@@ -43,8 +43,6 @@ app.get("/test-db", async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3000;
-
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
@@ -70,7 +68,6 @@ app.post("/users", async (req, res) => {
 });
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
-const PORT = process.env.PORT || 3000;
 app.post("/auth/signup", async (req, res) => {
   try {
     const { username, email, password } = req.body;
@@ -122,3 +119,4 @@ app.post("/auth/login", async (req, res) => {
     res.status(500).json({ error: "Login failed" });
   }
 });
+const PORT = process.env.PORT || 3000;
