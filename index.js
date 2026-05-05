@@ -11,7 +11,28 @@ app.use(express.json());
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
 });
+function authMiddleware(req, res, next) {
+  const token = req.headers.authorization?.split(" ")[1];
 
+  if (!token) {
+    return res.status(401).json({ error: "No token" });
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || "dev_secret");
+    req.user = decoded;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: "Invalid token" });
+  }
+}
+
+app.get("/protected", authMiddleware, (req, res) => {
+  res.json({
+    message: "Protected route working",
+    user: req.user
+  });
+});
 app.get("/", async (req, res) => {
   res.json({ message: "Meetro API running" });
 });
