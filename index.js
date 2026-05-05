@@ -27,11 +27,16 @@ function authMiddleware(req, res, next) {
   }
 }
 
-app.get("/protected", authMiddleware, (req, res) => {
-  res.json({
-    message: "Protected route working",
-    user: req.user
-  });
+app.get("/users", authMiddleware, async (req, res) => {
+ try {
+    const result = await pool.query(
+      "SELECT id, username, email, created_at FROM users ORDER BY id ASC"
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 app.get("/", async (req, res) => {
   res.json({ message: "Meetro API running" });
@@ -48,11 +53,6 @@ app.get("/test-db", async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
-});
-
-app.get("/users", async (req, res) => {
-  const result = await pool.query("SELECT id, username, email, created_at FROM users ORDER BY id ASC");
-  res.json(result.rows);
 });
 
 app.post("/auth/signup", async (req, res) => {
@@ -90,7 +90,7 @@ app.post("/auth/login", async (req, res) => {
     res.status(500).json({ error: "Login failed", details: err.message });
   }
 });
-app.get("/setup-db", async (req, res) => {
+app.get("/setup-db", authMiddleware, async (req, res) => {
   try {
     await pool.query("DROP TABLE IF EXISTS users");
 
