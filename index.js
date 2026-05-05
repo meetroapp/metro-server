@@ -83,32 +83,18 @@ app.post("/auth/login", async (req, res) => {
     const valid = await bcrypt.compare(password, user.password_hash);
     if (!valid) return res.status(401).json({ error: "Invalid login" });
 
-    const token = jwt.sign({ id: user.id, email: user.email }, process.env.JWT_SECRET || "dev_secret");
+const token = jwt.sign(
+  { id: user.id, email: user.email },
+  process.env.JWT_SECRET,
+  { expiresIn: "1h" }
+);
 
     res.json({ message: "Login successful", token, user: { id: user.id, username: user.username, email: user.email } });
   } catch (err) {
     res.status(500).json({ error: "Login failed", details: err.message });
   }
 });
-app.get("/setup-db", authMiddleware, async (req, res) => {
-  try {
-    await pool.query("DROP TABLE IF EXISTS users");
 
-    await pool.query(`
-      CREATE TABLE users (
-        id SERIAL PRIMARY KEY,
-        username TEXT,
-        email TEXT UNIQUE NOT NULL,
-        password_hash TEXT NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    res.json({ message: "users table reset successfully" });
-  } catch (err) {
-    res.status(500).json({ error: "setup failed", details: err.message });
-  }
-});
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
