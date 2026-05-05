@@ -89,6 +89,7 @@ const token = jwt.sign(
   { expiresIn: "1h" }
 );
 
+
     res.json({ message: "Login successful", token, user: { id: user.id, username: user.username, email: user.email } });
   } catch (err) {
     res.status(500).json({ error: "Login failed", details: err.message });
