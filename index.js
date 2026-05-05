@@ -1,4 +1,5 @@
 require('dotenv').config();
+
 const express = require("express");
 const cors = require("cors");
 const { Pool } = require("pg");
@@ -12,6 +13,20 @@ app.use(express.json());
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
 });
+
+app.post("/register", (req, res) => {
+  const { email, password } = req.body;
+
+  if (!email || !password) {
+    return res.status(400).json({ error: "Missing fields" });
+  }
+
+  res.json({
+    message: "User registered successfully",
+    email
+  });
+});
+
 function authMiddleware(req, res, next) {
   const token = req.headers.authorization?.split(" ")[1];
 
@@ -20,7 +35,7 @@ function authMiddleware(req, res, next) {
   }
 
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || "dev_secret");
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
     req.user = decoded;
     next();
   } catch (err) {
