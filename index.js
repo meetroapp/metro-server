@@ -51,3 +51,20 @@ app.listen(PORT, () => {
 app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
+app.post("/users", async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    const result = await pool.query(
+      "INSERT INTO users (email) VALUES ($1) RETURNING *",
+      [email]
+    );
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      error: "Failed to create user",
+    });
+  }
+});
