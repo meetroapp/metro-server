@@ -12,12 +12,12 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
 });
 
-// Test route
+// Main route
 app.get("/", async (req, res) => {
   try {
     const result = await pool.query("SELECT NOW()");
     res.json({
-      message: "Meetro API running 🚀",
+      message: "Meetro API running",
       time: result.rows[0].now,
     });
   } catch (err) {
@@ -25,6 +25,21 @@ app.get("/", async (req, res) => {
       error: "Database connection failed",
       details: err.message,
     });
+  }
+});
+
+// Health route
+app.get("/health", (req, res) => {
+  res.json({ status: "ok" });
+});
+
+// Test DB route
+app.get("/test-db", async (req, res) => {
+  try {
+    const result = await pool.query("SELECT NOW()");
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
