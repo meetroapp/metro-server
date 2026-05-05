@@ -69,7 +69,25 @@ app.post("/auth/login", async (req, res) => {
     res.status(500).json({ error: "Login failed", details: err.message });
   }
 });
+app.get("/setup-db", async (req, res) => {
+  try {
+    await pool.query("DROP TABLE IF EXISTS users");
 
+    await pool.query(`
+      CREATE TABLE users (
+        id SERIAL PRIMARY KEY,
+        username TEXT,
+        email TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    res.json({ message: "users table reset successfully" });
+  } catch (err) {
+    res.status(500).json({ error: "setup failed", details: err.message });
+  }
+});
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
