@@ -139,7 +139,7 @@ app.get("/test-db", async (req, res) => {
 
 app.post("/auth/signup", async (req, res) => {
   try {
-    const { username, email, password_hash } = req.body;
+    const { username, email, password } = req.body;
     const passwordHash = await bcrypt.hash(password, 10);
 
     const result = await pool.query(
@@ -163,7 +163,8 @@ app.post("/auth/login", async (req, res) => {
     const { email, password } = req.body;
 
     const result = await pool.query("SELECT * FROM users WHERE email = $1", [email]);
-    const user = result.rows[0];
+   
+ const user = result.rows[0];
 
     if (!user) return res.status(401).json({ error: "Invalid login" });
 
