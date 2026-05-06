@@ -37,7 +37,7 @@ app.post("/register", async (req, res) => {
 
     // insert user
     const result = await pool.query(
-      "INSERT INTO users (email, password) VALUES ($1, $2) RETURNING id, email",
+      "INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id, email",
       [email, hashedPassword]
     );
 
@@ -139,7 +139,7 @@ app.get("/test-db", async (req, res) => {
 
 app.post("/auth/signup", async (req, res) => {
   try {
-    const { username, email, password } = req.body;
+    const { username, email, password_hash } = req.body;
     const passwordHash = await bcrypt.hash(password, 10);
 
     const result = await pool.query(
