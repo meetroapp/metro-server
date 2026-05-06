@@ -173,7 +173,7 @@ app.post("/auth/login", async (req, res) => {
 
 const token = jwt.sign(
   { id: user.id, email: user.email },
-  process.env.JWT_SECRET,
+ process.env.JWT_SECRET || "my_super_secret_key_123",
   { expiresIn: "1h" }
 );
 
