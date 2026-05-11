@@ -263,6 +263,134 @@ app.get("/posts/:id", async (req, res) => {
   }
 });
 
+app.post("/contractor-profiles", authMiddleware, async (req, res) => {
+  try {
+    const {
+      business_name,
+      category,
+      phone,
+      location,
+      bio,
+      image_url,
+    } = req.body;
+
+    const result = await pool.query(
+      `
+      INSERT INTO contractor_profiles
+      (
+        user_id,
+        business_name,
+        category,
+        phone,
+        location,
+        bio,
+        image_url
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      RETURNING *
+      `,
+      [
+        req.user.id,
+        business_name,
+        category,
+        phone,
+        location,
+        bio,
+        image_url,
+      ]
+    );
+
+    res.json({
+      message: "Contractor profile created",
+      profile: result.rows[0],
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: "Failed to create contractor profile",
+      details: err.message,
+    });
+  }
+});
+
+app.get("/contractor-profiles", async (req, res) => {
+  try {
+    const result = await pool.query(
+      `
+      SELECT contractor_profiles.*, users.username
+      FROM contractor_profiles
+      JOIN users ON contractor_profiles.user_id = users.id
+      ORDER BY contractor_profiles.created_at DESC
+      `
+    );
+
+    res.json({
+      profiles: result.rows,
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: "Failed to fetch contractor profiles",
+      details: err.message,
+    });
+  }
+});
+
+app.get("/contractor-profiles/:id", async (req, res) => {
+  try {
+    const result = await pool.query(
+      `
+      SELECT contractor_profiles.*, users.username
+      FROM contractor_profiles
+      JOIN users ON contractor_profiles.user_id = users.id
+      WHERE contractor_profiles.id = $1
+      `,
+      [req.params.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        error: "Contractor profile not found",
+      });
+    }
+
+    res.json({
+      profile: result.rows[0],
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: "Failed to fetch contractor profile",
+      details: err.message,
+    });
+  }
+});
+
+app.get("/my-contractor-profile", authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `
+      SELECT *
+      FROM contractor_profiles
+      WHERE user_id = $1
+      LIMIT 1
+      `,
+      [req.user.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        error: "No contractor profile found",
+      });
+    }
+
+    res.json({
+      profile: result.rows[0],
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: "Failed to fetch contractor profile",
+      details: err.message,
+    });
+  }
+});
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
