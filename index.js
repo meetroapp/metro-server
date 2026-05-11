@@ -128,8 +128,7 @@ app.post("/auth/login", async (req, res) => {
         id: user.id,
         email: user.email,
       },
-      process.env.JWT_SECRET ||
-        "my_super_secret_key_123",
+      process.env.JWT_SECRET || "my_super_secret_key_123",
       {
         expiresIn: "1h",
       }
@@ -154,12 +153,70 @@ app.post("/auth/login", async (req, res) => {
 
 app.get("/auth/me", authMiddleware, async (req, res) => {
   try {
+    const result = await pool.query(
+      `
+      SELECT id, username, email, created_at
+      FROM users
+      WHERE id = $1
+      `,
+      [req.user.id]
+    );
+
     res.json({
-      user: req.user,
+      user: result.rows[0],
     });
   } catch (err) {
     res.status(500).json({
       error: "Failed to fetch user",
+      details: err.message,
+    });
+  }
+});
+
+app.post("/posts", authMiddleware, async (req, res) => {
+  try {
+    const { title, description, category, location } = req.body;
+
+    const result = await pool.query(
+      `
+      INSERT INTO posts
+      (user_id, title, description, category, location)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING *
+      `,
+      [req.user.id, title, description, category, location]
+    );
+
+    res.json({
+      message: "Post created",
+      post: result.rows[0],
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: "Failed to create post",
+      details: err.message,
+    });
+  }
+});
+
+app.get("/posts", async (req, res) => {
+  try {
+    const result = await pool.query(
+      `
+      SELECT posts.*, users.email, users.username
+      FROM posts
+      JOIN users ON posts.user_id = users.id
+      ORDER BY posts.created_at DESC
+      `
+    );
+
+    res.json({
+      posts: result.rows,
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: "Failed to fetch posts",
+      details: err.message,
     });
   }
 });
