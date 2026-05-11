@@ -175,16 +175,29 @@ app.get("/auth/me", authMiddleware, async (req, res) => {
 
 app.post("/posts", authMiddleware, async (req, res) => {
   try {
-    const { title, description, category, location } = req.body;
+    const {
+      title,
+      description,
+      category,
+      location,
+      image_url,
+    } = req.body;
 
     const result = await pool.query(
       `
       INSERT INTO posts
-      (user_id, title, description, category, location)
-      VALUES ($1, $2, $3, $4, $5)
+      (user_id, title, description, category, location, image_url)
+      VALUES ($1, $2, $3, $4, $5, $6)
       RETURNING *
       `,
-      [req.user.id, title, description, category, location]
+      [
+        req.user.id,
+        title,
+        description,
+        category,
+        location,
+        image_url,
+      ]
     );
 
     res.json({
