@@ -391,6 +391,59 @@ app.get("/my-contractor-profile", authMiddleware, async (req, res) => {
     });
   }
 });
+app.put("/contractor-profiles/:id", authMiddleware, async (req, res) => {
+  try {
+    const {
+      business_name,
+      category,
+      phone,
+      location,
+      bio,
+      image_url,
+    } = req.body;
+
+    const result = await pool.query(
+      `
+      UPDATE contractor_profiles
+      SET
+        business_name = $1,
+        category = $2,
+        phone = $3,
+        location = $4,
+        bio = $5,
+        image_url = $6
+      WHERE id = $7 AND user_id = $8
+      RETURNING *
+      `,
+      [
+        business_name,
+        category,
+        phone,
+        location,
+        bio,
+        image_url,
+        req.params.id,
+        req.user.id,
+      ]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        error: "Profile not found or not authorized",
+      });
+    }
+
+    res.json({
+      message: "Contractor profile updated",
+      profile: result.rows[0],
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: "Failed to update contractor profile",
+      details: err.message,
+    });
+  }
+});
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
