@@ -221,6 +221,35 @@ app.get("/posts", async (req, res) => {
   }
 });
 
+app.get("/posts/:id", async (req, res) => {
+  try {
+    const result = await pool.query(
+      `
+      SELECT posts.*, users.email, users.username
+      FROM posts
+      JOIN users ON posts.user_id = users.id
+      WHERE posts.id = $1
+      `,
+      [req.params.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        error: "Post not found",
+      });
+    }
+
+    res.json({
+      post: result.rows[0],
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: "Failed to fetch post",
+      details: err.message,
+    });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
