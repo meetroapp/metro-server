@@ -444,6 +444,95 @@ app.put("/contractor-profiles/:id", authMiddleware, async (req, res) => {
     });
   }
 });
+app.post("/quote-requests", authMiddleware, async (req, res) => {
+  try {
+    const { contractor_id, project_title, project_description, location } = req.body;
+
+    const result = await pool.query(
+      `
+      INSERT INTO quote_requests
+      (contractor_id, homeowner_id, project_title, project_description, location)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING *
+      `,
+      [contractor_id, req.user.id, project_title, project_description, location]
+    );
+
+    res.json({
+      message: "Quote request created",
+      quote: result.rows[0],
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: "Failed to create quote request",
+      details: err.message,
+    });
+  }
+});
+
+app.get("/my-quote-requests", authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `
+      SELECT quote_requests.*, contractor_profiles.business_name
+      FROM quote_requests
+      JOIN contractor_profiles ON quote_requests.contractor_id = contractor_profiles.id
+      WHERE quote_requests.homeowner_id = $1
+      ORDER BY quote_requests.created_at DESC
+      `,
+      [req.user.id]
+    );
+
+    res.json({
+      quotes: result.rows,
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: "Failed to fetch quote requests",
+      details: err.message,
+    });
+  }
+});
+
+app.get("/contractor-quote-requests", authMiddleware, async (req, res) => {
+  try {
+    const profileResult = await pool.query(
+      `
+      SELECT id
+      FROM contractor_profiles
+      WHERE user_id = $1
+      LIMIT 1
+      `,
+      [req.user.id]
+    );
+
+    if (profileResult.rows.length === 0) {
+      return res.json({ quotes: [] });
+    }
+
+    const contractorId = profileResult.rows[0].id;
+
+    const result = await pool.query(
+      `
+      SELECT quote_requests.*, users.email AS homeowner_email
+      FROM quote_requests
+      JOIN users ON quote_requests.homeowner_id = users.id
+      WHERE quote_requests.contractor_id = $1
+      ORDER BY quote_requests.created_at DESC
+      `,
+      [contractorId]
+    );
+
+    res.json({
+      quotes: result.rows,
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: "Failed to fetch contractor quote requests",
+      details: err.message,
+    });
+  }
+});
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
