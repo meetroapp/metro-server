@@ -591,6 +591,82 @@ app.get("/messages/:quoteRequestId", authMiddleware, async (req, res) => {
     });
   }
 });
+
+app.post("/reviews", authMiddleware, async (req, res) => {
+  try {
+    const {
+      contractor_id,
+      rating,
+      review_text,
+    } = req.body;
+
+    const result = await pool.query(
+      `
+      INSERT INTO reviews
+      (contractor_id, reviewer_id, rating, review_text)
+      VALUES ($1, $2, $3, $4)
+      RETURNING *
+      `,
+      [
+        contractor_id,
+        req.user.id,
+        rating,
+        review_text,
+      ]
+    );
+
+    res.json({
+      message: "Review added",
+      review: result.rows[0],
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: "Failed to create review",
+      details: err.message,
+    });
+  }
+});
+
+app.get("/reviews/:contractorId", async (req, res) => {
+  try {
+    const contractorId = req.params.contractorId;
+
+    const reviewsResult = await pool.query(
+      `
+      SELECT
+        reviews.*,
+        users.email AS reviewer_email
+      FROM reviews
+      JOIN users
+      ON reviews.reviewer_id = users.id
+      WHERE contractor_id = $1
+      ORDER BY created_at DESC
+      `,
+      [contractorId]
+    );
+
+    const ratingResult = await pool.query(
+      `
+      SELECT
+        AVG(rating)::numeric(10,1) AS average_rating,
+        COUNT(*) AS total_reviews
+      FROM reviews
+      WHERE contractor_id = $1
+      `,
+      [contractorId]
+    );
+
+    res.json({
+      reviews: reviewsResult.rows,
+      stats: ratingResult.rows[0],
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: "Failed to fetch reviews",
+      details: err.message,
+    });
+  }
+});
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
