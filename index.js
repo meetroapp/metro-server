@@ -667,6 +667,67 @@ app.get("/reviews/:contractorId", async (req, res) => {
     });
   }
 });
+
+app.post("/contractor-projects", authMiddleware, async (req, res) => {
+  try {
+    const {
+      contractor_id,
+      title,
+      description,
+      image_url,
+    } = req.body;
+
+    const result = await pool.query(
+      `
+      INSERT INTO contractor_projects
+      (contractor_id, title, description, image_url)
+      VALUES ($1, $2, $3, $4)
+      RETURNING *
+      `,
+      [
+        contractor_id,
+        title,
+        description,
+        image_url,
+      ]
+    );
+
+    res.json({
+      message: "Project uploaded",
+      project: result.rows[0],
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: "Failed to upload project",
+      details: err.message,
+    });
+  }
+});
+
+app.get("/contractor-projects/:contractorId", async (req, res) => {
+  try {
+    const contractorId = req.params.contractorId;
+
+    const result = await pool.query(
+      `
+      SELECT *
+      FROM contractor_projects
+      WHERE contractor_id = $1
+      ORDER BY created_at DESC
+      `,
+      [contractorId]
+    );
+
+    res.json({
+      projects: result.rows,
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: "Failed to fetch projects",
+      details: err.message,
+    });
+  }
+});
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
