@@ -533,6 +533,64 @@ app.get("/contractor-quote-requests", authMiddleware, async (req, res) => {
     });
   }
 });
+app.post("/messages", authMiddleware, async (req, res) => {
+  try {
+    const {
+      quote_request_id,
+      receiver_id,
+      message_text,
+    } = req.body;
+
+    const result = await pool.query(
+      `
+      INSERT INTO messages
+      (quote_request_id, sender_id, receiver_id, message_text)
+      VALUES ($1, $2, $3, $4)
+      RETURNING *
+      `,
+      [
+        quote_request_id,
+        req.user.id,
+        receiver_id,
+        message_text,
+      ]
+    );
+
+    res.json({
+      message: "Message sent",
+      data: result.rows[0],
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: "Failed to send message",
+      details: err.message,
+    });
+  }
+});
+
+app.get("/messages/:quoteRequestId", authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `
+      SELECT messages.*, users.email AS sender_email
+      FROM messages
+      JOIN users ON messages.sender_id = users.id
+      WHERE messages.quote_request_id = $1
+      ORDER BY messages.created_at ASC
+      `,
+      [req.params.quoteRequestId]
+    );
+
+    res.json({
+      messages: result.rows,
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: "Failed to fetch messages",
+      details: err.message,
+    });
+  }
+});
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
