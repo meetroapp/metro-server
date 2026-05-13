@@ -539,20 +539,22 @@ app.post("/messages", authMiddleware, async (req, res) => {
       quote_request_id,
       receiver_id,
       message_text,
+      image_url,
     } = req.body;
 
     const result = await pool.query(
       `
       INSERT INTO messages
-      (quote_request_id, sender_id, receiver_id, message_text)
-      VALUES ($1, $2, $3, $4)
+      (quote_request_id, sender_id, receiver_id, message_text, image_url)
+      VALUES ($1, $2, $3, $4, $5)
       RETURNING *
       `,
       [
         quote_request_id,
         req.user.id,
         receiver_id,
-        message_text,
+        message_text || "",
+        image_url || null,
       ]
     );
 
