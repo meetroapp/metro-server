@@ -60,23 +60,78 @@ app.get("/test-db", async (req, res) => {
 
 app.post("/auth/signup", async (req, res) => {
   try {
-    const { username, email, password } = req.body;
+    const {
+      username,
+      name,
+      email,
+      password,
+      role,
+      account_type,
+      business_name,
+      business_category,
+    } = req.body;
+
+const finalAccountType =
+  account_type === "professional" || role !== "homeowner"
+    ? "professional"
+    : "homeowner";
+
+const finalBusinessCategory =
+  finalAccountType === "professional"
+    ? business_category || role || "contractor"
+    : "";
+
+const finalBusinessName =
+  finalAccountType === "professional"
+    ? business_name || username || name || ""
+    : "";
+
+  finalAccountType === "professional"
+    ? finalBusinessCategory
+    : "homeowner";const finalRole =
+  finalAccountType === "professional"
+    ? finalBusinessCategory
+    : "homeowner";
+
+    const finalUsername = username || name || email;
+    
 
     const passwordHash = await bcrypt.hash(password, 10);
 
     const result = await pool.query(
       `
-      INSERT INTO users 
-      (username, email, password_hash)
-      VALUES ($1, $2, $3)
-      RETURNING id, username, email, created_at
+      INSERT INTO users
+      (username, email, password_hash, role, account_type, business_name, business_category)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      RETURNING id, username, email, role, account_type, business_name, business_category, created_at
       `,
-      [username || email, email, passwordHash]
+      [
+        finalUsername,
+        email,
+        passwordHash,
+        finalRole,
+        finalAccountType,
+        finalBusinessName,
+        finalBusinessCategory,
+      ]
+    );
+
+    const user = result.rows[0];
+
+    const token = jwt.sign(
+      {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: "7d" }
     );
 
     res.json({
       message: "User created",
-      user: result.rows[0],
+      token,
+      user,
     });
   } catch (err) {
     res.status(500).json({
@@ -141,6 +196,10 @@ app.post("/auth/login", async (req, res) => {
         id: user.id,
         username: user.username,
         email: user.email,
+        role: user.role,
+        account_type: user.account_type,
+        business_name: user.business_name,
+        business_category: user.business_category,
       },
     });
   } catch (err) {
@@ -155,7 +214,15 @@ app.get("/auth/me", authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
       `
-      SELECT id, username, email, created_at
+      SELECT 
+        id,
+        username,
+        email,
+        role,
+        account_type,
+        business_name,
+        business_category,
+        created_at
       FROM users
       WHERE id = $1
       `,
