@@ -2,12 +2,15 @@ const express = require("express");
 const cors = require("cors");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
 const { Pool } = require("pg");
 
 const app = express();
 
 app.use(cors());
 app.use(express.json());
+
+const twoFactorCodes = {};
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -34,13 +37,24 @@ function authMiddleware(req, res, next) {
     );
 
     req.user = decoded;
-
     next();
   } catch (err) {
     return res.status(401).json({
       error: "Invalid token",
     });
   }
+}
+
+function createToken(user, expiresIn = "7d") {
+  return jwt.sign(
+    {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+    },
+    process.env.JWT_SECRET || "my_super_secret_key_123",
+    { expiresIn }
+  );
 }
 
 app.get("/health", (req, res) => {
@@ -58,6 +72,13 @@ app.get("/test-db", async (req, res) => {
   }
 });
 
+app.get("/debug-env", (req, res) => {
+  res.json({
+    hasJwtSecret: !!process.env.JWT_SECRET,
+    jwtLength: process.env.JWT_SECRET ? process.env.JWT_SECRET.length : 0,
+  });
+});
+
 app.post("/auth/signup", async (req, res) => {
   try {
     const {
@@ -71,30 +92,27 @@ app.post("/auth/signup", async (req, res) => {
       business_category,
     } = req.body;
 
-const finalAccountType =
-  account_type === "professional" || role !== "homeowner"
-    ? "professional"
-    : "homeowner";
+    const finalAccountType =
+      account_type === "professional" || role !== "homeowner"
+        ? "professional"
+        : "homeowner";
 
-const finalBusinessCategory =
-  finalAccountType === "professional"
-    ? business_category || role || "contractor"
-    : "";
+    const finalBusinessCategory =
+      finalAccountType === "professional"
+        ? business_category || role || "contractor"
+        : "";
 
-const finalBusinessName =
-  finalAccountType === "professional"
-    ? business_name || username || name || ""
-    : "";
+    const finalBusinessName =
+      finalAccountType === "professional"
+        ? business_name || username || name || ""
+        : "";
 
-  finalAccountType === "professional"
-    ? finalBusinessCategory
-    : "homeowner";const finalRole =
-  finalAccountType === "professional"
-    ? finalBusinessCategory
-    : "homeowner";
+    const finalRole =
+      finalAccountType === "professional"
+        ? finalBusinessCategory
+        : "homeowner";
 
     const finalUsername = username || name || email;
-    
 
     const passwordHash = await bcrypt.hash(password, 10);
 
@@ -117,16 +135,7 @@ const finalBusinessName =
     );
 
     const user = result.rows[0];
-
-    const token = jwt.sign(
-      {
-        id: user.id,
-        email: user.email,
-        role: user.role,
-      },
-      process.env.JWT_SECRET,
-      { expiresIn: "7d" }
-    );
+    const token = createToken(user);
 
     res.json({
       message: "User created",
@@ -141,23 +150,13 @@ const finalBusinessName =
   }
 });
 
-app.get("/debug-env", (req, res) => {
-  res.json({
-    hasJwtSecret: !!process.env.JWT_SECRET,
-    jwtLength: process.env.JWT_SECRET
-      ? process.env.JWT_SECRET.length
-      : 0,
-  });
-});
-
 app.post("/auth/login", async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    const result = await pool.query(
-      "SELECT * FROM users WHERE email = $1",
-      [email]
-    );
+    const result = await pool.query("SELECT * FROM users WHERE email = $1", [
+      email,
+    ]);
 
     const user = result.rows[0];
 
@@ -167,10 +166,7 @@ app.post("/auth/login", async (req, res) => {
       });
     }
 
-    const valid = await bcrypt.compare(
-      password,
-      user.password_hash
-    );
+    const valid = await bcrypt.compare(password, user.password_hash);
 
     if (!valid) {
       return res.status(401).json({
@@ -178,16 +174,7 @@ app.post("/auth/login", async (req, res) => {
       });
     }
 
-    const token = jwt.sign(
-      {
-        id: user.id,
-        email: user.email,
-      },
-      process.env.JWT_SECRET || "my_super_secret_key_123",
-      {
-        expiresIn: "1h",
-      }
-    );
+    const token = createToken(user, "7d");
 
     res.json({
       message: "Login successful",
@@ -240,15 +227,113 @@ app.get("/auth/me", authMiddleware, async (req, res) => {
   }
 });
 
+/* BASIC 2FA FOUNDATION */
+
+app.post("/auth/request-2fa-code", async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({
+        error: "Email required",
+      });
+    }
+
+    const code = crypto.randomInt(100000, 999999).toString();
+
+    twoFactorCodes[email] = {
+      code,
+      expires: Date.now() + 1000 * 60 * 10,
+    };
+
+    console.log("MEETRO 2FA CODE:", code);
+
+    res.json({
+      message: "2FA code generated",
+      expiresInMinutes: 10,
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: "Failed to generate 2FA code",
+      details: err.message,
+    });
+  }
+});
+
+app.post("/auth/verify-2fa-code", async (req, res) => {
+  try {
+    const { email, code } = req.body;
+
+    if (!email || !code) {
+      return res.status(400).json({
+        error: "Email and code required",
+      });
+    }
+
+    const stored = twoFactorCodes[email];
+
+    if (!stored) {
+      return res.status(400).json({
+        error: "No code found",
+      });
+    }
+
+    if (Date.now() > stored.expires) {
+      delete twoFactorCodes[email];
+
+      return res.status(400).json({
+        error: "Code expired",
+      });
+    }
+
+    if (stored.code !== code) {
+      return res.status(400).json({
+        error: "Invalid code",
+      });
+    }
+
+    delete twoFactorCodes[email];
+
+    res.json({
+      verified: true,
+      message: "2FA verification successful",
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: "2FA verification failed",
+      details: err.message,
+    });
+  }
+});
+
+app.get("/auth/security-status", authMiddleware, async (req, res) => {
+  res.json({
+    twoFactorEnabled: false,
+    trustedDevicesEnabled: false,
+    biometricAvailable: false,
+    message: "Security status placeholder ready",
+  });
+});
+
+app.post("/auth/enable-2fa", authMiddleware, async (req, res) => {
+  res.json({
+    enabled: true,
+    message: "2FA enable placeholder ready",
+  });
+});
+
+app.post("/auth/disable-2fa", authMiddleware, async (req, res) => {
+  res.json({
+    enabled: false,
+    message: "2FA disable placeholder ready",
+  });
+});
+
+/* POSTS */
+
 app.post("/posts", authMiddleware, async (req, res) => {
   try {
-    const {
-      title,
-      description,
-      category,
-      location,
-      image_url,
-    } = req.body;
+    const { title, description, category, location, image_url } = req.body;
 
     const result = await pool.query(
       `
@@ -257,14 +342,7 @@ app.post("/posts", authMiddleware, async (req, res) => {
       VALUES ($1, $2, $3, $4, $5, $6)
       RETURNING *
       `,
-      [
-        req.user.id,
-        title,
-        description,
-        category,
-        location,
-        image_url,
-      ]
+      [req.user.id, title, description, category, location, image_url]
     );
 
     res.json({
@@ -330,41 +408,21 @@ app.get("/posts/:id", async (req, res) => {
   }
 });
 
+/* CONTRACTOR PROFILES */
+
 app.post("/contractor-profiles", authMiddleware, async (req, res) => {
   try {
-    const {
-      business_name,
-      category,
-      phone,
-      location,
-      bio,
-      image_url,
-    } = req.body;
+    const { business_name, category, phone, location, bio, image_url } =
+      req.body;
 
     const result = await pool.query(
       `
       INSERT INTO contractor_profiles
-      (
-        user_id,
-        business_name,
-        category,
-        phone,
-        location,
-        bio,
-        image_url
-      )
+      (user_id, business_name, category, phone, location, bio, image_url)
       VALUES ($1, $2, $3, $4, $5, $6, $7)
       RETURNING *
       `,
-      [
-        req.user.id,
-        business_name,
-        category,
-        phone,
-        location,
-        bio,
-        image_url,
-      ]
+      [req.user.id, business_name, category, phone, location, bio, image_url]
     );
 
     res.json({
@@ -458,16 +516,11 @@ app.get("/my-contractor-profile", authMiddleware, async (req, res) => {
     });
   }
 });
+
 app.put("/contractor-profiles/:id", authMiddleware, async (req, res) => {
   try {
-    const {
-      business_name,
-      category,
-      phone,
-      location,
-      bio,
-      image_url,
-    } = req.body;
+    const { business_name, category, phone, location, bio, image_url } =
+      req.body;
 
     const result = await pool.query(
       `
@@ -511,9 +564,13 @@ app.put("/contractor-profiles/:id", authMiddleware, async (req, res) => {
     });
   }
 });
+
+/* QUOTE REQUESTS */
+
 app.post("/quote-requests", authMiddleware, async (req, res) => {
   try {
-    const { contractor_id, project_title, project_description, location } = req.body;
+    const { contractor_id, project_title, project_description, location } =
+      req.body;
 
     const result = await pool.query(
       `
@@ -522,7 +579,13 @@ app.post("/quote-requests", authMiddleware, async (req, res) => {
       VALUES ($1, $2, $3, $4, $5)
       RETURNING *
       `,
-      [contractor_id, req.user.id, project_title, project_description, location]
+      [
+        contractor_id,
+        req.user.id,
+        project_title,
+        project_description,
+        location,
+      ]
     );
 
     res.json({
@@ -600,14 +663,12 @@ app.get("/contractor-quote-requests", authMiddleware, async (req, res) => {
     });
   }
 });
+
+/* MESSAGES */
+
 app.post("/messages", authMiddleware, async (req, res) => {
   try {
-    const {
-      quote_request_id,
-      receiver_id,
-      message_text,
-      image_url,
-    } = req.body;
+    const { quote_request_id, receiver_id, message_text, image_url } = req.body;
 
     const result = await pool.query(
       `
@@ -661,13 +722,11 @@ app.get("/messages/:quoteRequestId", authMiddleware, async (req, res) => {
   }
 });
 
+/* REVIEWS */
+
 app.post("/reviews", authMiddleware, async (req, res) => {
   try {
-    const {
-      contractor_id,
-      rating,
-      review_text,
-    } = req.body;
+    const { contractor_id, rating, review_text } = req.body;
 
     const result = await pool.query(
       `
@@ -676,12 +735,7 @@ app.post("/reviews", authMiddleware, async (req, res) => {
       VALUES ($1, $2, $3, $4)
       RETURNING *
       `,
-      [
-        contractor_id,
-        req.user.id,
-        rating,
-        review_text,
-      ]
+      [contractor_id, req.user.id, rating, review_text]
     );
 
     res.json({
@@ -702,12 +756,9 @@ app.get("/reviews/:contractorId", async (req, res) => {
 
     const reviewsResult = await pool.query(
       `
-      SELECT
-        reviews.*,
-        users.email AS reviewer_email
+      SELECT reviews.*, users.email AS reviewer_email
       FROM reviews
-      JOIN users
-      ON reviews.reviewer_id = users.id
+      JOIN users ON reviews.reviewer_id = users.id
       WHERE contractor_id = $1
       ORDER BY created_at DESC
       `,
@@ -737,14 +788,11 @@ app.get("/reviews/:contractorId", async (req, res) => {
   }
 });
 
+/* CONTRACTOR PROJECTS */
+
 app.post("/contractor-projects", authMiddleware, async (req, res) => {
   try {
-    const {
-      contractor_id,
-      title,
-      description,
-      image_url,
-    } = req.body;
+    const { contractor_id, title, description, image_url } = req.body;
 
     const result = await pool.query(
       `
@@ -753,12 +801,7 @@ app.post("/contractor-projects", authMiddleware, async (req, res) => {
       VALUES ($1, $2, $3, $4)
       RETURNING *
       `,
-      [
-        contractor_id,
-        title,
-        description,
-        image_url,
-      ]
+      [contractor_id, title, description, image_url]
     );
 
     res.json({
@@ -797,6 +840,7 @@ app.get("/contractor-projects/:contractorId", async (req, res) => {
     });
   }
 });
+
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
