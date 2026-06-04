@@ -666,13 +666,32 @@ app.get("/contractor-quote-requests", authMiddleware, async (req, res) => {
 
 app.post("/messages", authMiddleware, async (req, res) => {
   try {
-    const { quote_request_id, receiver_id, message_text, image_url } = req.body;
+    const {
+      quote_request_id,
+      receiver_id,
+      message_text,
+      image_url,
+      message_type,
+      workflow_type,
+      workflow_status,
+      workflow_payload,
+    } = req.body;
 
     const result = await pool.query(
       `
       INSERT INTO messages
-      (quote_request_id, sender_id, receiver_id, message_text, image_url)
-      VALUES ($1, $2, $3, $4, $5)
+      (
+        quote_request_id,
+        sender_id,
+        receiver_id,
+        message_text,
+        image_url,
+        message_type,
+        workflow_type,
+        workflow_status,
+        workflow_payload
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
       RETURNING *
       `,
       [
@@ -681,6 +700,10 @@ app.post("/messages", authMiddleware, async (req, res) => {
         receiver_id,
         message_text || "",
         image_url || null,
+        message_type || "text",
+        workflow_type || null,
+        workflow_status || null,
+        JSON.stringify(workflow_payload || {}),
       ]
     );
 
@@ -715,6 +738,110 @@ app.get("/messages/:quoteRequestId", authMiddleware, async (req, res) => {
   } catch (err) {
     res.status(500).json({
       error: "Failed to fetch messages",
+      details: err.message,
+    });
+  }
+});
+
+
+// Workflow persistence routes
+app.post("/workflow-events", authMiddleware, async (req, res) => {
+  try {
+    const {
+      quote_request_id,
+      workflow_type,
+      workflow_status,
+      workflow_payload,
+      event_label,
+    } = req.body;
+
+    if (!quote_request_id || !workflow_type) {
+      return res.status(400).json({
+        error: "quote_request_id and workflow_type are required",
+      });
+    }
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS workflow_events (
+        id SERIAL PRIMARY KEY,
+        quote_request_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        workflow_type TEXT NOT NULL,
+        workflow_status TEXT,
+        workflow_payload JSONB DEFAULT '{}'::jsonb,
+        event_label TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    const result = await pool.query(
+      `
+      INSERT INTO workflow_events
+      (
+        quote_request_id,
+        user_id,
+        workflow_type,
+        workflow_status,
+        workflow_payload,
+        event_label
+      )
+      VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+      RETURNING *
+      `,
+      [
+        quote_request_id,
+        req.user.id,
+        workflow_type,
+        workflow_status || null,
+        JSON.stringify(workflow_payload || {}),
+        event_label || null,
+      ]
+    );
+
+    res.json({
+      message: "Workflow event saved",
+      workflow_event: result.rows[0],
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: "Failed to save workflow event",
+      details: err.message,
+    });
+  }
+});
+
+app.get("/workflow-events/:quoteRequestId", authMiddleware, async (req, res) => {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS workflow_events (
+        id SERIAL PRIMARY KEY,
+        quote_request_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        workflow_type TEXT NOT NULL,
+        workflow_status TEXT,
+        workflow_payload JSONB DEFAULT '{}'::jsonb,
+        event_label TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    const result = await pool.query(
+      `
+      SELECT workflow_events.*, users.email AS user_email
+      FROM workflow_events
+      JOIN users ON workflow_events.user_id = users.id
+      WHERE workflow_events.quote_request_id = $1
+      ORDER BY workflow_events.created_at ASC
+      `,
+      [req.params.quoteRequestId]
+    );
+
+    res.json({
+      workflow_events: result.rows,
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: "Failed to fetch workflow events",
       details: err.message,
     });
   }
@@ -784,16 +911,28 @@ app.get("/reviews/:contractorId", async (req, res) => {
 
 app.post("/contractor-projects", authMiddleware, async (req, res) => {
   try {
-    const { contractor_id, title, description, image_url } = req.body;
+    const { contractor_id, title, description, image_url, image_urls } = req.body;
+
+    const imageUrls = Array.isArray(image_urls)
+      ? image_urls
+      : image_url
+      ? [image_url]
+      : [];
 
     const result = await pool.query(
       `
       INSERT INTO contractor_projects
-      (contractor_id, title, description, image_url)
-      VALUES ($1, $2, $3, $4)
+      (contractor_id, title, description, image_url, image_urls)
+      VALUES ($1, $2, $3, $4, $5::jsonb)
       RETURNING *
       `,
-      [contractor_id, title, description, image_url]
+      [
+        contractor_id,
+        title,
+        description,
+        imageUrls[0] || image_url || "",
+        JSON.stringify(imageUrls),
+      ]
     );
 
     res.json({
@@ -803,6 +942,55 @@ app.post("/contractor-projects", authMiddleware, async (req, res) => {
   } catch (err) {
     res.status(500).json({
       error: "Failed to upload project",
+      details: err.message,
+    });
+  }
+});
+
+app.put("/contractor-projects/:id", authMiddleware, async (req, res) => {
+  try {
+    const projectId = req.params.id;
+    const { title, description, image_url, image_urls } = req.body;
+
+    const imageUrls = Array.isArray(image_urls)
+      ? image_urls
+      : image_url
+      ? [image_url]
+      : [];
+
+    const result = await pool.query(
+      `
+      UPDATE contractor_projects
+      SET
+        title = $1,
+        description = $2,
+        image_url = $3,
+        image_urls = $4::jsonb
+      WHERE id = $5
+      RETURNING *
+      `,
+      [
+        title,
+        description,
+        imageUrls[0] || image_url || "",
+        JSON.stringify(imageUrls),
+        projectId,
+      ]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        error: "Project not found",
+      });
+    }
+
+    res.json({
+      message: "Project updated",
+      project: result.rows[0],
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: "Failed to update project",
       details: err.message,
     });
   }
