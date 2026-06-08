@@ -133,7 +133,7 @@ app.post("/auth/signup", async (req, res) => {
       INSERT INTO users
       (username, email, password_hash, role, account_type, business_name, business_category)
       VALUES ($1, $2, $3, $4, $5, $6, $7)
-      RETURNING id, username, email, role, account_type, business_name, business_category, created_at
+      RETURNING id, username, email, role, account_type, business_name, business_category, profile_photo_url, created_at
       `,
       [
         finalUsername,
@@ -207,6 +207,7 @@ app.post("/auth/login", async (req, res) => {
         account_type: user.account_type,
         business_name: user.business_name,
         business_category: user.business_category,
+        profile_photo_url: user.profile_photo_url || "",
       },
     });
   } catch (err) {
@@ -218,11 +219,39 @@ app.post("/auth/login", async (req, res) => {
   }
 });
 
+
+app.put("/auth/profile-photo", authMiddleware, async (req, res) => {
+  try {
+    const { profile_photo_url } = req.body;
+
+    const result = await pool.query(
+      `
+      UPDATE users
+      SET profile_photo_url = $1
+      WHERE id = $2
+      RETURNING id, username, email, role, account_type, business_name, business_category, profile_photo_url, created_at
+      `,
+      [profile_photo_url || "", req.user.id]
+    );
+
+    res.json({
+      message: "Profile photo updated",
+      user: result.rows[0],
+    });
+  } catch (err) {
+    console.error("Profile photo update error:", err);
+    res.status(500).json({
+      error: "Failed to update profile photo",
+      details: err.message,
+    });
+  }
+});
+
 app.get("/auth/me", authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
       `
-      SELECT id, username, email, role, account_type, business_name, business_category, created_at
+      SELECT id, username, email, role, account_type, business_name, business_category, profile_photo_url, created_at
       FROM users
       WHERE id = $1
       `,
