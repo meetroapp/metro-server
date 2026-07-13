@@ -4,7 +4,10 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node --test test/*.test.js test/characterization/*.test.js"
+    "test": "node --test test/*.test.js test/characterization/*.test.js",
+    "migrate:test": "NODE_ENV=test MIGRATION_TARGET=local-test CONFIRM_MIGRATION_TARGET=local-test node scripts/run-migrations.js",
+    "migrate:staging": "MIGRATION_TARGET=staging node scripts/run-migrations.js",
+    "test:migrations": "node --test test/migrationRunner.test.js"
   },
   "keywords": [],
   "author": "",
