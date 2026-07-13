@@ -459,6 +459,54 @@ test("login and 2FA verification enforce their route-specific limits", async () 
   assert.equal(rateLimitKeys.some((key) => key.includes("000000")), false);
 });
 
+test("password reset routes enforce bounded limits without storing raw identity or token keys", async () => {
+  const pool = await createFakePool();
+  const genericResponse = {
+    success: true,
+    code: "PASSWORD_RESET_REQUEST_ACCEPTED",
+    message: "If an account matches that email, password reset instructions will be sent.",
+  };
+  const service = {
+    async request() { return genericResponse; },
+    async complete() {
+      return {
+        ok: false,
+        status: 400,
+        code: "RESET_TOKEN_INVALID",
+      };
+    },
+  };
+
+  let requestResult;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    requestResult = await invokeRoute("post", "/auth/password-reset/request", {
+      pool,
+      body: { email: "personal@example.test" },
+      locals: { passwordResetService: service },
+    });
+  }
+  assert.equal(requestResult.status, 429);
+  assert.deepEqual(requestResult.json, genericResponse);
+
+  let completionResult;
+  for (let attempt = 0; attempt < 11; attempt += 1) {
+    completionResult = await invokeRoute("post", "/auth/password-reset/complete", {
+      pool,
+      body: { token: "raw-opaque-reset-token", newPassword: "NewSecure12" },
+      locals: { passwordResetService: service },
+    });
+  }
+  assert.equal(completionResult.status, 429);
+  assert.equal(completionResult.json.code, "TOO_MANY_ATTEMPTS");
+
+  const resetKeys = [
+    ...authRateLimiters.passwordResetRequestRateLimiter.getKeys(),
+    ...authRateLimiters.passwordResetCompleteRateLimiter.getKeys(),
+  ];
+  assert.equal(resetKeys.some((key) => key.includes("personal@example.test")), false);
+  assert.equal(resetKeys.some((key) => key.includes("raw-opaque-reset-token")), false);
+});
+
 test("2FA delivery never exposes codes and verification is challenge-bound and single-use", async () => {
   const pool = await createFakePool();
   let delivered;

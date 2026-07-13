@@ -6,6 +6,7 @@ function createAuthRateLimiter({
   keyResolver,
   now = () => Date.now(),
   maxEntries = 5000,
+  limitResponse,
 } = {}) {
   if (!(windowMs > 0) || !(maxAttempts > 0) || typeof keyResolver !== "function") {
     throw new Error("A bounded auth rate-limit configuration is required.");
@@ -36,6 +37,9 @@ function createAuthRateLimiter({
     attempts.set(key, entry);
 
     if (entry.count > maxAttempts) {
+      if (typeof limitResponse === "function") {
+        return limitResponse(req, res, entry);
+      }
       return res.status(429).json({
         success: false,
         code: "TOO_MANY_ATTEMPTS",

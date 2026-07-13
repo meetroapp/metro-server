@@ -10,6 +10,8 @@ const ROUTE_INVENTORY = Object.freeze([
   ["POST", "/auth/request-2fa-code", false],
   ["POST", "/auth/verify-code", false],
   ["POST", "/auth/verify-2fa-code", false],
+  ["POST", "/auth/password-reset/request", false],
+  ["POST", "/auth/password-reset/complete", false],
   ["GET", "/auth/security-status", true],
   ["POST", "/auth/enable-2fa", true],
   ["POST", "/auth/disable-2fa", true],

@@ -9,6 +9,9 @@ function createUnavailableDelivery(status) {
     async sendSecurityVerificationCode() {
       return { accepted: false, status };
     },
+    async sendPasswordResetEmail() {
+      return { accepted: false, status };
+    },
   });
 }
 

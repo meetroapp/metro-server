@@ -20,6 +20,7 @@ Current inventory:
 
 1. `202607050001_initial_schema_baseline.sql`
 2. `202607130001_add_user_token_version.sql`
+3. `202607130002_create_password_reset_tokens.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.

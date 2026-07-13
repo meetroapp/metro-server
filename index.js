@@ -11,6 +11,11 @@ const { resolveJwtSecret } = require("./server/security/jwtConfig");
 const { validatePasswordPolicy } = require("./server/security/passwordPolicy");
 const { createEmailDelivery } = require("./server/email/emailDelivery");
 const {
+  GENERIC_REQUEST_RESPONSE,
+  createPasswordResetService,
+  hashResetToken,
+} = require("./server/security/passwordResetService");
+const {
   TWO_FACTOR_FAILURE,
   createTwoFactorChallengeStore,
   normalizeIdentity,
@@ -122,8 +127,35 @@ const passwordChangeRateLimiter = createAuthRateLimiter({
   maxAttempts: 5,
   keyResolver: (req) => `password-change:${req.user?.id || "anonymous"}`,
 });
+const passwordResetRequestRateLimiter = createAuthRateLimiter({
+  windowMs: 30 * 60 * 1000,
+  maxAttempts: 5,
+  keyResolver: (req) => {
+    const emailHash = hashResetToken(normalizeIdentity(getRequestBody(req).email));
+    const ipHash = hashResetToken(req.ip || req.socket?.remoteAddress || "unknown");
+    return `password-reset-request:${emailHash.slice(0, 16)}:${ipHash.slice(0, 16)}`;
+  },
+  limitResponse: (_req, res) => res.status(429).json(GENERIC_REQUEST_RESPONSE),
+});
+const passwordResetCompleteRateLimiter = createAuthRateLimiter({
+  windowMs: 30 * 60 * 1000,
+  maxAttempts: 10,
+  keyResolver: (req) => {
+    const tokenHash = hashResetToken(getRequestBody(req).token);
+    return `password-reset-complete:${tokenHash.slice(0, 16)}`;
+  },
+});
 const twoFactorChallengeStore = createTwoFactorChallengeStore();
 const emailDelivery = createEmailDelivery({ env: process.env });
+
+function getPasswordResetService(req) {
+  return req.app?.locals?.passwordResetService || createPasswordResetService({
+    pool: getPool(req),
+    emailDelivery: req.app?.locals?.emailDelivery || emailDelivery,
+    env: process.env,
+    logger: logAuthFailure,
+  });
+}
 
 function logAuthFailure(event, code, userId) {
   console.error("Authentication operation failed", {
@@ -860,6 +892,24 @@ async function completeAuthenticationVerification(req, res) {
 
 app.post("/auth/verify-code", twoFactorVerifyRateLimiter, completeAuthenticationVerification);
 app.post("/auth/verify-2fa-code", twoFactorVerifyRateLimiter, completeAuthenticationVerification);
+
+app.post("/auth/password-reset/request", passwordResetRequestRateLimiter, async (req, res) => {
+  const result = await getPasswordResetService(req).request(getRequestBody(req).email);
+  return res.json(result);
+});
+
+app.post("/auth/password-reset/complete", passwordResetCompleteRateLimiter, async (req, res) => {
+  const result = await getPasswordResetService(req).complete(getRequestBody(req));
+  if (result.ok) return res.status(result.status).json(result.body);
+  return res.status(result.status).json({
+    success: false,
+    code: result.code,
+    ...(result.policyCode ? { policyCode: result.policyCode } : {}),
+    message: result.code === "PASSWORD_RESET_FAILED"
+      ? "Password reset could not be completed."
+      : "Password reset request is invalid or expired.",
+  });
+});
 
 app.get("/auth/security-status", authMiddleware, async (req, res) => {
   res.status(501).json({
@@ -1763,6 +1813,8 @@ module.exports = {
   authRateLimiters: {
     loginRateLimiter,
     passwordChangeRateLimiter,
+    passwordResetCompleteRateLimiter,
+    passwordResetRequestRateLimiter,
     twoFactorRequestRateLimiter,
     twoFactorVerifyRateLimiter,
   },
