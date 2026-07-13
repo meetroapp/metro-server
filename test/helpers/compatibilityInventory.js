@@ -8,6 +8,7 @@ const ROUTE_INVENTORY = Object.freeze([
   ["PUT", "/auth/profile-photo", true],
   ["GET", "/auth/me", true],
   ["POST", "/auth/request-2fa-code", false],
+  ["POST", "/auth/verify-code", false],
   ["POST", "/auth/verify-2fa-code", false],
   ["GET", "/auth/security-status", true],
   ["POST", "/auth/enable-2fa", true],

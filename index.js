@@ -168,7 +168,11 @@ function getEmailDelivery(req) {
 }
 
 async function initiateSecurityVerification(req, account) {
-  const prepared = twoFactorChallengeStore.prepare(account.email, { accountId: account.id });
+  const prepared = twoFactorChallengeStore.prepare(account.email, {
+    accountId: account.id,
+    passwordVerified: true,
+    tokenVersionSnapshot: Number(account.token_version || 0),
+  });
   if (!prepared.ok) {
     return {
       ok: false,
@@ -632,26 +636,12 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
       return res.status(verification.status).json(verification.body);
     }
 
-    const token = createToken(user);
-
     res.json({
-      message: "Login successful",
       success: true,
-      code: "VERIFICATION_CODE_SENT",
+      code: "VERIFICATION_REQUIRED",
       challengeId: verification.challengeId,
       maskedEmail: verification.maskedEmail,
       expiresInSeconds: verification.expiresInSeconds,
-      token,
-      user: {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        role: user.role,
-        account_type: user.account_type,
-        business_name: user.business_name,
-        business_category: user.business_category,
-        profile_photo_url: user.profile_photo_url || "",
-      },
     });
   } catch {
     logAuthFailure("login", "LOGIN_FAILED");
@@ -724,10 +714,11 @@ app.post("/auth/request-2fa-code", twoFactorRequestRateLimiter, async (req, res)
       });
     }
 
-    if (!twoFactorChallengeStore.isActiveForIdentity({
+    const priorSession = twoFactorChallengeStore.getActiveSession({
       challengeId: priorChallengeId,
       identity: email,
-    })) {
+    });
+    if (!priorSession?.passwordVerified) {
       return res.status(202).json({
         success: true,
         code: "TWO_FACTOR_REQUEST_ACCEPTED",
@@ -736,12 +727,17 @@ app.post("/auth/request-2fa-code", twoFactorRequestRateLimiter, async (req, res)
     }
 
     const accountResult = await getPool(req).query(
-      "SELECT id, email FROM users WHERE email = $1",
+      "SELECT id, email, token_version FROM users WHERE email = $1",
       [email]
     );
     const account = accountResult.rows[0];
 
-    if (!account) {
+    if (
+      !account ||
+      Number(account.id) !== Number(priorSession.accountId) ||
+      Number(account.token_version || 0) !== Number(priorSession.tokenVersionSnapshot || 0)
+    ) {
+      twoFactorChallengeStore.remove(priorChallengeId);
       return res.status(202).json({
         success: true,
         code: "TWO_FACTOR_REQUEST_ACCEPTED",
@@ -772,7 +768,7 @@ app.post("/auth/request-2fa-code", twoFactorRequestRateLimiter, async (req, res)
   }
 });
 
-app.post("/auth/verify-2fa-code", twoFactorVerifyRateLimiter, async (req, res) => {
+async function completeAuthenticationVerification(req, res) {
   try {
     const body = getRequestBody(req);
     const email = normalizeIdentity(body.email);
@@ -789,10 +785,55 @@ app.post("/auth/verify-2fa-code", twoFactorVerifyRateLimiter, async (req, res) =
 
     const result = twoFactorChallengeStore.verify({ challengeId, identity: email, code });
     if (result.ok) {
+      const temporarySession = result.session;
+      if (!temporarySession?.passwordVerified || !temporarySession.accountId) {
+        twoFactorChallengeStore.remove(challengeId);
+        return res.status(401).json({
+          success: false,
+          code: "SESSION_INVALID",
+          message: "Verification challenge is no longer valid.",
+        });
+      }
+
+      const accountResult = await getPool(req).query(
+        `
+        SELECT id, username, email, role, account_type,
+               business_name, business_category, profile_photo_url, token_version
+        FROM users
+        WHERE id = $1 AND email = $2
+        `,
+        [temporarySession.accountId, temporarySession.email]
+      );
+      const account = accountResult.rows[0];
+
+      if (
+        !account ||
+        Number(account.token_version || 0) !== Number(temporarySession.tokenVersionSnapshot || 0)
+      ) {
+        twoFactorChallengeStore.remove(challengeId);
+        return res.status(401).json({
+          success: false,
+          code: "SESSION_INVALID",
+          message: "Verification challenge is no longer valid.",
+        });
+      }
+
+      const token = createToken(account);
+      twoFactorChallengeStore.remove(challengeId);
       return res.json({
         success: true,
-        code: "CODE_VERIFIED",
-        message: "Code verified.",
+        code: "AUTHENTICATION_COMPLETE",
+        token,
+        user: {
+          id: account.id,
+          username: account.username,
+          email: account.email,
+          role: account.role,
+          account_type: account.account_type,
+          business_name: account.business_name,
+          business_category: account.business_category,
+          profile_photo_url: account.profile_photo_url || "",
+        },
       });
     }
 
@@ -815,7 +856,10 @@ app.post("/auth/verify-2fa-code", twoFactorVerifyRateLimiter, async (req, res) =
       message: "Verification could not be completed.",
     });
   }
-});
+}
+
+app.post("/auth/verify-code", twoFactorVerifyRateLimiter, completeAuthenticationVerification);
+app.post("/auth/verify-2fa-code", twoFactorVerifyRateLimiter, completeAuthenticationVerification);
 
 app.get("/auth/security-status", authMiddleware, async (req, res) => {
   res.status(501).json({
@@ -1731,6 +1775,7 @@ module.exports = {
   buildUserPostsQuery,
   createCorsOptions,
   createToken,
+  completeAuthenticationVerification,
   findAuthorizedQuoteRequest,
   getApprovedCorsOrigins,
   initiateSecurityVerification,

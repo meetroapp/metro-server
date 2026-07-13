@@ -80,6 +80,11 @@ async function createFakePool() {
         return { rows: user ? [user] : [] };
       }
 
+      if (sql.includes("FROM users WHERE id = $1 AND email = $2")) {
+        const user = users.get(Number(values[0]));
+        return { rows: user?.email === values[1] ? [user] : [] };
+      }
+
       if (sql.includes("SELECT id, username, email, role, account_type") && sql.includes("WHERE id = $1")) {
         const user = users.get(Number(values[0]));
         return { rows: user ? [user] : [] };
@@ -304,15 +309,17 @@ test("password change uses authenticated identity, stores bcrypt, invalidates ol
   assert.equal(unaffectedSession.json.user.id, 2);
 });
 
-test("login issues current token version and remains bcrypt-compatible", async () => {
+test("login remains bcrypt-compatible and issues JWT only after verification", async () => {
   const pool = await createFakePool();
   pool.users.get(1).token_version = 4;
+  let deliveredCode;
   const login = await invokeRoute("post", "/auth/login", {
     pool,
     body: { email: " PERSONAL@EXAMPLE.TEST ", password: "CurrentPass12" },
     locals: {
       emailDelivery: {
-        async sendSecurityVerificationCode() {
+        async sendSecurityVerificationCode({ code }) {
+          deliveredCode = code;
           return { accepted: true };
         },
       },
@@ -320,11 +327,79 @@ test("login issues current token version and remains bcrypt-compatible", async (
   });
 
   assert.equal(login.status, 200);
-  assert.equal(login.json.message, "Login successful");
-  assert.equal(login.json.code, "VERIFICATION_CODE_SENT");
+  assert.equal(login.json.code, "VERIFICATION_REQUIRED");
   assert.equal(typeof login.json.challengeId, "string");
-  assert.equal(jwt.decode(login.json.token).tokenVersion, 4);
-  assert.equal(Object.hasOwn(login.json.user, "password_hash"), false);
+  assert.equal(Object.hasOwn(login.json, "token"), false);
+  assert.equal(Object.hasOwn(login.json, "user"), false);
+
+  const beforeVerification = await invokeRoute("get", "/auth/me", { pool });
+  assert.equal(beforeVerification.status, 401);
+  assert.equal(beforeVerification.json.code, "AUTHENTICATION_REQUIRED");
+
+  const completed = await invokeRoute("post", "/auth/verify-code", {
+    pool,
+    body: {
+      email: "personal@example.test",
+      challengeId: login.json.challengeId,
+      code: deliveredCode,
+    },
+  });
+  assert.equal(completed.status, 200);
+  assert.equal(completed.json.code, "AUTHENTICATION_COMPLETE");
+  assert.equal(jwt.decode(completed.json.token).tokenVersion, 4);
+  assert.equal(Object.hasOwn(completed.json.user, "password_hash"), false);
+
+  const authenticated = await invokeRoute("get", "/auth/me", {
+    pool,
+    token: completed.json.token,
+  });
+  assert.equal(authenticated.status, 200);
+  assert.equal(authenticated.json.user.id, 1);
+
+  const passwordChanged = await invokeRoute("post", "/auth/change-password", {
+    pool,
+    token: completed.json.token,
+    body: { currentPassword: "CurrentPass12", newPassword: "NewSecure12" },
+  });
+  assert.equal(passwordChanged.status, 200);
+  const invalidated = await invokeRoute("get", "/auth/me", {
+    pool,
+    token: completed.json.token,
+  });
+  assert.equal(invalidated.status, 401);
+  assert.equal(invalidated.json.code, "SESSION_INVALID");
+});
+
+test("verification fails closed when token version changes after password validation", async () => {
+  const pool = await createFakePool();
+  let deliveredCode;
+  const login = await invokeRoute("post", "/auth/login", {
+    pool,
+    body: { email: "personal@example.test", password: "CurrentPass12" },
+    locals: {
+      emailDelivery: {
+        async sendSecurityVerificationCode({ code }) {
+          deliveredCode = code;
+          return { accepted: true };
+        },
+      },
+    },
+  });
+
+  pool.users.get(1).token_version += 1;
+  const verification = await invokeRoute("post", "/auth/verify-code", {
+    pool,
+    body: {
+      email: "personal@example.test",
+      challengeId: login.json.challengeId,
+      code: deliveredCode,
+    },
+  });
+
+  assert.equal(verification.status, 401);
+  assert.equal(verification.json.code, "SESSION_INVALID");
+  assert.equal(Object.hasOwn(verification.json, "token"), false);
+  assert.equal(twoFactorChallengeStore.size(), 0);
 });
 
 test("password database failures are normalized and repeated attempts are rate limited with safe keys", async () => {
@@ -402,8 +477,9 @@ test("2FA delivery never exposes codes and verification is challenge-bound and s
 
   assert.equal(requested.status, 200);
   assert.equal(typeof requested.json.challengeId, "string");
-  assert.equal(requested.json.code, "VERIFICATION_CODE_SENT");
+  assert.equal(requested.json.code, "VERIFICATION_REQUIRED");
   assert.equal(requested.json.maskedEmail, "pe***@example.test");
+  assert.equal(Object.hasOwn(requested.json, "token"), false);
   assert.doesNotMatch(String(requested.json.code), /^\d{6}$/);
   assert.equal(Object.hasOwn(requested.json, "devCode"), false);
   assert.equal(typeof delivered.code, "string");
@@ -413,20 +489,24 @@ test("2FA delivery never exposes codes and verification is challenge-bound and s
     body: { email: "personal@example.test", challengeId: requested.json.challengeId, code: "000000" },
   });
   assert.notEqual(fixedCode.status, 200);
+  assert.equal(Object.hasOwn(fixedCode.json, "token"), false);
 
   const verified = await invokeRoute("post", "/auth/verify-2fa-code", {
     pool,
     body: { email: "personal@example.test", challengeId: requested.json.challengeId, code: delivered.code },
   });
   assert.equal(verified.status, 200);
-  assert.equal(verified.json.code, "CODE_VERIFIED");
+  assert.equal(verified.json.code, "AUTHENTICATION_COMPLETE");
+  assert.equal(typeof verified.json.token, "string");
+  assert.equal(twoFactorChallengeStore.size(), 0);
 
   const replay = await invokeRoute("post", "/auth/verify-2fa-code", {
     pool,
     body: { email: "personal@example.test", challengeId: requested.json.challengeId, code: delivered.code },
   });
-  assert.equal(replay.status, 401);
-  assert.equal(replay.json.code, "SESSION_INVALID");
+  assert.equal(replay.status, 400);
+  assert.equal(replay.json.code, "MISSING_CHALLENGE");
+  assert.equal(Object.hasOwn(replay.json, "token"), false);
 });
 
 test("login delivery failure leaves no active challenge and a later retry can succeed", async () => {
@@ -478,7 +558,8 @@ test("login delivery failure leaves no active challenge and a later retry can su
   });
 
   assert.equal(retry.status, 200);
-  assert.equal(retry.json.code, "VERIFICATION_CODE_SENT");
+  assert.equal(retry.json.code, "VERIFICATION_REQUIRED");
+  assert.equal(Object.hasOwn(retry.json, "token"), false);
   assert.equal(twoFactorChallengeStore.size(), 1);
 });
 

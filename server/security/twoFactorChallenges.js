@@ -79,7 +79,11 @@ function createTwoFactorChallengeStore({
     return { ok: true };
   }
 
-  function prepare(identity, { accountId } = {}) {
+  function prepare(identity, {
+    accountId,
+    passwordVerified = false,
+    tokenVersionSnapshot = 0,
+  } = {}) {
     const normalizedIdentity = normalizeIdentity(identity);
     const availability = getSendAvailability(normalizedIdentity);
     if (!availability.ok) return availability;
@@ -90,7 +94,10 @@ function createTwoFactorChallengeStore({
     const prepared = {
       challengeId: idGenerator(),
       identity: normalizedIdentity,
+      email: normalizedIdentity,
       accountId: accountId ?? null,
+      passwordVerified: passwordVerified === true,
+      tokenVersionSnapshot: Number(tokenVersionSnapshot || 0),
       codeHash: hashCode(rawCode, salt),
       salt,
       createdAt,
@@ -156,6 +163,7 @@ function createTwoFactorChallengeStore({
     if (!challenge) return { ok: false, code: TWO_FACTOR_FAILURE.MISSING_CHALLENGE };
     if (challenge.consumedAt) return { ok: false, code: TWO_FACTOR_FAILURE.CHALLENGE_USED };
     if (challenge.expiresAt <= now()) {
+      challenges.delete(challenge.challengeId);
       return { ok: false, code: TWO_FACTOR_FAILURE.CHALLENGE_EXPIRED };
     }
     if (challenge.attemptsRemaining <= 0) {
@@ -179,17 +187,43 @@ function createTwoFactorChallengeStore({
     }
 
     challenge.consumedAt = now();
-    return { ok: true, code: "CODE_VERIFIED" };
+    return {
+      ok: true,
+      code: "CODE_VERIFIED",
+      session: {
+        challengeId: challenge.challengeId,
+        email: challenge.email,
+        accountId: challenge.accountId,
+        passwordVerified: challenge.passwordVerified,
+        tokenVersionSnapshot: challenge.tokenVersionSnapshot,
+        createdAt: challenge.createdAt,
+        expiresAt: challenge.expiresAt,
+        attemptsRemaining: challenge.attemptsRemaining,
+      },
+    };
   }
 
-  function isActiveForIdentity({ challengeId, identity }) {
+  function getActiveSession({ challengeId, identity }) {
     const challenge = challenges.get(String(challengeId || ""));
-    return Boolean(
-      challenge &&
-      !challenge.consumedAt &&
-      challenge.expiresAt > now() &&
-      challenge.identity === normalizeIdentity(identity)
-    );
+    if (
+      !challenge ||
+      challenge.consumedAt ||
+      challenge.expiresAt <= now() ||
+      challenge.identity !== normalizeIdentity(identity)
+    ) {
+      return null;
+    }
+
+    return {
+      challengeId: challenge.challengeId,
+      email: challenge.email,
+      accountId: challenge.accountId,
+      passwordVerified: challenge.passwordVerified,
+      tokenVersionSnapshot: challenge.tokenVersionSnapshot,
+      createdAt: challenge.createdAt,
+      expiresAt: challenge.expiresAt,
+      attemptsRemaining: challenge.attemptsRemaining,
+    };
   }
 
   return {
@@ -201,11 +235,11 @@ function createTwoFactorChallengeStore({
       successfulSends.clear();
     },
     getSendAvailability,
+    getActiveSession,
     hasStoredPlaintextCode: () => [...challenges.values()].some(
       (challenge) => Object.hasOwn(challenge, "deliveryCode") || Object.hasOwn(challenge, "code")
     ),
     issue,
-    isActiveForIdentity,
     prepare,
     remove,
     size: () => challenges.size,

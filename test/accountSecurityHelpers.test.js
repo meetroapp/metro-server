@@ -84,8 +84,13 @@ test("two-factor challenges expire, limit attempts, bind accounts, and prevent r
     codeGenerator: () => issuedCode,
     idGenerator: () => `challenge-${++challengeNumber}`,
   });
+  const sessionState = {
+    accountId: 42,
+    passwordVerified: true,
+    tokenVersionSnapshot: 3,
+  };
 
-  const first = store.issue("Person@Example.Test");
+  const first = store.issue("Person@Example.Test", sessionState);
   assert.equal(first.deliveryCode, issuedCode);
   assert.equal(
     store.verify({ challengeId: first.challengeId, identity: "other@example.test", code: issuedCode }).code,
@@ -100,18 +105,30 @@ test("two-factor challenges expire, limit attempts, bind accounts, and prevent r
     TWO_FACTOR_FAILURE.TOO_MANY_ATTEMPTS
   );
 
-  const second = store.issue("person@example.test");
-  assert.equal(store.verify({ challengeId: second.challengeId, identity: "person@example.test", code: issuedCode }).ok, true);
+  const second = store.issue("person@example.test", sessionState);
+  const completed = store.verify({
+    challengeId: second.challengeId,
+    identity: "person@example.test",
+    code: issuedCode,
+  });
+  assert.equal(completed.ok, true);
+  assert.equal(completed.session.passwordVerified, true);
+  assert.equal(completed.session.accountId, 42);
+  assert.equal(completed.session.tokenVersionSnapshot, 3);
   assert.equal(
     store.verify({ challengeId: second.challengeId, identity: "person@example.test", code: issuedCode }).code,
     TWO_FACTOR_FAILURE.CHALLENGE_USED
   );
 
-  const third = store.issue("person@example.test");
+  const third = store.issue("person@example.test", sessionState);
   currentTime = 1100;
   assert.equal(
     store.verify({ challengeId: third.challengeId, identity: "person@example.test", code: issuedCode }).code,
     TWO_FACTOR_FAILURE.CHALLENGE_EXPIRED
+  );
+  assert.equal(
+    store.verify({ challengeId: third.challengeId, identity: "person@example.test", code: issuedCode }).code,
+    TWO_FACTOR_FAILURE.MISSING_CHALLENGE
   );
   assert.equal(
     store.verify({ challengeId: "missing", identity: "person@example.test", code: issuedCode }).code,
