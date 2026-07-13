@@ -4,15 +4,88 @@ const express = require("express");
 const cors = require("cors");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
-const crypto = require("crypto");
 const { Pool } = require("pg");
+const packageJson = require("./package.json");
+const { createAuthRateLimiter } = require("./server/security/authRateLimit");
+const { resolveJwtSecret } = require("./server/security/jwtConfig");
+const { validatePasswordPolicy } = require("./server/security/passwordPolicy");
+const {
+  TWO_FACTOR_FAILURE,
+  createTwoFactorChallengeStore,
+  normalizeIdentity,
+} = require("./server/security/twoFactorChallenges");
+
+const JWT_SECRET = resolveJwtSecret(process.env);
+const BCRYPT_ROUNDS = 10;
 
 const app = express();
 
-app.use(cors());
+const LOCAL_DEV_ORIGINS = Object.freeze([
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "http://localhost:4173",
+  "http://127.0.0.1:4173",
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+]);
+
+function parseOriginList(value) {
+  if (!value) return [];
+
+  return String(value)
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+}
+
+function getApprovedCorsOrigins(env = process.env) {
+  const configuredOrigins = [
+    ...parseOriginList(env.ALLOWED_ORIGINS),
+    ...parseOriginList(env.FRONTEND_ORIGINS),
+    ...parseOriginList(env.FRONTEND_URL),
+    ...parseOriginList(env.PUBLIC_WEB_ORIGIN),
+  ];
+
+  if (env.NODE_ENV !== "production") {
+    configuredOrigins.push(...LOCAL_DEV_ORIGINS);
+  }
+
+  return new Set(configuredOrigins.filter((origin) => origin !== "*"));
+}
+
+function createCorsOptions(env = process.env) {
+  const approvedOrigins = getApprovedCorsOrigins(env);
+  const allowRequestsWithoutOrigin = env.NODE_ENV !== "production";
+
+  return {
+    methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Authorization", "Content-Type"],
+    origin(origin, callback) {
+      if (!origin) {
+        return callback(null, allowRequestsWithoutOrigin);
+      }
+
+      if (approvedOrigins.has(origin)) {
+        return callback(null, true);
+      }
+
+      return callback(new Error("Origin not allowed by CORS"));
+    },
+  };
+}
+
+app.use(cors(createCorsOptions()));
 app.use(express.json());
 
-const twoFactorCodes = {};
+function jsonSyntaxErrorHandler(err, req, res, next) {
+  if (err instanceof SyntaxError && "body" in err) {
+    return res.status(400).json({ error: "Invalid JSON body" });
+  }
+
+  next(err);
+}
+
+app.use(jsonSyntaxErrorHandler);
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -21,42 +94,300 @@ const pool = new Pool({
   },
 });
 
+function getPool(req) {
+  return req.app?.locals?.pool || pool;
+}
+
+const loginRateLimiter = createAuthRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  maxAttempts: 10,
+  keyResolver: (req) => `login:${normalizeIdentity(getRequestBody(req).email) || "anonymous"}`,
+});
+const twoFactorRequestRateLimiter = createAuthRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  maxAttempts: 5,
+  keyResolver: (req) => `2fa-request:${normalizeIdentity(getRequestBody(req).email) || "anonymous"}`,
+});
+const twoFactorVerifyRateLimiter = createAuthRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  maxAttempts: 5,
+  keyResolver: (req) => {
+    const body = getRequestBody(req);
+    return `2fa-verify:${body.challengeId || body.challenge_id || normalizeIdentity(body.email) || "anonymous"}`;
+  },
+});
+const passwordChangeRateLimiter = createAuthRateLimiter({
+  windowMs: 30 * 60 * 1000,
+  maxAttempts: 5,
+  keyResolver: (req) => `password-change:${req.user?.id || "anonymous"}`,
+});
+const twoFactorChallengeStore = createTwoFactorChallengeStore();
+
+function logAuthFailure(event, code, userId) {
+  console.error("Authentication operation failed", {
+    event,
+    code,
+    ...(userId ? { userId } : {}),
+  });
+}
+
+function buildHealthMetadata(env = process.env) {
+  return {
+    status: "ok",
+    version: packageJson.version,
+    environment:
+      env.RAILWAY_ENVIRONMENT_NAME ||
+      env.RAILWAY_ENVIRONMENT ||
+      env.NODE_ENV ||
+      "unknown",
+    commit:
+      env.RAILWAY_GIT_COMMIT_SHA ||
+      env.VERCEL_GIT_COMMIT_SHA ||
+      env.GIT_COMMIT ||
+      env.COMMIT_SHA ||
+      "unknown",
+    uptimeSeconds: Math.floor(process.uptime()),
+  };
+}
+
+function getRequestBody(req) {
+  return req.body && typeof req.body === "object" ? req.body : {};
+}
+
+function validateLoginRequestBody(body) {
+  const source = body && typeof body === "object" ? body : {};
+  const email = String(source.email || "").trim().toLowerCase();
+  const password = String(source.password || "");
+
+  if (!email || !password) {
+    return {
+      ok: false,
+      status: 400,
+      error: "Email and password are required",
+    };
+  }
+
+  return {
+    ok: true,
+    email,
+    password,
+  };
+}
+
+function toSafePostRow(row = {}) {
+  return {
+    id: row.id,
+    title: row.title,
+    description: row.description,
+    location: row.location,
+    category: row.category,
+    created_at: row.created_at,
+    mage_url: row.mage_url ?? null,
+    image_url: row.image_url ?? "",
+  };
+}
+
+function buildUserPostsQuery(userId) {
+  return {
+    text: `
+      SELECT id, title, description, location, category, created_at, mage_url, image_url
+      FROM posts
+      WHERE user_id = $1
+      ORDER BY posts.created_at DESC
+      `,
+    values: [userId],
+  };
+}
+
+function buildUserPostByIdQuery(postId, userId) {
+  return {
+    text: `
+      SELECT id, title, description, location, category, created_at, mage_url, image_url
+      FROM posts
+      WHERE id = $1 AND user_id = $2
+      `,
+    values: [postId, userId],
+  };
+}
+
+function buildQuoteRequestParticipantQuery(quoteRequestId, userId) {
+  return {
+    text: `
+      SELECT
+        quote_requests.id,
+        quote_requests.homeowner_id,
+        contractor_profiles.user_id AS contractor_user_id
+      FROM quote_requests
+      JOIN contractor_profiles ON quote_requests.contractor_id = contractor_profiles.id
+      WHERE quote_requests.id = $1
+        AND (
+          quote_requests.homeowner_id = $2
+          OR contractor_profiles.user_id = $2
+        )
+      LIMIT 1
+      `,
+    values: [quoteRequestId, userId],
+  };
+}
+
+function getQuoteParticipantUserIds(quoteRequest = {}) {
+  return [quoteRequest.homeowner_id, quoteRequest.contractor_user_id]
+    .filter((id) => id !== undefined && id !== null && id !== "")
+    .map((id) => String(id));
+}
+
+function receiverBelongsToQuoteRequest(quoteRequest, receiverId) {
+  if (receiverId === undefined || receiverId === null || receiverId === "") {
+    return true;
+  }
+
+  return getQuoteParticipantUserIds(quoteRequest).includes(String(receiverId));
+}
+
+async function findAuthorizedQuoteRequest(poolClient, quoteRequestId, userId) {
+  const query = buildQuoteRequestParticipantQuery(quoteRequestId, userId);
+  const result = await poolClient.query(query.text, query.values);
+
+  return result.rows[0] || null;
+}
+
+function buildOwnedContractorProjectUpdateQuery({
+  projectId,
+  ownerUserId,
+  title,
+  description,
+  imageUrl,
+  imageUrls,
+}) {
+  return {
+    text: `
+      UPDATE contractor_projects
+      SET
+        title = $1,
+        description = $2,
+        image_url = $3,
+        image_urls = $4::jsonb
+      WHERE contractor_projects.id = $5
+        AND EXISTS (
+          SELECT 1
+          FROM contractor_profiles
+          WHERE contractor_profiles.id = contractor_projects.contractor_id
+            AND contractor_profiles.user_id = $6
+        )
+      RETURNING *
+      `,
+    values: [
+      title,
+      description,
+      imageUrl,
+      JSON.stringify(imageUrls),
+      projectId,
+      ownerUserId,
+    ],
+  };
+}
+
+function buildOwnedContractorProjectCreateQuery({
+  contractorId,
+  ownerUserId,
+  title,
+  description,
+  imageUrl,
+  imageUrls,
+}) {
+  return {
+    text: `
+      INSERT INTO contractor_projects
+      (contractor_id, title, description, image_url, image_urls)
+      SELECT contractor_profiles.id, $2, $3, $4, $5::jsonb
+      FROM contractor_profiles
+      WHERE contractor_profiles.id = $1
+        AND contractor_profiles.user_id = $6
+      RETURNING *
+      `,
+    values: [
+      contractorId,
+      title,
+      description,
+      imageUrl,
+      JSON.stringify(imageUrls),
+      ownerUserId,
+    ],
+  };
+}
+
 function createToken(user, expiresIn = "7d") {
   return jwt.sign(
     {
       id: user.id,
       email: user.email,
       role: user.role,
+      tokenVersion: Number(user.token_version ?? user.tokenVersion ?? 0),
     },
-    process.env.JWT_SECRET || "my_super_secret_key_123",
+    JWT_SECRET,
     { expiresIn }
   );
 }
 
-function authMiddleware(req, res, next) {
-  const authHeader = req.headers.authorization;
+async function authMiddleware(req, res, next) {
+  const authHeader = String(req.headers?.authorization || "");
 
-  if (!authHeader) {
-    return res.status(401).json({ error: "No token provided" });
+  if (!authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({
+      success: false,
+      code: "AUTHENTICATION_REQUIRED",
+      message: "Authentication required.",
+    });
   }
 
-  const token = authHeader.split(" ")[1];
+  const token = authHeader.slice("Bearer ".length).trim();
+  if (!token) {
+    return res.status(401).json({
+      success: false,
+      code: "AUTHENTICATION_REQUIRED",
+      message: "Authentication required.",
+    });
+  }
 
   try {
-    const decoded = jwt.verify(
-      token,
-      process.env.JWT_SECRET || "my_super_secret_key_123"
+    const decoded = jwt.verify(token, JWT_SECRET);
+    const result = await getPool(req).query(
+      `
+      SELECT id, email, role, token_version
+      FROM users
+      WHERE id = $1
+      `,
+      [decoded.id]
     );
+    const user = result.rows[0];
+    const tokenVersion = Number(decoded.tokenVersion ?? 0);
 
-    req.user = decoded;
+    if (!user || Number(user.token_version || 0) !== tokenVersion) {
+      return res.status(401).json({
+        success: false,
+        code: "SESSION_INVALID",
+        message: "Session is no longer valid.",
+      });
+    }
+
+    req.user = {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      tokenVersion,
+    };
     next();
-  } catch (err) {
-    return res.status(401).json({ error: "Invalid token" });
+  } catch {
+    return res.status(401).json({
+      success: false,
+      code: "SESSION_INVALID",
+      message: "Session is no longer valid.",
+    });
   }
 }
 
 app.get("/health", (req, res) => {
-  res.json({ status: "ok" });
+  res.json(buildHealthMetadata());
 });
 
 app.get("/test-db", async (req, res) => {
@@ -93,7 +424,18 @@ app.post("/auth/signup", async (req, res) => {
       });
     }
 
-    const existingUser = await pool.query(
+    const passwordPolicy = validatePasswordPolicy(cleanPassword);
+    if (!passwordPolicy.valid) {
+      return res.status(400).json({
+        success: false,
+        code: "PASSWORD_POLICY_FAILED",
+        policyCode: passwordPolicy.code,
+        message: "Password does not meet requirements.",
+      });
+    }
+
+    const requestPool = getPool(req);
+    const existingUser = await requestPool.query(
       "SELECT id FROM users WHERE email = $1",
       [cleanEmail]
     );
@@ -126,14 +468,14 @@ app.post("/auth/signup", async (req, res) => {
 
     const finalUsername = username || name || cleanEmail;
 
-    const passwordHash = await bcrypt.hash(cleanPassword, 10);
+    const passwordHash = await bcrypt.hash(cleanPassword, BCRYPT_ROUNDS);
 
-    const result = await pool.query(
+    const result = await requestPool.query(
       `
       INSERT INTO users
       (username, email, password_hash, role, account_type, business_name, business_category)
       VALUES ($1, $2, $3, $4, $5, $6, $7)
-      RETURNING id, username, email, role, account_type, business_name, business_category, profile_photo_url, created_at
+      RETURNING id, username, email, role, account_type, business_name, business_category, profile_photo_url, token_version, created_at
       `,
       [
         finalUsername,
@@ -152,31 +494,45 @@ app.post("/auth/signup", async (req, res) => {
     res.json({
       message: "User created",
       token,
-      user,
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        role: user.role,
+        account_type: user.account_type,
+        business_name: user.business_name,
+        business_category: user.business_category,
+        profile_photo_url: user.profile_photo_url || "",
+        created_at: user.created_at,
+      },
     });
-  } catch (err) {
-    console.error("Signup error:", err);
+  } catch {
+    logAuthFailure("signup", "SIGNUP_FAILED");
     res.status(500).json({
       error: "Signup failed",
-      details: err.message,
     });
   }
 });
 
-app.post("/auth/login", async (req, res) => {
+app.post("/auth/login", loginRateLimiter, async (req, res) => {
   try {
-    const cleanEmail = String(req.body.email || "").trim().toLowerCase();
-    const cleanPassword = String(req.body.password || "");
+    const loginRequest = validateLoginRequestBody(getRequestBody(req));
 
-    if (!cleanEmail || !cleanPassword) {
-      return res.status(400).json({
-        error: "Email and password are required",
+    if (!loginRequest.ok) {
+      return res.status(loginRequest.status).json({
+        error: loginRequest.error,
       });
     }
 
-    const result = await pool.query("SELECT * FROM users WHERE email = $1", [
-      cleanEmail,
-    ]);
+    const result = await getPool(req).query(
+      `
+      SELECT id, username, email, password_hash, role, account_type,
+             business_name, business_category, profile_photo_url, token_version
+      FROM users
+      WHERE email = $1
+      `,
+      [loginRequest.email]
+    );
 
     const user = result.rows[0];
 
@@ -186,7 +542,7 @@ app.post("/auth/login", async (req, res) => {
       });
     }
 
-    const valid = await bcrypt.compare(cleanPassword, user.password_hash);
+    const valid = await bcrypt.compare(loginRequest.password, user.password_hash);
 
     if (!valid) {
       return res.status(401).json({
@@ -210,11 +566,10 @@ app.post("/auth/login", async (req, res) => {
         profile_photo_url: user.profile_photo_url || "",
       },
     });
-  } catch (err) {
-    console.error("Login error:", err);
+  } catch {
+    logAuthFailure("login", "LOGIN_FAILED");
     res.status(500).json({
       error: "Login failed",
-      details: err.message,
     });
   }
 });
@@ -224,7 +579,7 @@ app.put("/auth/profile-photo", authMiddleware, async (req, res) => {
   try {
     const { profile_photo_url } = req.body;
 
-    const result = await pool.query(
+    const result = await getPool(req).query(
       `
       UPDATE users
       SET profile_photo_url = $1
@@ -238,18 +593,17 @@ app.put("/auth/profile-photo", authMiddleware, async (req, res) => {
       message: "Profile photo updated",
       user: result.rows[0],
     });
-  } catch (err) {
-    console.error("Profile photo update error:", err);
+  } catch {
+    logAuthFailure("profile_photo_update", "PROFILE_PHOTO_UPDATE_FAILED", req.user.id);
     res.status(500).json({
       error: "Failed to update profile photo",
-      details: err.message,
     });
   }
 });
 
 app.get("/auth/me", authMiddleware, async (req, res) => {
   try {
-    const result = await pool.query(
+    const result = await getPool(req).query(
       `
       SELECT id, username, email, role, account_type, business_name, business_category, profile_photo_url, created_at
       FROM users
@@ -261,97 +615,263 @@ app.get("/auth/me", authMiddleware, async (req, res) => {
     res.json({
       user: result.rows[0],
     });
-  } catch (err) {
+  } catch {
+    logAuthFailure("auth_me", "AUTH_ME_FAILED", req.user.id);
     res.status(500).json({
       error: "Failed to fetch user",
-      details: err.message,
     });
   }
 });
 
-app.post("/auth/request-2fa-code", async (req, res) => {
+app.post("/auth/request-2fa-code", twoFactorRequestRateLimiter, async (req, res) => {
   try {
-    const email = String(req.body.email || "").trim().toLowerCase();
+    const email = normalizeIdentity(getRequestBody(req).email);
 
     if (!email) {
-      return res.status(400).json({ error: "Email required" });
+      return res.status(400).json({
+        success: false,
+        code: "EMAIL_REQUIRED",
+        message: "Email is required.",
+      });
     }
 
-    const code = crypto.randomInt(100000, 999999).toString();
+    const accountResult = await getPool(req).query(
+      "SELECT id, email FROM users WHERE email = $1",
+      [email]
+    );
+    const account = accountResult.rows[0];
 
-    twoFactorCodes[email] = {
-      code,
-      expires: Date.now() + 1000 * 60 * 10,
-    };
+    if (!account) {
+      return res.status(202).json({
+        success: true,
+        code: "TWO_FACTOR_REQUEST_ACCEPTED",
+        message: "If verification is available, instructions will be sent.",
+      });
+    }
 
-    console.log("MEETRO 2FA CODE:", code);
+    const deliverCode = req.app?.locals?.twoFactorCodeDelivery;
+    if (typeof deliverCode !== "function") {
+      return res.status(503).json({
+        success: false,
+        code: "TWO_FACTOR_DELIVERY_UNAVAILABLE",
+        message: "Verification delivery is unavailable.",
+      });
+    }
+
+    const challenge = twoFactorChallengeStore.issue(account.email);
+    try {
+      await deliverCode({
+        accountId: account.id,
+        email: account.email,
+        challengeId: challenge.challengeId,
+        code: challenge.deliveryCode,
+        expiresAt: challenge.expiresAt,
+      });
+    } catch {
+      twoFactorChallengeStore.remove(challenge.challengeId);
+      logAuthFailure("two_factor_request", "DELIVERY_FAILED", account.id);
+      return res.status(503).json({
+        success: false,
+        code: "TWO_FACTOR_DELIVERY_UNAVAILABLE",
+        message: "Verification delivery is unavailable.",
+      });
+    }
 
     res.json({
-      message: "2FA code generated",
-      expiresInMinutes: 10,
-      devCode: "123456",
+      success: true,
+      code: "TWO_FACTOR_CHALLENGE_CREATED",
+      challengeId: challenge.challengeId,
+      expiresAt: challenge.expiresAt,
+      message: "Verification code sent.",
     });
-  } catch (err) {
+  } catch {
+    logAuthFailure("two_factor_request", "TWO_FACTOR_REQUEST_FAILED");
     res.status(500).json({
-      error: "Failed to generate 2FA code",
-      details: err.message,
+      success: false,
+      code: "TWO_FACTOR_REQUEST_FAILED",
+      message: "Verification request could not be completed.",
     });
   }
 });
 
-app.post("/auth/verify-2fa-code", async (req, res) => {
+app.post("/auth/verify-2fa-code", twoFactorVerifyRateLimiter, async (req, res) => {
   try {
-    const email = String(req.body.email || "").trim().toLowerCase();
-    const code = String(req.body.code || "").trim();
+    const body = getRequestBody(req);
+    const email = normalizeIdentity(body.email);
+    const code = String(body.code || "").trim();
+    const challengeId = String(body.challengeId || body.challenge_id || "").trim();
 
-    console.log("VERIFY 2FA BODY:", { email, code });
-
-    if (!email || !code) {
+    if (!email || !code || !challengeId) {
       return res.status(400).json({
-        error: "Email and code required",
+        success: false,
+        code: "MISSING_CHALLENGE",
+        message: "Verification challenge, email, and code are required.",
       });
     }
 
-    if (code === "123456") {
+    const result = twoFactorChallengeStore.verify({ challengeId, identity: email, code });
+    if (result.ok) {
       return res.json({
         success: true,
-        message: "Code verified",
+        code: "CODE_VERIFIED",
+        message: "Code verified.",
       });
     }
 
-    return res.status(400).json({
-      error: "Invalid code",
-    });
-  } catch (error) {
-    console.error("2FA verify error:", error);
+    const failureMap = {
+      [TWO_FACTOR_FAILURE.MISSING_CHALLENGE]: [400, "MISSING_CHALLENGE", "Verification challenge is invalid."],
+      [TWO_FACTOR_FAILURE.CHALLENGE_EXPIRED]: [410, "CODE_EXPIRED", "Verification code expired."],
+      [TWO_FACTOR_FAILURE.CHALLENGE_USED]: [401, "SESSION_INVALID", "Verification challenge is no longer valid."],
+      [TWO_FACTOR_FAILURE.ACCOUNT_MISMATCH]: [401, "SESSION_INVALID", "Verification challenge is no longer valid."],
+      [TWO_FACTOR_FAILURE.INVALID_CODE]: [400, "INVALID_CODE", "Verification code is invalid."],
+      [TWO_FACTOR_FAILURE.TOO_MANY_ATTEMPTS]: [429, "TOO_MANY_ATTEMPTS", "Try again later."],
+    };
+    const [status, failureCode, message] = failureMap[result.code] || [400, "INVALID_CODE", "Verification code is invalid."];
+
+    return res.status(status).json({ success: false, code: failureCode, message });
+  } catch {
+    logAuthFailure("two_factor_verify", "TWO_FACTOR_VERIFY_FAILED");
     return res.status(500).json({
-      error: "Server error verifying code",
+      success: false,
+      code: "TWO_FACTOR_VERIFY_FAILED",
+      message: "Verification could not be completed.",
     });
   }
 });
 
 app.get("/auth/security-status", authMiddleware, async (req, res) => {
-  res.json({
-    twoFactorEnabled: false,
-    trustedDevicesEnabled: false,
-    biometricAvailable: false,
-    message: "Security status placeholder ready",
+  res.status(501).json({
+    success: false,
+    code: "TWO_FACTOR_MANAGEMENT_UNSUPPORTED",
+    message: "Two-factor enrollment management is not available.",
   });
 });
 
 app.post("/auth/enable-2fa", authMiddleware, async (req, res) => {
-  res.json({
-    enabled: true,
-    message: "2FA enable placeholder ready",
+  res.status(501).json({
+    success: false,
+    code: "TWO_FACTOR_MANAGEMENT_UNSUPPORTED",
+    message: "Two-factor enrollment management is not available.",
   });
 });
 
 app.post("/auth/disable-2fa", authMiddleware, async (req, res) => {
-  res.json({
-    enabled: false,
-    message: "2FA disable placeholder ready",
+  res.status(501).json({
+    success: false,
+    code: "TWO_FACTOR_MANAGEMENT_UNSUPPORTED",
+    message: "Two-factor enrollment management is not available.",
   });
 });
+
+app.post(
+  "/auth/change-password",
+  authMiddleware,
+  passwordChangeRateLimiter,
+  async (req, res) => {
+    const body = getRequestBody(req);
+    const currentPassword = String(body.currentPassword || "");
+    const newPassword = String(body.newPassword || "");
+
+    if (!currentPassword) {
+      return res.status(400).json({
+        success: false,
+        code: "CURRENT_PASSWORD_REQUIRED",
+        message: "Current password is required.",
+      });
+    }
+    if (!newPassword) {
+      return res.status(400).json({
+        success: false,
+        code: "NEW_PASSWORD_REQUIRED",
+        message: "New password is required.",
+      });
+    }
+
+    const passwordPolicy = validatePasswordPolicy(newPassword);
+    if (!passwordPolicy.valid) {
+      return res.status(400).json({
+        success: false,
+        code: "PASSWORD_POLICY_FAILED",
+        policyCode: passwordPolicy.code,
+        message: "Password does not meet requirements.",
+      });
+    }
+
+    try {
+      const requestPool = getPool(req);
+      const userResult = await requestPool.query(
+        `
+        SELECT id, email, role, password_hash, token_version
+        FROM users
+        WHERE id = $1
+        `,
+        [req.user.id]
+      );
+      const user = userResult.rows[0];
+
+      if (!user) {
+        return res.status(401).json({
+          success: false,
+          code: "SESSION_INVALID",
+          message: "Session is no longer valid.",
+        });
+      }
+
+      const currentMatches = await bcrypt.compare(currentPassword, user.password_hash);
+      if (!currentMatches) {
+        return res.status(401).json({
+          success: false,
+          code: "CURRENT_PASSWORD_INCORRECT",
+          message: "Current password is incorrect.",
+        });
+      }
+
+      const reusesPassword = await bcrypt.compare(newPassword, user.password_hash);
+      if (reusesPassword) {
+        return res.status(400).json({
+          success: false,
+          code: "PASSWORD_REUSE_NOT_ALLOWED",
+          message: "New password must be different.",
+        });
+      }
+
+      const passwordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+      const updateResult = await requestPool.query(
+        `
+        UPDATE users
+        SET password_hash = $1,
+            token_version = token_version + 1
+        WHERE id = $2 AND password_hash = $3
+        RETURNING id, email, role, token_version
+        `,
+        [passwordHash, req.user.id, user.password_hash]
+      );
+      const updatedUser = updateResult.rows[0];
+
+      if (!updatedUser) {
+        return res.status(401).json({
+          success: false,
+          code: "SESSION_INVALID",
+          message: "Session is no longer valid.",
+        });
+      }
+
+      return res.json({
+        success: true,
+        code: "PASSWORD_CHANGED",
+        message: "Password updated successfully.",
+        token: createToken(updatedUser),
+      });
+    } catch {
+      logAuthFailure("password_change", "PASSWORD_CHANGE_FAILED", req.user.id);
+      return res.status(500).json({
+        success: false,
+        code: "PASSWORD_CHANGE_FAILED",
+        message: "Password change could not be completed.",
+      });
+    }
+  }
+);
 
 app.post("/posts", authMiddleware, async (req, res) => {
   try {
@@ -379,39 +899,25 @@ app.post("/posts", authMiddleware, async (req, res) => {
   }
 });
 
-app.get("/posts", async (req, res) => {
+app.get("/posts", authMiddleware, async (req, res) => {
   try {
-    const result = await pool.query(
-      `
-      SELECT posts.*, users.email, users.username
-      FROM posts
-      JOIN users ON posts.user_id = users.id
-      ORDER BY posts.created_at DESC
-      `
-    );
+    const query = buildUserPostsQuery(req.user.id);
+    const result = await getPool(req).query(query.text, query.values);
 
     res.json({
-      posts: result.rows,
+      posts: result.rows.map(toSafePostRow),
     });
   } catch (err) {
     res.status(500).json({
       error: "Failed to fetch posts",
-      details: err.message,
     });
   }
 });
 
-app.get("/posts/:id", async (req, res) => {
+app.get("/posts/:id", authMiddleware, async (req, res) => {
   try {
-    const result = await pool.query(
-      `
-      SELECT posts.*, users.email, users.username
-      FROM posts
-      JOIN users ON posts.user_id = users.id
-      WHERE posts.id = $1
-      `,
-      [req.params.id]
-    );
+    const query = buildUserPostByIdQuery(req.params.id, req.user.id);
+    const result = await getPool(req).query(query.text, query.values);
 
     if (result.rows.length === 0) {
       return res.status(404).json({
@@ -420,12 +926,11 @@ app.get("/posts/:id", async (req, res) => {
     }
 
     res.json({
-      post: result.rows[0],
+      post: toSafePostRow(result.rows[0]),
     });
   } catch (err) {
     res.status(500).json({
       error: "Failed to fetch post",
-      details: err.message,
     });
   }
 });
@@ -695,6 +1200,7 @@ app.get("/contractor-quote-requests", authMiddleware, async (req, res) => {
 
 app.post("/messages", authMiddleware, async (req, res) => {
   try {
+    const requestPool = getPool(req);
     const {
       quote_request_id,
       receiver_id,
@@ -706,7 +1212,31 @@ app.post("/messages", authMiddleware, async (req, res) => {
       workflow_payload,
     } = req.body;
 
-    const result = await pool.query(
+    if (!quote_request_id) {
+      return res.status(400).json({
+        error: "quote_request_id is required",
+      });
+    }
+
+    const quoteRequest = await findAuthorizedQuoteRequest(
+      requestPool,
+      quote_request_id,
+      req.user.id
+    );
+
+    if (!quoteRequest) {
+      return res.status(404).json({
+        error: "Quote request not found or not authorized",
+      });
+    }
+
+    if (!receiverBelongsToQuoteRequest(quoteRequest, receiver_id)) {
+      return res.status(400).json({
+        error: "receiver_id must belong to the quote request participants",
+      });
+    }
+
+    const result = await requestPool.query(
       `
       INSERT INTO messages
       (
@@ -750,7 +1280,20 @@ app.post("/messages", authMiddleware, async (req, res) => {
 
 app.get("/messages/:quoteRequestId", authMiddleware, async (req, res) => {
   try {
-    const result = await pool.query(
+    const requestPool = getPool(req);
+    const quoteRequest = await findAuthorizedQuoteRequest(
+      requestPool,
+      req.params.quoteRequestId,
+      req.user.id
+    );
+
+    if (!quoteRequest) {
+      return res.status(404).json({
+        error: "Quote request not found or not authorized",
+      });
+    }
+
+    const result = await requestPool.query(
       `
       SELECT messages.*, users.email AS sender_email
       FROM messages
@@ -776,6 +1319,7 @@ app.get("/messages/:quoteRequestId", authMiddleware, async (req, res) => {
 // Workflow persistence routes
 app.post("/workflow-events", authMiddleware, async (req, res) => {
   try {
+    const requestPool = getPool(req);
     const {
       quote_request_id,
       workflow_type,
@@ -790,7 +1334,19 @@ app.post("/workflow-events", authMiddleware, async (req, res) => {
       });
     }
 
-    await pool.query(`
+    const quoteRequest = await findAuthorizedQuoteRequest(
+      requestPool,
+      quote_request_id,
+      req.user.id
+    );
+
+    if (!quoteRequest) {
+      return res.status(404).json({
+        error: "Quote request not found or not authorized",
+      });
+    }
+
+    await requestPool.query(`
       CREATE TABLE IF NOT EXISTS workflow_events (
         id SERIAL PRIMARY KEY,
         quote_request_id INTEGER NOT NULL,
@@ -803,7 +1359,7 @@ app.post("/workflow-events", authMiddleware, async (req, res) => {
       )
     `);
 
-    const result = await pool.query(
+    const result = await requestPool.query(
       `
       INSERT INTO workflow_events
       (
@@ -841,7 +1397,20 @@ app.post("/workflow-events", authMiddleware, async (req, res) => {
 
 app.get("/workflow-events/:quoteRequestId", authMiddleware, async (req, res) => {
   try {
-    await pool.query(`
+    const requestPool = getPool(req);
+    const quoteRequest = await findAuthorizedQuoteRequest(
+      requestPool,
+      req.params.quoteRequestId,
+      req.user.id
+    );
+
+    if (!quoteRequest) {
+      return res.status(404).json({
+        error: "Quote request not found or not authorized",
+      });
+    }
+
+    await requestPool.query(`
       CREATE TABLE IF NOT EXISTS workflow_events (
         id SERIAL PRIMARY KEY,
         quote_request_id INTEGER NOT NULL,
@@ -854,7 +1423,7 @@ app.get("/workflow-events/:quoteRequestId", authMiddleware, async (req, res) => 
       )
     `);
 
-    const result = await pool.query(
+    const result = await requestPool.query(
       `
       SELECT workflow_events.*, users.email AS user_email
       FROM workflow_events
@@ -940,7 +1509,14 @@ app.get("/reviews/:contractorId", async (req, res) => {
 
 app.post("/contractor-projects", authMiddleware, async (req, res) => {
   try {
+    const requestPool = getPool(req);
     const { contractor_id, title, description, image_url, image_urls } = req.body;
+
+    if (!contractor_id) {
+      return res.status(400).json({
+        error: "contractor_id is required",
+      });
+    }
 
     const imageUrls = Array.isArray(image_urls)
       ? image_urls
@@ -948,21 +1524,22 @@ app.post("/contractor-projects", authMiddleware, async (req, res) => {
       ? [image_url]
       : [];
 
-    const result = await pool.query(
-      `
-      INSERT INTO contractor_projects
-      (contractor_id, title, description, image_url, image_urls)
-      VALUES ($1, $2, $3, $4, $5::jsonb)
-      RETURNING *
-      `,
-      [
-        contractor_id,
-        title,
-        description,
-        imageUrls[0] || image_url || "",
-        JSON.stringify(imageUrls),
-      ]
-    );
+    const query = buildOwnedContractorProjectCreateQuery({
+      contractorId: contractor_id,
+      ownerUserId: req.user.id,
+      title,
+      description,
+      imageUrl: imageUrls[0] || image_url || "",
+      imageUrls,
+    });
+
+    const result = await requestPool.query(query.text, query.values);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        error: "Contractor profile not found or not authorized",
+      });
+    }
 
     res.json({
       message: "Project uploaded",
@@ -978,6 +1555,7 @@ app.post("/contractor-projects", authMiddleware, async (req, res) => {
 
 app.put("/contractor-projects/:id", authMiddleware, async (req, res) => {
   try {
+    const requestPool = getPool(req);
     const projectId = req.params.id;
     const { title, description, image_url, image_urls } = req.body;
 
@@ -987,29 +1565,20 @@ app.put("/contractor-projects/:id", authMiddleware, async (req, res) => {
       ? [image_url]
       : [];
 
-    const result = await pool.query(
-      `
-      UPDATE contractor_projects
-      SET
-        title = $1,
-        description = $2,
-        image_url = $3,
-        image_urls = $4::jsonb
-      WHERE id = $5
-      RETURNING *
-      `,
-      [
-        title,
-        description,
-        imageUrls[0] || image_url || "",
-        JSON.stringify(imageUrls),
-        projectId,
-      ]
-    );
+    const query = buildOwnedContractorProjectUpdateQuery({
+      projectId,
+      ownerUserId: req.user.id,
+      title,
+      description,
+      imageUrl: imageUrls[0] || image_url || "",
+      imageUrls,
+    });
+
+    const result = await requestPool.query(query.text, query.values);
 
     if (result.rows.length === 0) {
       return res.status(404).json({
-        error: "Project not found",
+        error: "Project not found or not authorized",
       });
     }
 
@@ -1050,8 +1619,46 @@ app.get("/contractor-projects/:contractorId", async (req, res) => {
   }
 });
 
+app.use((err, req, res, next) => {
+  if (err?.message === "Origin not allowed by CORS") {
+    return res.status(403).json({ error: "Origin not allowed" });
+  }
+
+  console.error("Unhandled server error:", err);
+  return res.status(500).json({ error: "Server error" });
+});
+
 const PORT = process.env.PORT || 3000;
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
+
+module.exports = {
+  app,
+  authRateLimiters: {
+    loginRateLimiter,
+    passwordChangeRateLimiter,
+    twoFactorRequestRateLimiter,
+    twoFactorVerifyRateLimiter,
+  },
+  authMiddleware,
+  buildHealthMetadata,
+  buildOwnedContractorProjectCreateQuery,
+  buildOwnedContractorProjectUpdateQuery,
+  buildQuoteRequestParticipantQuery,
+  buildUserPostByIdQuery,
+  buildUserPostsQuery,
+  createCorsOptions,
+  createToken,
+  findAuthorizedQuoteRequest,
+  getApprovedCorsOrigins,
+  getQuoteParticipantUserIds,
+  jsonSyntaxErrorHandler,
+  receiverBelongsToQuoteRequest,
+  toSafePostRow,
+  twoFactorChallengeStore,
+  validateLoginRequestBody,
+};
