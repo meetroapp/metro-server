@@ -310,10 +310,19 @@ test("login issues current token version and remains bcrypt-compatible", async (
   const login = await invokeRoute("post", "/auth/login", {
     pool,
     body: { email: " PERSONAL@EXAMPLE.TEST ", password: "CurrentPass12" },
+    locals: {
+      emailDelivery: {
+        async sendSecurityVerificationCode() {
+          return { accepted: true };
+        },
+      },
+    },
   });
 
   assert.equal(login.status, 200);
   assert.equal(login.json.message, "Login successful");
+  assert.equal(login.json.code, "VERIFICATION_CODE_SENT");
+  assert.equal(typeof login.json.challengeId, "string");
   assert.equal(jwt.decode(login.json.token).tokenVersion, 4);
   assert.equal(Object.hasOwn(login.json.user, "password_hash"), false);
 });
@@ -370,19 +379,31 @@ test("login and 2FA verification enforce their route-specific limits", async () 
   }
   assert.equal(verificationResult.status, 429);
   assert.equal(verificationResult.json.code, "TOO_MANY_ATTEMPTS");
+  const rateLimitKeys = Object.values(authRateLimiters).flatMap((limiter) => limiter.getKeys());
+  assert.equal(rateLimitKeys.some((key) => key.includes("WrongPass12")), false);
+  assert.equal(rateLimitKeys.some((key) => key.includes("000000")), false);
 });
 
 test("2FA delivery never exposes codes and verification is challenge-bound and single-use", async () => {
   const pool = await createFakePool();
   let delivered;
-  const requested = await invokeRoute("post", "/auth/request-2fa-code", {
+  const requested = await invokeRoute("post", "/auth/login", {
     pool,
-    body: { email: "personal@example.test" },
-    locals: { twoFactorCodeDelivery: async (payload) => { delivered = payload; } },
+    body: { email: "personal@example.test", password: "CurrentPass12" },
+    locals: {
+      emailDelivery: {
+        async sendSecurityVerificationCode(payload) {
+          delivered = payload;
+          return { accepted: true };
+        },
+      },
+    },
   });
 
   assert.equal(requested.status, 200);
   assert.equal(typeof requested.json.challengeId, "string");
+  assert.equal(requested.json.code, "VERIFICATION_CODE_SENT");
+  assert.equal(requested.json.maskedEmail, "pe***@example.test");
   assert.doesNotMatch(String(requested.json.code), /^\d{6}$/);
   assert.equal(Object.hasOwn(requested.json, "devCode"), false);
   assert.equal(typeof delivered.code, "string");
@@ -406,6 +427,101 @@ test("2FA delivery never exposes codes and verification is challenge-bound and s
   });
   assert.equal(replay.status, 401);
   assert.equal(replay.json.code, "SESSION_INVALID");
+});
+
+test("login delivery failure leaves no active challenge and a later retry can succeed", async () => {
+  const pool = await createFakePool();
+  let attemptedCode = "";
+  const logEntries = [];
+  const originalConsoleError = console.error;
+  console.error = (...values) => logEntries.push(values);
+  let unavailable;
+  try {
+    unavailable = await invokeRoute("post", "/auth/login", {
+      pool,
+      body: { email: "personal@example.test", password: "CurrentPass12" },
+      locals: {
+        emailDelivery: {
+          async sendSecurityVerificationCode({ code }) {
+            attemptedCode = code;
+            return { accepted: false, status: "provider_unavailable" };
+          },
+        },
+      },
+    });
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  assert.equal(unavailable.status, 503);
+  assert.deepEqual(unavailable.json, {
+    success: false,
+    code: "VERIFICATION_DELIVERY_UNAVAILABLE",
+    message: "Verification code could not be sent. Please try again.",
+  });
+  assert.equal(Object.hasOwn(unavailable.json, "challengeId"), false);
+  assert.equal(twoFactorChallengeStore.size(), 0);
+  assert.match(attemptedCode, /^\d{6}$/);
+  assert.equal(JSON.stringify(logEntries).includes(attemptedCode), false);
+  assert.equal(JSON.stringify(logEntries).includes("personal@example.test"), false);
+
+  const retry = await invokeRoute("post", "/auth/login", {
+    pool,
+    body: { email: "personal@example.test", password: "CurrentPass12" },
+    locals: {
+      emailDelivery: {
+        async sendSecurityVerificationCode() {
+          return { accepted: true };
+        },
+      },
+    },
+  });
+
+  assert.equal(retry.status, 200);
+  assert.equal(retry.json.code, "VERIFICATION_CODE_SENT");
+  assert.equal(twoFactorChallengeStore.size(), 1);
+});
+
+test("resend requires prior challenge context and enforces the send cooldown", async () => {
+  const pool = await createFakePool();
+  const delivery = {
+    calls: 0,
+    async sendSecurityVerificationCode() {
+      this.calls += 1;
+      return { accepted: true };
+    },
+  };
+  const login = await invokeRoute("post", "/auth/login", {
+    pool,
+    body: { email: "personal@example.test", password: "CurrentPass12" },
+    locals: { emailDelivery: delivery },
+  });
+  assert.equal(login.status, 200);
+  assert.equal(delivery.calls, 1);
+
+  const resend = await invokeRoute("post", "/auth/request-2fa-code", {
+    pool,
+    body: {
+      email: "personal@example.test",
+      challengeId: login.json.challengeId,
+    },
+    locals: { emailDelivery: delivery },
+  });
+  assert.equal(resend.status, 429);
+  assert.equal(resend.json.code, "TOO_MANY_ATTEMPTS");
+  assert.equal(delivery.calls, 1);
+
+  const unrelated = await invokeRoute("post", "/auth/request-2fa-code", {
+    pool,
+    body: {
+      email: "personal@example.test",
+      challengeId: "forged-challenge",
+    },
+    locals: { emailDelivery: delivery },
+  });
+  assert.equal(unrelated.status, 202);
+  assert.equal(unrelated.json.code, "TWO_FACTOR_REQUEST_ACCEPTED");
+  assert.equal(delivery.calls, 1);
 });
 
 test("2FA management placeholders fail explicitly instead of reporting false success", async () => {

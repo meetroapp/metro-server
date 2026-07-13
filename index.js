@@ -9,6 +9,7 @@ const packageJson = require("./package.json");
 const { createAuthRateLimiter } = require("./server/security/authRateLimit");
 const { resolveJwtSecret } = require("./server/security/jwtConfig");
 const { validatePasswordPolicy } = require("./server/security/passwordPolicy");
+const { createEmailDelivery } = require("./server/email/emailDelivery");
 const {
   TWO_FACTOR_FAILURE,
   createTwoFactorChallengeStore,
@@ -122,6 +123,7 @@ const passwordChangeRateLimiter = createAuthRateLimiter({
   keyResolver: (req) => `password-change:${req.user?.id || "anonymous"}`,
 });
 const twoFactorChallengeStore = createTwoFactorChallengeStore();
+const emailDelivery = createEmailDelivery({ env: process.env });
 
 function logAuthFailure(event, code, userId) {
   console.error("Authentication operation failed", {
@@ -152,6 +154,81 @@ function buildHealthMetadata(env = process.env) {
 
 function getRequestBody(req) {
   return req.body && typeof req.body === "object" ? req.body : {};
+}
+
+function maskEmail(email) {
+  const [localPart = "", domain = ""] = normalizeIdentity(email).split("@");
+  if (!localPart || !domain) return "***";
+  const visible = localPart.slice(0, Math.min(2, localPart.length));
+  return `${visible}***@${domain}`;
+}
+
+function getEmailDelivery(req) {
+  return req.app?.locals?.emailDelivery || emailDelivery;
+}
+
+async function initiateSecurityVerification(req, account) {
+  const prepared = twoFactorChallengeStore.prepare(account.email, { accountId: account.id });
+  if (!prepared.ok) {
+    return {
+      ok: false,
+      status: 429,
+      body: {
+        success: false,
+        code: "TOO_MANY_ATTEMPTS",
+        message: "Try again later.",
+        retryAfterSeconds: prepared.retryAfterSeconds,
+      },
+    };
+  }
+
+  let deliveryResult;
+  try {
+    deliveryResult = await getEmailDelivery(req).sendSecurityVerificationCode({
+      recipientEmail: account.email,
+      maskedEmail: maskEmail(account.email),
+      code: prepared.deliveryCode,
+      expiresInMinutes: Math.ceil((prepared.expiresAt - prepared.createdAt) / 60000),
+      challengeId: prepared.challengeId,
+    });
+  } catch {
+    deliveryResult = { accepted: false, status: "provider_unavailable" };
+  }
+
+  if (!deliveryResult?.accepted) {
+    twoFactorChallengeStore.cancel(prepared);
+    logAuthFailure("security_verification_delivery", "DELIVERY_UNAVAILABLE", account.id);
+    return {
+      ok: false,
+      status: 503,
+      body: {
+        success: false,
+        code: "VERIFICATION_DELIVERY_UNAVAILABLE",
+        message: "Verification code could not be sent. Please try again.",
+      },
+    };
+  }
+
+  const activated = twoFactorChallengeStore.activate(prepared);
+  if (!activated.ok) {
+    twoFactorChallengeStore.cancel(prepared);
+    return {
+      ok: false,
+      status: 503,
+      body: {
+        success: false,
+        code: "VERIFICATION_DELIVERY_UNAVAILABLE",
+        message: "Verification code could not be sent. Please try again.",
+      },
+    };
+  }
+
+  return {
+    ok: true,
+    challengeId: activated.challengeId,
+    maskedEmail: maskEmail(account.email),
+    expiresInSeconds: Math.max(1, Math.ceil((prepared.expiresAt - prepared.createdAt) / 1000)),
+  };
 }
 
 function validateLoginRequestBody(body) {
@@ -550,10 +627,20 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
       });
     }
 
+    const verification = await initiateSecurityVerification(req, user);
+    if (!verification.ok) {
+      return res.status(verification.status).json(verification.body);
+    }
+
     const token = createToken(user);
 
     res.json({
       message: "Login successful",
+      success: true,
+      code: "VERIFICATION_CODE_SENT",
+      challengeId: verification.challengeId,
+      maskedEmail: verification.maskedEmail,
+      expiresInSeconds: verification.expiresInSeconds,
       token,
       user: {
         id: user.id,
@@ -625,13 +712,26 @@ app.get("/auth/me", authMiddleware, async (req, res) => {
 
 app.post("/auth/request-2fa-code", twoFactorRequestRateLimiter, async (req, res) => {
   try {
-    const email = normalizeIdentity(getRequestBody(req).email);
+    const body = getRequestBody(req);
+    const email = normalizeIdentity(body.email);
+    const priorChallengeId = String(body.challengeId || body.challenge_id || "").trim();
 
-    if (!email) {
+    if (!email || !priorChallengeId) {
       return res.status(400).json({
         success: false,
-        code: "EMAIL_REQUIRED",
-        message: "Email is required.",
+        code: "CHALLENGE_CONTEXT_REQUIRED",
+        message: "Verification challenge and email are required.",
+      });
+    }
+
+    if (!twoFactorChallengeStore.isActiveForIdentity({
+      challengeId: priorChallengeId,
+      identity: email,
+    })) {
+      return res.status(202).json({
+        success: true,
+        code: "TWO_FACTOR_REQUEST_ACCEPTED",
+        message: "If verification is available, instructions will be sent.",
       });
     }
 
@@ -649,39 +749,17 @@ app.post("/auth/request-2fa-code", twoFactorRequestRateLimiter, async (req, res)
       });
     }
 
-    const deliverCode = req.app?.locals?.twoFactorCodeDelivery;
-    if (typeof deliverCode !== "function") {
-      return res.status(503).json({
-        success: false,
-        code: "TWO_FACTOR_DELIVERY_UNAVAILABLE",
-        message: "Verification delivery is unavailable.",
-      });
-    }
-
-    const challenge = twoFactorChallengeStore.issue(account.email);
-    try {
-      await deliverCode({
-        accountId: account.id,
-        email: account.email,
-        challengeId: challenge.challengeId,
-        code: challenge.deliveryCode,
-        expiresAt: challenge.expiresAt,
-      });
-    } catch {
-      twoFactorChallengeStore.remove(challenge.challengeId);
-      logAuthFailure("two_factor_request", "DELIVERY_FAILED", account.id);
-      return res.status(503).json({
-        success: false,
-        code: "TWO_FACTOR_DELIVERY_UNAVAILABLE",
-        message: "Verification delivery is unavailable.",
-      });
+    const verification = await initiateSecurityVerification(req, account);
+    if (!verification.ok) {
+      return res.status(verification.status).json(verification.body);
     }
 
     res.json({
       success: true,
-      code: "TWO_FACTOR_CHALLENGE_CREATED",
-      challengeId: challenge.challengeId,
-      expiresAt: challenge.expiresAt,
+      code: "VERIFICATION_CODE_SENT",
+      challengeId: verification.challengeId,
+      maskedEmail: verification.maskedEmail,
+      expiresInSeconds: verification.expiresInSeconds,
       message: "Verification code sent.",
     });
   } catch {
@@ -1655,8 +1733,10 @@ module.exports = {
   createToken,
   findAuthorizedQuoteRequest,
   getApprovedCorsOrigins,
+  initiateSecurityVerification,
   getQuoteParticipantUserIds,
   jsonSyntaxErrorHandler,
+  maskEmail,
   receiverBelongsToQuoteRequest,
   toSafePostRow,
   twoFactorChallengeStore,

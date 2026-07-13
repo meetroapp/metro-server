@@ -9,6 +9,8 @@ const TWO_FACTOR_FAILURE = Object.freeze({
   ACCOUNT_MISMATCH: "CHALLENGE_ACCOUNT_MISMATCH",
   INVALID_CODE: "INVALID_CODE",
   TOO_MANY_ATTEMPTS: "TOO_MANY_ATTEMPTS",
+  SEND_COOLDOWN: "SEND_COOLDOWN",
+  SEND_LIMIT_REACHED: "SEND_LIMIT_REACHED",
 });
 
 function normalizeIdentity(value) {
@@ -24,10 +26,15 @@ function createTwoFactorChallengeStore({
   ttlMs = 10 * 60 * 1000,
   maxAttempts = 5,
   maxEntries = 5000,
+  sendCooldownMs = 60 * 1000,
+  sendWindowMs = 15 * 60 * 1000,
+  maxSendsPerWindow = 5,
   codeGenerator = () => crypto.randomInt(100000, 1000000).toString(),
   idGenerator = () => crypto.randomUUID(),
 } = {}) {
   const challenges = new Map();
+  const pendingDeliveries = new Map();
+  const successfulSends = new Map();
 
   function cleanup(currentTime = now()) {
     for (const [id, challenge] of challenges) {
@@ -36,33 +43,108 @@ function createTwoFactorChallengeStore({
     while (challenges.size >= maxEntries) {
       challenges.delete(challenges.keys().next().value);
     }
+    for (const [identity, timestamps] of successfulSends) {
+      const active = timestamps.filter((timestamp) => timestamp + sendWindowMs > currentTime);
+      if (active.length) successfulSends.set(identity, active);
+      else successfulSends.delete(identity);
+    }
   }
 
-  function issue(identity) {
+  function getSendAvailability(identity) {
     const normalizedIdentity = normalizeIdentity(identity);
     if (!normalizedIdentity) throw new Error("Challenge identity is required.");
 
-    cleanup();
+    const currentTime = now();
+    cleanup(currentTime);
+    const timestamps = successfulSends.get(normalizedIdentity) || [];
+    const lastSentAt = timestamps.at(-1);
+
+    if (pendingDeliveries.has(normalizedIdentity)) {
+      return { ok: false, code: TWO_FACTOR_FAILURE.SEND_COOLDOWN, retryAfterSeconds: 60 };
+    }
+    if (lastSentAt !== undefined && lastSentAt + sendCooldownMs > currentTime) {
+      return {
+        ok: false,
+        code: TWO_FACTOR_FAILURE.SEND_COOLDOWN,
+        retryAfterSeconds: Math.ceil((lastSentAt + sendCooldownMs - currentTime) / 1000),
+      };
+    }
+    if (timestamps.length >= maxSendsPerWindow) {
+      return {
+        ok: false,
+        code: TWO_FACTOR_FAILURE.SEND_LIMIT_REACHED,
+        retryAfterSeconds: Math.ceil((timestamps[0] + sendWindowMs - currentTime) / 1000),
+      };
+    }
+    return { ok: true };
+  }
+
+  function prepare(identity, { accountId } = {}) {
+    const normalizedIdentity = normalizeIdentity(identity);
+    const availability = getSendAvailability(normalizedIdentity);
+    if (!availability.ok) return availability;
+
     const rawCode = codeGenerator();
     const salt = crypto.randomBytes(16);
     const createdAt = now();
-    const challenge = {
+    const prepared = {
       challengeId: idGenerator(),
       identity: normalizedIdentity,
+      accountId: accountId ?? null,
       codeHash: hashCode(rawCode, salt),
       salt,
       createdAt,
       expiresAt: createdAt + ttlMs,
       attemptsRemaining: maxAttempts,
       consumedAt: null,
-    };
-    challenges.set(challenge.challengeId, challenge);
-
-    return {
-      challengeId: challenge.challengeId,
-      expiresAt: challenge.expiresAt,
       deliveryCode: rawCode,
     };
+    pendingDeliveries.set(normalizedIdentity, prepared.challengeId);
+
+    return { ok: true, ...prepared };
+  }
+
+  function cancel(prepared) {
+    if (!prepared) return;
+    if (pendingDeliveries.get(prepared.identity) === prepared.challengeId) {
+      pendingDeliveries.delete(prepared.identity);
+    }
+    delete prepared.deliveryCode;
+  }
+
+  function activate(prepared) {
+    if (!prepared || pendingDeliveries.get(prepared.identity) !== prepared.challengeId) {
+      return { ok: false, code: TWO_FACTOR_FAILURE.MISSING_CHALLENGE };
+    }
+
+    for (const [id, challenge] of challenges) {
+      if (challenge.identity === prepared.identity && !challenge.consumedAt) challenges.delete(id);
+    }
+
+    const { deliveryCode, ok, ...storedChallenge } = prepared;
+    delete prepared.deliveryCode;
+    void deliveryCode;
+    void ok;
+    challenges.set(storedChallenge.challengeId, storedChallenge);
+    pendingDeliveries.delete(prepared.identity);
+    successfulSends.set(prepared.identity, [
+      ...(successfulSends.get(prepared.identity) || []),
+      now(),
+    ]);
+
+    return {
+      ok: true,
+      challengeId: storedChallenge.challengeId,
+      expiresAt: storedChallenge.expiresAt,
+    };
+  }
+
+  function issue(identity, options) {
+    const prepared = prepare(identity, options);
+    if (!prepared.ok) return prepared;
+    const deliveryCode = prepared.deliveryCode;
+    const activated = activate(prepared);
+    return { ...activated, deliveryCode };
   }
 
   function remove(challengeId) {
@@ -100,9 +182,31 @@ function createTwoFactorChallengeStore({
     return { ok: true, code: "CODE_VERIFIED" };
   }
 
+  function isActiveForIdentity({ challengeId, identity }) {
+    const challenge = challenges.get(String(challengeId || ""));
+    return Boolean(
+      challenge &&
+      !challenge.consumedAt &&
+      challenge.expiresAt > now() &&
+      challenge.identity === normalizeIdentity(identity)
+    );
+  }
+
   return {
-    clear: () => challenges.clear(),
+    activate,
+    cancel,
+    clear() {
+      challenges.clear();
+      pendingDeliveries.clear();
+      successfulSends.clear();
+    },
+    getSendAvailability,
+    hasStoredPlaintextCode: () => [...challenges.values()].some(
+      (challenge) => Object.hasOwn(challenge, "deliveryCode") || Object.hasOwn(challenge, "code")
+    ),
     issue,
+    isActiveForIdentity,
+    prepare,
     remove,
     size: () => challenges.size,
     verify,

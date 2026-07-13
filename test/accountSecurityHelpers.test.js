@@ -80,6 +80,7 @@ test("two-factor challenges expire, limit attempts, bind accounts, and prevent r
     now: () => currentTime,
     ttlMs: 100,
     maxAttempts: 2,
+    sendCooldownMs: 0,
     codeGenerator: () => issuedCode,
     idGenerator: () => `challenge-${++challengeNumber}`,
   });
