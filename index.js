@@ -20,6 +20,13 @@ const {
   createTwoFactorChallengeStore,
   normalizeIdentity,
 } = require("./server/security/twoFactorChallenges");
+const {
+  buildCreateBusinessProfileQuery,
+  buildUpdateBusinessProfileQuery,
+  serializeOwnedBusinessProfile,
+  serializePublicBusinessProfile,
+  validateBusinessProfilePayload,
+} = require("./server/profile/businessProfile");
 
 const JWT_SECRET = resolveJwtSecret(process.env);
 const BCRYPT_ROUNDS = 10;
@@ -1193,51 +1200,37 @@ app.get("/posts/:id", authMiddleware, async (req, res) => {
 
 app.post("/contractor-profiles", authMiddleware, async (req, res) => {
   try {
-    const { business_name, category, phone, location, bio, image_url } =
-      req.body;
+    const validation = validateBusinessProfilePayload(req.body);
+    if (!validation.ok) {
+      return res.status(validation.status).json({
+        success: false,
+        code: validation.code,
+        error: validation.message,
+      });
+    }
 
-    const result = await pool.query(
-      `
-      INSERT INTO contractor_profiles
-      (user_id, business_name, category, phone, location, bio, image_url)
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
-      RETURNING *
-      `,
-      [req.user.id, business_name, category, phone, location, bio, image_url]
-    );
-    
-    await pool.query(
-  `
-  UPDATE users
-  SET
-    account_type = 'professional',
-    role = $1,
-    business_name = $2,
-    business_category = $1
-  WHERE id = $3
-  `,
-  [
-    category,
-    business_name,
-    req.user.id,
-  ]
-);
-  
-  res.json({
+    const database = getPool(req);
+    const query = buildCreateBusinessProfileQuery(req.user.id, validation.profile);
+    const result = await database.query(query.text, query.values);
+
+    res.json({
+      success: true,
+      code: "BUSINESS_PROFILE_CREATED",
       message: "Contractor profile created",
-      profile: result.rows[0],
+      profile: serializeOwnedBusinessProfile(result.rows[0]),
     });
   } catch (err) {
     res.status(500).json({
+      success: false,
+      code: "BUSINESS_PROFILE_CREATE_FAILED",
       error: "Failed to create contractor profile",
-      details: err.message,
     });
   }
 });
 
 app.get("/contractor-profiles", async (req, res) => {
   try {
-    const result = await pool.query(
+    const result = await getPool(req).query(
       `
       SELECT contractor_profiles.*, users.username
       FROM contractor_profiles
@@ -1247,19 +1240,18 @@ app.get("/contractor-profiles", async (req, res) => {
     );
 
     res.json({
-      profiles: result.rows,
+      profiles: result.rows.map(serializePublicBusinessProfile),
     });
   } catch (err) {
     res.status(500).json({
       error: "Failed to fetch contractor profiles",
-      details: err.message,
     });
   }
 });
 
 app.get("/contractor-profiles/:id", async (req, res) => {
   try {
-    const result = await pool.query(
+    const result = await getPool(req).query(
       `
       SELECT contractor_profiles.*, users.username
       FROM contractor_profiles
@@ -1276,19 +1268,18 @@ app.get("/contractor-profiles/:id", async (req, res) => {
     }
 
     res.json({
-      profile: result.rows[0],
+      profile: serializePublicBusinessProfile(result.rows[0]),
     });
   } catch (err) {
     res.status(500).json({
       error: "Failed to fetch contractor profile",
-      details: err.message,
     });
   }
 });
 
 app.get("/my-contractor-profile", authMiddleware, async (req, res) => {
   try {
-    const result = await pool.query(
+    const result = await getPool(req).query(
       `
       SELECT *
       FROM contractor_profiles
@@ -1305,39 +1296,32 @@ app.get("/my-contractor-profile", authMiddleware, async (req, res) => {
     }
 
     res.json({
-      profile: result.rows[0],
+      profile: serializeOwnedBusinessProfile(result.rows[0]),
     });
   } catch (err) {
     res.status(500).json({
       error: "Failed to fetch contractor profile",
-      details: err.message,
     });
   }
 });
 
 app.put("/contractor-profiles/:id", authMiddleware, async (req, res) => {
   try {
-    const { business_name, category, phone, location, bio, image_url } =
-      req.body;
+    const validation = validateBusinessProfilePayload(req.body);
+    if (!validation.ok) {
+      return res.status(validation.status).json({
+        success: false,
+        code: validation.code,
+        error: validation.message,
+      });
+    }
 
-    const result = await pool.query(
-      `
-      UPDATE contractor_profiles
-      SET business_name = $1, category = $2, phone = $3, location = $4, bio = $5, image_url = $6
-      WHERE id = $7 AND user_id = $8
-      RETURNING *
-      `,
-      [
-        business_name,
-        category,
-        phone,
-        location,
-        bio,
-        image_url,
-        req.params.id,
-        req.user.id,
-      ]
+    const query = buildUpdateBusinessProfileQuery(
+      req.params.id,
+      req.user.id,
+      validation.profile
     );
+    const result = await getPool(req).query(query.text, query.values);
 
     if (result.rows.length === 0) {
       return res.status(404).json({
@@ -1346,13 +1330,16 @@ app.put("/contractor-profiles/:id", authMiddleware, async (req, res) => {
     }
 
     res.json({
+      success: true,
+      code: "BUSINESS_PROFILE_UPDATED",
       message: "Contractor profile updated",
-      profile: result.rows[0],
+      profile: serializeOwnedBusinessProfile(result.rows[0]),
     });
   } catch (err) {
     res.status(500).json({
+      success: false,
+      code: "BUSINESS_PROFILE_UPDATE_FAILED",
       error: "Failed to update contractor profile",
-      details: err.message,
     });
   }
 });
