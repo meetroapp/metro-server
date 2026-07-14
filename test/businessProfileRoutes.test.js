@@ -53,7 +53,7 @@ function createPool() {
         });
         return { rows: [{ ...profile }] };
       }
-      if (sql.includes("FROM contractor_profiles WHERE user_id = $1 LIMIT 1")) {
+      if (sql.includes("FROM contractor_profiles WHERE user_id = $1")) {
         const profile = [...profiles.values()].find((item) => item.user_id === Number(values[0]));
         return { rows: profile ? [{ ...profile }] : [] };
       }

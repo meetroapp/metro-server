@@ -21,6 +21,7 @@ function normalizeSql(sql) {
 
 async function createFakePool() {
   const users = new Map();
+  const contractorProfiles = new Map();
   users.set(1, {
     id: 1,
     username: "Personal User",
@@ -50,10 +51,26 @@ async function createFakePool() {
   return {
     calls,
     users,
+    contractorProfiles,
     failPasswordSelect: false,
     async query(text, values = []) {
       const sql = normalizeSql(text);
       calls.push({ text: sql, values });
+
+      if (sql.includes("LEFT JOIN LATERAL") && sql.includes("FROM contractor_profiles")) {
+        const user = users.get(Number(values[0]));
+        if (!user || (values[1] && user.email !== values[1])) return { rows: [] };
+        const profile = contractorProfiles.get(user.id);
+        return {
+          rows: [{
+            ...user,
+            business_name: profile?.business_name || user.business_name,
+            business_category: profile?.category || user.business_category,
+            contractor_profile_id: profile?.id || null,
+            has_business_profile: Boolean(profile),
+          }],
+        };
+      }
 
       if (sql.includes("SELECT id, email, role, token_version FROM users WHERE id = $1")) {
         const user = users.get(Number(values[0]));
@@ -448,6 +465,8 @@ test("login remains bcrypt-compatible and issues JWT only after verification", a
   assert.equal(completed.json.code, "AUTHENTICATION_COMPLETE");
   assert.equal(jwt.decode(completed.json.token).tokenVersion, 4);
   assert.equal(Object.hasOwn(completed.json.user, "password_hash"), false);
+  assert.equal(completed.json.user.contractor_profile_id, null);
+  assert.equal(completed.json.user.has_business_profile, false);
 
   const authenticated = await invokeRoute("get", "/auth/me", {
     pool,
@@ -455,6 +474,8 @@ test("login remains bcrypt-compatible and issues JWT only after verification", a
   });
   assert.equal(authenticated.status, 200);
   assert.equal(authenticated.json.user.id, 1);
+  assert.equal(authenticated.json.user.contractor_profile_id, null);
+  assert.equal(authenticated.json.user.has_business_profile, false);
 
   const passwordChanged = await invokeRoute("post", "/auth/change-password", {
     pool,
@@ -468,6 +489,59 @@ test("login remains bcrypt-compatible and issues JWT only after verification", a
   });
   assert.equal(invalidated.status, 401);
   assert.equal(invalidated.json.code, "SESSION_INVALID");
+});
+
+test("verification and auth me restore canonical contractor profile identity", async () => {
+  const pool = await createFakePool();
+  const user = pool.users.get(1);
+  Object.assign(user, {
+    role: "handyman",
+    account_type: "professional",
+    business_name: "Stale Organization Name",
+    business_category: "contractor",
+  });
+  pool.contractorProfiles.set(user.id, {
+    id: 42,
+    business_name: "Canonical Business Name",
+    category: "handyman",
+  });
+
+  let deliveredCode;
+  const login = await invokeRoute("post", "/auth/login", {
+    pool,
+    body: { email: user.email, password: "CurrentPass12" },
+    locals: {
+      emailDelivery: {
+        async sendSecurityVerificationCode({ code }) {
+          deliveredCode = code;
+          return { accepted: true };
+        },
+      },
+    },
+  });
+  const verified = await invokeRoute("post", "/auth/verify-code", {
+    pool,
+    body: {
+      email: user.email,
+      challengeId: login.json.challengeId,
+      code: deliveredCode,
+    },
+  });
+
+  assert.equal(verified.status, 200);
+  assert.equal(verified.json.user.id, user.id);
+  assert.equal(verified.json.user.contractor_profile_id, 42);
+  assert.equal(verified.json.user.has_business_profile, true);
+  assert.equal(verified.json.user.business_name, "Canonical Business Name");
+  assert.equal(verified.json.user.business_category, "handyman");
+
+  const restored = await invokeRoute("get", "/auth/me", {
+    pool,
+    token: verified.json.token,
+  });
+  assert.equal(restored.status, 200);
+  assert.equal(restored.json.user.contractor_profile_id, 42);
+  assert.equal(restored.json.user.business_name, "Canonical Business Name");
 });
 
 test("verification fails closed when token version changes after password validation", async () => {

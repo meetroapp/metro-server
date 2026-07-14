@@ -805,9 +805,23 @@ app.get("/auth/me", authMiddleware, async (req, res) => {
   try {
     const result = await getPool(req).query(
       `
-      SELECT id, username, email, role, account_type, business_name, business_category, profile_photo_url, created_at
+      SELECT users.id, users.username, users.email, users.role, users.account_type,
+             COALESCE(profile.business_name, users.business_name) AS business_name,
+             COALESCE(profile.category, users.business_category) AS business_category,
+             users.profile_photo_url, users.created_at,
+             profile.id AS contractor_profile_id,
+             (profile.id IS NOT NULL) AS has_business_profile
       FROM users
-      WHERE id = $1
+      LEFT JOIN LATERAL (
+        SELECT contractor_profiles.id,
+               contractor_profiles.business_name,
+               contractor_profiles.category
+        FROM contractor_profiles
+        WHERE contractor_profiles.user_id = users.id
+        ORDER BY contractor_profiles.created_at ASC, contractor_profiles.id ASC
+        LIMIT 1
+      ) profile ON TRUE
+      WHERE users.id = $1
       `,
       [req.user.id]
     );
@@ -920,10 +934,23 @@ async function completeAuthenticationVerification(req, res) {
 
       const accountResult = await getPool(req).query(
         `
-        SELECT id, username, email, role, account_type,
-               business_name, business_category, profile_photo_url, token_version
+        SELECT users.id, users.username, users.email, users.role, users.account_type,
+               COALESCE(profile.business_name, users.business_name) AS business_name,
+               COALESCE(profile.category, users.business_category) AS business_category,
+               users.profile_photo_url, users.token_version,
+               profile.id AS contractor_profile_id,
+               (profile.id IS NOT NULL) AS has_business_profile
         FROM users
-        WHERE id = $1 AND email = $2
+        LEFT JOIN LATERAL (
+          SELECT contractor_profiles.id,
+                 contractor_profiles.business_name,
+                 contractor_profiles.category
+          FROM contractor_profiles
+          WHERE contractor_profiles.user_id = users.id
+          ORDER BY contractor_profiles.created_at ASC, contractor_profiles.id ASC
+          LIMIT 1
+        ) profile ON TRUE
+        WHERE users.id = $1 AND users.email = $2
         `,
         [temporarySession.accountId, temporarySession.email]
       );
@@ -955,6 +982,8 @@ async function completeAuthenticationVerification(req, res) {
           account_type: account.account_type,
           business_name: account.business_name,
           business_category: account.business_category,
+          contractor_profile_id: account.contractor_profile_id || null,
+          has_business_profile: account.has_business_profile === true,
           profile_photo_url: account.profile_photo_url || "",
         },
       });
@@ -1284,6 +1313,7 @@ app.get("/my-contractor-profile", authMiddleware, async (req, res) => {
       SELECT *
       FROM contractor_profiles
       WHERE user_id = $1
+      ORDER BY created_at ASC, id ASC
       LIMIT 1
       `,
       [req.user.id]
