@@ -213,8 +213,9 @@ test("signup and password change enforce the same shared password policy", async
   assert.equal(passwordChange.json.policyCode, signup.json.policyCode);
 });
 
-test("valid signup remains compatible, hashes the password, and returns a sanitized user", async () => {
+test("valid signup hashes the password and issues JWT only after email verification", async () => {
   const pool = await createFakePool();
+  let deliveredCode;
   const signup = await invokeRoute("post", "/auth/signup", {
     pool,
     body: {
@@ -223,17 +224,38 @@ test("valid signup remains compatible, hashes the password, and returns a saniti
       password: "ValidSignup12",
       account_type: "homeowner",
     },
+    locals: {
+      emailDelivery: {
+        async sendSecurityVerificationCode({ code }) {
+          deliveredCode = code;
+          return { accepted: true };
+        },
+      },
+    },
   });
 
   assert.equal(signup.status, 200);
-  assert.equal(signup.json.message, "User created");
-  assert.equal(typeof signup.json.token, "string");
-  assert.equal(Object.hasOwn(signup.json.user, "password_hash"), false);
-  assert.equal(Object.hasOwn(signup.json.user, "token_version"), false);
+  assert.equal(signup.json.code, "VERIFICATION_REQUIRED");
+  assert.equal(typeof signup.json.challengeId, "string");
+  assert.equal(Object.hasOwn(signup.json, "token"), false);
+  assert.equal(Object.hasOwn(signup.json, "user"), false);
   const stored = [...pool.users.values()].find((user) => user.email === "new@example.test");
   assert.ok(stored);
   assert.notEqual(stored.password_hash, "ValidSignup12");
   assert.equal(await bcrypt.compare("ValidSignup12", stored.password_hash), true);
+
+  const completed = await invokeRoute("post", "/auth/verify-code", {
+    pool,
+    body: {
+      email: "new@example.test",
+      challengeId: signup.json.challengeId,
+      code: deliveredCode,
+    },
+  });
+  assert.equal(completed.status, 200);
+  assert.equal(completed.json.code, "AUTHENTICATION_COMPLETE");
+  assert.equal(typeof completed.json.token, "string");
+  assert.equal(Object.hasOwn(completed.json.user, "password_hash"), false);
 });
 
 test("password change rejects unauthenticated, missing, incorrect, reused, and weak requests", async () => {

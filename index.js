@@ -602,22 +602,17 @@ app.post("/auth/signup", async (req, res) => {
     );
 
     const user = result.rows[0];
-    const token = createToken(user);
+    const verification = await initiateSecurityVerification(req, user);
+    if (!verification.ok) {
+      return res.status(verification.status).json(verification.body);
+    }
 
     res.json({
-      message: "User created",
-      token,
-      user: {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        role: user.role,
-        account_type: user.account_type,
-        business_name: user.business_name,
-        business_category: user.business_category,
-        profile_photo_url: user.profile_photo_url || "",
-        created_at: user.created_at,
-      },
+      success: true,
+      code: "VERIFICATION_REQUIRED",
+      challengeId: verification.challengeId,
+      maskedEmail: verification.maskedEmail,
+      expiresInSeconds: verification.expiresInSeconds,
     });
   } catch {
     logAuthFailure("signup", "SIGNUP_FAILED");
