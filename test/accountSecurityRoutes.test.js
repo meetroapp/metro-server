@@ -75,6 +75,14 @@ async function createFakePool() {
         return { rows: [user] };
       }
 
+      if (sql.startsWith("UPDATE users SET username")) {
+        const [username, id] = values;
+        const user = users.get(Number(id));
+        if (!user) return { rows: [] };
+        user.username = username;
+        return { rows: [user] };
+      }
+
       if (sql.includes("FROM users WHERE email = $1")) {
         const user = [...users.values()].find((candidate) => candidate.email === values[0]);
         return { rows: user ? [user] : [] };
@@ -211,6 +219,76 @@ test("signup and password change enforce the same shared password policy", async
   });
   assert.equal(passwordChange.status, 400);
   assert.equal(passwordChange.json.policyCode, signup.json.policyCode);
+});
+
+test("authenticated profile update persists only the owned username", async () => {
+  const pool = await createFakePool();
+  const firstUserToken = createToken(pool.users.get(1));
+  const otherUserToken = createToken(pool.users.get(2));
+
+  const updated = await invokeRoute("patch", "/auth/profile", {
+    pool,
+    token: firstUserToken,
+    body: { username: "  Updated Personal Name  " },
+  });
+  assert.equal(updated.status, 200);
+  assert.equal(updated.json.code, "PROFILE_UPDATED");
+  assert.equal(updated.json.user.id, 1);
+  assert.equal(updated.json.user.username, "Updated Personal Name");
+  assert.equal(pool.users.get(1).username, "Updated Personal Name");
+  assert.equal(pool.users.get(2).username, "Other User");
+
+  const refreshed = await invokeRoute("get", "/auth/me", {
+    pool,
+    token: firstUserToken,
+  });
+  const anotherSession = await invokeRoute("get", "/auth/me", {
+    pool,
+    token: createToken(pool.users.get(1)),
+  });
+  const unrelated = await invokeRoute("get", "/auth/me", {
+    pool,
+    token: otherUserToken,
+  });
+
+  assert.equal(refreshed.json.user.username, "Updated Personal Name");
+  assert.equal(anotherSession.json.user.username, "Updated Personal Name");
+  assert.equal(unrelated.json.user.username, "Other User");
+});
+
+test("profile update requires authentication and rejects unsupported or malformed identity fields", async () => {
+  const pool = await createFakePool();
+  const token = createToken(pool.users.get(1));
+  const before = { ...pool.users.get(1) };
+
+  const unauthenticated = await invokeRoute("patch", "/auth/profile", {
+    pool,
+    body: { username: "Unauthorized Name" },
+  });
+  assert.equal(unauthenticated.status, 401);
+
+  for (const body of [
+    null,
+    [],
+    {},
+    { username: " " },
+    { username: "x".repeat(81) },
+    { username: "Allowed Name", email: "changed@example.test" },
+    { username: "Allowed Name", phone: "+1 555 0100" },
+    { username: "Allowed Name", userId: 2 },
+    { username: "Allowed Name", role: "admin" },
+  ]) {
+    const result = await invokeRoute("patch", "/auth/profile", {
+      pool,
+      token,
+      body,
+    });
+    assert.equal(result.status, 400);
+    assert.equal(result.json.success, false);
+  }
+
+  assert.deepEqual(pool.users.get(1), before);
+  assert.equal(pool.users.get(2).username, "Other User");
 });
 
 test("valid signup hashes the password and issues JWT only after email verification", async () => {

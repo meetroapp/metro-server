@@ -287,6 +287,51 @@ function validateLoginRequestBody(body) {
   };
 }
 
+function validateProfileUpdateRequestBody(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return {
+      ok: false,
+      status: 400,
+      code: "INVALID_PROFILE_UPDATE",
+      message: "Profile update must be an object.",
+    };
+  }
+
+  const allowedFields = new Set(["username"]);
+  const unsupportedFields = Object.keys(body).filter((key) => !allowedFields.has(key));
+  if (unsupportedFields.length > 0) {
+    return {
+      ok: false,
+      status: 400,
+      code: "UNSUPPORTED_PROFILE_FIELDS",
+      message: "One or more profile fields cannot be updated here.",
+    };
+  }
+
+  const username = String(body.username || "").trim();
+  if (!username) {
+    return {
+      ok: false,
+      status: 400,
+      code: "PROFILE_NAME_REQUIRED",
+      message: "Name is required.",
+    };
+  }
+  if (username.length > 80) {
+    return {
+      ok: false,
+      status: 400,
+      code: "PROFILE_NAME_TOO_LONG",
+      message: "Name must be 80 characters or fewer.",
+    };
+  }
+
+  return {
+    ok: true,
+    username,
+  };
+}
+
 function toSafePostRow(row = {}) {
   return {
     id: row.id,
@@ -701,6 +746,50 @@ app.put("/auth/profile-photo", authMiddleware, async (req, res) => {
     logAuthFailure("profile_photo_update", "PROFILE_PHOTO_UPDATE_FAILED", req.user.id);
     res.status(500).json({
       error: "Failed to update profile photo",
+    });
+  }
+});
+
+app.patch("/auth/profile", authMiddleware, async (req, res) => {
+  const profileUpdate = validateProfileUpdateRequestBody(getRequestBody(req));
+  if (!profileUpdate.ok) {
+    return res.status(profileUpdate.status).json({
+      success: false,
+      code: profileUpdate.code,
+      message: profileUpdate.message,
+    });
+  }
+
+  try {
+    const result = await getPool(req).query(
+      `
+      UPDATE users
+      SET username = $1
+      WHERE id = $2
+      RETURNING id, username, email, role, account_type, business_name, business_category, profile_photo_url, token_version, created_at
+      `,
+      [profileUpdate.username, req.user.id]
+    );
+    const user = result.rows[0];
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        code: "SESSION_INVALID",
+        message: "Session is no longer valid.",
+      });
+    }
+
+    return res.json({
+      success: true,
+      code: "PROFILE_UPDATED",
+      user,
+    });
+  } catch {
+    logAuthFailure("profile_update", "PROFILE_UPDATE_FAILED", req.user.id);
+    return res.status(500).json({
+      success: false,
+      code: "PROFILE_UPDATE_FAILED",
+      message: "Profile update could not be completed.",
     });
   }
 });
@@ -1833,4 +1922,5 @@ module.exports = {
   toSafePostRow,
   twoFactorChallengeStore,
   validateLoginRequestBody,
+  validateProfileUpdateRequestBody,
 };
