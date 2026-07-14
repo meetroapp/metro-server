@@ -33,15 +33,26 @@ function hashResetToken(token) {
   return crypto.createHash("sha256").update(String(token || "")).digest("hex");
 }
 
+function getAllowedPasswordResetHosts(env = process.env) {
+  const configuredHosts = String(env.PASSWORD_RESET_ALLOWED_HOSTS || "")
+    .split(",")
+    .map((host) => host.trim().toLowerCase())
+    .filter(Boolean);
+
+  return new Set(configuredHosts);
+}
+
 function resolvePasswordResetWebUrl(env = process.env) {
   const raw = String(env.PASSWORD_RESET_WEB_URL || "").trim();
   try {
     const url = new URL(raw);
-    const meetroHost = url.hostname === "getmeetro.com" || url.hostname.endsWith(".getmeetro.com");
+    const hostname = url.hostname.toLowerCase();
+    const meetroHost = hostname === "getmeetro.com" || hostname.endsWith(".getmeetro.com");
+    const explicitlyAllowedHost = getAllowedPasswordResetHosts(env).has(hostname);
     const localDevelopment = env.NODE_ENV !== "production" && ["localhost", "127.0.0.1"].includes(url.hostname);
     if (
       (url.protocol !== "https:" && !localDevelopment) ||
-      (!meetroHost && !localDevelopment) ||
+      (!meetroHost && !explicitlyAllowedHost && !localDevelopment) ||
       url.username || url.password || url.search || url.hash
     ) {
       return { configured: false };
@@ -233,6 +244,7 @@ module.exports = {
   buildResetUrl,
   createPasswordResetService,
   generateResetToken,
+  getAllowedPasswordResetHosts,
   hashResetToken,
   normalizeEmail,
   resolvePasswordResetWebUrl,

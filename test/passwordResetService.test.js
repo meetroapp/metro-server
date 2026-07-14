@@ -124,6 +124,16 @@ test("reset URL configuration is explicit and rejects unsafe public URLs", () =>
     assert.equal(resolvePasswordResetWebUrl({ NODE_ENV: "production", PASSWORD_RESET_WEB_URL: value }).configured, false);
   }
   assert.equal(resolvePasswordResetWebUrl({ NODE_ENV: "production", PASSWORD_RESET_WEB_URL: "https://getmeetro.com/reset-password" }).configured, true);
+  assert.equal(resolvePasswordResetWebUrl({
+    NODE_ENV: "production",
+    PASSWORD_RESET_WEB_URL: "https://meetro-client-staging.vercel.app/reset-password",
+    PASSWORD_RESET_ALLOWED_HOSTS: "meetro-client-staging.vercel.app",
+  }).configured, true);
+  assert.equal(resolvePasswordResetWebUrl({
+    NODE_ENV: "production",
+    PASSWORD_RESET_WEB_URL: "https://evil.example/reset-password",
+    PASSWORD_RESET_ALLOWED_HOSTS: "meetro-client-staging.vercel.app",
+  }).configured, false);
 });
 
 test("known and unknown reset requests are identical while only known accounts store hashed tokens", async () => {
