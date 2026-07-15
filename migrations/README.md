@@ -21,6 +21,8 @@ Current inventory:
 1. `202607050001_initial_schema_baseline.sql`
 2. `202607130001_add_user_token_version.sql`
 3. `202607130002_create_password_reset_tokens.sql`
+4. `202607140001_add_contractor_profile_details.sql`
+5. `202607140002_create_workflow_events.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -115,3 +117,8 @@ application startup, dependency installation, or the normal test command.
 
 Production migration remains unsupported by this runner. A separately reviewed
 production process is required before any production schema execution.
+
+The workflow-event migration has a dedicated, fail-closed production runner in
+`scripts/apply-production-workflow-events.js`. It requires explicit production
+environment evidence, the exact migration filename, and two CLI confirmations;
+normal application startup and `npm test` never invoke it.

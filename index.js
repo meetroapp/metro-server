@@ -172,6 +172,55 @@ function logAuthFailure(event, code, userId) {
   });
 }
 
+function validateWorkflowEventPayload(body) {
+  const source = body && typeof body === "object" && !Array.isArray(body) ? body : {};
+  const quoteRequestId = Number(source.quote_request_id);
+  const workflowType =
+    typeof source.workflow_type === "string" ? source.workflow_type.trim() : "";
+  const workflowStatus = source.workflow_status;
+  const workflowPayload = source.workflow_payload;
+  const eventLabel = source.event_label;
+
+  const valid =
+    Number.isInteger(quoteRequestId) &&
+    quoteRequestId > 0 &&
+    Boolean(workflowType) &&
+    (workflowStatus == null || typeof workflowStatus === "string") &&
+    (workflowPayload == null ||
+      (typeof workflowPayload === "object" && !Array.isArray(workflowPayload))) &&
+    (eventLabel == null || typeof eventLabel === "string");
+
+  if (!valid) return { valid: false };
+
+  return {
+    valid: true,
+    value: {
+      quoteRequestId,
+      workflowType,
+      workflowStatus: workflowStatus || null,
+      workflowPayload: workflowPayload || {},
+      eventLabel: eventLabel || null,
+    },
+  };
+}
+
+function sendWorkflowEventDatabaseFailure(res, operation, error) {
+  const schemaUnavailable = error?.code === "42P01";
+  console.error("Workflow event operation failed", {
+    operation,
+    code: error?.code || "DATABASE_OPERATION_FAILED",
+  });
+
+  return res.status(schemaUnavailable ? 503 : 500).json({
+    error: schemaUnavailable
+      ? "Workflow events are temporarily unavailable"
+      : `Failed to ${operation} workflow events`,
+    code: schemaUnavailable
+      ? "WORKFLOW_EVENTS_UNAVAILABLE"
+      : `WORKFLOW_EVENTS_${operation.toUpperCase()}_FAILED`,
+  });
+}
+
 function buildHealthMetadata(env = process.env) {
   return {
     status: "ok",
@@ -1593,23 +1642,25 @@ app.get("/messages/:quoteRequestId", authMiddleware, async (req, res) => {
 app.post("/workflow-events", authMiddleware, async (req, res) => {
   try {
     const requestPool = getPool(req);
-    const {
-      quote_request_id,
-      workflow_type,
-      workflow_status,
-      workflow_payload,
-      event_label,
-    } = req.body;
+    const validation = validateWorkflowEventPayload(req.body);
 
-    if (!quote_request_id || !workflow_type) {
+    if (!validation.valid) {
       return res.status(400).json({
         error: "quote_request_id and workflow_type are required",
       });
     }
 
+    const {
+      quoteRequestId,
+      workflowType,
+      workflowStatus,
+      workflowPayload,
+      eventLabel,
+    } = validation.value;
+
     const quoteRequest = await findAuthorizedQuoteRequest(
       requestPool,
-      quote_request_id,
+      quoteRequestId,
       req.user.id
     );
 
@@ -1618,19 +1669,6 @@ app.post("/workflow-events", authMiddleware, async (req, res) => {
         error: "Quote request not found or not authorized",
       });
     }
-
-    await requestPool.query(`
-      CREATE TABLE IF NOT EXISTS workflow_events (
-        id SERIAL PRIMARY KEY,
-        quote_request_id INTEGER NOT NULL,
-        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        workflow_type TEXT NOT NULL,
-        workflow_status TEXT,
-        workflow_payload JSONB DEFAULT '{}'::jsonb,
-        event_label TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
 
     const result = await requestPool.query(
       `
@@ -1647,12 +1685,12 @@ app.post("/workflow-events", authMiddleware, async (req, res) => {
       RETURNING *
       `,
       [
-        quote_request_id,
+        quoteRequestId,
         req.user.id,
-        workflow_type,
-        workflow_status || null,
-        JSON.stringify(workflow_payload || {}),
-        event_label || null,
+        workflowType,
+        workflowStatus,
+        JSON.stringify(workflowPayload),
+        eventLabel,
       ]
     );
 
@@ -1661,10 +1699,7 @@ app.post("/workflow-events", authMiddleware, async (req, res) => {
       workflow_event: result.rows[0],
     });
   } catch (err) {
-    res.status(500).json({
-      error: "Failed to save workflow event",
-      details: err.message,
-    });
+    return sendWorkflowEventDatabaseFailure(res, "save", err);
   }
 });
 
@@ -1683,19 +1718,6 @@ app.get("/workflow-events/:quoteRequestId", authMiddleware, async (req, res) => 
       });
     }
 
-    await requestPool.query(`
-      CREATE TABLE IF NOT EXISTS workflow_events (
-        id SERIAL PRIMARY KEY,
-        quote_request_id INTEGER NOT NULL,
-        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        workflow_type TEXT NOT NULL,
-        workflow_status TEXT,
-        workflow_payload JSONB DEFAULT '{}'::jsonb,
-        event_label TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
     const result = await requestPool.query(
       `
       SELECT workflow_events.*, users.email AS user_email
@@ -1711,10 +1733,7 @@ app.get("/workflow-events/:quoteRequestId", authMiddleware, async (req, res) => 
       workflow_events: result.rows,
     });
   } catch (err) {
-    res.status(500).json({
-      error: "Failed to fetch workflow events",
-      details: err.message,
-    });
+    return sendWorkflowEventDatabaseFailure(res, "fetch", err);
   }
 });
 
@@ -1938,6 +1957,7 @@ module.exports = {
   receiverBelongsToQuoteRequest,
   toSafePostRow,
   twoFactorChallengeStore,
+  validateWorkflowEventPayload,
   validateLoginRequestBody,
   validateProfileUpdateRequestBody,
 };

@@ -74,10 +74,6 @@ function createFakePool({ quoteRows = [], projectRows = [] } = {}) {
         };
       }
 
-      if (normalized.includes("CREATE TABLE IF NOT EXISTS workflow_events")) {
-        return { rows: [] };
-      }
-
       if (normalized.includes("SELECT workflow_events.")) {
         return {
           rows: [

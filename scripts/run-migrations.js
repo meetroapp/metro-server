@@ -5,10 +5,15 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { Pool } = require("pg");
+const {
+  inspectWorkflowEventsSchema,
+} = require("./workflow-events-schema");
 
 const MIGRATIONS_DIR = path.join(__dirname, "..", "migrations");
 const BASELINE_MIGRATION_FILENAME =
   "202607050001_initial_schema_baseline.sql";
+const WORKFLOW_EVENTS_MIGRATION_FILENAME =
+  "202607140002_create_workflow_events.sql";
 const MIGRATION_FILENAME_PATTERN = /^\d{12}_[a-z0-9]+(?:_[a-z0-9]+)*\.sql$/;
 const ALLOWED_TARGETS = new Set(["local-test", "staging"]);
 const LOCAL_DATABASE_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
@@ -416,7 +421,10 @@ async function assertBaselineSchemaParity(client) {
 function toSafeMigrationError(error, filename) {
   if (
     error?.code === "MIGRATION_CHECKSUM_MISMATCH" ||
-    error?.code === "BASELINE_SCHEMA_MISMATCH"
+    error?.code === "BASELINE_SCHEMA_MISMATCH" ||
+    error?.code === "WORKFLOW_EVENTS_PREREQUISITE_MISSING" ||
+    error?.code === "WORKFLOW_EVENTS_RELATION_CONFLICT" ||
+    error?.code === "WORKFLOW_EVENTS_SCHEMA_CONFLICT"
   ) {
     return error;
   }
@@ -449,6 +457,9 @@ async function runMigrationFile(client, migration, target) {
     await client.query(migration.sql);
     if (migration.filename === BASELINE_MIGRATION_FILENAME) {
       await assertBaselineSchemaParity(client);
+    }
+    if (migration.filename === WORKFLOW_EVENTS_MIGRATION_FILENAME) {
+      await inspectWorkflowEventsSchema(client);
     }
     await client.query(
       `
@@ -547,6 +558,7 @@ module.exports = {
   MIGRATIONS_DIR,
   MIGRATION_FILENAME_PATTERN,
   SCHEMA_MIGRATIONS_TABLE_SQL,
+  WORKFLOW_EVENTS_MIGRATION_FILENAME,
   assertBaselineSchemaParity,
   assertSafeMigrationExecutionTarget,
   ensureSchemaMigrationsTable,
