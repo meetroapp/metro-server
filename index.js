@@ -27,6 +27,11 @@ const {
   serializePublicBusinessProfile,
   validateBusinessProfilePayload,
 } = require("./server/profile/businessProfile");
+const {
+  isProductionRuntime,
+  logSafeServerError,
+  sendPublicDatabaseError,
+} = require("./server/errors/publicErrors");
 
 const JWT_SECRET = resolveJwtSecret(process.env);
 const BCRYPT_ROUNDS = 10;
@@ -605,13 +610,24 @@ app.get("/health", (req, res) => {
 });
 
 app.get("/test-db", async (req, res) => {
+  if (isProductionRuntime(process.env)) {
+    return res.status(404).json({
+      error: "NOT_FOUND",
+      message: "Resource not found.",
+    });
+  }
+
   try {
-    const result = await pool.query("SELECT NOW()");
-    res.json(result.rows);
+    await getPool(req).query("SELECT NOW()");
+    return res.json({ status: "ok" });
   } catch (err) {
-    res.status(500).json({
-      error: "Database connection failed",
-      details: err.message,
+    return sendPublicDatabaseError({
+      res,
+      error: err,
+      operation: "database_diagnostic",
+      code: "DATABASE_UNAVAILABLE",
+      message: "The service is temporarily unavailable.",
+      status: 503,
     });
   }
 });
@@ -1218,7 +1234,7 @@ app.post("/posts", authMiddleware, async (req, res) => {
   try {
     const { title, description, category, location, image_url } = req.body;
 
-    const result = await pool.query(
+    const result = await getPool(req).query(
       `
       INSERT INTO posts
       (user_id, title, description, category, location, image_url)
@@ -1233,9 +1249,12 @@ app.post("/posts", authMiddleware, async (req, res) => {
       post: result.rows[0],
     });
   } catch (err) {
-    res.status(500).json({
-      error: "Failed to create post",
-      details: err.message,
+    return sendPublicDatabaseError({
+      res,
+      error: err,
+      operation: "create_post",
+      code: "POST_CREATE_FAILED",
+      message: "The post could not be created.",
     });
   }
 });
@@ -1428,7 +1447,7 @@ app.post("/quote-requests", authMiddleware, async (req, res) => {
     const { contractor_id, project_title, project_description, location } =
       req.body;
 
-    const result = await pool.query(
+    const result = await getPool(req).query(
       `
       INSERT INTO quote_requests
       (contractor_id, homeowner_id, project_title, project_description, location)
@@ -1449,16 +1468,19 @@ app.post("/quote-requests", authMiddleware, async (req, res) => {
       quote: result.rows[0],
     });
   } catch (err) {
-    res.status(500).json({
-      error: "Failed to create quote request",
-      details: err.message,
+    return sendPublicDatabaseError({
+      res,
+      error: err,
+      operation: "create_quote_request",
+      code: "QUOTE_REQUEST_CREATE_FAILED",
+      message: "The quote request could not be created.",
     });
   }
 });
 
 app.get("/my-quote-requests", authMiddleware, async (req, res) => {
   try {
-    const result = await pool.query(
+    const result = await getPool(req).query(
       `
       SELECT quote_requests.*, contractor_profiles.business_name
       FROM quote_requests
@@ -1473,16 +1495,19 @@ app.get("/my-quote-requests", authMiddleware, async (req, res) => {
       quotes: result.rows,
     });
   } catch (err) {
-    res.status(500).json({
-      error: "Failed to fetch quote requests",
-      details: err.message,
+    return sendPublicDatabaseError({
+      res,
+      error: err,
+      operation: "fetch_homeowner_quote_requests",
+      code: "QUOTE_REQUESTS_FETCH_FAILED",
+      message: "Quote requests could not be loaded.",
     });
   }
 });
 
 app.get("/contractor-quote-requests", authMiddleware, async (req, res) => {
   try {
-    const profileResult = await pool.query(
+    const profileResult = await getPool(req).query(
       `
       SELECT id
       FROM contractor_profiles
@@ -1498,7 +1523,7 @@ app.get("/contractor-quote-requests", authMiddleware, async (req, res) => {
 
     const contractorId = profileResult.rows[0].id;
 
-    const result = await pool.query(
+    const result = await getPool(req).query(
       `
       SELECT quote_requests.*, users.email AS homeowner_email
       FROM quote_requests
@@ -1513,9 +1538,12 @@ app.get("/contractor-quote-requests", authMiddleware, async (req, res) => {
       quotes: result.rows,
     });
   } catch (err) {
-    res.status(500).json({
-      error: "Failed to fetch contractor quote requests",
-      details: err.message,
+    return sendPublicDatabaseError({
+      res,
+      error: err,
+      operation: "fetch_contractor_quote_requests",
+      code: "QUOTE_REQUESTS_FETCH_FAILED",
+      message: "Quote requests could not be loaded.",
     });
   }
 });
@@ -1593,9 +1621,12 @@ app.post("/messages", authMiddleware, async (req, res) => {
       data: result.rows[0],
     });
   } catch (err) {
-    res.status(500).json({
-      error: "Failed to send message",
-      details: err.message,
+    return sendPublicDatabaseError({
+      res,
+      error: err,
+      operation: "send_message",
+      code: "MESSAGE_SEND_FAILED",
+      message: "The message could not be sent.",
     });
   }
 });
@@ -1630,9 +1661,12 @@ app.get("/messages/:quoteRequestId", authMiddleware, async (req, res) => {
       messages: result.rows,
     });
   } catch (err) {
-    res.status(500).json({
-      error: "Failed to fetch messages",
-      details: err.message,
+    return sendPublicDatabaseError({
+      res,
+      error: err,
+      operation: "fetch_messages",
+      code: "MESSAGES_FETCH_FAILED",
+      message: "Messages could not be loaded.",
     });
   }
 });
@@ -1741,7 +1775,7 @@ app.post("/reviews", authMiddleware, async (req, res) => {
   try {
     const { contractor_id, rating, review_text } = req.body;
 
-    const result = await pool.query(
+    const result = await getPool(req).query(
       `
       INSERT INTO reviews
       (contractor_id, reviewer_id, rating, review_text)
@@ -1756,9 +1790,12 @@ app.post("/reviews", authMiddleware, async (req, res) => {
       review: result.rows[0],
     });
   } catch (err) {
-    res.status(500).json({
-      error: "Failed to create review",
-      details: err.message,
+    return sendPublicDatabaseError({
+      res,
+      error: err,
+      operation: "create_review",
+      code: "REVIEW_CREATE_FAILED",
+      message: "The review could not be created.",
     });
   }
 });
@@ -1767,7 +1804,7 @@ app.get("/reviews/:contractorId", async (req, res) => {
   try {
     const contractorId = req.params.contractorId;
 
-    const reviewsResult = await pool.query(
+    const reviewsResult = await getPool(req).query(
       `
       SELECT reviews.*, users.email AS reviewer_email
       FROM reviews
@@ -1778,7 +1815,7 @@ app.get("/reviews/:contractorId", async (req, res) => {
       [contractorId]
     );
 
-    const ratingResult = await pool.query(
+    const ratingResult = await getPool(req).query(
       `
       SELECT AVG(rating)::numeric(10,1) AS average_rating, COUNT(*) AS total_reviews
       FROM reviews
@@ -1792,9 +1829,12 @@ app.get("/reviews/:contractorId", async (req, res) => {
       stats: ratingResult.rows[0],
     });
   } catch (err) {
-    res.status(500).json({
-      error: "Failed to fetch reviews",
-      details: err.message,
+    return sendPublicDatabaseError({
+      res,
+      error: err,
+      operation: "fetch_reviews",
+      code: "REVIEWS_FETCH_FAILED",
+      message: "Reviews could not be loaded.",
     });
   }
 });
@@ -1838,9 +1878,12 @@ app.post("/contractor-projects", authMiddleware, async (req, res) => {
       project: result.rows[0],
     });
   } catch (err) {
-    res.status(500).json({
-      error: "Failed to upload project",
-      details: err.message,
+    return sendPublicDatabaseError({
+      res,
+      error: err,
+      operation: "create_contractor_project",
+      code: "CONTRACTOR_PROJECT_CREATE_FAILED",
+      message: "The project could not be uploaded.",
     });
   }
 });
@@ -1879,9 +1922,12 @@ app.put("/contractor-projects/:id", authMiddleware, async (req, res) => {
       project: result.rows[0],
     });
   } catch (err) {
-    res.status(500).json({
-      error: "Failed to update project",
-      details: err.message,
+    return sendPublicDatabaseError({
+      res,
+      error: err,
+      operation: "update_contractor_project",
+      code: "CONTRACTOR_PROJECT_UPDATE_FAILED",
+      message: "The project could not be updated.",
     });
   }
 });
@@ -1890,7 +1936,7 @@ app.get("/contractor-projects/:contractorId", async (req, res) => {
   try {
     const contractorId = req.params.contractorId;
 
-    const result = await pool.query(
+    const result = await getPool(req).query(
       `
       SELECT *
       FROM contractor_projects
@@ -1904,9 +1950,12 @@ app.get("/contractor-projects/:contractorId", async (req, res) => {
       projects: result.rows,
     });
   } catch (err) {
-    res.status(500).json({
-      error: "Failed to fetch projects",
-      details: err.message,
+    return sendPublicDatabaseError({
+      res,
+      error: err,
+      operation: "fetch_contractor_projects",
+      code: "CONTRACTOR_PROJECTS_FETCH_FAILED",
+      message: "Projects could not be loaded.",
     });
   }
 });
@@ -1916,8 +1965,15 @@ app.use((err, req, res, next) => {
     return res.status(403).json({ error: "Origin not allowed" });
   }
 
-  console.error("Unhandled server error:", err);
-  return res.status(500).json({ error: "Server error" });
+  logSafeServerError(console.error, {
+    event: "Unhandled server error",
+    operation: "request_handler",
+    code: "INTERNAL_ERROR",
+  }, err);
+  return res.status(500).json({
+    error: "INTERNAL_ERROR",
+    message: "The request could not be completed.",
+  });
 });
 
 const PORT = process.env.PORT || 3000;
