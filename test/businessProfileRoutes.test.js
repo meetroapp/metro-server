@@ -40,16 +40,15 @@ function createPool() {
         return { rows: user ? [user] : [] };
       }
       if (sql.includes("UPDATE contractor_profiles SET")) {
-        const profile = profiles.get(Number(values[7]));
-        if (!profile || profile.user_id !== Number(values[8])) return { rows: [] };
+        const profile = profiles.get(Number(values[6]));
+        if (!profile || profile.user_id !== Number(values[7])) return { rows: [] };
         Object.assign(profile, {
           business_name: values[0],
           category: values[1],
           phone: values[2],
           location: values[3],
           bio: values[4],
-          image_url: values[5],
-          profile_details: JSON.parse(values[6]),
+          profile_details: JSON.parse(values[5]),
         });
         return { rows: [{ ...profile }] };
       }

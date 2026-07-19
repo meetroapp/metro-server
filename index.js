@@ -33,6 +33,7 @@ const {
   sendPublicDatabaseError,
 } = require("./server/errors/publicErrors");
 const { createUploadSignatureHandler } = require("./server/media/uploadSignature");
+const { rejectUnsupportedMedia } = require("./server/media/mediaReferencePolicy");
 const { createPersonalProfileImageHandler } = require("./server/profile/personalProfileImage");
 
 const JWT_SECRET = resolveJwtSecret(process.env);
@@ -1220,6 +1221,7 @@ app.post(
 
 app.post("/posts", authMiddleware, async (req, res) => {
   try {
+    if (rejectUnsupportedMedia(req, res, ["image_url"])) return;
     const { title, description, category, location, image_url } = req.body;
 
     const result = await getPool(req).query(
@@ -1538,6 +1540,7 @@ app.get("/contractor-quote-requests", authMiddleware, async (req, res) => {
 
 app.post("/messages", authMiddleware, async (req, res) => {
   try {
+    if (rejectUnsupportedMedia(req, res, ["image_url"])) return;
     const requestPool = getPool(req);
     const {
       quote_request_id,
@@ -1829,6 +1832,7 @@ app.get("/reviews/:contractorId", async (req, res) => {
 
 app.post("/contractor-projects", authMiddleware, async (req, res) => {
   try {
+    if (rejectUnsupportedMedia(req, res, ["image_url", "image_urls"])) return;
     const requestPool = getPool(req);
     const { contractor_id, title, description, image_url, image_urls } = req.body;
 
@@ -1878,6 +1882,7 @@ app.post("/contractor-projects", authMiddleware, async (req, res) => {
 
 app.put("/contractor-projects/:id", authMiddleware, async (req, res) => {
   try {
+    if (rejectUnsupportedMedia(req, res, ["image_url", "image_urls"])) return;
     const requestPool = getPool(req);
     const projectId = req.params.id;
     const { title, description, image_url, image_urls } = req.body;

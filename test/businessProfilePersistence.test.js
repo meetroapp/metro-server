@@ -18,7 +18,7 @@ const completePayload = Object.freeze({
   phone: "555-0100",
   location: "Orlando, FL",
   bio: "Repairs and maintenance.",
-  image_url: "https://example.test/logo.png",
+  image_url: "",
   street_address: "100 Main Street",
   address_line_2: "Suite 2",
   city: "Orlando",
@@ -92,6 +92,16 @@ test("unsupported and malformed business profile fields fail closed", () => {
   assert.equal(malformed.code, "INVALID_BUSINESS_PROFILE_FIELD");
 });
 
+test("business profile payload rejects client-supplied media references", () => {
+  const result = validateBusinessProfilePayload({
+    ...completePayload,
+    image_url: "https://example.test/unowned-logo.png",
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "GOVERNED_MEDIA_REFERENCE_REQUIRED");
+});
+
 test("business profile queries enforce authenticated ownership and preserve stable fields", () => {
   const profile = validateBusinessProfilePayload(completePayload).profile;
   const create = buildCreateBusinessProfileQuery(41, profile);
@@ -99,9 +109,10 @@ test("business profile queries enforce authenticated ownership and preserve stab
 
   assert.match(create.text, /profile_details/);
   assert.equal(create.values[0], 41);
-  assert.match(update.text, /WHERE id = \$8 AND user_id = \$9/);
+  assert.doesNotMatch(update.text, /image_url\s*=/);
+  assert.match(update.text, /WHERE id = \$7 AND user_id = \$8/);
   assert.deepEqual(update.values.slice(-2), [7, 41]);
-  assert.deepEqual(JSON.parse(update.values[6]).service_specialties, completePayload.service_specialties);
+  assert.deepEqual(JSON.parse(update.values[5]).service_specialties, completePayload.service_specialties);
 });
 
 test("owned serializer restores persisted fields while public serializer protects private address", () => {

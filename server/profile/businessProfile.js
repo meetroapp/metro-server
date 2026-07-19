@@ -116,8 +116,11 @@ function validateBusinessProfilePayload(body) {
     );
   }
 
-  if (profile.image_url && !/^https:\/\//i.test(profile.image_url)) {
-    return failure("INVALID_BUSINESS_PROFILE_IMAGE", "Business image URL must use HTTPS.");
+  if (profile.image_url) {
+    return failure(
+      "GOVERNED_MEDIA_REFERENCE_REQUIRED",
+      "Business profile media is not available yet."
+    );
   }
   if (
     profile.license_expiration &&
@@ -249,7 +252,7 @@ function buildCreateBusinessProfileQuery(userId, profile) {
       profile.phone,
       profile.location,
       profile.bio,
-      profile.image_url,
+      "",
       JSON.stringify(details),
     ],
   };
@@ -266,15 +269,14 @@ function buildUpdateBusinessProfileQuery(profileId, userId, profile) {
             phone = $3,
             location = $4,
             bio = $5,
-            image_url = $6,
-            profile_details = $7::jsonb
-        WHERE id = $8 AND user_id = $9
+            profile_details = $6::jsonb
+        WHERE id = $7 AND user_id = $8
         RETURNING *
       ), updated_user AS (
         UPDATE users
         SET business_name = $1,
             business_category = $2
-        WHERE id = $9 AND EXISTS (SELECT 1 FROM updated_profile)
+        WHERE id = $8 AND EXISTS (SELECT 1 FROM updated_profile)
         RETURNING id
       )
       SELECT updated_profile.*
@@ -287,7 +289,6 @@ function buildUpdateBusinessProfileQuery(profileId, userId, profile) {
       profile.phone,
       profile.location,
       profile.bio,
-      profile.image_url,
       JSON.stringify(details),
       profileId,
       userId,
