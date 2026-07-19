@@ -33,6 +33,7 @@ const {
   sendPublicDatabaseError,
 } = require("./server/errors/publicErrors");
 const { createUploadSignatureHandler } = require("./server/media/uploadSignature");
+const { createPersonalProfileImageHandler } = require("./server/profile/personalProfileImage");
 
 const JWT_SECRET = resolveJwtSecret(process.env);
 const BCRYPT_ROUNDS = 10;
@@ -803,31 +804,11 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
 });
 
 
-app.put("/auth/profile-photo", authMiddleware, async (req, res) => {
-  try {
-    const { profile_photo_url } = req.body;
-
-    const result = await getPool(req).query(
-      `
-      UPDATE users
-      SET profile_photo_url = $1
-      WHERE id = $2
-      RETURNING id, username, email, role, account_type, business_name, business_category, profile_photo_url, created_at
-      `,
-      [profile_photo_url || "", req.user.id]
-    );
-
-    res.json({
-      message: "Profile photo updated",
-      user: result.rows[0],
-    });
-  } catch {
-    logAuthFailure("profile_photo_update", "PROFILE_PHOTO_UPDATE_FAILED", req.user.id);
-    res.status(500).json({
-      error: "Failed to update profile photo",
-    });
-  }
-});
+app.put(
+  "/auth/profile-photo",
+  authMiddleware,
+  createPersonalProfileImageHandler({ getPool })
+);
 
 app.patch("/auth/profile", authMiddleware, async (req, res) => {
   const profileUpdate = validateProfileUpdateRequestBody(getRequestBody(req));
