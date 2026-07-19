@@ -25,6 +25,7 @@ const ROUTE_INVENTORY = Object.freeze([
   ["GET", "/contractor-profiles/:id", false],
   ["GET", "/my-contractor-profile", true],
   ["PUT", "/contractor-profiles/:id", true],
+  ["PUT", "/contractor-profile/logo", true],
   ["POST", "/quote-requests", true],
   ["GET", "/my-quote-requests", true],
   ["GET", "/contractor-quote-requests", true],

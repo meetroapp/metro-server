@@ -165,7 +165,27 @@ test("personal profile signature derives its folder from authenticated identity"
   assert.doesNotMatch(JSON.stringify(result.body), /test-api-secret/);
 });
 
-test("business signatures use only the authenticated owner's contractor profile", async () => {
+test("business logo signatures use only the authenticated owner's contractor profile", async () => {
+  const pool = createPool();
+  const logo = await invoke({
+    pool,
+    token: createToken(pool.user),
+    body: validBody({
+      purpose: "business-logo",
+      fileName: "logo.png",
+      contentType: "image/png",
+    }),
+    cloudinaryMedia: createMedia(),
+  });
+
+  assert.equal(logo.body.upload.folder, "meetro/production/businesses/logos/91");
+  assert.equal(
+    pool.calls.filter((call) => call.sql.includes("FROM contractor_profiles")).length,
+    1
+  );
+});
+
+test("business cover and legacy business profile signatures are not enabled", async () => {
   const pool = createPool();
   const profile = await invoke({
     pool,
@@ -188,12 +208,10 @@ test("business signatures use only the authenticated owner's contractor profile"
     cloudinaryMedia: createMedia(),
   });
 
-  assert.equal(profile.body.upload.folder, "meetro/production/businesses/91/profile");
-  assert.equal(cover.body.upload.folder, "meetro/production/businesses/91/cover");
-  assert.equal(
-    pool.calls.filter((call) => call.sql.includes("FROM contractor_profiles")).length,
-    2
-  );
+  assert.equal(profile.statusCode, 400);
+  assert.equal(profile.body.code, "MEDIA_PURPOSE_NOT_ENABLED");
+  assert.equal(cover.statusCode, 400);
+  assert.equal(cover.body.code, "MEDIA_PURPOSE_NOT_ENABLED");
 });
 
 test("invalid purposes, formats, sizes, and ownership fields are rejected before signing", async () => {
@@ -226,7 +244,7 @@ test("missing business ownership and missing configuration fail closed", async (
   const noOwner = await invoke({
     pool,
     token: createToken(pool.user),
-    body: validBody({ purpose: "business_profile" }),
+    body: validBody({ purpose: "business-logo" }),
     cloudinaryMedia: createMedia(),
   });
   assert.equal(noOwner.statusCode, 404);

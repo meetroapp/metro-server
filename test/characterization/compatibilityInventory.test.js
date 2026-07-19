@@ -16,7 +16,7 @@ test("route inventory is inert, valid data only", () => {
   assert.deepEqual(result, {
     valid: true,
     blockers: [],
-    routeCount: 36,
+    routeCount: 37,
   });
   assert.equal(Object.isFrozen(ROUTE_INVENTORY), true);
   assert.equal(

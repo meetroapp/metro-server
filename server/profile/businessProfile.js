@@ -269,7 +269,7 @@ function buildUpdateBusinessProfileQuery(profileId, userId, profile) {
             phone = $3,
             location = $4,
             bio = $5,
-            profile_details = $6::jsonb
+            profile_details = COALESCE(profile_details, '{}'::jsonb) || $6::jsonb
         WHERE id = $7 AND user_id = $8
         RETURNING *
       ), updated_user AS (

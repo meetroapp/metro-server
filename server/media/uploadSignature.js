@@ -7,6 +7,11 @@ const {
   normalizeUploadMetadata,
 } = require("./cloudinary");
 
+const ENABLED_SIGNATURE_PURPOSES = Object.freeze([
+  "personal_profile",
+  "business-logo",
+]);
+
 async function findOwnedContractorProfileId(pool, userId) {
   const result = await pool.query(
     `
@@ -59,6 +64,10 @@ function createUploadSignatureHandler({ getPool, env = process.env } = {}) {
   return async function uploadSignatureHandler(req, res) {
     try {
       const metadata = normalizeUploadMetadata(req.body);
+      if (!ENABLED_SIGNATURE_PURPOSES.includes(metadata.purpose)) {
+        throw new MediaValidationError("MEDIA_PURPOSE_NOT_ENABLED");
+      }
+
       const media = req.app?.locals?.cloudinaryMedia || createCloudinaryMedia({ env });
       const ownership = { userId: req.user.id };
 

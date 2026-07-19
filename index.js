@@ -35,6 +35,7 @@ const {
 const { createUploadSignatureHandler } = require("./server/media/uploadSignature");
 const { rejectUnsupportedMedia } = require("./server/media/mediaReferencePolicy");
 const { createPersonalProfileImageHandler } = require("./server/profile/personalProfileImage");
+const { createBusinessProfileLogoHandler } = require("./server/profile/businessProfileLogo");
 
 const JWT_SECRET = resolveJwtSecret(process.env);
 const BCRYPT_ROUNDS = 10;
@@ -809,6 +810,12 @@ app.put(
   "/auth/profile-photo",
   authMiddleware,
   createPersonalProfileImageHandler({ getPool })
+);
+
+app.put(
+  "/contractor-profile/logo",
+  authMiddleware,
+  createBusinessProfileLogoHandler({ getPool })
 );
 
 app.patch("/auth/profile", authMiddleware, async (req, res) => {

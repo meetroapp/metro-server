@@ -110,6 +110,7 @@ test("business profile queries enforce authenticated ownership and preserve stab
   assert.match(create.text, /profile_details/);
   assert.equal(create.values[0], 41);
   assert.doesNotMatch(update.text, /image_url\s*=/);
+  assert.match(update.text, /COALESCE\(profile_details, '\{\}'::jsonb\) \|\| \$6::jsonb/);
   assert.match(update.text, /WHERE id = \$7 AND user_id = \$8/);
   assert.deepEqual(update.values.slice(-2), [7, 41]);
   assert.deepEqual(JSON.parse(update.values[5]).service_specialties, completePayload.service_specialties);

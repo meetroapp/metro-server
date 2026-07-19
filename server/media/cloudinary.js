@@ -4,6 +4,7 @@ const { v2: defaultCloudinary } = require("cloudinary");
 
 const ALLOWED_MEDIA_PURPOSES = Object.freeze([
   "personal_profile",
+  "business-logo",
   "business_profile",
   "business_cover",
 ]);
@@ -130,6 +131,10 @@ function buildOwnedMediaFolder(configuration, purpose, ownership = {}) {
   }
 
   const contractorProfileId = requirePositiveOwnerId(ownership.contractorProfileId);
+  if (purpose === "business-logo") {
+    return `${configuration.uploadFolder}/businesses/logos/${contractorProfileId}`;
+  }
+
   const destination = purpose === "business_cover" ? "cover" : "profile";
   return `${configuration.uploadFolder}/businesses/${contractorProfileId}/${destination}`;
 }
