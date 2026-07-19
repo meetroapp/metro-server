@@ -32,6 +32,7 @@ const {
   logSafeServerError,
   sendPublicDatabaseError,
 } = require("./server/errors/publicErrors");
+const { createUploadSignatureHandler } = require("./server/media/uploadSignature");
 
 const JWT_SECRET = resolveJwtSecret(process.env);
 const BCRYPT_ROUNDS = 10;
@@ -608,6 +609,12 @@ async function authMiddleware(req, res, next) {
 app.get("/health", (req, res) => {
   res.json(buildHealthMetadata());
 });
+
+app.post(
+  "/media/upload-signature",
+  authMiddleware,
+  createUploadSignatureHandler({ getPool })
+);
 
 app.get("/test-db", async (req, res) => {
   if (isProductionRuntime(process.env)) {

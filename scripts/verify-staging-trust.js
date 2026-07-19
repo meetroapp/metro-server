@@ -10,11 +10,11 @@ const LOCAL_TEST_TARGET = "local-test";
 const DEFAULT_REQUEST_TIMEOUT_MS = 12000;
 const RUN_PREFIX = "qa-staging-trust";
 const MEDIA_TRUST = Object.freeze({
-  status: "DEFERRED_NOT_SUPPORTED",
+  status: "SIGNED_UPLOAD_FOUNDATION_READY",
   reason:
-    "No production-ready backend media upload, storage, deletion, or validation route exists.",
+    "Authenticated, owner-scoped Cloudinary signatures are available for approved profile purposes.",
   releaseNote:
-    "Backend media storage remains deferred for Friends & Family; URL-reference fields are not authoritative media storage.",
+    "Client media uploads remain disabled until a separately governed UI phase.",
 });
 
 const SENSITIVE_KEY_PATTERN =
