@@ -32,8 +32,15 @@ const {
   logSafeServerError,
   sendPublicDatabaseError,
 } = require("./server/errors/publicErrors");
-const { createUploadSignatureHandler } = require("./server/media/uploadSignature");
+const { createUploadSignatureHandler, sendMediaError } = require("./server/media/uploadSignature");
 const { rejectUnsupportedMedia } = require("./server/media/mediaReferencePolicy");
+const { MediaValidationError, createCloudinaryMedia } = require("./server/media/cloudinary");
+const {
+  createRequestPhotoCleanupHandler,
+  normalizeRequestPhotoCollection,
+  parseStoredRequestPhotos,
+  safelyDeleteRequestPhoto,
+} = require("./server/media/requestPhoto");
 const { createPersonalProfileImageHandler } = require("./server/profile/personalProfileImage");
 const { createBusinessProfileLogoHandler } = require("./server/profile/businessProfileLogo");
 
@@ -398,6 +405,7 @@ function validateProfileUpdateRequestBody(body) {
 }
 
 function toSafePostRow(row = {}) {
+  const requestPhotos = parseStoredRequestPhotos(row.request_photos);
   return {
     id: row.id,
     title: row.title,
@@ -406,14 +414,15 @@ function toSafePostRow(row = {}) {
     category: row.category,
     created_at: row.created_at,
     mage_url: row.mage_url ?? null,
-    image_url: row.image_url ?? "",
+    image_url: row.image_url ?? requestPhotos[0]?.secure_url ?? "",
+    request_photos: requestPhotos,
   };
 }
 
 function buildUserPostsQuery(userId) {
   return {
     text: `
-      SELECT id, title, description, location, category, created_at, mage_url, image_url
+      SELECT id, title, description, location, category, created_at, mage_url, image_url, request_photos
       FROM posts
       WHERE user_id = $1
       ORDER BY posts.created_at DESC
@@ -425,7 +434,7 @@ function buildUserPostsQuery(userId) {
 function buildUserPostByIdQuery(postId, userId) {
   return {
     text: `
-      SELECT id, title, description, location, category, created_at, mage_url, image_url
+      SELECT id, title, description, location, category, created_at, mage_url, image_url, request_photos
       FROM posts
       WHERE id = $1 AND user_id = $2
       `,
@@ -617,6 +626,11 @@ app.post(
   "/media/upload-signature",
   authMiddleware,
   createUploadSignatureHandler({ getPool })
+);
+app.post(
+  "/media/request-photo/cleanup",
+  authMiddleware,
+  createRequestPhotoCleanupHandler()
 );
 
 app.get("/test-db", async (req, res) => {
@@ -1227,25 +1241,48 @@ app.post(
 );
 
 app.post("/posts", authMiddleware, async (req, res) => {
+  let normalizedRequestPhotos = [];
   try {
     if (rejectUnsupportedMedia(req, res, ["image_url"])) return;
-    const { title, description, category, location, image_url } = req.body;
+    const { title, description, category, location, request_photos } = req.body;
+    normalizedRequestPhotos = normalizeRequestPhotoCollection(request_photos || [], {
+      userId: req.user.id,
+    });
+    const imageUrl = normalizedRequestPhotos[0]?.secure_url || null;
 
     const result = await getPool(req).query(
       `
       INSERT INTO posts
-      (user_id, title, description, category, location, image_url)
-      VALUES ($1, $2, $3, $4, $5, $6)
+      (user_id, title, description, category, location, image_url, request_photos)
+      VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
       RETURNING *
       `,
-      [req.user.id, title, description, category, location, image_url]
+      [
+        req.user.id,
+        title,
+        description,
+        category,
+        location,
+        imageUrl,
+        JSON.stringify(normalizedRequestPhotos),
+      ]
     );
 
     res.json({
       message: "Post created",
-      post: result.rows[0],
+      post: toSafePostRow(result.rows[0]),
     });
   } catch (err) {
+    if (err instanceof MediaValidationError) {
+      return sendMediaError(res, err);
+    }
+    if (normalizedRequestPhotos.length > 0) {
+      const mediaService =
+        req.app?.locals?.cloudinaryMedia || createCloudinaryMedia({ env: process.env });
+      for (const media of normalizedRequestPhotos) {
+        await safelyDeleteRequestPhoto(mediaService, media.public_id, req.user.id);
+      }
+    }
     return sendPublicDatabaseError({
       res,
       error: err,
@@ -2010,6 +2047,7 @@ module.exports = {
   getQuoteParticipantUserIds,
   jsonSyntaxErrorHandler,
   maskEmail,
+  normalizeRequestPhotoCollection,
   receiverBelongsToQuoteRequest,
   toSafePostRow,
   twoFactorChallengeStore,

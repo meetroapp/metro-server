@@ -33,6 +33,8 @@ const baselinePath = join(migrationsDirectory, BASELINE_MIGRATION_FILENAME);
 const baselineSql = readFileSync(baselinePath, "utf8");
 const tokenVersionMigrationFilename =
   "202607130001_add_user_token_version.sql";
+const requestPhotosMigrationFilename =
+  "202607190002_add_post_request_photos.sql";
 const packageJson = require("../package.json");
 
 function normalizeSql(sql) {
@@ -476,6 +478,24 @@ test("token-version migration follows baseline and changes only users.token_vers
   assert.doesNotMatch(
     tokenVersion.sql,
     /password_hash|\b(?:DROP|DELETE|TRUNCATE|UPDATE|INSERT|CREATE TABLE)\b/i
+  );
+});
+
+test("request-photo migration is additive and changes only posts.request_photos", () => {
+  const migrations = getMigrationFiles(migrationsDirectory);
+  const requestPhotos = migrations.find(
+    ({ filename }) => filename === requestPhotosMigrationFilename
+  );
+  assert.ok(requestPhotos);
+  assert.match(requestPhotos.sql, /ALTER TABLE posts/i);
+  assert.match(
+    requestPhotos.sql,
+    /ADD COLUMN IF NOT EXISTS request_photos JSONB NOT NULL DEFAULT '\[\]'::jsonb/i
+  );
+  assert.equal((requestPhotos.sql.match(/ALTER TABLE/gi) || []).length, 1);
+  assert.doesNotMatch(
+    requestPhotos.sql,
+    /\b(?:DROP|DELETE|TRUNCATE|UPDATE|INSERT|CREATE TABLE)\b/i
   );
 });
 

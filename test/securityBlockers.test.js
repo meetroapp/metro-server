@@ -99,6 +99,7 @@ test("safe post serialization removes owner identity fields", () => {
     created_at: "2026-07-04T12:00:00.000Z",
     mage_url: null,
     image_url: "https://example.test/request.jpg",
+    request_photos: [],
   });
   assert.equal(Object.hasOwn(post, "user_id"), false);
   assert.equal(Object.hasOwn(post, "email"), false);

@@ -125,17 +125,27 @@ function createMedia(client = createCloudinaryClient()) {
   });
 }
 
-test("media foundation exposes signatures only and no upload endpoint", () => {
+test("media foundation exposes signatures and governed cleanup only", () => {
   const mediaRoutes = app.router.stack
     .filter((item) => String(item.route?.path || "").startsWith("/media/"))
     .map((item) => ({
       path: item.route.path,
       methods: Object.keys(item.route.methods).sort(),
     }));
-  assert.deepEqual(mediaRoutes, [{
-    path: "/media/upload-signature",
-    methods: ["post"],
-  }]);
+  assert.deepEqual(mediaRoutes, [
+    {
+      path: "/media/upload-signature",
+      methods: ["post"],
+    },
+    {
+      path: "/media/request-photo/cleanup",
+      methods: ["post"],
+    },
+  ]);
+  assert.equal(
+    mediaRoutes.some((route) => /upload(?!-signature)/i.test(route.path)),
+    false
+  );
 });
 
 test("upload signatures require a valid authenticated session", async () => {

@@ -10,6 +10,7 @@ const {
 const ENABLED_SIGNATURE_PURPOSES = Object.freeze([
   "personal_profile",
   "business-logo",
+  "request-photo",
 ]);
 
 async function findOwnedContractorProfileId(pool, userId) {
@@ -71,7 +72,10 @@ function createUploadSignatureHandler({ getPool, env = process.env } = {}) {
       const media = req.app?.locals?.cloudinaryMedia || createCloudinaryMedia({ env });
       const ownership = { userId: req.user.id };
 
-      if (metadata.purpose !== "personal_profile") {
+      if (
+        metadata.purpose !== "personal_profile" &&
+        metadata.purpose !== "request-photo"
+      ) {
         ownership.contractorProfileId = await findOwnedContractorProfileId(
           getPool(req),
           req.user.id
