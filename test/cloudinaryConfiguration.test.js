@@ -59,6 +59,17 @@ test("Cloudinary configuration requires every server-owned environment value", (
   );
 });
 
+test("Cloudinary configuration rejects an environment assignment as the folder value", () => {
+  assert.throws(
+    () => resolveCloudinaryConfiguration({
+      ...VALID_ENV,
+      CLOUDINARY_UPLOAD_FOLDER: "CLOUDINARY_UPLOAD_FOLDER=meetro/production",
+    }),
+    (error) => error instanceof MediaConfigurationError &&
+      error.code === "MEDIA_UPLOAD_FOLDER_INVALID"
+  );
+});
+
 test("Cloudinary initializes from environment without exposing its secret", () => {
   const client = createFakeCloudinary();
   const media = createCloudinaryMedia({
