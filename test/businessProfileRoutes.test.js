@@ -48,7 +48,10 @@ function createPool() {
           phone: values[2],
           location: values[3],
           bio: values[4],
-          profile_details: JSON.parse(values[5]),
+          profile_details: {
+            ...(profile.profile_details || {}),
+            ...JSON.parse(values[5]),
+          },
         });
         return { rows: [{ ...profile }] };
       }
@@ -186,4 +189,29 @@ test("malformed update fails without changing the authoritative profile", async 
   assert.equal(result.statusCode, 400);
   assert.equal(result.body.code, "INVALID_BUSINESS_PROFILE_FIELD");
   assert.equal(pool.profiles.get(10).business_name, "Original Business");
+});
+
+test("unrelated update omission preserves services while explicit empty clears them", async () => {
+  const pool = createPool();
+  const owner = pool.users.get(1);
+  pool.profiles.get(10).profile_details = {
+    service_specialties: ["handyman", "small_repairs"],
+  };
+  const { service_specialties: _services, ...withoutServices } = payload;
+
+  const preserved = await invoke("put", "/contractor-profiles/:id", {
+    pool,
+    user: owner,
+    body: { ...withoutServices, bio: "Updated unrelated field" },
+    params: { id: "10" },
+  });
+  const cleared = await invoke("put", "/contractor-profiles/:id", {
+    pool,
+    user: owner,
+    body: { ...payload, service_specialties: [] },
+    params: { id: "10" },
+  });
+
+  assert.deepEqual(preserved.body.profile.service_specialties, ["handyman", "small_repairs"]);
+  assert.deepEqual(cleared.body.profile.service_specialties, []);
 });

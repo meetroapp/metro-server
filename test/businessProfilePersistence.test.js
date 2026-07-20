@@ -92,6 +92,43 @@ test("unsupported and malformed business profile fields fail closed", () => {
   assert.equal(malformed.code, "INVALID_BUSINESS_PROFILE_FIELD");
 });
 
+test("service specialties require canonical identifiers and remove duplicates", () => {
+  const canonical = validateBusinessProfilePayload({
+    ...completePayload,
+    service_specialties: ["handyman", "small_repairs", "handyman"],
+  });
+  const unknown = validateBusinessProfilePayload({
+    ...completePayload,
+    service_specialties: ["made_up_service"],
+  });
+
+  assert.equal(canonical.ok, true);
+  assert.deepEqual(canonical.profile.service_specialties, ["handyman", "small_repairs"]);
+  assert.equal(unknown.ok, false);
+  assert.equal(unknown.code, "INVALID_SERVICE_SPECIALTIES");
+});
+
+test("update validation distinguishes omitted services from an intentional empty set", () => {
+  const { service_specialties: _services, ...withoutServices } = completePayload;
+  const omitted = validateBusinessProfilePayload(withoutServices, {
+    preserveOmittedServiceSpecialties: true,
+  });
+  const cleared = validateBusinessProfilePayload({
+    ...withoutServices,
+    service_specialties: [],
+  }, {
+    preserveOmittedServiceSpecialties: true,
+  });
+
+  assert.equal(omitted.ok, true);
+  assert.equal(Object.hasOwn(omitted.profile, "service_specialties"), false);
+  assert.equal(
+    Object.hasOwn(JSON.parse(buildUpdateBusinessProfileQuery(7, 41, omitted.profile).values[5]), "service_specialties"),
+    false
+  );
+  assert.deepEqual(cleared.profile.service_specialties, []);
+});
+
 test("business profile payload rejects client-supplied media references", () => {
   const result = validateBusinessProfilePayload({
     ...completePayload,
@@ -109,6 +146,7 @@ test("business profile queries enforce authenticated ownership and preserve stab
 
   assert.match(create.text, /profile_details/);
   assert.equal(create.values[0], 41);
+  assert.deepEqual(JSON.parse(create.values[7]).service_specialties, completePayload.service_specialties);
   assert.doesNotMatch(update.text, /image_url\s*=/);
   assert.match(update.text, /COALESCE\(profile_details, '\{\}'::jsonb\) \|\| \$6::jsonb/);
   assert.match(update.text, /WHERE id = \$7 AND user_id = \$8/);

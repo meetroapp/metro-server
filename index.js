@@ -1610,7 +1610,9 @@ app.get("/my-contractor-profile", authMiddleware, async (req, res) => {
 
 app.put("/contractor-profiles/:id", authMiddleware, async (req, res) => {
   try {
-    const validation = validateBusinessProfilePayload(req.body);
+    const validation = validateBusinessProfilePayload(req.body, {
+      preserveOmittedServiceSpecialties: true,
+    });
     if (!validation.ok) {
       return res.status(validation.status).json({
         success: false,

@@ -1,5 +1,7 @@
 "use strict";
 
+const { PROFESSIONAL_SERVICE_IDS } = require("./professionalServiceIds");
+
 const BASE_FIELDS = Object.freeze([
   "business_name",
   "category",
@@ -76,7 +78,12 @@ function validateSpecialties(value) {
   for (const item of value) {
     if (typeof item !== "string") return null;
     const specialty = item.trim();
-    if (!specialty || specialty.length > 100 || !/^[a-z0-9_-]+$/i.test(specialty)) {
+    if (
+      !specialty ||
+      specialty.length > 100 ||
+      !/^[a-z0-9_-]+$/i.test(specialty) ||
+      !PROFESSIONAL_SERVICE_IDS.has(specialty)
+    ) {
       return null;
     }
     if (!normalized.includes(specialty)) normalized.push(specialty);
@@ -84,7 +91,10 @@ function validateSpecialties(value) {
   return normalized;
 }
 
-function validateBusinessProfilePayload(body) {
+function validateBusinessProfilePayload(
+  body,
+  { preserveOmittedServiceSpecialties = false } = {}
+) {
   if (!isRecord(body)) {
     return failure("INVALID_BUSINESS_PROFILE", "Business profile must be an object.");
   }
@@ -139,20 +149,27 @@ function validateBusinessProfilePayload(body) {
     profile[field] = body[field] === true;
   }
 
-  const specialties = validateSpecialties(body.service_specialties ?? []);
-  if (!specialties) {
-    return failure(
-      "INVALID_SERVICE_SPECIALTIES",
-      "Service specialties must use supported stable identifiers."
-    );
+  const serviceSpecialtiesProvided = Object.hasOwn(body, "service_specialties");
+  if (serviceSpecialtiesProvided || !preserveOmittedServiceSpecialties) {
+    const specialties = validateSpecialties(body.service_specialties ?? []);
+    if (!specialties) {
+      return failure(
+        "INVALID_SERVICE_SPECIALTIES",
+        "Service specialties must use supported stable identifiers."
+      );
+    }
+    profile.service_specialties = specialties;
   }
-  profile.service_specialties = specialties;
 
   return { ok: true, profile };
 }
 
 function buildProfileDetails(profile) {
-  return Object.fromEntries(DETAIL_FIELDS.map((field) => [field, profile[field]]));
+  return Object.fromEntries(
+    DETAIL_FIELDS
+      .filter((field) => profile[field] !== undefined)
+      .map((field) => [field, profile[field]])
+  );
 }
 
 function parseDetails(value) {
