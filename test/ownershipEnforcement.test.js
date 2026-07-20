@@ -28,6 +28,10 @@ function createFakePool({ quoteRows = [], projectRows = [] } = {}) {
       const normalized = normalizeSql(text);
       calls.push({ text: normalized, values });
 
+      if (["BEGIN", "COMMIT", "ROLLBACK"].includes(normalized)) {
+        return { rows: [] };
+      }
+
       if (
         normalized.includes("SELECT id, email, role, token_version") &&
         normalized.includes("FROM users")
@@ -97,6 +101,13 @@ function createFakePool({ quoteRows = [], projectRows = [] } = {}) {
             },
           ],
         };
+      }
+
+      if (
+        normalized.includes("SELECT contractor_projects.*") &&
+        normalized.includes("JOIN contractor_profiles")
+      ) {
+        return { rows: projectRows };
       }
 
       if (
@@ -299,8 +310,11 @@ test("Account B cannot update Account A contractor project", async () => {
   const projectUpdateCall = pool.calls.find((call) =>
     call.text.includes("UPDATE contractor_projects")
   );
-  assert.ok(projectUpdateCall);
-  assert.match(projectUpdateCall.text, /contractor_profiles\.user_id = \$6/);
+  assert.equal(projectUpdateCall, undefined);
+  assert.ok(pool.calls.some((call) =>
+    call.text.includes("JOIN contractor_profiles") &&
+    call.text.includes("contractor_profiles.user_id = $2")
+  ));
 });
 
 test("contractor project create and update queries require contractor profile ownership", () => {

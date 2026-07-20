@@ -43,6 +43,12 @@ const {
 } = require("./server/media/requestPhoto");
 const { createPersonalProfileImageHandler } = require("./server/profile/personalProfileImage");
 const { createBusinessProfileLogoHandler } = require("./server/profile/businessProfileLogo");
+const {
+  createPortfolioCleanupHandler,
+  createPortfolioProjectHandler,
+  serializeOwnedPortfolioProject,
+  serializePublicPortfolioProject,
+} = require("./server/media/businessPortfolio");
 
 const JWT_SECRET = resolveJwtSecret(process.env);
 const BCRYPT_ROUNDS = 10;
@@ -631,6 +637,11 @@ app.post(
   "/media/request-photo/cleanup",
   authMiddleware,
   createRequestPhotoCleanupHandler()
+);
+app.post(
+  "/media/business-portfolio/cleanup",
+  authMiddleware,
+  createPortfolioCleanupHandler({ getPool })
 );
 
 app.get("/test-db", async (req, res) => {
@@ -1874,97 +1885,43 @@ app.get("/reviews/:contractorId", async (req, res) => {
   }
 });
 
-app.post("/contractor-projects", authMiddleware, async (req, res) => {
+app.post(
+  "/contractor-projects",
+  authMiddleware,
+  createPortfolioProjectHandler({ getPool })
+);
+
+app.put(
+  "/contractor-projects/:id",
+  authMiddleware,
+  createPortfolioProjectHandler({ getPool, update: true })
+);
+
+app.get("/my-contractor-projects", authMiddleware, async (req, res) => {
   try {
-    if (rejectUnsupportedMedia(req, res, ["image_url", "image_urls"])) return;
-    const requestPool = getPool(req);
-    const { contractor_id, title, description, image_url, image_urls } = req.body;
-
-    if (!contractor_id) {
-      return res.status(400).json({
-        error: "contractor_id is required",
-      });
-    }
-
-    const imageUrls = Array.isArray(image_urls)
-      ? image_urls
-      : image_url
-      ? [image_url]
-      : [];
-
-    const query = buildOwnedContractorProjectCreateQuery({
-      contractorId: contractor_id,
-      ownerUserId: req.user.id,
-      title,
-      description,
-      imageUrl: imageUrls[0] || image_url || "",
-      imageUrls,
+    const result = await getPool(req).query(
+      `
+      SELECT contractor_projects.*
+      FROM contractor_projects
+      JOIN contractor_profiles
+        ON contractor_profiles.id = contractor_projects.contractor_id
+      WHERE contractor_profiles.user_id = $1
+      ORDER BY contractor_projects.created_at DESC
+      `,
+      [req.user.id]
+    );
+    return res.json({
+      success: true,
+      code: "BUSINESS_PORTFOLIO_LOADED",
+      projects: result.rows.map(serializeOwnedPortfolioProject),
     });
-
-    const result = await requestPool.query(query.text, query.values);
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        error: "Contractor profile not found or not authorized",
-      });
-    }
-
-    res.json({
-      message: "Project uploaded",
-      project: result.rows[0],
-    });
-  } catch (err) {
+  } catch (error) {
     return sendPublicDatabaseError({
       res,
-      error: err,
-      operation: "create_contractor_project",
-      code: "CONTRACTOR_PROJECT_CREATE_FAILED",
-      message: "The project could not be uploaded.",
-    });
-  }
-});
-
-app.put("/contractor-projects/:id", authMiddleware, async (req, res) => {
-  try {
-    if (rejectUnsupportedMedia(req, res, ["image_url", "image_urls"])) return;
-    const requestPool = getPool(req);
-    const projectId = req.params.id;
-    const { title, description, image_url, image_urls } = req.body;
-
-    const imageUrls = Array.isArray(image_urls)
-      ? image_urls
-      : image_url
-      ? [image_url]
-      : [];
-
-    const query = buildOwnedContractorProjectUpdateQuery({
-      projectId,
-      ownerUserId: req.user.id,
-      title,
-      description,
-      imageUrl: imageUrls[0] || image_url || "",
-      imageUrls,
-    });
-
-    const result = await requestPool.query(query.text, query.values);
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        error: "Project not found or not authorized",
-      });
-    }
-
-    res.json({
-      message: "Project updated",
-      project: result.rows[0],
-    });
-  } catch (err) {
-    return sendPublicDatabaseError({
-      res,
-      error: err,
-      operation: "update_contractor_project",
-      code: "CONTRACTOR_PROJECT_UPDATE_FAILED",
-      message: "The project could not be updated.",
+      error,
+      operation: "fetch_owned_contractor_projects",
+      code: "CONTRACTOR_PROJECTS_FETCH_FAILED",
+      message: "Projects could not be loaded.",
     });
   }
 });
@@ -1984,7 +1941,7 @@ app.get("/contractor-projects/:contractorId", async (req, res) => {
     );
 
     res.json({
-      projects: result.rows,
+      projects: result.rows.map(serializePublicPortfolioProject),
     });
   } catch (err) {
     return sendPublicDatabaseError({

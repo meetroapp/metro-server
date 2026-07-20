@@ -10,6 +10,7 @@ const {
 const ENABLED_SIGNATURE_PURPOSES = Object.freeze([
   "personal_profile",
   "business-logo",
+  "business-portfolio",
   "request-photo",
 ]);
 

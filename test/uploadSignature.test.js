@@ -141,6 +141,10 @@ test("media foundation exposes signatures and governed cleanup only", () => {
       path: "/media/request-photo/cleanup",
       methods: ["post"],
     },
+    {
+      path: "/media/business-portfolio/cleanup",
+      methods: ["post"],
+    },
   ]);
   assert.equal(
     mediaRoutes.some((route) => /upload(?!-signature)/i.test(route.path)),
@@ -193,6 +197,23 @@ test("business logo signatures use only the authenticated owner's contractor pro
     pool.calls.filter((call) => call.sql.includes("FROM contractor_profiles")).length,
     1
   );
+});
+
+test("business portfolio signatures use the authenticated business portfolio folder", async () => {
+  const pool = createPool();
+  const result = await invoke({
+    pool,
+    token: createToken(pool.user),
+    body: validBody({
+      purpose: "business-portfolio",
+      fileName: "project.webp",
+      contentType: "image/webp",
+    }),
+    cloudinaryMedia: createMedia(),
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.upload.folder, "meetro/production/businesses/91/portfolio");
 });
 
 test("business cover and legacy business profile signatures are not enabled", async () => {
