@@ -49,6 +49,12 @@ const {
   serializeOwnedPortfolioProject,
   serializePublicPortfolioProject,
 } = require("./server/media/businessPortfolio");
+const {
+  professionalCanSeeRequest,
+  serializeOwnedRequest,
+  serializeProfessionalOpportunity,
+  validateRequestPayload,
+} = require("./server/requests/requestLifecycle");
 
 const JWT_SECRET = resolveJwtSecret(process.env);
 const BCRYPT_ROUNDS = 10;
@@ -412,23 +418,15 @@ function validateProfileUpdateRequestBody(body) {
 
 function toSafePostRow(row = {}) {
   const requestPhotos = parseStoredRequestPhotos(row.request_photos);
-  return {
-    id: row.id,
-    title: row.title,
-    description: row.description,
-    location: row.location,
-    category: row.category,
-    created_at: row.created_at,
-    mage_url: row.mage_url ?? null,
-    image_url: row.image_url ?? requestPhotos[0]?.secure_url ?? "",
-    request_photos: requestPhotos,
-  };
+  return serializeOwnedRequest(row, requestPhotos);
 }
 
 function buildUserPostsQuery(userId) {
   return {
     text: `
-      SELECT id, title, description, location, category, created_at, mage_url, image_url, request_photos
+      SELECT id, title, description, location, category, request_category,
+             service_domain, service_specialty, unit_number, access_notes, status,
+             created_at, updated_at, cancelled_at, mage_url, image_url, request_photos
       FROM posts
       WHERE user_id = $1
       ORDER BY posts.created_at DESC
@@ -440,7 +438,9 @@ function buildUserPostsQuery(userId) {
 function buildUserPostByIdQuery(postId, userId) {
   return {
     text: `
-      SELECT id, title, description, location, category, created_at, mage_url, image_url, request_photos
+      SELECT id, title, description, location, category, request_category,
+             service_domain, service_specialty, unit_number, access_notes, status,
+             created_at, updated_at, cancelled_at, mage_url, image_url, request_photos
       FROM posts
       WHERE id = $1 AND user_id = $2
       `,
@@ -1255,7 +1255,16 @@ app.post("/posts", authMiddleware, async (req, res) => {
   let normalizedRequestPhotos = [];
   try {
     if (rejectUnsupportedMedia(req, res, ["image_url"])) return;
-    const { title, description, category, location, request_photos } = req.body;
+    const validation = validateRequestPayload(req.body);
+    if (!validation.ok) {
+      return res.status(validation.status).json({
+        success: false,
+        code: validation.code,
+        message: validation.message,
+      });
+    }
+    const { request_photos } = req.body;
+    const request = validation.request;
     normalizedRequestPhotos = normalizeRequestPhotoCollection(request_photos || [], {
       userId: req.user.id,
     });
@@ -1264,16 +1273,23 @@ app.post("/posts", authMiddleware, async (req, res) => {
     const result = await getPool(req).query(
       `
       INSERT INTO posts
-      (user_id, title, description, category, location, image_url, request_photos)
-      VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+      (user_id, title, description, category, request_category, service_domain,
+       service_specialty, location, unit_number, access_notes, status, image_url,
+       request_photos, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'open', $11, $12::jsonb, CURRENT_TIMESTAMP)
       RETURNING *
       `,
       [
         req.user.id,
-        title,
-        description,
-        category,
-        location,
+        request.title,
+        request.description,
+        request.category,
+        request.request_category,
+        request.service_domain,
+        request.service_specialty,
+        request.location,
+        request.unit_number,
+        request.access_notes,
         imageUrl,
         JSON.stringify(normalizedRequestPhotos),
       ]
@@ -1336,6 +1352,150 @@ app.get("/posts/:id", authMiddleware, async (req, res) => {
   } catch (err) {
     res.status(500).json({
       error: "Failed to fetch post",
+    });
+  }
+});
+
+app.put("/posts/:id", authMiddleware, async (req, res) => {
+  try {
+    const validation = validateRequestPayload(req.body, { partial: true });
+    if (!validation.ok) {
+      return res.status(validation.status).json({
+        success: false,
+        code: validation.code,
+        message: validation.message,
+      });
+    }
+    const request = validation.request;
+    const result = await getPool(req).query(
+      `
+      UPDATE posts
+      SET title = CASE WHEN $1::boolean THEN $2 ELSE title END,
+          description = CASE WHEN $3::boolean THEN $4 ELSE description END,
+          location = CASE WHEN $5::boolean THEN $6 ELSE location END,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = $7 AND user_id = $8 AND status = 'open'
+      RETURNING *
+      `,
+      [
+        req.body.title !== undefined,
+        request.title,
+        req.body.description !== undefined,
+        request.description,
+        req.body.location !== undefined,
+        request.location,
+        req.params.id,
+        req.user.id,
+      ]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        code: "REQUEST_NOT_FOUND",
+        message: "Request was not found or cannot be edited.",
+      });
+    }
+    return res.json({
+      success: true,
+      code: "REQUEST_UPDATED",
+      post: toSafePostRow(result.rows[0]),
+    });
+  } catch (error) {
+    return sendPublicDatabaseError({
+      res,
+      error,
+      operation: "update_post",
+      code: "POST_UPDATE_FAILED",
+      message: "The request could not be updated.",
+    });
+  }
+});
+
+app.post("/posts/:id/cancel", authMiddleware, async (req, res) => {
+  try {
+    const result = await getPool(req).query(
+      `
+      UPDATE posts
+      SET status = 'cancelled',
+          cancelled_at = COALESCE(cancelled_at, CURRENT_TIMESTAMP),
+          updated_at = CASE WHEN status = 'cancelled' THEN updated_at ELSE CURRENT_TIMESTAMP END
+      WHERE id = $1 AND user_id = $2
+      RETURNING *
+      `,
+      [req.params.id, req.user.id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        code: "REQUEST_NOT_FOUND",
+        message: "Request was not found.",
+      });
+    }
+    return res.json({
+      success: true,
+      code: "REQUEST_CANCELLED",
+      post: toSafePostRow(result.rows[0]),
+    });
+  } catch (error) {
+    return sendPublicDatabaseError({
+      res,
+      error,
+      operation: "cancel_post",
+      code: "POST_CANCEL_FAILED",
+      message: "The request could not be cancelled.",
+    });
+  }
+});
+
+app.get("/professional-request-opportunities", authMiddleware, async (req, res) => {
+  try {
+    const database = getPool(req);
+    const profileResult = await database.query(
+      `
+      SELECT id, user_id, category, profile_details
+      FROM contractor_profiles
+      WHERE user_id = $1
+      LIMIT 1
+      `,
+      [req.user.id]
+    );
+    if (profileResult.rows.length === 0) {
+      return res.status(403).json({
+        success: false,
+        code: "PROFESSIONAL_PROFILE_REQUIRED",
+        message: "A business profile is required to view request opportunities.",
+      });
+    }
+
+    const result = await database.query(
+      `
+      SELECT id, title, description, category, request_category, service_domain,
+             service_specialty, location, status, created_at, updated_at,
+             image_url, request_photos
+      FROM posts
+      WHERE status = 'open' AND user_id <> $1
+      ORDER BY created_at DESC
+      `,
+      [req.user.id]
+    );
+    const profile = profileResult.rows[0];
+    const opportunities = result.rows
+      .filter((request) => professionalCanSeeRequest(profile, request))
+      .map((request) =>
+        serializeProfessionalOpportunity(
+          request,
+          parseStoredRequestPhotos(request.request_photos)
+        )
+      );
+
+    return res.json({ success: true, opportunities });
+  } catch (error) {
+    return sendPublicDatabaseError({
+      res,
+      error,
+      operation: "fetch_professional_request_opportunities",
+      code: "REQUEST_OPPORTUNITIES_FETCH_FAILED",
+      message: "Request opportunities could not be loaded.",
     });
   }
 });

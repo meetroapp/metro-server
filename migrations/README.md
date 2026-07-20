@@ -23,6 +23,9 @@ Current inventory:
 3. `202607130002_create_password_reset_tokens.sql`
 4. `202607140001_add_contractor_profile_details.sql`
 5. `202607140002_create_workflow_events.sql`
+6. `202607190001_add_user_profile_photo_details.sql`
+7. `202607190002_add_post_request_photos.sql`
+8. `202607200001_add_post_request_lifecycle.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.

@@ -51,6 +51,19 @@ function payload(index = 1, overrides = {}) {
   };
 }
 
+function requestBody(overrides = {}) {
+  return {
+    title: "Leaking window",
+    description: "Water around the sill",
+    category: "handyman",
+    request_category: "handyman",
+    service_domain: "home_services",
+    service_specialty: "handyman",
+    location: "Cape Coral",
+    ...overrides,
+  };
+}
+
 function createMediaService() {
   const deletions = [];
   return {
@@ -101,10 +114,17 @@ function createPool({ failInsert = false } = {}) {
             title: values[1],
             description: values[2],
             category: values[3],
-            location: values[4],
-            image_url: values[5],
-            request_photos: JSON.parse(values[6]),
+            request_category: values[4],
+            service_domain: values[5],
+            service_specialty: values[6],
+            location: values[7],
+            unit_number: values[8],
+            access_notes: values[9],
+            status: "open",
+            image_url: values[10],
+            request_photos: JSON.parse(values[11]),
             created_at: "2026-07-19T18:00:00.000Z",
+            updated_at: "2026-07-19T18:00:00.000Z",
           }],
         };
       }
@@ -218,13 +238,9 @@ test("request-photo signatures use the authenticated homeowner folder", async ()
 
 test("owned request photos persist in order and derive compatibility image URL", async () => {
   const { res, pool } = await invoke("post", "/posts", {
-    body: {
-      title: "Leaking window",
-      description: "Water around the sill",
-      category: "handyman",
-      location: "Cape Coral",
+    body: requestBody({
       request_photos: [payload(1), payload(2)],
-    },
+    }),
   });
 
   assert.equal(res.statusCode, 200);
@@ -234,26 +250,24 @@ test("owned request photos persist in order and derive compatibility image URL",
     [0, 1]
   );
   const insert = pool.calls.find((call) => call.sql.startsWith("INSERT INTO posts"));
-  assert.equal(JSON.parse(insert.values[6])[1].public_id, media(2).public_id);
+  assert.equal(JSON.parse(insert.values[11])[1].public_id, media(2).public_id);
 });
 
 test("foreign request photos and arbitrary URLs are rejected before persistence", async () => {
   const foreign = await invoke("post", "/posts", {
-    body: {
-      title: "Leaking window",
+    body: requestBody({
       request_photos: [payload(1, {
         public_id: "meetro/production/users/8/request-photos/photo-1",
       })],
-    },
+    }),
   });
   assert.equal(foreign.res.statusCode, 400);
   assert.equal(foreign.pool.calls.some((call) => call.sql.startsWith("INSERT INTO posts")), false);
 
   const arbitrary = await invoke("post", "/posts", {
-    body: {
-      title: "Leaking window",
+    body: requestBody({
       image_url: "https://example.test/unsafe.jpg",
-    },
+    }),
   });
   assert.equal(arbitrary.res.statusCode, 400);
   assert.equal(arbitrary.res.body.code, "GOVERNED_MEDIA_REFERENCE_REQUIRED");
@@ -264,10 +278,9 @@ test("post persistence failure cleans uploaded request photos", async () => {
   const { res } = await invoke("post", "/posts", {
     pool: createPool({ failInsert: true }),
     mediaService,
-    body: {
-      title: "Leaking window",
+    body: requestBody({
       request_photos: [payload(1), payload(2)],
-    },
+    }),
   });
 
   assert.equal(res.statusCode, 500);

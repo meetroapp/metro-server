@@ -35,6 +35,8 @@ const tokenVersionMigrationFilename =
   "202607130001_add_user_token_version.sql";
 const requestPhotosMigrationFilename =
   "202607190002_add_post_request_photos.sql";
+const requestLifecycleMigrationFilename =
+  "202607200001_add_post_request_lifecycle.sql";
 const packageJson = require("../package.json");
 
 function normalizeSql(sql) {
@@ -497,6 +499,19 @@ test("request-photo migration is additive and changes only posts.request_photos"
     requestPhotos.sql,
     /\b(?:DROP|DELETE|TRUNCATE|UPDATE|INSERT|CREATE TABLE)\b/i
   );
+});
+
+test("request lifecycle migration is additive, constrained, and scoped to posts", () => {
+  const migrations = getMigrationFiles(migrationsDirectory);
+  const lifecycle = migrations.find(
+    ({ filename }) => filename === requestLifecycleMigrationFilename
+  );
+  assert.ok(lifecycle);
+  assert.match(lifecycle.sql, /ALTER TABLE posts/i);
+  assert.match(lifecycle.sql, /ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'open'/i);
+  assert.match(lifecycle.sql, /CHECK \(status IN \('open', 'cancelled'\)\)/i);
+  assert.match(lifecycle.sql, /CREATE INDEX IF NOT EXISTS idx_posts_open_service_projection/i);
+  assert.doesNotMatch(lifecycle.sql, /\b(?:DROP|DELETE|TRUNCATE|UPDATE|INSERT)\b/i);
 });
 
 test("README and package scripts match governed execution boundaries", () => {
