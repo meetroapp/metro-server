@@ -5,6 +5,10 @@ const {
   validateProfessionalResponsePayload,
 } = require("./requestRelationships");
 
+const {
+  ensureConversationWithClient,
+} = require("../conversations/conversationService");
+
 async function createProfessionalRequestRelationship({
   pool,
   professionalUserId,
@@ -368,6 +372,24 @@ async function updateHomeownerRelationshipStatus({
       };
     }
 
+    let conversation = null;
+
+    if (action === "accept") {
+      const conversationResult =
+        await ensureConversationWithClient({
+          client,
+          relationshipId,
+        });
+
+      if (!conversationResult.ok) {
+        throw new Error(
+          "The accepted relationship conversation could not be ensured."
+        );
+      }
+
+      conversation = conversationResult.conversation;
+    }
+
     await client.query("COMMIT");
 
     return {
@@ -375,6 +397,7 @@ async function updateHomeownerRelationshipStatus({
       status: 200,
       code: transition.code,
       relationship: updateResult.rows[0],
+      conversation,
     };
   } catch (error) {
     try {

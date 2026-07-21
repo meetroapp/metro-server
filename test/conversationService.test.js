@@ -4,7 +4,8 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const {
-  createConversation,
+  ensureConversation,
+  ensureConversationWithClient,
   getConversation,
   listHomeownerConversations,
   listProfessionalConversations,
@@ -112,7 +113,7 @@ test("active relationship creates one canonical conversation", async () => {
     }],
   });
 
-  const result = await createConversation({
+  const result = await ensureConversation({
     pool: fake.pool,
     relationshipId: 31,
   });
@@ -152,7 +153,7 @@ test("repeated creation resolves the existing conversation idempotently", async 
     }],
   });
 
-  const result = await createConversation({
+  const result = await ensureConversation({
     pool: fake.pool,
     relationshipId: "31",
   });
@@ -167,7 +168,7 @@ test("repeated creation resolves the existing conversation idempotently", async 
 test("invalid relationship identifiers fail before database access", async () => {
   let queried = false;
 
-  const result = await createConversation({
+  const result = await ensureConversation({
     pool: {
       async query() {
         queried = true;
@@ -192,7 +193,7 @@ test("conversation creation requires an active relationship", async () => {
     relationshipRows: [],
   });
 
-  const result = await createConversation({
+  const result = await ensureConversation({
     pool: fake.pool,
     relationshipId: 31,
   });
@@ -233,7 +234,7 @@ test("conversation creation rolls back and releases on persistence failure", asy
   });
 
   await assert.rejects(
-    createConversation({
+    ensureConversation({
       pool: fake.pool,
       relationshipId: 31,
     }),
@@ -452,7 +453,7 @@ test("invalid conversation identifiers fail before database access", async () =>
 
 test("conversation services validate the database dependency", async () => {
   await assert.rejects(
-    createConversation({
+    ensureConversation({
       pool: null,
       relationshipId: 31,
     }),
@@ -483,4 +484,128 @@ test("conversation services validate the database dependency", async () => {
     }),
     /database pool or client/
   );
+});
+
+
+test("client-level conversation ensure does not control the caller transaction", async () => {
+  const calls = [];
+
+  const client = {
+    async query(sql, params = []) {
+      const normalized = normalizeSql(sql);
+      calls.push({ sql: normalized, params });
+
+      if (
+        normalized.includes("FROM request_relationships") &&
+        normalized.includes("FOR UPDATE")
+      ) {
+        return {
+          rows: [{
+            id: 31,
+            post_id: 41,
+            homeowner_id: 7,
+            contractor_id: 80,
+            professional_user_id: 9,
+            status: "active",
+          }],
+        };
+      }
+
+      if (
+        normalized.includes("WITH inserted AS") &&
+        normalized.includes("INSERT INTO conversations")
+      ) {
+        return {
+          rows: [{
+            id: 51,
+            relationship_id: 31,
+            homeowner_id: 7,
+            contractor_id: 80,
+            professional_user_id: 9,
+            status: "active",
+            created: true,
+          }],
+        };
+      }
+
+      throw new Error(`Unexpected SQL: ${normalized}`);
+    },
+  };
+
+  const result = await ensureConversationWithClient({
+    client,
+    relationshipId: 31,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.code, "CONVERSATION_CREATED");
+
+  for (const transactionCommand of [
+    "BEGIN",
+    "COMMIT",
+    "ROLLBACK",
+  ]) {
+    assert.equal(
+      calls.some((call) => call.sql === transactionCommand),
+      false
+    );
+  }
+});
+
+test("client-level conversation ensure never releases a caller-owned client", async () => {
+  let released = false;
+
+  const client = {
+    async query(sql) {
+      const normalized = normalizeSql(sql);
+
+      if (
+        normalized.includes("FROM request_relationships") &&
+        normalized.includes("FOR UPDATE")
+      ) {
+        return {
+          rows: [{
+            id: 31,
+            post_id: 41,
+            homeowner_id: 7,
+            contractor_id: 80,
+            professional_user_id: 9,
+            status: "active",
+          }],
+        };
+      }
+
+      if (
+        normalized.includes("WITH inserted AS") &&
+        normalized.includes("INSERT INTO conversations")
+      ) {
+        return {
+          rows: [{
+            id: 51,
+            relationship_id: 31,
+            homeowner_id: 7,
+            contractor_id: 80,
+            professional_user_id: 9,
+            status: "active",
+            created: false,
+          }],
+        };
+      }
+
+      throw new Error(`Unexpected SQL: ${normalized}`);
+    },
+
+    release() {
+      released = true;
+    },
+  };
+
+  const result = await ensureConversationWithClient({
+    client,
+    relationshipId: 31,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.code, "CONVERSATION_EXISTS");
+  assert.equal(released, false);
 });

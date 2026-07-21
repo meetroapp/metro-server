@@ -10,7 +10,106 @@ function requireDatabasePool(pool) {
   }
 }
 
-async function createConversation({
+async function ensureConversationWithClient({
+  client,
+  relationshipId: rawRelationshipId,
+}) {
+  const relationshipId = parsePositiveInteger(rawRelationshipId);
+
+  if (!relationshipId) {
+    return {
+      ok: false,
+      status: 400,
+      code: "INVALID_RELATIONSHIP_ID",
+      message: "A valid relationship ID is required.",
+    };
+  }
+
+  requireDatabasePool(client);
+
+  const relationshipResult = await client.query(
+    `
+    SELECT
+      id,
+      post_id,
+      homeowner_id,
+      contractor_id,
+      professional_user_id,
+      status
+    FROM request_relationships
+    WHERE id = $1
+      AND status = 'active'
+    LIMIT 1
+    FOR UPDATE
+    `,
+    [relationshipId]
+  );
+
+  if (relationshipResult.rows.length === 0) {
+    return {
+      ok: false,
+      status: 404,
+      code: "ACTIVE_RELATIONSHIP_NOT_FOUND",
+      message: "An active relationship is required to create a conversation.",
+    };
+  }
+
+  const relationship = relationshipResult.rows[0];
+
+  const conversationResult = await client.query(
+    `
+    WITH inserted AS (
+      INSERT INTO conversations
+      (
+        relationship_id,
+        homeowner_id,
+        contractor_id,
+        professional_user_id,
+        status
+      )
+      VALUES ($1, $2, $3, $4, 'active')
+      ON CONFLICT (relationship_id)
+      DO NOTHING
+      RETURNING *, TRUE AS created
+    )
+    SELECT * FROM inserted
+
+    UNION ALL
+
+    SELECT conversations.*, FALSE AS created
+    FROM conversations
+    WHERE relationship_id = $1
+
+    LIMIT 1
+    `,
+    [
+      relationship.id,
+      relationship.homeowner_id,
+      relationship.contractor_id,
+      relationship.professional_user_id,
+    ]
+  );
+
+  const conversation = conversationResult.rows[0];
+
+  if (!conversation) {
+    throw new Error(
+      "The conversation could not be created or resolved."
+    );
+  }
+
+  return {
+    ok: true,
+    status: conversation.created ? 201 : 200,
+    code: conversation.created
+      ? "CONVERSATION_CREATED"
+      : "CONVERSATION_EXISTS",
+    created: Boolean(conversation.created),
+    conversation,
+  };
+}
+
+async function ensureConversation({
   pool,
   relationshipId: rawRelationshipId,
 }) {
@@ -35,90 +134,18 @@ async function createConversation({
   try {
     await client.query("BEGIN");
 
-    const relationshipResult = await client.query(
-      `
-      SELECT
-        id,
-        post_id,
-        homeowner_id,
-        contractor_id,
-        professional_user_id,
-        status
-      FROM request_relationships
-      WHERE id = $1
-        AND status = 'active'
-      LIMIT 1
-      FOR UPDATE
-      `,
-      [relationshipId]
-    );
+    const result = await ensureConversationWithClient({
+      client,
+      relationshipId,
+    });
 
-    if (relationshipResult.rows.length === 0) {
+    if (!result.ok) {
       await client.query("ROLLBACK");
-
-      return {
-        ok: false,
-        status: 404,
-        code: "ACTIVE_RELATIONSHIP_NOT_FOUND",
-        message: "An active relationship is required to create a conversation.",
-      };
-    }
-
-    const relationship = relationshipResult.rows[0];
-
-    const conversationResult = await client.query(
-      `
-      WITH inserted AS (
-        INSERT INTO conversations
-        (
-          relationship_id,
-          homeowner_id,
-          contractor_id,
-          professional_user_id,
-          status
-        )
-        VALUES ($1, $2, $3, $4, 'active')
-        ON CONFLICT (relationship_id)
-        DO NOTHING
-        RETURNING *, TRUE AS created
-      )
-      SELECT * FROM inserted
-
-      UNION ALL
-
-      SELECT conversations.*, FALSE AS created
-      FROM conversations
-      WHERE relationship_id = $1
-
-      LIMIT 1
-      `,
-      [
-        relationship.id,
-        relationship.homeowner_id,
-        relationship.contractor_id,
-        relationship.professional_user_id,
-      ]
-    );
-
-    const conversation = conversationResult.rows[0];
-
-    if (!conversation) {
-      throw new Error(
-        "The conversation could not be created or resolved."
-      );
+      return result;
     }
 
     await client.query("COMMIT");
-
-    return {
-      ok: true,
-      status: conversation.created ? 201 : 200,
-      code: conversation.created
-        ? "CONVERSATION_CREATED"
-        : "CONVERSATION_EXISTS",
-      created: Boolean(conversation.created),
-      conversation,
-    };
+    return result;
   } catch (error) {
     try {
       await client.query("ROLLBACK");
@@ -302,7 +329,8 @@ async function getConversation({
 }
 
 module.exports = {
-  createConversation,
+  ensureConversation,
+  ensureConversationWithClient,
   getConversation,
   listHomeownerConversations,
   listProfessionalConversations,

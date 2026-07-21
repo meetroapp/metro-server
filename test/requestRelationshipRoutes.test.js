@@ -689,6 +689,24 @@ function createRelationshipTransitionRoutePool({
     accepted_at: "2026-07-20T13:00:00.000Z",
     declined_at: null,
   }],
+  activeRelationshipRows = [{
+    id: 51,
+    post_id: 41,
+    homeowner_id: 7,
+    contractor_id: 80,
+    professional_user_id: 9,
+    status: "active",
+  }],
+  conversationRows = [{
+    id: 91,
+    relationship_id: 51,
+    homeowner_id: 7,
+    contractor_id: 80,
+    professional_user_id: 9,
+    status: "active",
+    created: true,
+  }],
+  failOn,
 } = {}) {
   const calls = [];
   let released = false;
@@ -697,6 +715,10 @@ function createRelationshipTransitionRoutePool({
     async query(text, values = []) {
       const sql = normalizeSql(text);
       calls.push({ sql, values });
+
+      if (failOn && sql.includes(failOn)) {
+        throw new Error("simulated route transition failure");
+      }
 
       if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql)) {
         return { rows: [] };
@@ -714,6 +736,21 @@ function createRelationshipTransitionRoutePool({
 
       if (sql.startsWith("UPDATE request_relationships")) {
         return { rows: updatedRows };
+      }
+
+      if (
+        sql.includes("FROM request_relationships") &&
+        sql.includes("status = 'active'") &&
+        sql.includes("FOR UPDATE")
+      ) {
+        return { rows: activeRelationshipRows };
+      }
+
+      if (
+        sql.includes("WITH inserted AS") &&
+        sql.includes("INSERT INTO conversations")
+      ) {
+        return { rows: conversationRows };
       }
 
       throw new Error(`Unexpected query: ${sql}`);
@@ -782,6 +819,11 @@ test("homeowner accept route activates the owned pending relationship", async ()
       accepted_at: "2026-07-20T13:00:00.000Z",
       conversation_available: true,
     },
+    conversation: {
+      id: 91,
+      relationship_id: 51,
+      status: "active",
+    },
   });
 
   assert.equal(
@@ -794,6 +836,24 @@ test("homeowner accept route activates the owned pending relationship", async ()
       result.body.relationship,
       "professional_user_id"
     ),
+    false
+  );
+
+  assert.equal(
+    Object.hasOwn(result.body.conversation, "homeowner_id"),
+    false
+  );
+
+  assert.equal(
+    Object.hasOwn(
+      result.body.conversation,
+      "professional_user_id"
+    ),
+    false
+  );
+
+  assert.equal(
+    Object.hasOwn(result.body.conversation, "contractor_id"),
     false
   );
 
@@ -1213,4 +1273,37 @@ test("active relationship cannot be withdrawn", async () => {
     result.body.code,
     "REQUEST_RELATIONSHIP_NOT_PENDING"
   );
+});
+
+
+test("accept route fails safely when canonical conversation persistence fails", async () => {
+  const fake = createRelationshipTransitionRoutePool({
+    failOn: "INSERT INTO conversations",
+  });
+
+  const result = await invokeHomeownerRelationshipTransition({
+    action: "accept",
+    userId: 7,
+    relationshipId: 51,
+    pool: fake.pool,
+  });
+
+  assert.equal(result.statusCode, 500);
+
+  assert.deepEqual(result.body, {
+    error: "REQUEST_RELATIONSHIP_ACCEPT_FAILED",
+    message: "The professional response could not be accepted.",
+  });
+
+  assert.equal(
+    fake.calls.some((call) => call.sql === "ROLLBACK"),
+    true
+  );
+
+  assert.equal(
+    fake.calls.some((call) => call.sql === "COMMIT"),
+    false
+  );
+
+  assert.equal(fake.wasReleased(), true);
 });

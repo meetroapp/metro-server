@@ -406,6 +406,23 @@ function createTransitionPool({
     status: "active",
     accepted_at: "2026-07-20T13:00:00.000Z",
   }],
+  activeRelationshipRows = [{
+    id: 51,
+    post_id: 41,
+    homeowner_id: 7,
+    contractor_id: 80,
+    professional_user_id: 9,
+    status: "active",
+  }],
+  conversationRows = [{
+    id: 91,
+    relationship_id: 51,
+    homeowner_id: 7,
+    contractor_id: 80,
+    professional_user_id: 9,
+    status: "active",
+    created: true,
+  }],
   failOn,
 } = {}) {
   const calls = [];
@@ -436,6 +453,21 @@ function createTransitionPool({
 
       if (sql.startsWith("UPDATE request_relationships")) {
         return { rows: updatedRows };
+      }
+
+      if (
+        sql.includes("FROM request_relationships") &&
+        sql.includes("status = 'active'") &&
+        sql.includes("FOR UPDATE")
+      ) {
+        return { rows: activeRelationshipRows };
+      }
+
+      if (
+        sql.includes("WITH inserted AS") &&
+        sql.includes("INSERT INTO conversations")
+      ) {
+        return { rows: conversationRows };
       }
 
       throw new Error(`Unexpected query: ${sql}`);
@@ -482,6 +514,18 @@ test("homeowner can accept a pending owned relationship", async () => {
   assert.equal(result.status, 200);
   assert.equal(result.code, "REQUEST_RELATIONSHIP_ACCEPTED");
   assert.equal(result.relationship.status, "active");
+  assert.equal(result.conversation.id, 91);
+  assert.equal(result.conversation.relationship_id, 51);
+
+  const conversationInsert = fake.calls.find((call) =>
+    call.sql.includes("INSERT INTO conversations")
+  );
+
+  assert.ok(conversationInsert);
+  assert.deepEqual(
+    conversationInsert.values,
+    [51, 7, 80, 9]
+  );
 
   const select = fake.calls.find((call) =>
     call.sql.includes("FROM request_relationships")
@@ -531,6 +575,14 @@ test("homeowner can decline a pending owned relationship", async () => {
   assert.equal(result.ok, true);
   assert.equal(result.code, "REQUEST_RELATIONSHIP_DECLINED");
   assert.equal(result.relationship.status, "declined");
+  assert.equal(result.conversation, null);
+
+  assert.equal(
+    fake.calls.some((call) =>
+      call.sql.includes("INSERT INTO conversations")
+    ),
+    false
+  );
 
   const update = fake.calls.find((call) =>
     call.sql.startsWith("UPDATE request_relationships")
@@ -810,4 +862,76 @@ test("professional cannot withdraw an active or completed relationship", async (
   assert.equal(result.ok, false);
   assert.equal(result.status, 409);
   assert.equal(result.code, "REQUEST_RELATIONSHIP_NOT_PENDING");
+});
+
+
+test("acceptance rolls back when conversation persistence fails", async () => {
+  const {
+    acceptHomeownerRequestRelationship,
+  } = require("../server/relationships/requestRelationshipService");
+
+  const fake = createTransitionPool({
+    failOn: "INSERT INTO conversations",
+  });
+
+  await assert.rejects(
+    acceptHomeownerRequestRelationship({
+      pool: fake.pool,
+      homeownerUserId: 7,
+      relationshipId: 51,
+    }),
+    /simulated transition failure/
+  );
+
+  assert.ok(
+    fake.calls.some((call) =>
+      call.sql.startsWith("UPDATE request_relationships")
+    )
+  );
+
+  assert.ok(
+    fake.calls.some((call) => call.sql === "ROLLBACK")
+  );
+
+  assert.equal(
+    fake.calls.some((call) => call.sql === "COMMIT"),
+    false
+  );
+
+  assert.equal(fake.wasReleased(), true);
+});
+
+test("acceptance resolves an existing canonical conversation idempotently", async () => {
+  const {
+    acceptHomeownerRequestRelationship,
+  } = require("../server/relationships/requestRelationshipService");
+
+  const fake = createTransitionPool({
+    conversationRows: [{
+      id: 91,
+      relationship_id: 51,
+      homeowner_id: 7,
+      contractor_id: 80,
+      professional_user_id: 9,
+      status: "active",
+      created: false,
+    }],
+  });
+
+  const result = await acceptHomeownerRequestRelationship({
+    pool: fake.pool,
+    homeownerUserId: 7,
+    relationshipId: 51,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.conversation.id, 91);
+  assert.equal(result.conversation.created, false);
+
+  assert.equal(
+    fake.calls.filter((call) =>
+      call.sql.includes("INSERT INTO conversations")
+    ).length,
+    1
+  );
 });

@@ -1794,6 +1794,11 @@ app.post(
           accepted_at: result.relationship.accepted_at,
           conversation_available: true,
         },
+        conversation: {
+          id: result.conversation.id,
+          relationship_id: result.conversation.relationship_id,
+          status: result.conversation.status,
+        },
       });
     } catch (error) {
       return sendPublicDatabaseError({
