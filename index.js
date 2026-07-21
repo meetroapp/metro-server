@@ -317,7 +317,11 @@ function getEmailDelivery(req) {
   return req.app?.locals?.emailDelivery || emailDelivery;
 }
 
-async function initiateSecurityVerification(req, account) {
+async function initiateSecurityVerification(
+  req,
+  account,
+  { preserveRecoveryContext = false } = {}
+) {
   const prepared = twoFactorChallengeStore.prepare(account.email, {
     accountId: account.id,
     passwordVerified: true,
@@ -350,8 +354,41 @@ async function initiateSecurityVerification(req, account) {
   }
 
   if (!deliveryResult?.accepted) {
-    twoFactorChallengeStore.cancel(prepared);
+    const recovery = preserveRecoveryContext
+      ? twoFactorChallengeStore.preserveForResend(prepared)
+      : null;
+
+    if (!recovery?.ok) {
+      twoFactorChallengeStore.cancel(prepared);
+    }
     logAuthFailure("security_verification_delivery", "DELIVERY_UNAVAILABLE", account.id);
+
+    if (recovery?.ok) {
+      return {
+        ok: false,
+        recoverable: true,
+        status: 201,
+        body: {
+          success: true,
+          code: "REGISTRATION_CREATED_VERIFICATION_SEND_FAILED",
+          verificationRequired: true,
+          verificationEmailSent: false,
+          message:
+            "Your account was created, but the verification code could not be sent.",
+          challengeId: recovery.challengeId,
+          maskedEmail: maskEmail(account.email),
+          expiresInSeconds: Math.max(
+            1,
+            Math.ceil((prepared.expiresAt - prepared.createdAt) / 1000)
+          ),
+          verification: {
+            resendAvailable: true,
+            retryAfterSeconds: 0,
+          },
+        },
+      };
+    }
+
     return {
       ok: false,
       status: 503,
@@ -788,7 +825,9 @@ app.post("/auth/signup", async (req, res) => {
     );
 
     const user = result.rows[0];
-    const verification = await initiateSecurityVerification(req, user);
+    const verification = await initiateSecurityVerification(req, user, {
+      preserveRecoveryContext: true,
+    });
     if (!verification.ok) {
       return res.status(verification.status).json(verification.body);
     }
@@ -796,9 +835,16 @@ app.post("/auth/signup", async (req, res) => {
     res.json({
       success: true,
       code: "VERIFICATION_REQUIRED",
+      verificationRequired: true,
+      verificationEmailSent: true,
+      message: "We sent a verification code to your email.",
       challengeId: verification.challengeId,
       maskedEmail: verification.maskedEmail,
       expiresInSeconds: verification.expiresInSeconds,
+      verification: {
+        resendAvailable: false,
+        retryAfterSeconds: 60,
+      },
     });
   } catch {
     logAuthFailure("signup", "SIGNUP_FAILED");
@@ -980,6 +1026,7 @@ app.post("/auth/request-2fa-code", twoFactorRequestRateLimiter, async (req, res)
         success: true,
         code: "TWO_FACTOR_REQUEST_ACCEPTED",
         message: "If verification is available, instructions will be sent.",
+        retryAfterSeconds: 60,
       });
     }
 
@@ -999,6 +1046,7 @@ app.post("/auth/request-2fa-code", twoFactorRequestRateLimiter, async (req, res)
         success: true,
         code: "TWO_FACTOR_REQUEST_ACCEPTED",
         message: "If verification is available, instructions will be sent.",
+        retryAfterSeconds: 60,
       });
     }
 
@@ -1014,6 +1062,7 @@ app.post("/auth/request-2fa-code", twoFactorRequestRateLimiter, async (req, res)
       maskedEmail: verification.maskedEmail,
       expiresInSeconds: verification.expiresInSeconds,
       message: "Verification code sent.",
+      retryAfterSeconds: 60,
     });
   } catch {
     logAuthFailure("two_factor_request", "TWO_FACTOR_REQUEST_FAILED");

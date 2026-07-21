@@ -353,6 +353,115 @@ test("valid signup hashes the password and issues JWT only after email verificat
   assert.equal(Object.hasOwn(completed.json.user, "password_hash"), false);
 });
 
+test("signup delivery failure truthfully preserves the created account and resend recovery", async () => {
+  const pool = await createFakePool();
+  const deliveredCodes = [];
+  let deliveryAccepted = false;
+  const delivery = {
+    async sendSecurityVerificationCode({ code }) {
+      deliveredCodes.push(code);
+      return deliveryAccepted
+        ? { accepted: true }
+        : { accepted: false, status: "private_provider_failure" };
+    },
+  };
+
+  const signup = await invokeRoute("post", "/auth/signup", {
+    pool,
+    body: {
+      username: "Recovery Business",
+      email: "recovery-business@example.test",
+      password: "ValidSignup12",
+      account_type: "professional",
+      business_name: "Recovery Business",
+      business_category: "contractor",
+    },
+    locals: { emailDelivery: delivery },
+  });
+
+  assert.equal(signup.status, 201);
+  assert.equal(signup.json.success, true);
+  assert.equal(
+    signup.json.code,
+    "REGISTRATION_CREATED_VERIFICATION_SEND_FAILED"
+  );
+  assert.equal(signup.json.verificationRequired, true);
+  assert.equal(signup.json.verificationEmailSent, false);
+  assert.equal(signup.json.verification.resendAvailable, true);
+  assert.equal(signup.json.verification.retryAfterSeconds, 0);
+  assert.equal(typeof signup.json.challengeId, "string");
+  assert.equal(JSON.stringify(signup.json).includes("private_provider_failure"), false);
+  assert.equal(Object.hasOwn(signup.json, "token"), false);
+  assert.equal(
+    [...pool.users.values()].some(
+      (user) => user.email === "recovery-business@example.test"
+    ),
+    true
+  );
+  assert.equal(twoFactorChallengeStore.size(), 1);
+
+  const undeliveredCode = await invokeRoute("post", "/auth/verify-code", {
+    pool,
+    body: {
+      email: "recovery-business@example.test",
+      challengeId: signup.json.challengeId,
+      code: deliveredCodes[0],
+    },
+  });
+  assert.equal(undeliveredCode.status, 400);
+  assert.equal(undeliveredCode.json.code, "MISSING_CHALLENGE");
+
+  const failedResend = await invokeRoute("post", "/auth/request-2fa-code", {
+    pool,
+    body: {
+      email: "recovery-business@example.test",
+      challengeId: signup.json.challengeId,
+    },
+    locals: { emailDelivery: delivery },
+  });
+
+  assert.equal(failedResend.status, 503);
+  assert.equal(failedResend.json.code, "VERIFICATION_DELIVERY_UNAVAILABLE");
+  assert.equal(JSON.stringify(failedResend.json).includes("private_provider_failure"), false);
+
+  deliveryAccepted = true;
+  const resend = await invokeRoute("post", "/auth/request-2fa-code", {
+    pool,
+    body: {
+      email: "recovery-business@example.test",
+      challengeId: signup.json.challengeId,
+    },
+    locals: { emailDelivery: delivery },
+  });
+
+  assert.equal(resend.status, 200);
+  assert.equal(resend.json.code, "VERIFICATION_CODE_SENT");
+  assert.equal(resend.json.retryAfterSeconds, 60);
+  assert.notEqual(resend.json.challengeId, signup.json.challengeId);
+  assert.equal(deliveredCodes.length, 3);
+
+  const oldChallenge = await invokeRoute("post", "/auth/verify-code", {
+    pool,
+    body: {
+      email: "recovery-business@example.test",
+      challengeId: signup.json.challengeId,
+      code: deliveredCodes[0],
+    },
+  });
+  assert.equal(oldChallenge.json.code, "MISSING_CHALLENGE");
+
+  const completed = await invokeRoute("post", "/auth/verify-code", {
+    pool,
+    body: {
+      email: "recovery-business@example.test",
+      challengeId: resend.json.challengeId,
+      code: deliveredCodes[2],
+    },
+  });
+  assert.equal(completed.status, 200);
+  assert.equal(completed.json.code, "AUTHENTICATION_COMPLETE");
+});
+
 test("password change rejects unauthenticated, missing, incorrect, reused, and weak requests", async () => {
   const pool = await createFakePool();
   const token = createToken(pool.users.get(1));
@@ -684,12 +793,14 @@ test("password reset routes enforce bounded limits without storing raw identity 
 test("2FA delivery never exposes codes and verification is challenge-bound and single-use", async () => {
   const pool = await createFakePool();
   let delivered;
+  let deliveryCalls = 0;
   const requested = await invokeRoute("post", "/auth/login", {
     pool,
     body: { email: "personal@example.test", password: "CurrentPass12" },
     locals: {
       emailDelivery: {
         async sendSecurityVerificationCode(payload) {
+          deliveryCalls += 1;
           delivered = payload;
           return { accepted: true };
         },
@@ -729,6 +840,31 @@ test("2FA delivery never exposes codes and verification is challenge-bound and s
   assert.equal(replay.status, 400);
   assert.equal(replay.json.code, "MISSING_CHALLENGE");
   assert.equal(Object.hasOwn(replay.json, "token"), false);
+
+  const resendAfterCompletion = await invokeRoute(
+    "post",
+    "/auth/request-2fa-code",
+    {
+      pool,
+      body: {
+        email: "personal@example.test",
+        challengeId: requested.json.challengeId,
+      },
+      locals: {
+        emailDelivery: {
+          async sendSecurityVerificationCode() {
+            deliveryCalls += 1;
+            return { accepted: true };
+          },
+        },
+      },
+    }
+  );
+  assert.equal(resendAfterCompletion.status, 202);
+  assert.equal(resendAfterCompletion.json.code, "TWO_FACTOR_REQUEST_ACCEPTED");
+  assert.equal(resendAfterCompletion.json.retryAfterSeconds, 60);
+  assert.equal(deliveryCalls, 1);
+  assert.equal(twoFactorChallengeStore.size(), 0);
 });
 
 test("login delivery failure leaves no active challenge and a later retry can succeed", async () => {
@@ -824,6 +960,7 @@ test("resend requires prior challenge context and enforces the send cooldown", a
   });
   assert.equal(unrelated.status, 202);
   assert.equal(unrelated.json.code, "TWO_FACTOR_REQUEST_ACCEPTED");
+  assert.equal(unrelated.json.retryAfterSeconds, 60);
   assert.equal(delivery.calls, 1);
 });
 

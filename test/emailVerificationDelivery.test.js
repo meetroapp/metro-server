@@ -175,6 +175,45 @@ test("challenge activation occurs after delivery and stores no plaintext code", 
   );
 });
 
+test("failed registration delivery can retain an opaque resend-only context", () => {
+  const store = createTwoFactorChallengeStore({
+    codeGenerator: () => "654321",
+    idGenerator: () => "recovery-challenge",
+  });
+
+  const prepared = store.prepare("person@example.test", {
+    accountId: 7,
+    passwordVerified: true,
+    tokenVersionSnapshot: 3,
+  });
+  const recovery = store.preserveForResend(prepared);
+
+  assert.deepEqual(recovery, {
+    ok: true,
+    challengeId: "recovery-challenge",
+    expiresAt: prepared.expiresAt,
+  });
+  assert.equal(store.hasStoredPlaintextCode(), false);
+  assert.equal(
+    store.verify({
+      challengeId: recovery.challengeId,
+      identity: "person@example.test",
+      code: "654321",
+    }).code,
+    TWO_FACTOR_FAILURE.MISSING_CHALLENGE
+  );
+  assert.equal(
+    store.getActiveSession({
+      challengeId: recovery.challengeId,
+      identity: "person@example.test",
+    }).passwordVerified,
+    true
+  );
+
+  const replacement = store.prepare("person@example.test");
+  assert.equal(replacement.ok, true);
+});
+
 test("failed provisional delivery can retry and successful sends obey the bounded window", () => {
   let currentTime = 0;
   let challengeNumber = 0;

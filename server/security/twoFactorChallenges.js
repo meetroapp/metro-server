@@ -132,12 +132,37 @@ function createTwoFactorChallengeStore({
     delete prepared.deliveryCode;
     void deliveryCode;
     void ok;
-    challenges.set(storedChallenge.challengeId, storedChallenge);
+    challenges.set(storedChallenge.challengeId, {
+      ...storedChallenge,
+      verificationCodeActive: true,
+    });
     pendingDeliveries.delete(prepared.identity);
     successfulSends.set(prepared.identity, [
       ...(successfulSends.get(prepared.identity) || []),
       now(),
     ]);
+
+    return {
+      ok: true,
+      challengeId: storedChallenge.challengeId,
+      expiresAt: storedChallenge.expiresAt,
+    };
+  }
+
+  function preserveForResend(prepared) {
+    if (!prepared || pendingDeliveries.get(prepared.identity) !== prepared.challengeId) {
+      return { ok: false, code: TWO_FACTOR_FAILURE.MISSING_CHALLENGE };
+    }
+
+    const { deliveryCode, ok, ...storedChallenge } = prepared;
+    delete prepared.deliveryCode;
+    void deliveryCode;
+    void ok;
+    challenges.set(storedChallenge.challengeId, {
+      ...storedChallenge,
+      verificationCodeActive: false,
+    });
+    pendingDeliveries.delete(prepared.identity);
 
     return {
       ok: true,
@@ -161,6 +186,9 @@ function createTwoFactorChallengeStore({
   function verify({ challengeId, identity, code }) {
     const challenge = challenges.get(String(challengeId || ""));
     if (!challenge) return { ok: false, code: TWO_FACTOR_FAILURE.MISSING_CHALLENGE };
+    if (challenge.verificationCodeActive === false) {
+      return { ok: false, code: TWO_FACTOR_FAILURE.MISSING_CHALLENGE };
+    }
     if (challenge.consumedAt) return { ok: false, code: TWO_FACTOR_FAILURE.CHALLENGE_USED };
     if (challenge.expiresAt <= now()) {
       challenges.delete(challenge.challengeId);
@@ -241,6 +269,7 @@ function createTwoFactorChallengeStore({
     ),
     issue,
     prepare,
+    preserveForResend,
     remove,
     size: () => challenges.size,
     verify,
