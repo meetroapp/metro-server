@@ -56,6 +56,22 @@ const {
   validateRequestPayload,
 } = require("./server/requests/requestLifecycle");
 
+const {
+  serializePendingRelationshipForHomeowner,
+  serializeRelationshipForProfessional,
+} = require("./server/relationships/requestRelationships");
+
+
+const {
+  acceptHomeownerRequestRelationship,
+  createProfessionalRequestRelationship,
+  declineHomeownerRequestRelationship,
+  listHomeownerRequestRelationships,
+  listProfessionalRequestRelationships,
+  withdrawProfessionalRequestRelationship,
+} = require("./server/relationships/requestRelationshipService");
+
+
 const JWT_SECRET = resolveJwtSecret(process.env);
 const BCRYPT_ROUNDS = 10;
 
@@ -1648,6 +1664,239 @@ app.put("/contractor-profiles/:id", authMiddleware, async (req, res) => {
     });
   }
 });
+
+
+
+
+app.get(
+  "/professional-request-relationships",
+  authMiddleware,
+  async (req, res) => {
+    try {
+      const rows = await listProfessionalRequestRelationships({
+        pool: getPool(req),
+        professionalUserId: req.user.id,
+      });
+
+      return res.json({
+        success: true,
+        relationships: rows.map(
+          serializeRelationshipForProfessional
+        ),
+      });
+    } catch (error) {
+      return sendPublicDatabaseError({
+        res,
+        error,
+        operation: "fetch_professional_request_relationships",
+        code: "PROFESSIONAL_RELATIONSHIPS_FETCH_FAILED",
+        message: "Professional request relationships could not be loaded.",
+      });
+    }
+  }
+);
+
+app.post(
+  "/request-relationships/:relationshipId/withdraw",
+  authMiddleware,
+  async (req, res) => {
+    try {
+      const result = await withdrawProfessionalRequestRelationship({
+        pool: getPool(req),
+        professionalUserId: req.user.id,
+        relationshipId: req.params.relationshipId,
+      });
+
+      if (!result.ok) {
+        return res.status(result.status).json({
+          success: false,
+          code: result.code,
+          message: result.message,
+        });
+      }
+
+      return res.status(result.status).json({
+        success: true,
+        code: result.code,
+        relationship: {
+          id: result.relationship.id,
+          request_id: result.relationship.post_id,
+          contractor_id: result.relationship.contractor_id,
+          status: result.relationship.status,
+          withdrawn_at: result.relationship.withdrawn_at,
+          conversation_available: false,
+        },
+      });
+    } catch (error) {
+      return sendPublicDatabaseError({
+        res,
+        error,
+        operation: "withdraw_request_relationship",
+        code: "REQUEST_RELATIONSHIP_WITHDRAW_FAILED",
+        message: "The professional response could not be withdrawn.",
+      });
+    }
+  }
+);
+
+app.get("/my-request-relationships", authMiddleware, async (req, res) => {
+  try {
+    const rows = await listHomeownerRequestRelationships({
+      pool: getPool(req),
+      homeownerUserId: req.user.id,
+    });
+
+    return res.json({
+      success: true,
+      relationships: rows.map(
+        serializePendingRelationshipForHomeowner
+      ),
+    });
+  } catch (error) {
+    return sendPublicDatabaseError({
+      res,
+      error,
+      operation: "fetch_homeowner_request_relationships",
+      code: "REQUEST_RELATIONSHIPS_FETCH_FAILED",
+      message: "Professional responses could not be loaded.",
+    });
+  }
+});
+
+
+app.post(
+  "/request-relationships/:relationshipId/accept",
+  authMiddleware,
+  async (req, res) => {
+    try {
+      const result = await acceptHomeownerRequestRelationship({
+        pool: getPool(req),
+        homeownerUserId: req.user.id,
+        relationshipId: req.params.relationshipId,
+      });
+
+      if (!result.ok) {
+        return res.status(result.status).json({
+          success: false,
+          code: result.code,
+          message: result.message,
+        });
+      }
+
+      return res.status(result.status).json({
+        success: true,
+        code: result.code,
+        relationship: {
+          id: result.relationship.id,
+          request_id: result.relationship.post_id,
+          contractor_id: result.relationship.contractor_id,
+          status: result.relationship.status,
+          accepted_at: result.relationship.accepted_at,
+          conversation_available: true,
+        },
+      });
+    } catch (error) {
+      return sendPublicDatabaseError({
+        res,
+        error,
+        operation: "accept_request_relationship",
+        code: "REQUEST_RELATIONSHIP_ACCEPT_FAILED",
+        message: "The professional response could not be accepted.",
+      });
+    }
+  }
+);
+
+app.post(
+  "/request-relationships/:relationshipId/decline",
+  authMiddleware,
+  async (req, res) => {
+    try {
+      const result = await declineHomeownerRequestRelationship({
+        pool: getPool(req),
+        homeownerUserId: req.user.id,
+        relationshipId: req.params.relationshipId,
+      });
+
+      if (!result.ok) {
+        return res.status(result.status).json({
+          success: false,
+          code: result.code,
+          message: result.message,
+        });
+      }
+
+      return res.status(result.status).json({
+        success: true,
+        code: result.code,
+        relationship: {
+          id: result.relationship.id,
+          request_id: result.relationship.post_id,
+          contractor_id: result.relationship.contractor_id,
+          status: result.relationship.status,
+          declined_at: result.relationship.declined_at,
+          conversation_available: false,
+        },
+      });
+    } catch (error) {
+      return sendPublicDatabaseError({
+        res,
+        error,
+        operation: "decline_request_relationship",
+        code: "REQUEST_RELATIONSHIP_DECLINE_FAILED",
+        message: "The professional response could not be declined.",
+      });
+    }
+  }
+);
+
+app.post(
+  "/professional-request-opportunities/:postId/respond",
+  authMiddleware,
+  async (req, res) => {
+    try {
+      const result = await createProfessionalRequestRelationship({
+        pool: getPool(req),
+        professionalUserId: req.user.id,
+        postId: req.params.postId,
+        payload: req.body,
+        professionalCanSeeRequest,
+      });
+
+      if (!result.ok) {
+        return res.status(result.status).json({
+          success: false,
+          code: result.code,
+          message: result.message,
+        });
+      }
+
+      return res.status(result.status).json({
+        success: true,
+        code: result.code,
+        relationship: {
+          id: result.relationship.id,
+          request_id: result.relationship.post_id,
+          contractor_id: result.relationship.contractor_id,
+          status: result.relationship.status,
+          introduction_text: result.relationship.introduction_text,
+          created_at: result.relationship.created_at,
+          responded_at: result.relationship.responded_at,
+          conversation_available: false,
+        },
+        created: result.created,
+      });
+    } catch (error) {
+      return sendPublicDatabaseError({
+        res,
+        error,
+        operation: "create_professional_request_relationship",
+        code: "REQUEST_RELATIONSHIP_CREATE_FAILED",
+        message: "The professional response could not be created.",
+      });
+    }
+  }
+);
 
 app.post("/quote-requests", authMiddleware, async (req, res) => {
   try {

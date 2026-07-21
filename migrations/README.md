@@ -26,6 +26,7 @@ Current inventory:
 6. `202607190001_add_user_profile_photo_details.sql`
 7. `202607190002_add_post_request_photos.sql`
 8. `202607200001_add_post_request_lifecycle.sql`
+9. `202607200002_create_request_relationships.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
