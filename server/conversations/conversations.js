@@ -164,6 +164,66 @@ function serializeConversationSummaryForProfessional(row = {}) {
   };
 }
 
+
+function serializeConversationDetail(row = {}, viewerUserId) {
+  const viewerIsHomeowner =
+    String(row.homeowner_id) === String(viewerUserId);
+
+  const viewerIsProfessional =
+    String(row.professional_user_id) === String(viewerUserId);
+
+  if (!viewerIsHomeowner && !viewerIsProfessional) {
+    throw new TypeError(
+      "The conversation viewer must be an authorized participant."
+    );
+  }
+
+  return {
+    conversation: {
+      id: row.id,
+      type: "request",
+      status: row.status,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      closedAt: row.closed_at || null,
+    },
+    participants: {
+      viewer: {
+        id: viewerUserId,
+        role: viewerIsHomeowner
+          ? "homeowner"
+          : "professional",
+      },
+      homeowner: {
+        id: row.homeowner_id,
+        displayName:
+          row.homeowner_display_name || "Customer",
+      },
+      business: {
+        id: row.contractor_id,
+        userId: row.professional_user_id,
+        name: row.business_name || "",
+        imageUrl: row.business_image_url || "",
+        category: row.professional_category || "",
+      },
+    },
+    relationship: {
+      id: row.relationship_id,
+      requestId: row.post_id,
+      title: row.request_title || "",
+    },
+    workflow: {
+      status: null,
+      stage: null,
+    },
+    permissions: {
+      canRead: true,
+      canSendMessages: false,
+      canManageWorkflow: false,
+    },
+  };
+}
+
 module.exports = {
   CONVERSATION_STATUSES,
   CONVERSATION_STATUS_VALUES,
@@ -176,6 +236,7 @@ module.exports = {
   participantArchiveField,
   serializeConversationForHomeowner,
   serializeConversationForProfessional,
+  serializeConversationDetail,
   serializeConversationSummaryForHomeowner,
   serializeConversationSummaryForProfessional,
   validateConversationStatus,

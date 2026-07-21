@@ -57,6 +57,7 @@ const {
 } = require("./server/requests/requestLifecycle");
 
 const {
+  serializeConversationDetail,
   serializeConversationSummaryForHomeowner,
   serializeConversationSummaryForProfessional,
 } = require("./server/conversations/conversations");
@@ -68,6 +69,7 @@ const {
 
 
 const {
+  getConversation,
   listHomeownerConversations,
   listProfessionalConversations,
 } = require("./server/conversations/conversationService");
@@ -1754,6 +1756,42 @@ app.get("/conversations", authMiddleware, async (req, res) => {
       operation: "fetch_conversation_inbox",
       code: "CONVERSATIONS_FETCH_FAILED",
       message: "Conversations could not be loaded.",
+    });
+  }
+});
+
+
+
+app.get("/conversations/:conversationId", authMiddleware, async (req, res) => {
+  try {
+    const result = await getConversation({
+      pool: getPool(req),
+      conversationId: req.params.conversationId,
+      participantUserId: req.user.id,
+    });
+
+    if (!result.ok) {
+      return res.status(result.status).json({
+        success: false,
+        code: result.code,
+        message: result.message,
+      });
+    }
+
+    return res.json({
+      success: true,
+      ...serializeConversationDetail(
+        result.conversation,
+        req.user.id
+      ),
+    });
+  } catch (err) {
+    return sendPublicDatabaseError({
+      res,
+      error: err,
+      operation: "fetch_conversation_detail",
+      code: "CONVERSATION_DETAIL_FETCH_FAILED",
+      message: "The conversation could not be loaded.",
     });
   }
 });

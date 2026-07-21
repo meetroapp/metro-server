@@ -15,6 +15,7 @@ const {
   participantArchiveField,
   serializeConversationForHomeowner,
   serializeConversationForProfessional,
+  serializeConversationDetail,
   serializeConversationSummaryForHomeowner,
   serializeConversationSummaryForProfessional,
   validateConversationStatus,
@@ -359,5 +360,134 @@ test("closed conversation summaries remain available but not active", () => {
   assert.equal(
     homeowner.last_activity,
     "2026-07-20T14:00:00.000Z"
+  );
+});
+
+
+test("conversation detail serializer exposes canonical participant-scoped data", () => {
+  const row = {
+    id: 91,
+    relationship_id: 51,
+    post_id: 41,
+    homeowner_id: 7,
+    contractor_id: 80,
+    professional_user_id: 9,
+    status: "active",
+    request_title: "Drywall Repair",
+    homeowner_display_name: "William Molina",
+    business_name: "Trusted Repairs",
+    business_image_url: "https://example.test/logo.jpg",
+    professional_category: "handyman",
+    homeowner_archived_at: null,
+    professional_archived_at: null,
+    created_at: "2026-07-20T14:00:00.000Z",
+    updated_at: "2026-07-22T14:00:00.000Z",
+    closed_at: null,
+  };
+
+  assert.deepEqual(
+    serializeConversationDetail(row, 7),
+    {
+      conversation: {
+        id: 91,
+        type: "request",
+        status: "active",
+        createdAt: "2026-07-20T14:00:00.000Z",
+        updatedAt: "2026-07-22T14:00:00.000Z",
+        closedAt: null,
+      },
+      participants: {
+        viewer: {
+          id: 7,
+          role: "homeowner",
+        },
+        homeowner: {
+          id: 7,
+          displayName: "William Molina",
+        },
+        business: {
+          id: 80,
+          userId: 9,
+          name: "Trusted Repairs",
+          imageUrl: "https://example.test/logo.jpg",
+          category: "handyman",
+        },
+      },
+      relationship: {
+        id: 51,
+        requestId: 41,
+        title: "Drywall Repair",
+      },
+      workflow: {
+        status: null,
+        stage: null,
+      },
+      permissions: {
+        canRead: true,
+        canSendMessages: false,
+        canManageWorkflow: false,
+      },
+    }
+  );
+
+  const serialized =
+    serializeConversationDetail(row, 7);
+
+  for (const internalField of [
+    "homeowner_id",
+    "professional_user_id",
+    "contractor_id",
+    "homeowner_archived_at",
+    "professional_archived_at",
+    "post_id",
+    "relationship_id",
+  ]) {
+    assert.equal(
+      Object.hasOwn(serialized, internalField),
+      false
+    );
+  }
+});
+
+test("conversation detail serializer identifies the professional viewer", () => {
+  const detail = serializeConversationDetail(
+    {
+      id: 91,
+      relationship_id: 51,
+      post_id: 41,
+      homeowner_id: 7,
+      contractor_id: 80,
+      professional_user_id: 9,
+      status: "active",
+      request_title: "Drywall Repair",
+      homeowner_display_name: "William Molina",
+      business_name: "Trusted Repairs",
+      created_at: "2026-07-20T14:00:00.000Z",
+      updated_at: "2026-07-22T14:00:00.000Z",
+    },
+    9
+  );
+
+  assert.deepEqual(detail.participants.viewer, {
+    id: 9,
+    role: "professional",
+  });
+
+  assert.equal(detail.permissions.canRead, true);
+  assert.equal(detail.permissions.canSendMessages, false);
+  assert.equal(detail.permissions.canManageWorkflow, false);
+});
+
+test("conversation detail serializer rejects a non-participant viewer", () => {
+  assert.throws(
+    () =>
+      serializeConversationDetail(
+        {
+          homeowner_id: 7,
+          professional_user_id: 9,
+        },
+        10
+      ),
+    /authorized participant/
   );
 });

@@ -462,3 +462,397 @@ test("conversation inbox database failures use the safe public contract", async 
     message: "Conversations could not be loaded.",
   });
 });
+
+
+async function invokeConversationDetail({
+  userId = 7,
+  conversationId = "91",
+  pool,
+  authenticated = true,
+} = {}) {
+  const user = {
+    id: userId,
+    email: `user${userId}@example.test`,
+    role: "user",
+    token_version: 0,
+  };
+
+  app.locals.pool = pool;
+
+  const req = {
+    app,
+    params: {
+      conversationId,
+    },
+    headers: authenticated
+      ? {
+          authorization: `Bearer ${createToken(user)}`,
+        }
+      : {},
+  };
+
+  const res = response();
+
+  try {
+    for (
+      const handler of getHandlers(
+        "get",
+        "/conversations/:conversationId"
+      )
+    ) {
+      if (res.finished) break;
+
+      if (handler.length < 3) {
+        await handler(req, res);
+        continue;
+      }
+
+      await new Promise((resolve, reject) => {
+        const next = (error) =>
+          error ? reject(error) : resolve();
+
+        Promise.resolve(
+          handler(req, res, next)
+        ).then(
+          () => {
+            if (res.finished) resolve();
+          },
+          reject
+        );
+      });
+    }
+
+    return res;
+  } finally {
+    delete app.locals.pool;
+  }
+}
+
+function createConversationDetailRoutePool({
+  conversationRows,
+  failOn,
+} = {}) {
+  const calls = [];
+
+  const defaultRows = [{
+    id: 91,
+    relationship_id: 51,
+    post_id: 41,
+    homeowner_id: 7,
+    contractor_id: 80,
+    professional_user_id: 9,
+    status: "active",
+    request_title: "Drywall Repair",
+    homeowner_display_name: "William Molina",
+    business_name: "Trusted Repairs",
+    business_image_url: "https://example.test/logo.jpg",
+    professional_category: "handyman",
+    homeowner_archived_at: null,
+    professional_archived_at: null,
+    created_at: "2026-07-20T14:00:00.000Z",
+    updated_at: "2026-07-22T14:00:00.000Z",
+    closed_at: null,
+  }];
+
+  return {
+    calls,
+
+    pool: {
+      async query(text, values = []) {
+        const sql = normalizeSql(text);
+        calls.push({ sql, values });
+
+        if (failOn && sql.includes(failOn)) {
+          throw new Error(
+            "simulated conversation detail failure"
+          );
+        }
+
+        if (
+          sql.includes(
+            "SELECT id, email, role, token_version"
+          ) &&
+          sql.includes("FROM users")
+        ) {
+          return {
+            rows: [{
+              id: values[0],
+              email: `user${values[0]}@example.test`,
+              role: "user",
+              token_version: 0,
+            }],
+          };
+        }
+
+        if (
+          sql.includes("FROM conversations") &&
+          sql.includes(
+            "WHERE conversations.id = $1"
+          )
+        ) {
+          return {
+            rows:
+              conversationRows === undefined
+                ? defaultRows
+                : conversationRows,
+          };
+        }
+
+        throw new Error(`Unexpected SQL: ${sql}`);
+      },
+    },
+  };
+}
+
+test("homeowner participant receives canonical conversation detail", async () => {
+  const fake = createConversationDetailRoutePool();
+
+  const result = await invokeConversationDetail({
+    userId: 7,
+    conversationId: "91",
+    pool: fake.pool,
+  });
+
+  assert.equal(result.statusCode, 200);
+
+  assert.deepEqual(result.body, {
+    success: true,
+    conversation: {
+      id: 91,
+      type: "request",
+      status: "active",
+      createdAt: "2026-07-20T14:00:00.000Z",
+      updatedAt: "2026-07-22T14:00:00.000Z",
+      closedAt: null,
+    },
+    participants: {
+      viewer: {
+        id: 7,
+        role: "homeowner",
+      },
+      homeowner: {
+        id: 7,
+        displayName: "William Molina",
+      },
+      business: {
+        id: 80,
+        userId: 9,
+        name: "Trusted Repairs",
+        imageUrl: "https://example.test/logo.jpg",
+        category: "handyman",
+      },
+    },
+    relationship: {
+      id: 51,
+      requestId: 41,
+      title: "Drywall Repair",
+    },
+    workflow: {
+      status: null,
+      stage: null,
+    },
+    permissions: {
+      canRead: true,
+      canSendMessages: false,
+      canManageWorkflow: false,
+    },
+  });
+
+  const detailCall = fake.calls.find((call) =>
+    call.sql.includes(
+      "WHERE conversations.id = $1"
+    )
+  );
+
+  assert.ok(detailCall);
+  assert.deepEqual(detailCall.values, [91, 7]);
+});
+
+test("professional participant receives canonical conversation detail", async () => {
+  const fake = createConversationDetailRoutePool();
+
+  const result = await invokeConversationDetail({
+    userId: 9,
+    conversationId: "91",
+    pool: fake.pool,
+  });
+
+  assert.equal(result.statusCode, 200);
+
+  assert.deepEqual(
+    result.body.participants.viewer,
+    {
+      id: 9,
+      role: "professional",
+    }
+  );
+
+  assert.equal(
+    result.body.participants.business.userId,
+    9
+  );
+
+  const detailCall = fake.calls.find((call) =>
+    call.sql.includes(
+      "WHERE conversations.id = $1"
+    )
+  );
+
+  assert.ok(detailCall);
+  assert.deepEqual(detailCall.values, [91, 9]);
+});
+
+test("non-participant receives the protected not-found response", async () => {
+  const fake = createConversationDetailRoutePool({
+    conversationRows: [],
+  });
+
+  const result = await invokeConversationDetail({
+    userId: 10,
+    conversationId: "91",
+    pool: fake.pool,
+  });
+
+  assert.equal(result.statusCode, 404);
+
+  assert.deepEqual(result.body, {
+    success: false,
+    code: "CONVERSATION_NOT_FOUND",
+    message: "The conversation was not found.",
+  });
+
+  const detailCall = fake.calls.find((call) =>
+    call.sql.includes(
+      "WHERE conversations.id = $1"
+    )
+  );
+
+  assert.ok(detailCall);
+  assert.deepEqual(detailCall.values, [91, 10]);
+});
+
+test("unknown conversation returns canonical not-found behavior", async () => {
+  const fake = createConversationDetailRoutePool({
+    conversationRows: [],
+  });
+
+  const result = await invokeConversationDetail({
+    userId: 7,
+    conversationId: "999999",
+    pool: fake.pool,
+  });
+
+  assert.equal(result.statusCode, 404);
+
+  assert.deepEqual(result.body, {
+    success: false,
+    code: "CONVERSATION_NOT_FOUND",
+    message: "The conversation was not found.",
+  });
+});
+
+test("invalid conversation identifier preserves service validation behavior", async () => {
+  const fake = createConversationDetailRoutePool();
+
+  const result = await invokeConversationDetail({
+    userId: 7,
+    conversationId: "invalid",
+    pool: fake.pool,
+  });
+
+  assert.equal(result.statusCode, 400);
+
+  assert.deepEqual(result.body, {
+    success: false,
+    code: "INVALID_CONVERSATION_ID",
+    message: "A valid conversation ID is required.",
+  });
+
+  assert.equal(
+    fake.calls.some((call) =>
+      call.sql.includes(
+        "WHERE conversations.id = $1"
+      )
+    ),
+    false
+  );
+});
+
+test("conversation detail requires authentication", async () => {
+  let queried = false;
+
+  const result = await invokeConversationDetail({
+    authenticated: false,
+    pool: {
+      async query() {
+        queried = true;
+        return { rows: [] };
+      },
+    },
+  });
+
+  assert.equal(result.statusCode, 401);
+  assert.equal(queried, false);
+
+  assert.deepEqual(result.body, {
+    success: false,
+    code: "AUTHENTICATION_REQUIRED",
+    message: "Authentication required.",
+  });
+});
+
+test("conversation detail does not expose raw persistence fields", async () => {
+  const fake = createConversationDetailRoutePool();
+
+  const result = await invokeConversationDetail({
+    userId: 7,
+    conversationId: "91",
+    pool: fake.pool,
+  });
+
+  assert.equal(result.statusCode, 200);
+
+  for (const internalField of [
+    "homeowner_id",
+    "professional_user_id",
+    "contractor_id",
+    "homeowner_archived_at",
+    "professional_archived_at",
+    "relationship_id",
+    "post_id",
+  ]) {
+    assert.equal(
+      Object.hasOwn(result.body, internalField),
+      false
+    );
+
+    assert.equal(
+      Object.hasOwn(
+        result.body.conversation,
+        internalField
+      ),
+      false
+    );
+  }
+});
+
+test("existing conversation inbox remains independently available", () => {
+  assert.doesNotThrow(() =>
+    getHandlers("get", "/conversations")
+  );
+
+  assert.doesNotThrow(() =>
+    getHandlers(
+      "get",
+      "/conversations/:conversationId"
+    )
+  );
+
+  assert.notEqual(
+    getHandlers("get", "/conversations"),
+    getHandlers(
+      "get",
+      "/conversations/:conversationId"
+    )
+  );
+});
