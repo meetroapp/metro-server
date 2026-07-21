@@ -184,12 +184,15 @@ async function listHomeownerConversations({
       conversations.updated_at,
       contractor_profiles.business_name,
       contractor_profiles.image_url AS business_image_url,
-      contractor_profiles.category AS professional_category
+      contractor_profiles.category AS professional_category,
+      posts.title AS request_title
     FROM conversations
     JOIN contractor_profiles
       ON conversations.contractor_id = contractor_profiles.id
     JOIN request_relationships
       ON conversations.relationship_id = request_relationships.id
+    JOIN posts
+      ON request_relationships.post_id = posts.id
     WHERE conversations.homeowner_id = $1
       AND request_relationships.homeowner_id = $1
       AND (

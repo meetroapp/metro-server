@@ -15,6 +15,8 @@ const {
   participantArchiveField,
   serializeConversationForHomeowner,
   serializeConversationForProfessional,
+  serializeConversationSummaryForHomeowner,
+  serializeConversationSummaryForProfessional,
   validateConversationStatus,
 } = require("../server/conversations/conversations");
 
@@ -230,5 +232,132 @@ test("professional serializer exposes only the professional archive state", () =
   assert.equal(
     Object.hasOwn(serialized, "homeowner_archived_at"),
     false
+  );
+});
+
+
+test("homeowner conversation summary exposes UI-safe relationship and business context", () => {
+  const summary = serializeConversationSummaryForHomeowner({
+    id: 91,
+    relationship_id: 51,
+    homeowner_id: 7,
+    professional_user_id: 9,
+    contractor_id: 80,
+    request_title: "Drywall Repair",
+    business_name: "Trusted Repairs",
+    business_image_url: "https://example.test/logo.jpg",
+    professional_category: "handyman",
+    status: "active",
+    homeowner_archived_at: null,
+    professional_archived_at: "2026-07-21T14:00:00.000Z",
+    created_at: "2026-07-20T14:00:00.000Z",
+    updated_at: "2026-07-22T14:00:00.000Z",
+  });
+
+  assert.deepEqual(summary, {
+    id: 91,
+    relationship: {
+      id: 51,
+      title: "Drywall Repair",
+      stage: "conversation",
+    },
+    display: {
+      name: "Trusted Repairs",
+      image_url: "https://example.test/logo.jpg",
+      category: "handyman",
+    },
+    status: {
+      value: "active",
+      active: true,
+      archived: false,
+      requires_attention: false,
+    },
+    last_activity: "2026-07-22T14:00:00.000Z",
+    last_message_preview: null,
+    unread_count: 0,
+    conversation_available: true,
+  });
+
+  for (const privateField of [
+    "homeowner_id",
+    "professional_user_id",
+    "contractor_id",
+    "homeowner_archived_at",
+    "professional_archived_at",
+  ]) {
+    assert.equal(Object.hasOwn(summary, privateField), false);
+  }
+});
+
+test("professional conversation summary uses the same UI contract", () => {
+  const summary = serializeConversationSummaryForProfessional({
+    id: 91,
+    relationship_id: 51,
+    post_id: 41,
+    homeowner_id: 7,
+    professional_user_id: 9,
+    contractor_id: 80,
+    request_title: "Drywall Repair",
+    homeowner_display_name: "William Molina",
+    status: "active",
+    homeowner_archived_at: null,
+    professional_archived_at: "2026-07-21T14:00:00.000Z",
+    created_at: "2026-07-20T14:00:00.000Z",
+    updated_at: "2026-07-22T14:00:00.000Z",
+  });
+
+  assert.deepEqual(summary, {
+    id: 91,
+    relationship: {
+      id: 51,
+      title: "Drywall Repair",
+      stage: "conversation",
+    },
+    display: {
+      name: "William Molina",
+      image_url: "",
+      category: "",
+    },
+    status: {
+      value: "active",
+      active: true,
+      archived: true,
+      requires_attention: false,
+    },
+    last_activity: "2026-07-22T14:00:00.000Z",
+    last_message_preview: null,
+    unread_count: 0,
+    conversation_available: true,
+  });
+
+  for (const privateField of [
+    "homeowner_id",
+    "professional_user_id",
+    "contractor_id",
+    "post_id",
+    "homeowner_archived_at",
+    "professional_archived_at",
+  ]) {
+    assert.equal(Object.hasOwn(summary, privateField), false);
+  }
+});
+
+test("closed conversation summaries remain available but not active", () => {
+  const homeowner = serializeConversationSummaryForHomeowner({
+    id: 91,
+    relationship_id: 51,
+    request_title: "Drywall Repair",
+    status: "closed",
+    homeowner_archived_at: null,
+    created_at: "2026-07-20T14:00:00.000Z",
+    updated_at: null,
+  });
+
+  assert.equal(homeowner.status.value, "closed");
+  assert.equal(homeowner.status.active, false);
+  assert.equal(homeowner.conversation_available, false);
+  assert.equal(
+    homeowner.last_activity,
+    "2026-07-20T14:00:00.000Z"
   );
 });

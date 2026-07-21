@@ -110,6 +110,60 @@ function serializeConversationForProfessional(row = {}) {
   };
 }
 
+function serializeConversationSummaryForHomeowner(row = {}) {
+  return {
+    id: row.id,
+    relationship: {
+      id: row.relationship_id,
+      title: row.request_title || "",
+      stage: "conversation",
+    },
+    display: {
+      name: row.business_name || "",
+      image_url: row.business_image_url || "",
+      category: row.professional_category || "",
+    },
+    status: {
+      value: row.status,
+      active: row.status === CONVERSATION_STATUSES.ACTIVE,
+      archived: Boolean(row.homeowner_archived_at),
+      requires_attention: false,
+    },
+    last_activity: row.updated_at || row.created_at || null,
+    last_message_preview: null,
+    unread_count: 0,
+    conversation_available:
+      row.status === CONVERSATION_STATUSES.ACTIVE,
+  };
+}
+
+function serializeConversationSummaryForProfessional(row = {}) {
+  return {
+    id: row.id,
+    relationship: {
+      id: row.relationship_id,
+      title: row.request_title || "",
+      stage: "conversation",
+    },
+    display: {
+      name: row.homeowner_display_name || "Customer",
+      image_url: "",
+      category: "",
+    },
+    status: {
+      value: row.status,
+      active: row.status === CONVERSATION_STATUSES.ACTIVE,
+      archived: Boolean(row.professional_archived_at),
+      requires_attention: false,
+    },
+    last_activity: row.updated_at || row.created_at || null,
+    last_message_preview: null,
+    unread_count: 0,
+    conversation_available:
+      row.status === CONVERSATION_STATUSES.ACTIVE,
+  };
+}
+
 module.exports = {
   CONVERSATION_STATUSES,
   CONVERSATION_STATUS_VALUES,
@@ -122,5 +176,7 @@ module.exports = {
   participantArchiveField,
   serializeConversationForHomeowner,
   serializeConversationForProfessional,
+  serializeConversationSummaryForHomeowner,
+  serializeConversationSummaryForProfessional,
   validateConversationStatus,
 };

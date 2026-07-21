@@ -57,10 +57,20 @@ const {
 } = require("./server/requests/requestLifecycle");
 
 const {
+  serializeConversationSummaryForHomeowner,
+  serializeConversationSummaryForProfessional,
+} = require("./server/conversations/conversations");
+
+const {
   serializePendingRelationshipForHomeowner,
   serializeRelationshipForProfessional,
 } = require("./server/relationships/requestRelationships");
 
+
+const {
+  listHomeownerConversations,
+  listProfessionalConversations,
+} = require("./server/conversations/conversationService");
 
 const {
   acceptHomeownerRequestRelationship,
@@ -1666,6 +1676,87 @@ app.put("/contractor-profiles/:id", authMiddleware, async (req, res) => {
 });
 
 
+
+
+app.get("/conversations", authMiddleware, async (req, res) => {
+  const perspective = String(
+    req.query?.perspective || ""
+  ).trim().toLowerCase();
+
+  if (!["homeowner", "professional"].includes(perspective)) {
+    return res.status(400).json({
+      success: false,
+      code: "CONVERSATION_PERSPECTIVE_REQUIRED",
+      message:
+        "A homeowner or professional conversation perspective is required.",
+    });
+  }
+
+  const includeArchived =
+    String(req.query?.includeArchived || "").toLowerCase() === "true";
+
+  try {
+    const database = getPool(req);
+
+    if (perspective === "professional") {
+      const profileResult = await database.query(
+        `
+        SELECT id
+        FROM contractor_profiles
+        WHERE user_id = $1
+        ORDER BY created_at ASC, id ASC
+        LIMIT 1
+        `,
+        [req.user.id]
+      );
+
+      if (profileResult.rows.length === 0) {
+        return res.status(403).json({
+          success: false,
+          code: "PROFESSIONAL_PROFILE_REQUIRED",
+          message:
+            "A business profile is required to view professional conversations.",
+        });
+      }
+
+      const rows = await listProfessionalConversations({
+        pool: database,
+        professionalUserId: req.user.id,
+        includeArchived,
+      });
+
+      return res.json({
+        success: true,
+        perspective,
+        conversations: rows.map(
+          serializeConversationSummaryForProfessional
+        ),
+      });
+    }
+
+    const rows = await listHomeownerConversations({
+      pool: database,
+      homeownerUserId: req.user.id,
+      includeArchived,
+    });
+
+    return res.json({
+      success: true,
+      perspective,
+      conversations: rows.map(
+        serializeConversationSummaryForHomeowner
+      ),
+    });
+  } catch (error) {
+    return sendPublicDatabaseError({
+      res,
+      error,
+      operation: "fetch_conversation_inbox",
+      code: "CONVERSATIONS_FETCH_FAILED",
+      message: "Conversations could not be loaded.",
+    });
+  }
+});
 
 
 app.get(

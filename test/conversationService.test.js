@@ -273,6 +273,16 @@ test("homeowner conversation list is owner scoped", async () => {
       /request_relationships\.homeowner_id = \$1/
     );
 
+    assert.match(
+      sql,
+      /JOIN posts ON request_relationships\.post_id = posts\.id/
+    );
+
+    assert.match(
+      sql,
+      /posts\.title AS request_title/
+    );
+
     assert.deepEqual(params, [7, false]);
 
     return { rows };
