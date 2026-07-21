@@ -44,6 +44,16 @@ test("legacy compatibility fields remain explicitly inventoried", () => {
   ]);
 });
 
+test("messages preserve legacy identity while canonical identity remains nullable", () => {
+  assert.deepEqual(IDENTITY_COMPATIBILITY.messages, {
+    legacyIdentityField: "quote_request_id",
+    canonicalConversationIdentityField: "conversation_id",
+    legacyIdentityRetained: true,
+    canonicalIdentityNullableDuringTransition: true,
+    automaticBackfillAuthorized: false,
+  });
+});
+
 test("quote requests remain source compatibility identity only", () => {
   assert.deepEqual(IDENTITY_COMPATIBILITY.quote_requests, {
     identityRole: "source_compatibility_identity",

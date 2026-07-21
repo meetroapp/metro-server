@@ -87,3 +87,18 @@ test("seed shapes are inert metadata and reject unsafe fixtures", () => {
     /Unsafe fixture/
   );
 });
+
+
+test("message fixtures preserve legacy and canonical conversation identities", () => {
+  const legacyMessage = buildMessage();
+
+  assert.equal(legacyMessage.quote_request_id, 3001);
+  assert.equal(legacyMessage.conversation_id, null);
+
+  const canonicalMessage = buildMessage({
+    conversation_id: 7001,
+  });
+
+  assert.equal(canonicalMessage.quote_request_id, 3001);
+  assert.equal(canonicalMessage.conversation_id, 7001);
+});

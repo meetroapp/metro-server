@@ -4,6 +4,7 @@ function buildMessage(overrides = {}) {
   return {
     id: 5001,
     quote_request_id: 3001,
+    conversation_id: null,
     sender_id: 1001,
     receiver_id: 1002,
     message_text: "Synthetic message content.",

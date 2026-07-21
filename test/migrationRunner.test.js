@@ -37,6 +37,8 @@ const requestPhotosMigrationFilename =
   "202607190002_add_post_request_photos.sql";
 const requestLifecycleMigrationFilename =
   "202607200001_add_post_request_lifecycle.sql";
+const messageConversationIdentityMigrationFilename =
+  "202607210001_add_message_conversation_identity.sql";
 const packageJson = require("../package.json");
 
 function normalizeSql(sql) {
@@ -287,6 +289,11 @@ test("migration discovery is deterministic, timestamped, and checksum-stable", (
 
   assert.ok(filenames.includes(BASELINE_MIGRATION_FILENAME));
   assert.ok(filenames.includes(tokenVersionMigrationFilename));
+  assert.ok(
+    filenames.includes(
+      messageConversationIdentityMigrationFilename
+    )
+  );
   assert.deepEqual(filenames, [...filenames].sort());
   assert.ok(filenames.indexOf(BASELINE_MIGRATION_FILENAME) < filenames.indexOf(tokenVersionMigrationFilename));
   assert.deepEqual(
@@ -532,6 +539,74 @@ test("README and package scripts match governed execution boundaries", () => {
     false
   );
   assert.equal(packageJson.scripts.test.includes("migrat"), false);
+});
+
+
+
+test("message conversation identity migration is additive, nullable, and conversation scoped", () => {
+  const migrations = getMigrationFiles(migrationsDirectory);
+  const identityMigration = migrations.find(
+    ({ filename }) =>
+      filename ===
+      messageConversationIdentityMigrationFilename
+  );
+
+  assert.ok(identityMigration);
+
+  assert.match(
+    identityMigration.sql,
+    /ALTER TABLE messages/i
+  );
+
+  assert.match(
+    identityMigration.sql,
+    /ADD COLUMN IF NOT EXISTS conversation_id INTEGER/i
+  );
+
+  assert.match(
+    identityMigration.sql,
+    /REFERENCES conversations\(id\)\s+ON DELETE RESTRICT/i
+  );
+
+  assert.match(
+    identityMigration.sql,
+    /CREATE INDEX IF NOT EXISTS messages_conversation_id_created_at_id_idx/i
+  );
+
+  assert.match(
+    identityMigration.sql,
+    /ON messages\s*\(\s*conversation_id\s*,\s*created_at ASC\s*,\s*id ASC\s*\)/i
+  );
+
+  assert.doesNotMatch(
+    identityMigration.sql,
+    /conversation_id INTEGER NOT NULL/i
+  );
+
+  assert.doesNotMatch(
+    identityMigration.sql,
+    /\bDROP\s+(?:TABLE|COLUMN|CONSTRAINT|INDEX)\b/i
+  );
+
+  assert.doesNotMatch(
+    identityMigration.sql,
+    /\bDELETE\s+FROM\b/i
+  );
+
+  assert.doesNotMatch(
+    identityMigration.sql,
+    /\bTRUNCATE\b/i
+  );
+
+  assert.doesNotMatch(
+    identityMigration.sql,
+    /\bUPDATE\s+messages\b/i
+  );
+
+  assert.doesNotMatch(
+    identityMigration.sql,
+    /\bINSERT\s+INTO\s+messages\b/i
+  );
 });
 
 test("application startup does not execute migrations", () => {

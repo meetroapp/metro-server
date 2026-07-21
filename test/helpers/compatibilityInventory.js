@@ -71,6 +71,13 @@ const LEGACY_FIELD_INVENTORY = Object.freeze([
 ]);
 
 const IDENTITY_COMPATIBILITY = Object.freeze({
+  messages: Object.freeze({
+    legacyIdentityField: "quote_request_id",
+    canonicalConversationIdentityField: "conversation_id",
+    legacyIdentityRetained: true,
+    canonicalIdentityNullableDuringTransition: true,
+    automaticBackfillAuthorized: false,
+  }),
   quote_requests: Object.freeze({
     identityRole: "source_compatibility_identity",
     canonicalServiceRequestAuthority: false,
