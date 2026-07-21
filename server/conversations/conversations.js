@@ -165,6 +165,46 @@ function serializeConversationSummaryForProfessional(row = {}) {
 }
 
 
+function normalizeMessageWorkflowPayload(value) {
+  return value &&
+    typeof value === "object" &&
+    !Array.isArray(value)
+    ? value
+    : {};
+}
+
+function serializeConversationMessage(
+  row = {},
+  viewerUserId
+) {
+  return {
+    id: row.id,
+    sender: {
+      id: row.sender_id,
+      isViewer:
+        String(row.sender_id) ===
+        String(viewerUserId),
+    },
+    recipient: {
+      id: row.receiver_id ?? null,
+    },
+    content: {
+      text: row.message_text || "",
+      imageUrl: row.image_url || null,
+      type: row.message_type || "text",
+    },
+    workflow: {
+      type: row.workflow_type || null,
+      status: row.workflow_status || null,
+      payload: normalizeMessageWorkflowPayload(
+        row.workflow_payload
+      ),
+    },
+    createdAt: row.created_at || null,
+  };
+}
+
+
 function serializeConversationDetail(row = {}, viewerUserId) {
   const viewerIsHomeowner =
     String(row.homeowner_id) === String(viewerUserId);
@@ -237,6 +277,7 @@ module.exports = {
   serializeConversationForHomeowner,
   serializeConversationForProfessional,
   serializeConversationDetail,
+  serializeConversationMessage,
   serializeConversationSummaryForHomeowner,
   serializeConversationSummaryForProfessional,
   validateConversationStatus,

@@ -58,6 +58,7 @@ const {
 
 const {
   serializeConversationDetail,
+  serializeConversationMessage,
   serializeConversationSummaryForHomeowner,
   serializeConversationSummaryForProfessional,
 } = require("./server/conversations/conversations");
@@ -73,6 +74,10 @@ const {
   listHomeownerConversations,
   listProfessionalConversations,
 } = require("./server/conversations/conversationService");
+
+const {
+  listConversationMessages,
+} = require("./server/conversations/conversationMessageService");
 
 const {
   acceptHomeownerRequestRelationship,
@@ -1795,6 +1800,82 @@ app.get("/conversations/:conversationId", authMiddleware, async (req, res) => {
     });
   }
 });
+
+
+app.get(
+  "/conversations/:conversationId/messages",
+  authMiddleware,
+  async (req, res) => {
+    try {
+      const database = getPool(req);
+
+      const conversationResult =
+        await getConversation({
+          pool: database,
+          conversationId:
+            req.params.conversationId,
+          participantUserId: req.user.id,
+        });
+
+      if (!conversationResult.ok) {
+        return res
+          .status(conversationResult.status)
+          .json({
+            success: false,
+            code: conversationResult.code,
+            message:
+              conversationResult.message,
+          });
+      }
+
+      const messageResult =
+        await listConversationMessages({
+          pool: database,
+          conversationId:
+            conversationResult.conversation.id,
+          limit: req.query?.limit,
+          cursor: req.query?.cursor,
+        });
+
+      if (!messageResult.ok) {
+        return res
+          .status(messageResult.status)
+          .json({
+            success: false,
+            code: messageResult.code,
+            message: messageResult.message,
+          });
+      }
+
+      return res.json({
+        success: true,
+        conversationId:
+          conversationResult.conversation.id,
+        messages:
+          messageResult.messages.map(
+            (message) =>
+              serializeConversationMessage(
+                message,
+                req.user.id
+              )
+          ),
+        pagination:
+          messageResult.pagination,
+      });
+    } catch (error) {
+      return sendPublicDatabaseError({
+        res,
+        error,
+        operation:
+          "fetch_conversation_messages",
+        code:
+          "CONVERSATION_MESSAGES_FETCH_FAILED",
+        message:
+          "Conversation messages could not be loaded.",
+      });
+    }
+  }
+);
 
 
 app.get(

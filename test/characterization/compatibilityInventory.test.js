@@ -16,7 +16,7 @@ test("route inventory is inert, valid data only", () => {
   assert.deepEqual(result, {
     valid: true,
     blockers: [],
-    routeCount: 37,
+    routeCount: 38,
   });
   assert.equal(Object.isFrozen(ROUTE_INVENTORY), true);
   assert.equal(
@@ -77,4 +77,26 @@ test("message workflow status is not aggregate lifecycle authority", () => {
   );
 
   assert.equal(workflowStatus.status, "not_aggregate_lifecycle_authority");
+});
+
+
+test("canonical and legacy message read routes remain independently inventoried", () => {
+  const routeKeys = ROUTE_INVENTORY.map(
+    ({ method, path }) =>
+      `${method} ${path}`
+  );
+
+  assert.equal(
+    routeKeys.includes(
+      "GET /messages/:quoteRequestId"
+    ),
+    true
+  );
+
+  assert.equal(
+    routeKeys.includes(
+      "GET /conversations/:conversationId/messages"
+    ),
+    true
+  );
 });

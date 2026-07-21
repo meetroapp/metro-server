@@ -16,6 +16,7 @@ const {
   serializeConversationForHomeowner,
   serializeConversationForProfessional,
   serializeConversationDetail,
+  serializeConversationMessage,
   serializeConversationSummaryForHomeowner,
   serializeConversationSummaryForProfessional,
   validateConversationStatus,
@@ -489,5 +490,116 @@ test("conversation detail serializer rejects a non-participant viewer", () => {
         10
       ),
     /authorized participant/
+  );
+});
+
+
+test("conversation message serializer exposes only the canonical public contract", () => {
+  const serialized =
+    serializeConversationMessage(
+      {
+        id: 201,
+        quote_request_id: 3001,
+        conversation_id: 91,
+        sender_id: 7,
+        receiver_id: 9,
+        sender_email:
+          "private@example.test",
+        message_text: "Hello",
+        image_url: null,
+        message_type: "workflow",
+        workflow_type: "quote",
+        workflow_status: "sent",
+        workflow_payload: {
+          safe: true,
+        },
+        created_at:
+          "2026-07-21T12:00:00.000Z",
+      },
+      7
+    );
+
+  assert.deepEqual(serialized, {
+    id: 201,
+    sender: {
+      id: 7,
+      isViewer: true,
+    },
+    recipient: {
+      id: 9,
+    },
+    content: {
+      text: "Hello",
+      imageUrl: null,
+      type: "workflow",
+    },
+    workflow: {
+      type: "quote",
+      status: "sent",
+      payload: {
+        safe: true,
+      },
+    },
+    createdAt:
+      "2026-07-21T12:00:00.000Z",
+  });
+
+  for (const privateField of [
+    "quote_request_id",
+    "conversation_id",
+    "sender_id",
+    "receiver_id",
+    "sender_email",
+    "message_text",
+    "image_url",
+    "message_type",
+    "workflow_type",
+    "workflow_status",
+    "workflow_payload",
+    "created_at",
+  ]) {
+    assert.equal(
+      Object.hasOwn(
+        serialized,
+        privateField
+      ),
+      false
+    );
+  }
+});
+
+test("conversation message serializer normalizes malformed workflow payloads", () => {
+  const serialized =
+    serializeConversationMessage(
+      {
+        id: 202,
+        sender_id: 9,
+        receiver_id: null,
+        message_text: "",
+        message_type: "",
+        workflow_payload: [],
+        created_at: null,
+      },
+      7
+    );
+
+  assert.equal(
+    serialized.sender.isViewer,
+    false
+  );
+
+  assert.deepEqual(
+    serialized.workflow.payload,
+    {}
+  );
+
+  assert.equal(
+    serialized.content.type,
+    "text"
+  );
+
+  assert.equal(
+    serialized.recipient.id,
+    null
   );
 });

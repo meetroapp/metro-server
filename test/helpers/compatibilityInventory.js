@@ -31,6 +31,7 @@ const ROUTE_INVENTORY = Object.freeze([
   ["GET", "/contractor-quote-requests", true],
   ["POST", "/messages", true],
   ["GET", "/messages/:quoteRequestId", true],
+  ["GET", "/conversations/:conversationId/messages", true],
   ["POST", "/workflow-events", true],
   ["GET", "/workflow-events/:quoteRequestId", true],
   ["POST", "/reviews", true],
