@@ -6,6 +6,10 @@ const {
 
 const DEFAULT_MESSAGE_PAGE_SIZE = 50;
 const MAX_MESSAGE_PAGE_SIZE = 100;
+const MAX_MESSAGE_TEXT_LENGTH = 5000;
+const CONVERSATION_MESSAGE_FIELDS = new Set([
+  "message_text",
+]);
 
 function requireDatabasePool(pool) {
   if (!pool || typeof pool.query !== "function") {
@@ -40,6 +44,280 @@ function parseMessagePageSize(value) {
   }
 
   return parsed;
+}
+
+function validateConversationMessageInput(payload) {
+  if (
+    payload === null ||
+    typeof payload !== "object" ||
+    Array.isArray(payload) ||
+    ![Object.prototype, null].includes(
+      Object.getPrototypeOf(payload)
+    )
+  ) {
+    return {
+      valid: false,
+      status: 400,
+      code: "MESSAGE_TEXT_REQUIRED",
+      message: "Message text is required.",
+    };
+  }
+
+  const unsupportedFields = Object.keys(payload)
+    .filter((field) =>
+      !CONVERSATION_MESSAGE_FIELDS.has(field)
+    );
+
+  if (unsupportedFields.length > 0) {
+    return {
+      valid: false,
+      status: 400,
+      code: "UNSUPPORTED_MESSAGE_FIELDS",
+      message:
+        "One or more message fields are not supported.",
+    };
+  }
+
+  if (typeof payload.message_text !== "string") {
+    return {
+      valid: false,
+      status: 400,
+      code: "MESSAGE_TEXT_REQUIRED",
+      message: "Message text is required.",
+    };
+  }
+
+  const messageText = payload.message_text.trim();
+
+  if (!messageText) {
+    return {
+      valid: false,
+      status: 400,
+      code: "MESSAGE_TEXT_REQUIRED",
+      message: "Message text is required.",
+    };
+  }
+
+  if (messageText.length > MAX_MESSAGE_TEXT_LENGTH) {
+    return {
+      valid: false,
+      status: 400,
+      code: "MESSAGE_TEXT_TOO_LONG",
+      message:
+        "Message text must be 5000 characters or fewer.",
+    };
+  }
+
+  return {
+    valid: true,
+    value: {
+      messageText,
+    },
+  };
+}
+
+async function createConversationMessage({
+  pool,
+  conversationId: rawConversationId,
+  senderUserId: rawSenderUserId,
+  payload,
+}) {
+  const conversationId =
+    parsePositiveInteger(rawConversationId);
+
+  if (!conversationId) {
+    return {
+      ok: false,
+      status: 400,
+      code: "INVALID_CONVERSATION_ID",
+      message: "A valid conversation ID is required.",
+    };
+  }
+
+  const senderUserId =
+    parsePositiveInteger(rawSenderUserId);
+
+  if (!senderUserId) {
+    return {
+      ok: false,
+      status: 400,
+      code: "INVALID_SENDER_USER_ID",
+      message: "A valid sender user ID is required.",
+    };
+  }
+
+  const validation =
+    validateConversationMessageInput(payload);
+
+  if (!validation.valid) {
+    return {
+      ok: false,
+      status: validation.status,
+      code: validation.code,
+      message: validation.message,
+    };
+  }
+
+  requireDatabasePool(pool);
+
+  const client =
+    typeof pool.connect === "function"
+      ? await pool.connect()
+      : pool;
+
+  try {
+    await client.query("BEGIN");
+
+    const conversationResult = await client.query(
+      `
+      SELECT
+        conversations.id,
+        conversations.homeowner_id,
+        conversations.professional_user_id,
+        conversations.status
+      FROM conversations
+      WHERE conversations.id = $1
+        AND (
+          conversations.homeowner_id = $2
+          OR conversations.professional_user_id = $2
+        )
+      LIMIT 1
+      FOR UPDATE
+      `,
+      [conversationId, senderUserId]
+    );
+
+    if (conversationResult.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return {
+        ok: false,
+        status: 404,
+        code: "CONVERSATION_NOT_FOUND",
+        message: "The conversation was not found.",
+      };
+    }
+
+    const conversation = conversationResult.rows[0];
+
+    if (conversation.status !== "active") {
+      await client.query("ROLLBACK");
+      return {
+        ok: false,
+        status: 409,
+        code: "CONVERSATION_CLOSED",
+        message:
+          "Messages cannot be sent to a closed conversation.",
+      };
+    }
+
+    const receiverId =
+      Number(conversation.homeowner_id) === senderUserId
+        ? parsePositiveInteger(
+            conversation.professional_user_id
+          )
+        : parsePositiveInteger(
+            conversation.homeowner_id
+          );
+
+    if (!receiverId || receiverId === senderUserId) {
+      throw new Error(
+        "The canonical message recipient could not be resolved."
+      );
+    }
+
+    const messageResult = await client.query(
+      `
+      INSERT INTO messages
+      (
+        quote_request_id,
+        conversation_id,
+        sender_id,
+        receiver_id,
+        message_text,
+        image_url,
+        message_type,
+        workflow_type,
+        workflow_status,
+        workflow_payload
+      )
+      VALUES
+      (
+        NULL,
+        $1,
+        $2,
+        $3,
+        $4,
+        NULL,
+        'text',
+        NULL,
+        NULL,
+        '{}'::jsonb
+      )
+      RETURNING
+        id,
+        sender_id,
+        receiver_id,
+        message_text,
+        image_url,
+        message_type,
+        workflow_type,
+        workflow_status,
+        workflow_payload,
+        created_at
+      `,
+      [
+        conversation.id,
+        senderUserId,
+        receiverId,
+        validation.value.messageText,
+      ]
+    );
+
+    const message = messageResult.rows[0];
+
+    if (!message) {
+      throw new Error(
+        "The canonical message was not returned after insertion."
+      );
+    }
+
+    const activityResult = await client.query(
+      `
+      UPDATE conversations
+      SET updated_at = COALESCE($2, CURRENT_TIMESTAMP)
+      WHERE id = $1
+      `,
+      [conversation.id, message.created_at || null]
+    );
+
+    if (activityResult.rowCount === 0) {
+      throw new Error(
+        "Conversation activity could not be updated."
+      );
+    }
+
+    await client.query("COMMIT");
+
+    return {
+      ok: true,
+      status: 201,
+      code: "CONVERSATION_MESSAGE_CREATED",
+      conversationId: conversation.id,
+      message,
+    };
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Preserve the original operation error.
+    }
+
+    throw error;
+  } finally {
+    if (client !== pool && typeof client.release === "function") {
+      client.release();
+    }
+  }
 }
 
 function encodeMessageCursor(row = {}) {
@@ -258,9 +536,12 @@ async function listConversationMessages({
 
 module.exports = {
   DEFAULT_MESSAGE_PAGE_SIZE,
+  MAX_MESSAGE_TEXT_LENGTH,
   MAX_MESSAGE_PAGE_SIZE,
+  createConversationMessage,
   decodeMessageCursor,
   encodeMessageCursor,
   listConversationMessages,
   parseMessagePageSize,
+  validateConversationMessageInput,
 };

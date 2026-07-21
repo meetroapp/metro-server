@@ -425,7 +425,7 @@ test("conversation detail serializer exposes canonical participant-scoped data",
       },
       permissions: {
         canRead: true,
-        canSendMessages: false,
+        canSendMessages: true,
         canManageWorkflow: false,
       },
     }
@@ -473,6 +473,29 @@ test("conversation detail serializer identifies the professional viewer", () => 
     id: 9,
     role: "professional",
   });
+
+  assert.equal(detail.permissions.canRead, true);
+  assert.equal(detail.permissions.canSendMessages, true);
+  assert.equal(detail.permissions.canManageWorkflow, false);
+});
+
+test("closed conversation detail disables sending without granting workflow authority", () => {
+  const detail = serializeConversationDetail(
+    {
+      id: 91,
+      relationship_id: 51,
+      post_id: 41,
+      homeowner_id: 7,
+      contractor_id: 80,
+      professional_user_id: 9,
+      status: "closed",
+      request_title: "Drywall Repair",
+      created_at: "2026-07-20T14:00:00.000Z",
+      updated_at: "2026-07-22T14:00:00.000Z",
+      closed_at: "2026-07-22T14:00:00.000Z",
+    },
+    7
+  );
 
   assert.equal(detail.permissions.canRead, true);
   assert.equal(detail.permissions.canSendMessages, false);

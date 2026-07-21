@@ -653,7 +653,7 @@ test("homeowner participant receives canonical conversation detail", async () =>
     },
     permissions: {
       canRead: true,
-      canSendMessages: false,
+      canSendMessages: true,
       canManageWorkflow: false,
     },
   });

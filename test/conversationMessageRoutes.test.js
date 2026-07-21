@@ -90,10 +90,7 @@ function createPool({
       "2026-07-21T12:00:00.000Z",
   }];
 
-  return {
-    calls,
-    pool: {
-      async query(text, values = []) {
+  const query = async (text, values = []) => {
         const sql = normalizeSql(text);
         calls.push({ sql, values });
 
@@ -101,6 +98,10 @@ function createPool({
           throw new Error(
             "private simulated database failure"
           );
+        }
+
+        if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql)) {
+          return { rows: [] };
         }
 
         if (
@@ -134,6 +135,28 @@ function createPool({
           };
         }
 
+        if (sql.includes("INSERT INTO messages")) {
+          return {
+            rows: [{
+              id: 201,
+              sender_id: values[1],
+              receiver_id: values[2],
+              message_text: values[3],
+              image_url: null,
+              message_type: "text",
+              workflow_type: null,
+              workflow_status: null,
+              workflow_payload: {},
+              created_at:
+                "2026-07-21T12:00:00.000Z",
+            }],
+          };
+        }
+
+        if (sql.includes("UPDATE conversations")) {
+          return { rows: [], rowCount: 1 };
+        }
+
         if (
           sql.includes("FROM messages") &&
           sql.includes(
@@ -151,15 +174,28 @@ function createPool({
         throw new Error(
           `Unexpected SQL: ${sql}`
         );
+      };
+
+  return {
+    calls,
+    pool: {
+      query,
+      async connect() {
+        return {
+          query,
+          release() {},
+        };
       },
     },
   };
 }
 
 async function invoke({
+  method = "get",
   userId = 7,
   conversationId = "91",
   query = {},
+  body,
   pool,
   authenticated = true,
 } = {}) {
@@ -171,6 +207,7 @@ async function invoke({
       conversationId,
     },
     query,
+    body,
     headers: authenticated
       ? {
           authorization:
@@ -190,7 +227,7 @@ async function invoke({
   try {
     for (
       const handler of getHandlers(
-        "get",
+        method,
         "/conversations/:conversationId/messages"
       )
     ) {
@@ -225,6 +262,175 @@ async function invoke({
     delete app.locals.pool;
   }
 }
+
+test("homeowner sends a privacy-safe canonical text message", async () => {
+  const fake = createPool();
+
+  const result = await invoke({
+    method: "post",
+    userId: 7,
+    body: { message_text: "  Hello  " },
+    pool: fake.pool,
+  });
+
+  assert.equal(result.statusCode, 201);
+  assert.deepEqual(result.body, {
+    success: true,
+    code: "CONVERSATION_MESSAGE_CREATED",
+    conversationId: 91,
+    message: {
+      id: 201,
+      sender: { id: 7, isViewer: true },
+      recipient: { id: 9 },
+      content: {
+        text: "Hello",
+        imageUrl: null,
+        type: "text",
+      },
+      workflow: {
+        type: null,
+        status: null,
+        payload: {},
+      },
+      createdAt: "2026-07-21T12:00:00.000Z",
+    },
+  });
+
+  for (const rawField of [
+    "quote_request_id",
+    "conversation_id",
+    "sender_id",
+    "receiver_id",
+    "message_text",
+    "image_url",
+    "message_type",
+    "workflow_type",
+    "workflow_status",
+    "workflow_payload",
+    "sender_email",
+  ]) {
+    assert.equal(Object.hasOwn(result.body.message, rawField), false);
+  }
+
+  const inserted = fake.calls.find(({ sql }) => sql.includes("INSERT INTO messages"));
+  assert.deepEqual(inserted.values, [91, 7, 9, "Hello"]);
+});
+
+test("professional sender resolves the homeowner from the locked conversation", async () => {
+  const fake = createPool();
+
+  const result = await invoke({
+    method: "post",
+    userId: 9,
+    body: { message_text: "Hello" },
+    pool: fake.pool,
+  });
+
+  assert.equal(result.statusCode, 201);
+  assert.deepEqual(result.body.message.recipient, { id: 7 });
+  assert.deepEqual(
+    fake.calls.find(({ sql }) => sql.includes("INSERT INTO messages")).values,
+    [91, 9, 7, "Hello"]
+  );
+});
+
+test("canonical route rejects client identity, media, and workflow authority before insertion", async () => {
+  for (const field of [
+    "receiver_id",
+    "sender_id",
+    "quote_request_id",
+    "image_url",
+    "workflow_type",
+  ]) {
+    const fake = createPool();
+    const result = await invoke({
+      method: "post",
+      body: {
+        message_text: "Hello",
+        [field]: "client-controlled",
+      },
+      pool: fake.pool,
+    });
+
+    assert.equal(result.statusCode, 400);
+    assert.equal(result.body.code, "UNSUPPORTED_MESSAGE_FIELDS");
+    assert.equal(fake.calls.some(({ sql }) => sql.includes("FROM conversations")), false);
+    assert.equal(fake.calls.some(({ sql }) => sql.includes("INSERT INTO messages")), false);
+  }
+});
+
+test("canonical route rejects invalid text before conversation access", async () => {
+  const fake = createPool();
+  const result = await invoke({
+    method: "post",
+    body: { message_text: "   " },
+    pool: fake.pool,
+  });
+
+  assert.equal(result.statusCode, 400);
+  assert.equal(result.body.code, "MESSAGE_TEXT_REQUIRED");
+  assert.equal(fake.calls.some(({ sql }) => sql.includes("FROM conversations")), false);
+});
+
+test("canonical route protects absent participants and closed conversations", async () => {
+  for (const scenario of [
+    { conversationRows: [], status: 404, code: "CONVERSATION_NOT_FOUND" },
+    {
+      conversationRows: [{
+        id: 91,
+        homeowner_id: 7,
+        professional_user_id: 9,
+        status: "closed",
+      }],
+      status: 409,
+      code: "CONVERSATION_CLOSED",
+    },
+  ]) {
+    const fake = createPool({ conversationRows: scenario.conversationRows });
+    const result = await invoke({
+      method: "post",
+      body: { message_text: "Hello" },
+      pool: fake.pool,
+    });
+
+    assert.equal(result.statusCode, scenario.status);
+    assert.equal(result.body.code, scenario.code);
+    assert.equal(fake.calls.some(({ sql }) => sql.includes("INSERT INTO messages")), false);
+  }
+});
+
+test("canonical POST requires authentication without database access", async () => {
+  let queried = false;
+  const result = await invoke({
+    method: "post",
+    authenticated: false,
+    body: { message_text: "Hello" },
+    pool: {
+      async query() {
+        queried = true;
+        return { rows: [] };
+      },
+    },
+  });
+
+  assert.equal(result.statusCode, 401);
+  assert.equal(queried, false);
+});
+
+test("canonical POST database failures use the safe public contract", async () => {
+  const fake = createPool({ failOn: "INSERT INTO messages" });
+  const result = await invoke({
+    method: "post",
+    body: { message_text: "Hello" },
+    pool: fake.pool,
+  });
+
+  assert.equal(result.statusCode, 500);
+  assert.deepEqual(result.body, {
+    error: "CONVERSATION_MESSAGE_SEND_FAILED",
+    message: "The conversation message could not be sent.",
+  });
+});
 
 test("participant receives privacy-safe canonical messages", async () => {
   const fake = createPool();
@@ -437,6 +643,20 @@ test("database failures use the safe public contract", async () => {
 });
 
 test("legacy message retrieval route remains registered", () => {
+  assert.doesNotThrow(() =>
+    getHandlers(
+      "post",
+      "/messages"
+    )
+  );
+
+  assert.doesNotThrow(() =>
+    getHandlers(
+      "post",
+      "/conversations/:conversationId/messages"
+    )
+  );
+
   assert.doesNotThrow(() =>
     getHandlers(
       "get",

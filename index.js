@@ -76,6 +76,7 @@ const {
 } = require("./server/conversations/conversationService");
 
 const {
+  createConversationMessage,
   listConversationMessages,
 } = require("./server/conversations/conversationMessageService");
 
@@ -1872,6 +1873,48 @@ app.get(
           "CONVERSATION_MESSAGES_FETCH_FAILED",
         message:
           "Conversation messages could not be loaded.",
+      });
+    }
+  }
+);
+
+app.post(
+  "/conversations/:conversationId/messages",
+  authMiddleware,
+  async (req, res) => {
+    try {
+      const result = await createConversationMessage({
+        pool: getPool(req),
+        conversationId: req.params.conversationId,
+        senderUserId: req.user.id,
+        payload: req.body,
+      });
+
+      if (!result.ok) {
+        return res.status(result.status).json({
+          success: false,
+          code: result.code,
+          message: result.message,
+        });
+      }
+
+      return res.status(result.status).json({
+        success: true,
+        code: result.code,
+        conversationId: result.conversationId,
+        message: serializeConversationMessage(
+          result.message,
+          req.user.id
+        ),
+      });
+    } catch (error) {
+      return sendPublicDatabaseError({
+        res,
+        error,
+        operation: "send_conversation_message",
+        code: "CONVERSATION_MESSAGE_SEND_FAILED",
+        message:
+          "The conversation message could not be sent.",
       });
     }
   }

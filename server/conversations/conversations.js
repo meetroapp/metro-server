@@ -258,7 +258,8 @@ function serializeConversationDetail(row = {}, viewerUserId) {
     },
     permissions: {
       canRead: true,
-      canSendMessages: false,
+      canSendMessages:
+        row.status === CONVERSATION_STATUSES.ACTIVE,
       canManageWorkflow: false,
     },
   };
