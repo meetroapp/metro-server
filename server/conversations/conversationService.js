@@ -176,6 +176,7 @@ async function listHomeownerConversations({
       conversations.homeowner_id,
       conversations.contractor_id,
       conversations.professional_user_id,
+      request_relationships.post_id,
       conversations.status,
       conversations.homeowner_archived_at,
       conversations.professional_archived_at,

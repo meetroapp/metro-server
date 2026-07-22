@@ -245,6 +245,7 @@ test("homeowner conversation summary exposes UI-safe relationship and business c
     homeowner_id: 7,
     professional_user_id: 9,
     contractor_id: 80,
+    post_id: 41,
     request_title: "Drywall Repair",
     business_name: "Trusted Repairs",
     business_image_url: "https://example.test/logo.jpg",
@@ -258,8 +259,10 @@ test("homeowner conversation summary exposes UI-safe relationship and business c
 
   assert.deepEqual(summary, {
     id: 91,
+    conversation_id: 91,
+    request_id: 41,
+    request_title: "Drywall Repair",
     relationship: {
-      id: 51,
       title: "Drywall Repair",
       stage: "conversation",
     },
@@ -278,9 +281,13 @@ test("homeowner conversation summary exposes UI-safe relationship and business c
     last_message_preview: null,
     unread_count: 0,
     conversation_available: true,
+    permissions: {
+      canSendMessages: true,
+    },
   });
 
   for (const privateField of [
+    "relationship_id",
     "homeowner_id",
     "professional_user_id",
     "contractor_id",
@@ -289,6 +296,8 @@ test("homeowner conversation summary exposes UI-safe relationship and business c
   ]) {
     assert.equal(Object.hasOwn(summary, privateField), false);
   }
+
+  assert.equal(Object.hasOwn(summary.relationship, "id"), false);
 });
 
 test("professional conversation summary uses the same UI contract", () => {
@@ -348,6 +357,7 @@ test("closed conversation summaries remain available but not active", () => {
   const homeowner = serializeConversationSummaryForHomeowner({
     id: 91,
     relationship_id: 51,
+    post_id: 41,
     request_title: "Drywall Repair",
     status: "closed",
     homeowner_archived_at: null,
@@ -357,7 +367,8 @@ test("closed conversation summaries remain available but not active", () => {
 
   assert.equal(homeowner.status.value, "closed");
   assert.equal(homeowner.status.active, false);
-  assert.equal(homeowner.conversation_available, false);
+  assert.equal(homeowner.conversation_available, true);
+  assert.equal(homeowner.permissions.canSendMessages, false);
   assert.equal(
     homeowner.last_activity,
     "2026-07-20T14:00:00.000Z"

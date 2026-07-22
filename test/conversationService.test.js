@@ -256,6 +256,7 @@ test("homeowner conversation list is owner scoped", async () => {
     homeowner_id: 7,
     contractor_id: 80,
     professional_user_id: 9,
+    post_id: 41,
     status: "active",
     homeowner_archived_at: null,
     professional_archived_at: null,
@@ -281,6 +282,16 @@ test("homeowner conversation list is owner scoped", async () => {
     assert.match(
       sql,
       /posts\.title AS request_title/
+    );
+
+    assert.match(
+      sql,
+      /request_relationships\.post_id/
+    );
+
+    assert.match(
+      sql,
+      /ORDER BY conversations\.updated_at DESC, conversations\.id DESC/
     );
 
     assert.deepEqual(params, [7, false]);

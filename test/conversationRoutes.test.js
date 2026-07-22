@@ -120,6 +120,7 @@ function createConversationRoutePool({
     homeowner_id: 7,
     contractor_id: 80,
     professional_user_id: 9,
+    post_id: 41,
     status: "active",
     homeowner_archived_at: null,
     professional_archived_at: null,
@@ -226,8 +227,10 @@ test("homeowner conversation inbox returns privacy-safe summaries", async () => 
     perspective: "homeowner",
     conversations: [{
       id: 91,
+      conversation_id: 91,
+      request_id: 41,
+      request_title: "Drywall Repair",
       relationship: {
-        id: 51,
         title: "Drywall Repair",
         stage: "conversation",
       },
@@ -246,12 +249,16 @@ test("homeowner conversation inbox returns privacy-safe summaries", async () => 
       last_message_preview: null,
       unread_count: 0,
       conversation_available: true,
+      permissions: {
+        canSendMessages: true,
+      },
     }],
   });
 
   const summary = result.body.conversations[0];
 
   for (const privateField of [
+    "relationship_id",
     "homeowner_id",
     "professional_user_id",
     "contractor_id",
@@ -261,6 +268,8 @@ test("homeowner conversation inbox returns privacy-safe summaries", async () => 
     assert.equal(Object.hasOwn(summary, privateField), false);
   }
 
+  assert.equal(Object.hasOwn(summary.relationship, "id"), false);
+
   assert.equal(
     fake.calls.some((call) =>
       call.sql.includes(
@@ -269,6 +278,97 @@ test("homeowner conversation inbox returns privacy-safe summaries", async () => 
     ),
     true
   );
+});
+
+test("homeowner inbox preserves multiple canonical conversations for one request", async () => {
+  const shared = {
+    post_id: 41,
+    homeowner_id: 7,
+    status: "active",
+    homeowner_archived_at: null,
+    professional_archived_at: null,
+    created_at: "2026-07-20T14:00:00.000Z",
+    closed_at: null,
+    professional_category: "handyman",
+    request_title: "Drywall Repair",
+  };
+  const fake = createConversationRoutePool({
+    homeownerRows: [
+      {
+        ...shared,
+        id: 92,
+        relationship_id: 52,
+        contractor_id: 81,
+        professional_user_id: 10,
+        updated_at: "2026-07-22T15:00:00.000Z",
+        business_name: "Second Repairs",
+        business_image_url: "https://example.test/second.jpg",
+      },
+      {
+        ...shared,
+        id: 91,
+        relationship_id: 51,
+        contractor_id: 80,
+        professional_user_id: 9,
+        updated_at: "2026-07-22T14:00:00.000Z",
+        business_name: "Trusted Repairs",
+        business_image_url: "https://example.test/first.jpg",
+      },
+    ],
+  });
+
+  const result = await invokeConversationInbox({
+    userId: 7,
+    perspective: "homeowner",
+    pool: fake.pool,
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.deepEqual(
+    result.body.conversations.map((conversation) => ({
+      conversation_id: conversation.conversation_id,
+      request_id: conversation.request_id,
+      business: conversation.display.name,
+    })),
+    [
+      { conversation_id: 92, request_id: 41, business: "Second Repairs" },
+      { conversation_id: 91, request_id: 41, business: "Trusted Repairs" },
+    ]
+  );
+});
+
+test("closed homeowner conversations retain identity but disable sending", async () => {
+  const fake = createConversationRoutePool({
+    homeownerRows: [{
+      id: 91,
+      relationship_id: 51,
+      post_id: 41,
+      homeowner_id: 7,
+      contractor_id: 80,
+      professional_user_id: 9,
+      status: "closed",
+      homeowner_archived_at: null,
+      professional_archived_at: null,
+      created_at: "2026-07-20T14:00:00.000Z",
+      updated_at: "2026-07-22T14:00:00.000Z",
+      closed_at: "2026-07-22T14:00:00.000Z",
+      business_name: "Trusted Repairs",
+      business_image_url: "",
+      professional_category: "handyman",
+      request_title: "Drywall Repair",
+    }],
+  });
+
+  const result = await invokeConversationInbox({
+    userId: 7,
+    perspective: "homeowner",
+    pool: fake.pool,
+  });
+  const [conversation] = result.body.conversations;
+
+  assert.equal(conversation.conversation_available, true);
+  assert.equal(conversation.status.active, false);
+  assert.equal(conversation.permissions.canSendMessages, false);
 });
 
 test("professional conversation inbox returns the same summary contract", async () => {

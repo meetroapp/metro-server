@@ -111,10 +111,15 @@ function serializeConversationForProfessional(row = {}) {
 }
 
 function serializeConversationSummaryForHomeowner(row = {}) {
+  const conversationId = parsePositiveInteger(row.id);
+  const requestId = parsePositiveInteger(row.post_id);
+
   return {
-    id: row.id,
+    id: conversationId,
+    conversation_id: conversationId,
+    request_id: requestId,
+    request_title: row.request_title || "",
     relationship: {
-      id: row.relationship_id,
       title: row.request_title || "",
       stage: "conversation",
     },
@@ -132,8 +137,11 @@ function serializeConversationSummaryForHomeowner(row = {}) {
     last_activity: row.updated_at || row.created_at || null,
     last_message_preview: null,
     unread_count: 0,
-    conversation_available:
-      row.status === CONVERSATION_STATUSES.ACTIVE,
+    conversation_available: Boolean(conversationId),
+    permissions: {
+      canSendMessages:
+        row.status === CONVERSATION_STATUSES.ACTIVE,
+    },
   };
 }
 
