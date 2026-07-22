@@ -106,6 +106,27 @@ test("generic request validation preserves canonical lifecycle fields and reject
   assert.equal(direct.code, "DIRECT_REQUEST_UNAVAILABLE");
 });
 
+test("request validation rejects unknown, unsupported, and domain-forged service IDs", () => {
+  const unknown = validateRequestPayload(
+    validRequest({ service_specialty: "made_up_service" })
+  );
+  const marketing = validateRequestPayload(
+    validRequest({ service_specialty: "seo" })
+  );
+  const forgedDomain = validateRequestPayload(
+    validRequest({ service_domain: "healthcare", service_specialty: "painting" })
+  );
+  const normalized = validateRequestPayload(
+    validRequest({ service_specialty: " Painting " })
+  );
+
+  assert.equal(unknown.code, "REQUEST_MATCHING_REQUIRED");
+  assert.equal(marketing.code, "REQUEST_MATCHING_REQUIRED");
+  assert.equal(forgedDomain.code, "REQUEST_MATCHING_REQUIRED");
+  assert.equal(normalized.ok, true);
+  assert.equal(normalized.request.service_specialty, "painting");
+});
+
 test("professional eligibility is fail closed on domain, specialty, status, and service area", () => {
   const profile = {
     category: "painting",
@@ -116,9 +137,40 @@ test("professional eligibility is fail closed on domain, specialty, status, and 
   };
   assert.equal(professionalCanSeeRequest(profile, row()), true);
   assert.equal(professionalCanSeeRequest(profile, row({ status: "cancelled" })), false);
+  assert.equal(professionalCanSeeRequest(profile, row({ status: "closed" })), false);
+  assert.equal(professionalCanSeeRequest(profile, row({ status: "withdrawn" })), false);
   assert.equal(professionalCanSeeRequest(profile, row({ location: "Miami, FL" })), false);
   assert.equal(professionalCanSeeRequest(profile, row({ service_domain: "healthcare" })), false);
   assert.equal(professionalCanSeeRequest(profile, row({ service_specialty: "plumbing" })), false);
+  assert.equal(professionalCanSeeRequest(profile, row({ service_specialty: "unknown" })), false);
+});
+
+test("license and verification metadata do not alter deterministic lead eligibility", () => {
+  const request = row({ service_specialty: "painting" });
+  const profiles = [
+    {
+      category: "painting",
+      profile_details: {
+        service_area: "Cape Coral",
+        service_specialties: ["painting"],
+        license_number: "",
+        verified: false,
+      },
+    },
+    {
+      category: "painting",
+      profile_details: {
+        service_area: "Cape Coral",
+        service_specialties: ["painting"],
+        license_number: "TEST-LICENSE-METADATA",
+        verified: true,
+      },
+    },
+  ];
+
+  profiles.forEach((profile) => {
+    assert.equal(professionalCanSeeRequest(profile, request), true);
+  });
 });
 
 test("professional eligibility matches detailed door and window service capabilities", () => {

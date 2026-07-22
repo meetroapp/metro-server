@@ -1,75 +1,15 @@
 "use strict";
 
 const REQUEST_STATUSES = Object.freeze(["open", "cancelled"]);
-const SERVICE_DOMAINS = Object.freeze([
-  "healthcare",
-  "home_services",
-  "property_management",
-  "transportation",
-]);
-
-const CATEGORY_ELIGIBILITY = Object.freeze({
-  contractor: Object.freeze([
-    "carpentry", "concrete", "demolition", "door_installation", "door_repair",
-    "door_repair_replacement", "door_replacement", "doors_windows", "drywall",
-    "flooring", "garage_door_repair", "painting", "repair", "tile",
-    "window_repair", "window_replacement", "windows_doors",
-  ]),
-  door_installation: Object.freeze([
-    "door_installation", "door_repair", "door_repair_replacement",
-    "door_replacement", "doors_windows", "garage_door_repair", "windows_doors",
-  ]),
-  door_repair: Object.freeze([
-    "door_installation", "door_repair", "door_repair_replacement",
-    "doors_windows", "garage_door_repair", "windows_doors",
-  ]),
-  door_repair_replacement: Object.freeze([
-    "door_installation", "door_repair", "door_repair_replacement",
-    "door_replacement", "doors_windows", "windows_doors",
-  ]),
-  door_replacement: Object.freeze([
-    "door_installation", "door_repair_replacement", "door_replacement",
-    "doors_windows", "windows_doors",
-  ]),
-  garage_door_repair: Object.freeze([
-    "door_repair", "doors_windows", "garage_door_repair",
-    "garage_door_installation", "garage_door_opener_installation",
-    "windows_doors",
-  ]),
-  garage_door_installation: Object.freeze([
-    "door_installation", "doors_windows", "garage_door_repair",
-    "garage_door_installation", "garage_door_opener_installation",
-    "windows_doors",
-  ]),
-  window_repair: Object.freeze([
-    "doors_windows", "window_repair", "window_replacement", "windows_doors",
-  ]),
-  window_replacement: Object.freeze([
-    "doors_windows", "window_repair", "window_replacement", "windows_doors",
-  ]),
-  electrical: Object.freeze(["electrical", "ceiling_fan_installation", "minor_electrical"]),
-  handyman: Object.freeze([
-    "appliance_repair", "appliance_installation", "cabinetry", "carpentry",
-    "ceiling_fan_installation", "door_installation", "door_repair",
-    "door_repair_replacement", "door_replacement", "doors_windows", "drywall",
-    "drywall_repair", "electrical", "fence_repair", "flooring",
-    "garage_door_repair", "garage_door_installation", "general",
-    "general_maintenance", "locksmith", "minor_electrical", "minor_plumbing",
-    "mounting_hanging", "painting", "plumbing", "plumbing_repairs",
-    "pressure_washing", "repair", "tile", "tile_repair_installation",
-    "trim_baseboards", "window_repair", "window_replacement", "windows_doors",
-  ]),
-  landscaping: Object.freeze(["landscaping", "lawn_care", "tree_service"]),
-  painting: Object.freeze(["painting"]),
-  plumbing: Object.freeze(["plumbing", "plumbing_repairs", "minor_plumbing"]),
-  roofing: Object.freeze(["roofing", "storm"]),
-});
-
-const DOMAIN_CATEGORIES = Object.freeze({
-  healthcare: new Set(["caregiver", "healthcare", "home_health", "medical_care", "medical_transport", "nursing", "senior_care", "therapy"]),
-  property_management: new Set(["inspection", "maintenance", "property_management", "property_maintenance", "rental_maintenance", "tenant_ticket", "unit_turnover", "vendor_dispatch"]),
-  transportation: new Set(["automotive_services", "car_detailing", "mechanic", "mobile_services", "moving", "private_transportation"]),
-});
+const {
+  SUPPORTED_REQUEST_DOMAINS,
+  getProfessionalServiceDomain,
+  getRequestServiceDomain,
+  isProfessionalServiceEligibleForRequest,
+  isSupportedRequestService,
+  normalizeProfessionalServiceId,
+  normalizeRequestServiceId,
+} = require("./serviceCompatibility");
 
 function isRecord(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -123,7 +63,7 @@ function validateRequestPayload(body, { partial = false } = {}) {
   const category = cleanString(body.category, 100, { required: !partial });
   const requestCategory = cleanString(body.request_category, 100, { required: !partial });
   const serviceDomain = normalizeIdentifier(body.service_domain);
-  const serviceSpecialty = normalizeIdentifier(body.service_specialty);
+  const serviceSpecialty = normalizeRequestServiceId(body.service_specialty);
   const location = cleanString(body.location, 500, {
     required: !partial || body.location !== undefined,
   });
@@ -133,10 +73,20 @@ function validateRequestPayload(body, { partial = false } = {}) {
   if ([title, description, category, requestCategory, location, unitNumber, accessNotes].includes(null)) {
     return { ok: false, status: 400, code: "INVALID_REQUEST_FIELD", message: "One or more request fields are invalid." };
   }
-  if (!partial && (!SERVICE_DOMAINS.includes(serviceDomain) || !serviceSpecialty)) {
+  const canonicalServiceDomain = getRequestServiceDomain(serviceSpecialty);
+  if (
+    !partial &&
+    (!isSupportedRequestService(serviceSpecialty) ||
+      !canonicalServiceDomain ||
+      serviceDomain !== canonicalServiceDomain)
+  ) {
     return { ok: false, status: 400, code: "REQUEST_MATCHING_REQUIRED", message: "A supported service match is required." };
   }
-  if (partial && body.service_domain !== undefined && !SERVICE_DOMAINS.includes(serviceDomain)) {
+  if (
+    partial &&
+    body.service_domain !== undefined &&
+    !SUPPORTED_REQUEST_DOMAINS.includes(serviceDomain)
+  ) {
     return { ok: false, status: 400, code: "INVALID_SERVICE_DOMAIN", message: "Service domain is invalid." };
   }
 
@@ -167,30 +117,22 @@ function parseDetails(value) {
   }
 }
 
-function categoryCanServe(professionalCategory, requestCategory) {
-  if (!professionalCategory || !requestCategory) return false;
-  if (professionalCategory === requestCategory) return true;
-  return CATEGORY_ELIGIBILITY[professionalCategory]?.includes(requestCategory) === true;
-}
-
-function inferCategoryDomain(category) {
-  for (const [domain, categories] of Object.entries(DOMAIN_CATEGORIES)) {
-    if (categories.has(category)) return domain;
-  }
-  return category ? "home_services" : "";
-}
-
 function professionalCanSeeRequest(profile = {}, request = {}) {
   const details = parseDetails(profile.profile_details);
   const specialties = Array.isArray(details.service_specialties)
-    ? details.service_specialties.map(normalizeIdentifier).filter(Boolean)
+    ? details.service_specialties.map(normalizeProfessionalServiceId).filter(Boolean)
     : [];
   const professionalCategories = specialties.length > 0
     ? specialties
-    : [normalizeIdentifier(profile.category)].filter(Boolean);
-  const requestSpecialty = normalizeIdentifier(request.service_specialty || request.request_category);
+    : [normalizeProfessionalServiceId(profile.category)].filter(Boolean);
+  const requestSpecialty = normalizeRequestServiceId(
+    request.service_specialty || request.request_category
+  );
   const requestDomain = normalizeIdentifier(request.service_domain);
-  const professionalDomains = new Set(professionalCategories.map(inferCategoryDomain).filter(Boolean));
+  const canonicalRequestDomain = getRequestServiceDomain(requestSpecialty);
+  const professionalDomains = new Set(
+    professionalCategories.map(getProfessionalServiceDomain).filter(Boolean)
+  );
   const serviceAreas = [details.service_area, details.city, details.postal_code]
     .flatMap((value) => String(value || "").split(/[,;|]+/))
     .map((value) => value.trim().toLowerCase())
@@ -203,12 +145,13 @@ function professionalCanSeeRequest(profile = {}, request = {}) {
     serviceAreas.some((area) => normalizedRequestLocation.includes(area))
   );
   const specialtyMatched = professionalCategories.some((category) =>
-    categoryCanServe(category, requestSpecialty)
+    isProfessionalServiceEligibleForRequest(category, requestSpecialty)
   );
 
   return Boolean(
     request.status === "open" &&
-    requestDomain &&
+    canonicalRequestDomain &&
+    requestDomain === canonicalRequestDomain &&
     professionalDomains.has(requestDomain) &&
     specialtyMatched &&
     areaMatched
