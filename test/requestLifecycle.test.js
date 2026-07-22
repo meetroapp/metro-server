@@ -234,6 +234,31 @@ test("professional projection excludes owner and private location/access fields"
   }
   assert.equal(projected.request_id, 41);
   assert.equal(projected.status, "open");
+  assert.equal(projected.conversation_id, null);
+  assert.equal(projected.conversation_available, false);
+  assert.equal(Object.hasOwn(projected, "relationship_id"), false);
+  assert.equal(Object.hasOwn(projected, "professional_user_id"), false);
+  assert.equal(Object.hasOwn(projected, "contractor_id"), false);
+  assert.equal(Object.hasOwn(projected, "quote_request_id"), false);
+});
+
+test("professional projection exposes only valid canonical conversation identity", () => {
+  const projected = serializeProfessionalOpportunity(
+    row({ conversation_id: 91 }),
+    []
+  );
+
+  assert.equal(projected.conversation_id, 91);
+  assert.equal(projected.conversation_available, true);
+
+  for (const malformed of [undefined, null, "", 0, -1, 1.5, "1.5", "nope", Number.MAX_SAFE_INTEGER + 1]) {
+    const invalid = serializeProfessionalOpportunity(
+      row({ conversation_id: malformed }),
+      []
+    );
+    assert.equal(invalid.conversation_id, null);
+    assert.equal(invalid.conversation_available, false);
+  }
 });
 
 test("owner-only edit persists canonical response and cross-user edit is not disclosed", async () => {
@@ -291,7 +316,66 @@ test("cancel is owner scoped, retained, and idempotent", async () => {
   assert.match(calls.at(-1).sql, /cancelled_at = COALESCE/);
 });
 
-test("professional endpoint returns only eligible privacy-safe open requests", async () => {
+test("professional endpoint returns participant-scoped canonical identity without changing eligibility", async () => {
+  const calls = [];
+  const pool = {
+    async query(text, values = []) {
+      const sql = String(text).replace(/\s+/g, " ").trim();
+      calls.push({ sql, values });
+      if (sql.includes("FROM users WHERE id = $1")) {
+        return { rows: [{ id: values[0], email: "pro@example.test", role: "painting", token_version: 0 }] };
+      }
+      if (sql.includes("FROM contractor_profiles")) {
+        return { rows: [{
+          id: 80,
+          user_id: 9,
+          category: "painting",
+          profile_details: { service_area: "Cape Coral", service_specialties: ["painting"] },
+        }] };
+      }
+      if (sql.includes("FROM posts")) {
+        assert.deepEqual(values, [9, 80]);
+        assert.match(sql, /posts\.status = 'open' AND posts\.user_id <> \$1/);
+        assert.match(sql, /LEFT JOIN request_relationships/);
+        assert.match(sql, /request_relationships\.post_id = posts\.id/);
+        assert.match(sql, /request_relationships\.contractor_id = \$2/);
+        assert.match(sql, /request_relationships\.professional_user_id = \$1/);
+        assert.match(sql, /LEFT JOIN conversations/);
+        assert.match(sql, /conversations\.relationship_id = request_relationships\.id/);
+        assert.match(sql, /conversations\.contractor_id = \$2/);
+        assert.match(sql, /conversations\.professional_user_id = \$1/);
+        assert.doesNotMatch(sql, /quote_requests/);
+        return { rows: [
+          row({ id: 41, user_id: 7, conversation_id: 91 }),
+          row({ id: 42, user_id: 8, location: "Miami, FL" }),
+          row({ id: 43, user_id: 8, service_specialty: "plumbing" }),
+          row({ id: 44, user_id: 8, conversation_id: null }),
+        ] };
+      }
+      throw new Error(`Unexpected query: ${sql}`);
+    },
+  };
+  const result = await invoke("get", "/professional-request-opportunities", {
+    userId: 9,
+    pool,
+    params: {},
+  });
+  assert.equal(result.statusCode, 200);
+  assert.deepEqual(result.body.opportunities.map((item) => item.id), [41, 44]);
+  assert.equal(result.body.opportunities[0].conversation_id, 91);
+  assert.equal(result.body.opportunities[0].conversation_available, true);
+  assert.equal(result.body.opportunities[1].conversation_id, null);
+  assert.equal(result.body.opportunities[1].conversation_available, false);
+  assert.equal(Object.hasOwn(result.body.opportunities[0], "location"), false);
+  assert.equal(Object.hasOwn(result.body.opportunities[0], "user_id"), false);
+  assert.equal(Object.hasOwn(result.body.opportunities[0], "relationship_id"), false);
+  assert.equal(Object.hasOwn(result.body.opportunities[0], "professional_user_id"), false);
+  assert.equal(Object.hasOwn(result.body.opportunities[0], "contractor_id"), false);
+  assert.equal(Object.hasOwn(result.body.opportunities[0], "quote_request_id"), false);
+  assert.equal(calls.filter((call) => call.sql.includes("FROM posts")).length, 1);
+});
+
+test("closed or archived canonical conversations remain discoverable by identity", async () => {
   const pool = {
     async query(text, values = []) {
       const sql = String(text).replace(/\s+/g, " ").trim();
@@ -307,25 +391,48 @@ test("professional endpoint returns only eligible privacy-safe open requests", a
         }] };
       }
       if (sql.includes("FROM posts")) {
-        assert.match(sql, /status = 'open' AND user_id <> \$1/);
-        return { rows: [
-          row({ id: 41, user_id: 7 }),
-          row({ id: 42, user_id: 8, location: "Miami, FL" }),
-          row({ id: 43, user_id: 8, service_specialty: "plumbing" }),
-        ] };
+        assert.doesNotMatch(sql, /conversations\.status\s*=/);
+        assert.doesNotMatch(sql, /archived_at\s+IS\s+NULL/);
+        return { rows: [row({ conversation_id: 91 })] };
       }
       throw new Error(`Unexpected query: ${sql}`);
     },
   };
+
   const result = await invoke("get", "/professional-request-opportunities", {
     userId: 9,
     pool,
     params: {},
   });
+
   assert.equal(result.statusCode, 200);
-  assert.deepEqual(result.body.opportunities.map((item) => item.id), [41]);
-  assert.equal(Object.hasOwn(result.body.opportunities[0], "location"), false);
-  assert.equal(Object.hasOwn(result.body.opportunities[0], "user_id"), false);
+  assert.equal(result.body.opportunities[0].conversation_id, 91);
+  assert.equal(result.body.opportunities[0].conversation_available, true);
+});
+
+test("professional opportunity endpoint requires an owned business profile", async () => {
+  let opportunityQueryCalled = false;
+  const pool = {
+    async query(text, values = []) {
+      const sql = String(text).replace(/\s+/g, " ").trim();
+      if (sql.includes("FROM users WHERE id = $1")) {
+        return { rows: [{ id: values[0], email: "homeowner@example.test", role: "user", token_version: 0 }] };
+      }
+      if (sql.includes("FROM contractor_profiles")) return { rows: [] };
+      if (sql.includes("FROM posts")) opportunityQueryCalled = true;
+      return { rows: [] };
+    },
+  };
+
+  const result = await invoke("get", "/professional-request-opportunities", {
+    userId: 7,
+    pool,
+    params: {},
+  });
+
+  assert.equal(result.statusCode, 403);
+  assert.equal(result.body.code, "PROFESSIONAL_PROFILE_REQUIRED");
+  assert.equal(opportunityQueryCalled, false);
 });
 
 test("request lifecycle migration is additive and constrained", () => {

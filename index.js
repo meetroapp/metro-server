@@ -1550,18 +1550,28 @@ app.get("/professional-request-opportunities", authMiddleware, async (req, res) 
       });
     }
 
+    const profile = profileResult.rows[0];
     const result = await database.query(
       `
-      SELECT id, title, description, category, request_category, service_domain,
-             service_specialty, location, status, created_at, updated_at,
-             image_url, request_photos
+      SELECT posts.id, posts.title, posts.description, posts.category,
+             posts.request_category, posts.service_domain,
+             posts.service_specialty, posts.location, posts.status,
+             posts.created_at, posts.updated_at, posts.image_url,
+             posts.request_photos, conversations.id AS conversation_id
       FROM posts
-      WHERE status = 'open' AND user_id <> $1
-      ORDER BY created_at DESC
+      LEFT JOIN request_relationships
+        ON request_relationships.post_id = posts.id
+       AND request_relationships.contractor_id = $2
+       AND request_relationships.professional_user_id = $1
+      LEFT JOIN conversations
+        ON conversations.relationship_id = request_relationships.id
+       AND conversations.contractor_id = $2
+       AND conversations.professional_user_id = $1
+      WHERE posts.status = 'open' AND posts.user_id <> $1
+      ORDER BY posts.created_at DESC
       `,
-      [req.user.id]
+      [req.user.id, profile.id]
     );
-    const profile = profileResult.rows[0];
     const opportunities = result.rows
       .filter((request) => professionalCanSeeRequest(profile, request))
       .map((request) =>
