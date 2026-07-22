@@ -11,17 +11,53 @@ const SERVICE_DOMAINS = Object.freeze([
 const CATEGORY_ELIGIBILITY = Object.freeze({
   contractor: Object.freeze([
     "carpentry", "concrete", "demolition", "door_installation", "door_repair",
-    "door_replacement", "drywall", "flooring", "painting", "repair", "tile",
+    "door_repair_replacement", "door_replacement", "doors_windows", "drywall",
+    "flooring", "garage_door_repair", "painting", "repair", "tile",
+    "window_repair", "window_replacement", "windows_doors",
+  ]),
+  door_installation: Object.freeze([
+    "door_installation", "door_repair", "door_repair_replacement",
+    "door_replacement", "doors_windows", "garage_door_repair", "windows_doors",
+  ]),
+  door_repair: Object.freeze([
+    "door_installation", "door_repair", "door_repair_replacement",
+    "doors_windows", "garage_door_repair", "windows_doors",
+  ]),
+  door_repair_replacement: Object.freeze([
+    "door_installation", "door_repair", "door_repair_replacement",
+    "door_replacement", "doors_windows", "windows_doors",
+  ]),
+  door_replacement: Object.freeze([
+    "door_installation", "door_repair_replacement", "door_replacement",
+    "doors_windows", "windows_doors",
+  ]),
+  garage_door_repair: Object.freeze([
+    "door_repair", "doors_windows", "garage_door_repair",
+    "garage_door_installation", "garage_door_opener_installation",
+    "windows_doors",
+  ]),
+  garage_door_installation: Object.freeze([
+    "door_installation", "doors_windows", "garage_door_repair",
+    "garage_door_installation", "garage_door_opener_installation",
+    "windows_doors",
+  ]),
+  window_repair: Object.freeze([
+    "doors_windows", "window_repair", "window_replacement", "windows_doors",
+  ]),
+  window_replacement: Object.freeze([
+    "doors_windows", "window_repair", "window_replacement", "windows_doors",
   ]),
   electrical: Object.freeze(["electrical", "ceiling_fan_installation", "minor_electrical"]),
   handyman: Object.freeze([
     "appliance_repair", "appliance_installation", "cabinetry", "carpentry",
     "ceiling_fan_installation", "door_installation", "door_repair",
-    "door_replacement", "drywall", "drywall_repair", "electrical", "fence_repair",
-    "flooring", "general", "general_maintenance", "locksmith", "minor_electrical",
-    "minor_plumbing", "mounting_hanging", "painting", "plumbing",
-    "plumbing_repairs", "pressure_washing", "repair", "tile",
-    "tile_repair_installation", "trim_baseboards",
+    "door_repair_replacement", "door_replacement", "doors_windows", "drywall",
+    "drywall_repair", "electrical", "fence_repair", "flooring",
+    "garage_door_repair", "garage_door_installation", "general",
+    "general_maintenance", "locksmith", "minor_electrical", "minor_plumbing",
+    "mounting_hanging", "painting", "plumbing", "plumbing_repairs",
+    "pressure_washing", "repair", "tile", "tile_repair_installation",
+    "trim_baseboards", "window_repair", "window_replacement", "windows_doors",
   ]),
   landscaping: Object.freeze(["landscaping", "lawn_care", "tree_service"]),
   painting: Object.freeze(["painting"]),

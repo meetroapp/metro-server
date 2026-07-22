@@ -121,6 +121,60 @@ test("professional eligibility is fail closed on domain, specialty, status, and 
   assert.equal(professionalCanSeeRequest(profile, row({ service_specialty: "plumbing" })), false);
 });
 
+test("professional eligibility matches detailed door and window service capabilities", () => {
+  const profile = {
+    category: "handyman",
+    profile_details: {
+      service_area: "Cape Coral",
+      service_specialties: [
+        "door_repair_replacement",
+        "door_installation",
+        "garage_door_repair",
+        "window_repair",
+        "window_replacement",
+      ],
+    },
+  };
+
+  assert.equal(
+    professionalCanSeeRequest(
+      profile,
+      row({
+        title: "Door Repair",
+        request_category: "doors_windows",
+        service_specialty: "door_repair",
+      })
+    ),
+    true
+  );
+  assert.equal(
+    professionalCanSeeRequest(
+      profile,
+      row({
+        title: "Door Repair",
+        request_category: "doors_windows",
+        service_specialty: "doors_windows",
+      })
+    ),
+    true
+  );
+  assert.equal(
+    professionalCanSeeRequest(profile, row({ service_specialty: "window_repair" })),
+    true
+  );
+  assert.equal(
+    professionalCanSeeRequest(profile, row({ service_specialty: "plumbing" })),
+    false
+  );
+  assert.equal(
+    professionalCanSeeRequest(
+      profile,
+      row({ service_specialty: "door_repair", location: "Miami, FL" })
+    ),
+    false
+  );
+});
+
 test("professional projection excludes owner and private location/access fields", () => {
   const projected = serializeProfessionalOpportunity(row(), []);
   for (const key of ["user_id", "location", "unit_number", "access_notes"]) {
