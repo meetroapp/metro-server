@@ -55,6 +55,9 @@ const {
   serializeProfessionalOpportunity,
   validateRequestPayload,
 } = require("./server/requests/requestLifecycle");
+const {
+  materializeProfessionalOpportunities,
+} = require("./server/requests/professionalOpportunityService");
 
 const {
   serializeConversationDetail,
@@ -1532,48 +1535,20 @@ app.post("/posts/:id/cancel", authMiddleware, async (req, res) => {
 
 app.get("/professional-request-opportunities", authMiddleware, async (req, res) => {
   try {
-    const database = getPool(req);
-    const profileResult = await database.query(
-      `
-      SELECT id, user_id, category, profile_details
-      FROM contractor_profiles
-      WHERE user_id = $1
-      LIMIT 1
-      `,
-      [req.user.id]
-    );
-    if (profileResult.rows.length === 0) {
-      return res.status(403).json({
+    const result = await materializeProfessionalOpportunities({
+      pool: getPool(req),
+      professionalUserId: req.user.id,
+      professionalCanSeeRequest,
+    });
+    if (!result.ok) {
+      return res.status(result.status).json({
         success: false,
-        code: "PROFESSIONAL_PROFILE_REQUIRED",
-        message: "A business profile is required to view request opportunities.",
+        code: result.code,
+        message: result.message,
       });
     }
 
-    const profile = profileResult.rows[0];
-    const result = await database.query(
-      `
-      SELECT posts.id, posts.title, posts.description, posts.category,
-             posts.request_category, posts.service_domain,
-             posts.service_specialty, posts.location, posts.status,
-             posts.created_at, posts.updated_at, posts.image_url,
-             posts.request_photos, conversations.id AS conversation_id
-      FROM posts
-      LEFT JOIN request_relationships
-        ON request_relationships.post_id = posts.id
-       AND request_relationships.contractor_id = $2
-       AND request_relationships.professional_user_id = $1
-      LEFT JOIN conversations
-        ON conversations.relationship_id = request_relationships.id
-       AND conversations.contractor_id = $2
-       AND conversations.professional_user_id = $1
-      WHERE posts.status = 'open' AND posts.user_id <> $1
-      ORDER BY posts.created_at DESC
-      `,
-      [req.user.id, profile.id]
-    );
-    const opportunities = result.rows
-      .filter((request) => professionalCanSeeRequest(profile, request))
+    const opportunities = result.opportunities
       .map((request) =>
         serializeProfessionalOpportunity(
           request,

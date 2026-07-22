@@ -51,6 +51,54 @@ function row(overrides = {}) {
   };
 }
 
+function createOpportunityRoutePool({
+  profileRows = [{
+    id: 80,
+    user_id: 9,
+    category: "painting",
+    profile_details: {
+      service_area: "Cape Coral",
+      service_specialties: ["painting"],
+    },
+  }],
+  candidateRows = [row()],
+  identityRows = [{ post_id: 41, conversation_id: 91 }],
+} = {}) {
+  const calls = [];
+  const pool = {
+    async query(text, values = []) {
+      const sql = String(text).replace(/\s+/g, " ").trim();
+      calls.push({ sql, values });
+
+      if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql)) {
+        return { rows: [] };
+      }
+      if (sql.includes("FROM users WHERE id = $1")) {
+        return { rows: [{ id: values[0], email: "pro@example.test", role: "painting", token_version: 0 }] };
+      }
+      if (sql.includes("FROM contractor_profiles")) {
+        return { rows: profileRows };
+      }
+      if (sql.includes("INSERT INTO request_relationships")) {
+        return { rows: identityRows };
+      }
+      if (sql.includes("ANY($2::integer[])")) {
+        const ids = new Set(values[1].map(Number));
+        return {
+          rows: candidateRows.filter((request) => ids.has(Number(request.id))),
+        };
+      }
+      if (sql.includes("FROM posts")) {
+        return { rows: candidateRows };
+      }
+
+      throw new Error(`Unexpected query: ${sql}`);
+    },
+  };
+
+  return { calls, pool };
+}
+
 function getHandlers(method, path) {
   const layer = app.router.stack.find(
     (item) => item.route?.path === path && item.route.methods[method]
@@ -317,122 +365,84 @@ test("cancel is owner scoped, retained, and idempotent", async () => {
 });
 
 test("professional endpoint returns participant-scoped canonical identity without changing eligibility", async () => {
-  const calls = [];
-  const pool = {
-    async query(text, values = []) {
-      const sql = String(text).replace(/\s+/g, " ").trim();
-      calls.push({ sql, values });
-      if (sql.includes("FROM users WHERE id = $1")) {
-        return { rows: [{ id: values[0], email: "pro@example.test", role: "painting", token_version: 0 }] };
-      }
-      if (sql.includes("FROM contractor_profiles")) {
-        return { rows: [{
-          id: 80,
-          user_id: 9,
-          category: "painting",
-          profile_details: { service_area: "Cape Coral", service_specialties: ["painting"] },
-        }] };
-      }
-      if (sql.includes("FROM posts")) {
-        assert.deepEqual(values, [9, 80]);
-        assert.match(sql, /posts\.status = 'open' AND posts\.user_id <> \$1/);
-        assert.match(sql, /LEFT JOIN request_relationships/);
-        assert.match(sql, /request_relationships\.post_id = posts\.id/);
-        assert.match(sql, /request_relationships\.contractor_id = \$2/);
-        assert.match(sql, /request_relationships\.professional_user_id = \$1/);
-        assert.match(sql, /LEFT JOIN conversations/);
-        assert.match(sql, /conversations\.relationship_id = request_relationships\.id/);
-        assert.match(sql, /conversations\.contractor_id = \$2/);
-        assert.match(sql, /conversations\.professional_user_id = \$1/);
-        assert.doesNotMatch(sql, /quote_requests/);
-        return { rows: [
-          row({ id: 41, user_id: 7, conversation_id: 91 }),
-          row({ id: 42, user_id: 8, location: "Miami, FL" }),
-          row({ id: 43, user_id: 8, service_specialty: "plumbing" }),
-          row({ id: 44, user_id: 8, conversation_id: null }),
-        ] };
-      }
-      throw new Error(`Unexpected query: ${sql}`);
-    },
-  };
+  const fake = createOpportunityRoutePool({
+    candidateRows: [
+      row({ id: 41, user_id: 7 }),
+      row({ id: 42, user_id: 8, location: "Miami, FL" }),
+      row({ id: 43, user_id: 8, service_specialty: "plumbing" }),
+      row({ id: 44, user_id: 8 }),
+    ],
+    identityRows: [
+      { post_id: 41, conversation_id: 91 },
+      { post_id: 44, conversation_id: 92 },
+    ],
+  });
   const result = await invoke("get", "/professional-request-opportunities", {
     userId: 9,
-    pool,
+    pool: fake.pool,
     params: {},
   });
   assert.equal(result.statusCode, 200);
   assert.deepEqual(result.body.opportunities.map((item) => item.id), [41, 44]);
   assert.equal(result.body.opportunities[0].conversation_id, 91);
   assert.equal(result.body.opportunities[0].conversation_available, true);
-  assert.equal(result.body.opportunities[1].conversation_id, null);
-  assert.equal(result.body.opportunities[1].conversation_available, false);
+  assert.equal(result.body.opportunities[0].conversation_type, "request_opportunity");
+  assert.equal(result.body.opportunities[1].conversation_id, 92);
+  assert.equal(result.body.opportunities[1].conversation_available, true);
   assert.equal(Object.hasOwn(result.body.opportunities[0], "location"), false);
   assert.equal(Object.hasOwn(result.body.opportunities[0], "user_id"), false);
   assert.equal(Object.hasOwn(result.body.opportunities[0], "relationship_id"), false);
   assert.equal(Object.hasOwn(result.body.opportunities[0], "professional_user_id"), false);
   assert.equal(Object.hasOwn(result.body.opportunities[0], "contractor_id"), false);
   assert.equal(Object.hasOwn(result.body.opportunities[0], "quote_request_id"), false);
-  assert.equal(calls.filter((call) => call.sql.includes("FROM posts")).length, 1);
+  const materialization = fake.calls.find((call) =>
+    call.sql.includes("INSERT INTO request_relationships")
+  );
+  assert.ok(materialization);
+  assert.deepEqual(materialization.values, [9, 80, [41, 44]]);
+  assert.doesNotMatch(materialization.sql, /quote_requests/);
+  assert.equal(
+    fake.calls.filter((call) =>
+      call.sql.includes("INSERT INTO request_relationships")
+    ).length,
+    1
+  );
 });
 
 test("closed or archived canonical conversations remain discoverable by identity", async () => {
-  const pool = {
-    async query(text, values = []) {
-      const sql = String(text).replace(/\s+/g, " ").trim();
-      if (sql.includes("FROM users WHERE id = $1")) {
-        return { rows: [{ id: values[0], email: "pro@example.test", role: "painting", token_version: 0 }] };
-      }
-      if (sql.includes("FROM contractor_profiles")) {
-        return { rows: [{
-          id: 80,
-          user_id: 9,
-          category: "painting",
-          profile_details: { service_area: "Cape Coral", service_specialties: ["painting"] },
-        }] };
-      }
-      if (sql.includes("FROM posts")) {
-        assert.doesNotMatch(sql, /conversations\.status\s*=/);
-        assert.doesNotMatch(sql, /archived_at\s+IS\s+NULL/);
-        return { rows: [row({ conversation_id: 91 })] };
-      }
-      throw new Error(`Unexpected query: ${sql}`);
-    },
-  };
+  const fake = createOpportunityRoutePool();
 
   const result = await invoke("get", "/professional-request-opportunities", {
     userId: 9,
-    pool,
+    pool: fake.pool,
     params: {},
   });
 
   assert.equal(result.statusCode, 200);
   assert.equal(result.body.opportunities[0].conversation_id, 91);
   assert.equal(result.body.opportunities[0].conversation_available, true);
+  const materialization = fake.calls.find((call) =>
+    call.sql.includes("INSERT INTO conversations")
+  );
+  assert.doesNotMatch(materialization.sql, /conversations\.status\s*=/);
+  assert.doesNotMatch(materialization.sql, /archived_at\s+IS\s+NULL/);
 });
 
 test("professional opportunity endpoint requires an owned business profile", async () => {
-  let opportunityQueryCalled = false;
-  const pool = {
-    async query(text, values = []) {
-      const sql = String(text).replace(/\s+/g, " ").trim();
-      if (sql.includes("FROM users WHERE id = $1")) {
-        return { rows: [{ id: values[0], email: "homeowner@example.test", role: "user", token_version: 0 }] };
-      }
-      if (sql.includes("FROM contractor_profiles")) return { rows: [] };
-      if (sql.includes("FROM posts")) opportunityQueryCalled = true;
-      return { rows: [] };
-    },
-  };
+  const fake = createOpportunityRoutePool({ profileRows: [] });
 
   const result = await invoke("get", "/professional-request-opportunities", {
     userId: 7,
-    pool,
+    pool: fake.pool,
     params: {},
   });
 
   assert.equal(result.statusCode, 403);
   assert.equal(result.body.code, "PROFESSIONAL_PROFILE_REQUIRED");
-  assert.equal(opportunityQueryCalled, false);
+  assert.equal(
+    fake.calls.some((call) => call.sql.includes("FROM posts")),
+    false
+  );
 });
 
 test("request lifecycle migration is additive and constrained", () => {
