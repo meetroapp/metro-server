@@ -514,6 +514,7 @@ async function withdrawProfessionalRequestRelationship({
       WHERE request_relationships.id = $1
         AND request_relationships.professional_user_id = $2
         AND contractor_profiles.user_id = $2
+        AND request_relationships.post_id IS NOT NULL
       LIMIT 1
       FOR UPDATE
       `,

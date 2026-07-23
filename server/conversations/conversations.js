@@ -17,16 +17,13 @@ function isValidPositiveInteger(value) {
   }
 
   const parsed = Number(normalized);
-
   return Number.isSafeInteger(parsed) && parsed > 0;
 }
 
 function parsePositiveInteger(value) {
-  if (!isValidPositiveInteger(value)) return null;
-
-  const parsed = Number(value);
-
-  return Number.isSafeInteger(parsed) ? parsed : null;
+  return isValidPositiveInteger(value)
+    ? Number(value)
+    : null;
 }
 
 function validateConversationStatus(status) {
@@ -34,9 +31,9 @@ function validateConversationStatus(status) {
 }
 
 function isConversationParticipant(conversation = {}, userId) {
-  return Boolean(
+  return (
     String(conversation.homeowner_id) === String(userId) ||
-      String(conversation.professional_user_id) === String(userId)
+    String(conversation.professional_user_id) === String(userId)
   );
 }
 
@@ -45,7 +42,9 @@ function participantArchiveField(conversation = {}, userId) {
     return "homeowner_archived_at";
   }
 
-  if (String(conversation.professional_user_id) === String(userId)) {
+  if (
+    String(conversation.professional_user_id) === String(userId)
+  ) {
     return "professional_archived_at";
   }
 
@@ -53,22 +52,22 @@ function participantArchiveField(conversation = {}, userId) {
 }
 
 function canArchiveConversation(conversation = {}, userId) {
-  const archiveField = participantArchiveField(conversation, userId);
+  const field = participantArchiveField(conversation, userId);
 
   return Boolean(
     conversation.status === CONVERSATION_STATUSES.ACTIVE &&
-      archiveField &&
-      !conversation[archiveField]
+      field &&
+      !conversation[field]
   );
 }
 
 function canRestoreConversation(conversation = {}, userId) {
-  const archiveField = participantArchiveField(conversation, userId);
+  const field = participantArchiveField(conversation, userId);
 
   return Boolean(
     conversation.status === CONVERSATION_STATUSES.ACTIVE &&
-      archiveField &&
-      conversation[archiveField]
+      field &&
+      conversation[field]
   );
 }
 
@@ -77,6 +76,34 @@ function canCloseConversation(conversation = {}, userId) {
     conversation.status === CONVERSATION_STATUSES.ACTIVE &&
       isConversationParticipant(conversation, userId)
   );
+}
+
+function getConversationSource(row = {}) {
+  const emergencyId = parsePositiveInteger(
+    row.emergency_request_id
+  );
+
+  if (emergencyId) {
+    return {
+      type: "emergency",
+      id: emergencyId,
+      title: row.request_title || "",
+      serviceDomain: row.source_service_domain || "",
+      serviceSpecialty: row.source_service_specialty || "",
+      isEmergency: true,
+    };
+  }
+
+  const requestId = parsePositiveInteger(row.post_id);
+
+  return {
+    type: "request",
+    id: requestId,
+    title: row.request_title || "",
+    serviceDomain: row.source_service_domain || "",
+    serviceSpecialty: row.source_service_specialty || "",
+    isEmergency: false,
+  };
 }
 
 function serializeConversationForHomeowner(row = {}) {
@@ -96,7 +123,7 @@ function serializeConversationForHomeowner(row = {}) {
 }
 
 function serializeConversationForProfessional(row = {}) {
-  return {
+  const value = {
     id: row.id,
     relationship_id: row.relationship_id,
     request_id: row.post_id,
@@ -108,13 +135,23 @@ function serializeConversationForProfessional(row = {}) {
     updated_at: row.updated_at,
     closed_at: row.closed_at,
   };
+
+  if (parsePositiveInteger(row.emergency_request_id)) {
+    delete value.request_id;
+    value.emergency_request_id = parsePositiveInteger(
+      row.emergency_request_id
+    );
+    value.source = getConversationSource(row);
+  }
+
+  return value;
 }
 
 function serializeConversationSummaryForHomeowner(row = {}) {
   const conversationId = parsePositiveInteger(row.id);
   const requestId = parsePositiveInteger(row.post_id);
 
-  return {
+  const value = {
     id: conversationId,
     conversation_id: conversationId,
     request_id: requestId,
@@ -143,10 +180,20 @@ function serializeConversationSummaryForHomeowner(row = {}) {
         row.status === CONVERSATION_STATUSES.ACTIVE,
     },
   };
+
+  if (parsePositiveInteger(row.emergency_request_id)) {
+    value.request_id = null;
+    value.emergency_request_id = parsePositiveInteger(
+      row.emergency_request_id
+    );
+    value.source = getConversationSource(row);
+  }
+
+  return value;
 }
 
 function serializeConversationSummaryForProfessional(row = {}) {
-  return {
+  const value = {
     id: row.id,
     relationship: {
       id: row.relationship_id,
@@ -170,8 +217,16 @@ function serializeConversationSummaryForProfessional(row = {}) {
     conversation_available:
       row.status === CONVERSATION_STATUSES.ACTIVE,
   };
-}
 
+  if (parsePositiveInteger(row.emergency_request_id)) {
+    value.emergency_request_id = parsePositiveInteger(
+      row.emergency_request_id
+    );
+    value.source = getConversationSource(row);
+  }
+
+  return value;
+}
 
 function normalizeMessageWorkflowPayload(value) {
   return value &&
@@ -181,17 +236,13 @@ function normalizeMessageWorkflowPayload(value) {
     : {};
 }
 
-function serializeConversationMessage(
-  row = {},
-  viewerUserId
-) {
+function serializeConversationMessage(row = {}, viewerUserId) {
   return {
     id: row.id,
     sender: {
       id: row.sender_id,
       isViewer:
-        String(row.sender_id) ===
-        String(viewerUserId),
+        String(row.sender_id) === String(viewerUserId),
     },
     recipient: {
       id: row.receiver_id ?? null,
@@ -212,11 +263,9 @@ function serializeConversationMessage(
   };
 }
 
-
 function serializeConversationDetail(row = {}, viewerUserId) {
   const viewerIsHomeowner =
     String(row.homeowner_id) === String(viewerUserId);
-
   const viewerIsProfessional =
     String(row.professional_user_id) === String(viewerUserId);
 
@@ -226,10 +275,25 @@ function serializeConversationDetail(row = {}, viewerUserId) {
     );
   }
 
+  const source = getConversationSource(row);
+  const relationship =
+    source.type === "emergency"
+      ? {
+          id: row.relationship_id,
+          emergencyRequestId: source.id,
+          title: source.title,
+          source,
+        }
+      : {
+          id: row.relationship_id,
+          requestId: row.post_id,
+          title: row.request_title || "",
+        };
+
   return {
     conversation: {
       id: row.id,
-      type: "request",
+      type: source.type,
       status: row.status,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -255,11 +319,7 @@ function serializeConversationDetail(row = {}, viewerUserId) {
         category: row.professional_category || "",
       },
     },
-    relationship: {
-      id: row.relationship_id,
-      requestId: row.post_id,
-      title: row.request_title || "",
-    },
+    relationship,
     workflow: {
       status: null,
       stage: null,
@@ -279,6 +339,7 @@ module.exports = {
   canArchiveConversation,
   canCloseConversation,
   canRestoreConversation,
+  getConversationSource,
   isConversationParticipant,
   isValidPositiveInteger,
   parsePositiveInteger,

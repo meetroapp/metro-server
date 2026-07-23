@@ -281,7 +281,7 @@ test("homeowner conversation list is owner scoped", async () => {
 
     assert.match(
       sql,
-      /posts\.title AS request_title/
+      /END AS request_title/
     );
 
     assert.match(
@@ -629,4 +629,28 @@ test("client-level conversation ensure never releases a caller-owned client", as
   assert.equal(result.ok, true);
   assert.equal(result.code, "CONVERSATION_EXISTS");
   assert.equal(released, false);
+});
+
+
+test("active Emergency relationship creates one canonical conversation", async () => {
+  const fake = createConversationPool({
+    relationshipRows: [{ id: 32, post_id: null, emergency_request_id: 61, homeowner_id: 7, contractor_id: 80, professional_user_id: 9, status: "active" }],
+    conversationRows: [{ id: 52, relationship_id: 32, homeowner_id: 7, contractor_id: 80, professional_user_id: 9, status: "active", created: true }],
+  });
+  const result = await ensureConversation({ pool: fake.pool, relationshipId: 32 });
+  assert.equal(result.ok, true);
+  assert.equal(result.conversation.id, 52);
+});
+
+test("conversation creation rejects relationships with invalid source cardinality", async () => {
+  for (const relationshipRows of [
+    [{ id: 33, post_id: null, emergency_request_id: null, homeowner_id: 7, contractor_id: 80, professional_user_id: 9, status: "active" }],
+    [{ id: 34, post_id: 41, emergency_request_id: 61, homeowner_id: 7, contractor_id: 80, professional_user_id: 9, status: "active" }],
+  ]) {
+    const fake = createConversationPool({ relationshipRows });
+    const result = await ensureConversation({ pool: fake.pool, relationshipId: relationshipRows[0].id });
+    assert.equal(result.ok, false);
+    assert.equal(result.code, "RELATIONSHIP_SOURCE_INVALID");
+    assert.equal(fake.calls.some((call) => call.sql.includes("INSERT INTO conversations")), false);
+  }
 });

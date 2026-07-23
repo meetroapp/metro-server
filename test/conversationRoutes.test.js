@@ -956,3 +956,108 @@ test("existing conversation inbox remains independently available", () => {
     )
   );
 });
+
+test("homeowner inbox exposes governed Emergency source identity", async () => {
+  const fake = createConversationRoutePool({
+    homeownerRows: [{
+      id: 191,
+      relationship_id: 151,
+      homeowner_id: 7,
+      contractor_id: 80,
+      professional_user_id: 9,
+      post_id: null,
+      emergency_request_id: 141,
+      source_type: "emergency",
+      source_service_domain: "home_services",
+      source_service_specialty: "plumbing",
+      status: "active",
+      homeowner_archived_at: null,
+      professional_archived_at: null,
+      created_at: "2026-07-23T14:00:00.000Z",
+      updated_at: "2026-07-23T14:05:00.000Z",
+      closed_at: null,
+      business_name: "Trusted Repairs",
+      business_image_url: "https://example.test/logo.jpg",
+      professional_category: "handyman",
+      request_title: "Active Water Leak",
+    }],
+  });
+
+  const result = await invokeConversationInbox({
+    userId: 7,
+    perspective: "homeowner",
+    pool: fake.pool,
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.conversations.length, 1);
+
+  const conversation = result.body.conversations[0];
+
+  assert.equal(conversation.request_id, null);
+  assert.equal(conversation.emergency_request_id, 141);
+  assert.deepEqual(conversation.source, {
+    type: "emergency",
+    id: 141,
+    title: "Active Water Leak",
+    serviceDomain: "home_services",
+    serviceSpecialty: "plumbing",
+    isEmergency: true,
+  });
+  assert.equal(conversation.permissions.canSendMessages, true);
+});
+
+test("Emergency conversation detail preserves shared participant permissions", async () => {
+  const fake = createConversationDetailRoutePool({
+    conversationRows: [{
+      id: 191,
+      relationship_id: 151,
+      post_id: null,
+      emergency_request_id: 141,
+      source_type: "emergency",
+      source_service_domain: "home_services",
+      source_service_specialty: "plumbing",
+      homeowner_id: 7,
+      contractor_id: 80,
+      professional_user_id: 9,
+      status: "active",
+      request_title: "Active Water Leak",
+      homeowner_display_name: "William Molina",
+      business_name: "Trusted Repairs",
+      business_image_url: "https://example.test/logo.jpg",
+      professional_category: "handyman",
+      homeowner_archived_at: null,
+      professional_archived_at: null,
+      created_at: "2026-07-23T14:00:00.000Z",
+      updated_at: "2026-07-23T14:05:00.000Z",
+      closed_at: null,
+    }],
+  });
+
+  const result = await invokeConversationDetail({
+    userId: 7,
+    conversationId: "191",
+    pool: fake.pool,
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.conversation.type, "emergency");
+  assert.deepEqual(result.body.relationship, {
+    id: 151,
+    emergencyRequestId: 141,
+    title: "Active Water Leak",
+    source: {
+      type: "emergency",
+      id: 141,
+      title: "Active Water Leak",
+      serviceDomain: "home_services",
+      serviceSpecialty: "plumbing",
+      isEmergency: true,
+    },
+  });
+  assert.deepEqual(result.body.permissions, {
+    canRead: true,
+    canSendMessages: true,
+    canManageWorkflow: false,
+  });
+});

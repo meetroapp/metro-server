@@ -637,3 +637,39 @@ test("conversation message serializer normalizes malformed workflow payloads", (
     null
   );
 });
+
+
+test("Emergency conversation serializers expose explicit Emergency source identity", () => {
+  const row = {
+    id: 92,
+    relationship_id: 52,
+    post_id: null,
+    emergency_request_id: 61,
+    source_type: "emergency",
+    request_title: "Emergency Plumbing",
+    source_service_domain: "home_services",
+    source_service_specialty: "plumbing_repair",
+    homeowner_id: 7,
+    contractor_id: 80,
+    professional_user_id: 9,
+    status: "active",
+    homeowner_display_name: "William Molina",
+    business_name: "Trusted Repairs",
+    business_image_url: "",
+    professional_category: "plumbing",
+    created_at: "2026-07-23T14:00:00.000Z",
+    updated_at: "2026-07-23T14:01:00.000Z",
+  };
+  const homeowner = serializeConversationSummaryForHomeowner(row);
+  assert.equal(homeowner.request_id, null);
+  assert.equal(homeowner.emergency_request_id, 61);
+  assert.equal(homeowner.source.type, "emergency");
+  assert.equal(homeowner.source.isEmergency, true);
+  const professional = serializeConversationSummaryForProfessional(row);
+  assert.equal(professional.emergency_request_id, 61);
+  assert.equal(professional.source.id, 61);
+  const detail = serializeConversationDetail(row, 7);
+  assert.equal(detail.conversation.type, "emergency");
+  assert.equal(detail.relationship.emergencyRequestId, 61);
+  assert.equal(Object.hasOwn(detail.relationship, "requestId"), false);
+});

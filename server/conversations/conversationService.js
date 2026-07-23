@@ -1,8 +1,6 @@
 "use strict";
 
-const {
-  parsePositiveInteger,
-} = require("./conversations");
+const { parsePositiveInteger } = require("./conversations");
 
 function requireDatabasePool(pool) {
   if (!pool || typeof pool.query !== "function") {
@@ -10,12 +8,18 @@ function requireDatabasePool(pool) {
   }
 }
 
+function hasExactlyOneRelationshipSource(relationship = {}) {
+  const hasPost = parsePositiveInteger(relationship.post_id) !== null;
+  const hasEmergency =
+    parsePositiveInteger(relationship.emergency_request_id) !== null;
+  return hasPost !== hasEmergency;
+}
+
 async function ensureConversationWithClient({
   client,
   relationshipId: rawRelationshipId,
 }) {
   const relationshipId = parsePositiveInteger(rawRelationshipId);
-
   if (!relationshipId) {
     return {
       ok: false,
@@ -24,7 +28,6 @@ async function ensureConversationWithClient({
       message: "A valid relationship ID is required.",
     };
   }
-
   requireDatabasePool(client);
 
   const relationshipResult = await client.query(
@@ -32,6 +35,7 @@ async function ensureConversationWithClient({
     SELECT
       id,
       post_id,
+      emergency_request_id,
       homeowner_id,
       contractor_id,
       professional_user_id,
@@ -50,11 +54,20 @@ async function ensureConversationWithClient({
       ok: false,
       status: 404,
       code: "ACTIVE_RELATIONSHIP_NOT_FOUND",
-      message: "An active relationship is required to create a conversation.",
+      message:
+        "An active relationship is required to create a conversation.",
     };
   }
 
   const relationship = relationshipResult.rows[0];
+  if (!hasExactlyOneRelationshipSource(relationship)) {
+    return {
+      ok: false,
+      status: 409,
+      code: "RELATIONSHIP_SOURCE_INVALID",
+      message: "The relationship source is invalid.",
+    };
+  }
 
   const conversationResult = await client.query(
     `
@@ -91,7 +104,6 @@ async function ensureConversationWithClient({
   );
 
   const conversation = conversationResult.rows[0];
-
   if (!conversation) {
     throw new Error(
       "The conversation could not be created or resolved."
@@ -101,9 +113,7 @@ async function ensureConversationWithClient({
   return {
     ok: true,
     status: conversation.created ? 201 : 200,
-    code: conversation.created
-      ? "CONVERSATION_CREATED"
-      : "CONVERSATION_EXISTS",
+    code: conversation.created ? "CONVERSATION_CREATED" : "CONVERSATION_EXISTS",
     created: Boolean(conversation.created),
     conversation,
   };
@@ -114,7 +124,6 @@ async function ensureConversation({
   relationshipId: rawRelationshipId,
 }) {
   const relationshipId = parsePositiveInteger(rawRelationshipId);
-
   if (!relationshipId) {
     return {
       ok: false,
@@ -123,43 +132,64 @@ async function ensureConversation({
       message: "A valid relationship ID is required.",
     };
   }
-
   requireDatabasePool(pool);
-
   const client =
     typeof pool.connect === "function"
       ? await pool.connect()
       : pool;
-
   try {
     await client.query("BEGIN");
-
-    const result = await ensureConversationWithClient({
-      client,
-      relationshipId,
-    });
-
+    const result = await ensureConversationWithClient({ client, relationshipId });
     if (!result.ok) {
       await client.query("ROLLBACK");
       return result;
     }
-
     await client.query("COMMIT");
     return result;
   } catch (error) {
     try {
       await client.query("ROLLBACK");
     } catch {
-      // Preserve the original operation error.
+      // Preserve the original persistence error.
     }
-
     throw error;
   } finally {
-    if (client !== pool && typeof client.release === "function") {
+    if (
+      client !== pool &&
+      typeof client.release === "function"
+    ) {
       client.release();
     }
   }
 }
+
+const SOURCE_PROJECTION = `
+  request_relationships.post_id,
+  request_relationships.emergency_request_id,
+  CASE
+    WHEN request_relationships.emergency_request_id IS NOT NULL THEN 'emergency'
+    ELSE 'request'
+  END AS source_type,
+  CASE
+    WHEN request_relationships.emergency_request_id IS NOT NULL THEN emergency_requests.title
+    ELSE posts.title
+  END AS request_title,
+  CASE
+    WHEN request_relationships.emergency_request_id IS NOT NULL THEN emergency_requests.service_domain
+    ELSE posts.service_domain
+  END AS source_service_domain,
+  CASE
+    WHEN request_relationships.emergency_request_id IS NOT NULL THEN emergency_requests.service_specialty
+    ELSE posts.service_specialty
+  END AS source_service_specialty
+`;
+
+const SOURCE_JOINS = `
+  LEFT JOIN posts
+    ON request_relationships.post_id = posts.id
+  LEFT JOIN emergency_requests
+    ON request_relationships.emergency_request_id = emergency_requests.id
+`;
 
 async function listHomeownerConversations({
   pool,
@@ -167,7 +197,6 @@ async function listHomeownerConversations({
   includeArchived = false,
 }) {
   requireDatabasePool(pool);
-
   const result = await pool.query(
     `
     SELECT
@@ -176,7 +205,7 @@ async function listHomeownerConversations({
       conversations.homeowner_id,
       conversations.contractor_id,
       conversations.professional_user_id,
-      request_relationships.post_id,
+      ${SOURCE_PROJECTION},
       conversations.status,
       conversations.homeowner_archived_at,
       conversations.professional_archived_at,
@@ -185,26 +214,25 @@ async function listHomeownerConversations({
       conversations.updated_at,
       contractor_profiles.business_name,
       contractor_profiles.image_url AS business_image_url,
-      contractor_profiles.category AS professional_category,
-      posts.title AS request_title
+      contractor_profiles.category AS professional_category
     FROM conversations
     JOIN contractor_profiles
       ON conversations.contractor_id = contractor_profiles.id
     JOIN request_relationships
       ON conversations.relationship_id = request_relationships.id
-    JOIN posts
-      ON request_relationships.post_id = posts.id
+    ${SOURCE_JOINS}
     WHERE conversations.homeowner_id = $1
       AND request_relationships.homeowner_id = $1
       AND (
-        $2::boolean = TRUE
-        OR conversations.homeowner_archived_at IS NULL
+        (request_relationships.post_id IS NOT NULL AND posts.user_id = $1)
+        OR
+        (request_relationships.emergency_request_id IS NOT NULL AND emergency_requests.homeowner_id = $1)
       )
+      AND ($2::boolean = TRUE OR conversations.homeowner_archived_at IS NULL)
     ORDER BY conversations.updated_at DESC, conversations.id DESC
     `,
     [homeownerUserId, Boolean(includeArchived)]
   );
-
   return result.rows;
 }
 
@@ -214,7 +242,6 @@ async function listProfessionalConversations({
   includeArchived = false,
 }) {
   requireDatabasePool(pool);
-
   const result = await pool.query(
     `
     SELECT
@@ -229,31 +256,24 @@ async function listProfessionalConversations({
       conversations.closed_at,
       conversations.created_at,
       conversations.updated_at,
-      request_relationships.post_id,
-      posts.title AS request_title,
-      COALESCE(NULLIF(TRIM(users.username), ''), 'Customer')
-        AS homeowner_display_name
+      ${SOURCE_PROJECTION},
+      COALESCE(NULLIF(TRIM(users.username), ''), 'Customer') AS homeowner_display_name
     FROM conversations
     JOIN request_relationships
       ON conversations.relationship_id = request_relationships.id
     JOIN contractor_profiles
       ON conversations.contractor_id = contractor_profiles.id
-    JOIN posts
-      ON request_relationships.post_id = posts.id
+    ${SOURCE_JOINS}
     JOIN users
       ON conversations.homeowner_id = users.id
     WHERE conversations.professional_user_id = $1
       AND contractor_profiles.user_id = $1
       AND request_relationships.professional_user_id = $1
-      AND (
-        $2::boolean = TRUE
-        OR conversations.professional_archived_at IS NULL
-      )
+      AND ($2::boolean = TRUE OR conversations.professional_archived_at IS NULL)
     ORDER BY conversations.updated_at DESC, conversations.id DESC
     `,
     [professionalUserId, Boolean(includeArchived)]
   );
-
   return result.rows;
 }
 
@@ -263,7 +283,6 @@ async function getConversation({
   participantUserId,
 }) {
   const conversationId = parsePositiveInteger(rawConversationId);
-
   if (!conversationId) {
     return {
       ok: false,
@@ -272,9 +291,7 @@ async function getConversation({
       message: "A valid conversation ID is required.",
     };
   }
-
   requireDatabasePool(pool);
-
   const result = await pool.query(
     `
     SELECT
@@ -289,32 +306,25 @@ async function getConversation({
       conversations.closed_at,
       conversations.created_at,
       conversations.updated_at,
-      request_relationships.post_id,
-      posts.title AS request_title,
+      ${SOURCE_PROJECTION},
       contractor_profiles.business_name,
       contractor_profiles.image_url AS business_image_url,
       contractor_profiles.category AS professional_category,
-      COALESCE(NULLIF(TRIM(users.username), ''), 'Customer')
-        AS homeowner_display_name
+      COALESCE(NULLIF(TRIM(users.username), ''), 'Customer') AS homeowner_display_name
     FROM conversations
     JOIN request_relationships
       ON conversations.relationship_id = request_relationships.id
-    JOIN posts
-      ON request_relationships.post_id = posts.id
+    ${SOURCE_JOINS}
     JOIN contractor_profiles
       ON conversations.contractor_id = contractor_profiles.id
     JOIN users
       ON conversations.homeowner_id = users.id
     WHERE conversations.id = $1
-      AND (
-        conversations.homeowner_id = $2
-        OR conversations.professional_user_id = $2
-      )
+      AND (conversations.homeowner_id = $2 OR conversations.professional_user_id = $2)
     LIMIT 1
     `,
     [conversationId, participantUserId]
   );
-
   if (result.rows.length === 0) {
     return {
       ok: false,
@@ -323,7 +333,6 @@ async function getConversation({
       message: "The conversation was not found.",
     };
   }
-
   return {
     ok: true,
     status: 200,
@@ -336,6 +345,7 @@ module.exports = {
   ensureConversation,
   ensureConversationWithClient,
   getConversation,
+  hasExactlyOneRelationshipSource,
   listHomeownerConversations,
   listProfessionalConversations,
 };

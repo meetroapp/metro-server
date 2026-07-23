@@ -28,6 +28,8 @@ Current inventory:
 8. `202607200001_add_post_request_lifecycle.sql`
 9. `202607200002_create_request_relationships.sql`
 10. `202607200003_create_conversations.sql`
+11. `202607230001_create_emergency_requests.sql`
+12. `202607230002_add_emergency_relationship_source.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
