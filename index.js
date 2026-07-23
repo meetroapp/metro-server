@@ -92,6 +92,10 @@ const {
   withdrawProfessionalRequestRelationship,
 } = require("./server/relationships/requestRelationshipService");
 
+const {
+  registerEmergencyRequestRoutes,
+} = require("./server/emergency/emergencyRequests");
+
 
 const JWT_SECRET = resolveJwtSecret(process.env);
 const BCRYPT_ROUNDS = 10;
@@ -697,6 +701,13 @@ async function authMiddleware(req, res, next) {
     });
   }
 }
+
+registerEmergencyRequestRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
 
 app.get("/health", (req, res) => {
   res.json(buildHealthMetadata());
