@@ -31,6 +31,7 @@ Current inventory:
 11. `202607230001_create_emergency_requests.sql`
 12. `202607230002_add_emergency_relationship_source.sql`
 13. `202607230003_create_emergency_safety_assessments.sql`
+14. `202607240001_add_single_active_emergency_relationship.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
