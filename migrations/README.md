@@ -28,13 +28,19 @@ Current inventory:
 8. `202607200001_add_post_request_lifecycle.sql`
 9. `202607200002_create_request_relationships.sql`
 10. `202607200003_create_conversations.sql`
-11. `202607230001_create_emergency_requests.sql`
-12. `202607230002_add_emergency_relationship_source.sql`
-13. `202607230003_create_emergency_safety_assessments.sql`
-14. `202607240001_add_single_active_emergency_relationship.sql`
+11. `202607210001_add_message_conversation_identity.sql`
+12. `202607210002_allow_dual_message_identity.sql`
+13. `202607230001_create_emergency_requests.sql`
+14. `202607230002_add_emergency_relationship_source.sql`
+15. `202607230003_create_emergency_safety_assessments.sql`
+16. `202607240001_add_single_active_emergency_relationship.sql`
+17. `202607250001_add_emergency_dispatch_lifecycle.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
+
+This inventory records migration source files, not applied database state.
+Migration creation and governed migration execution remain separate operations.
 
 ## Migration Ledger and Transactions
 
