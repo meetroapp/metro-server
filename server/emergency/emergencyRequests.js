@@ -1,5 +1,6 @@
 "use strict";
 
+const emergencyOpportunityService = require("./emergencyOpportunityService");
 const emergencyRequestService = require("./emergencyRequestService");
 
 function sendServiceResult(res, result) {
@@ -20,10 +21,35 @@ function sendServiceResult(res, result) {
   });
 }
 
+function sendOpportunityResult(res, result) {
+  if (!result || result.ok !== true) {
+    return res.status(result?.status || 500).json({
+      success: false,
+      code:
+        result?.code ||
+        "EMERGENCY_OPPORTUNITIES_FETCH_FAILED",
+      message:
+        result?.message ||
+        "Emergency opportunities could not be loaded.",
+    });
+  }
+
+  return res.status(result.status || 200).json({
+    success: true,
+    code:
+      result.code ||
+      "EMERGENCY_OPPORTUNITIES_FOUND",
+    opportunities: Array.isArray(result.opportunities)
+      ? result.opportunities
+      : [],
+  });
+}
+
 function createEmergencyRequestHandlers({
   getPool,
   sendPublicDatabaseError,
   service = emergencyRequestService,
+  opportunityService = emergencyOpportunityService,
 }) {
   if (typeof getPool !== "function") {
     throw new TypeError("getPool must be a function.");
@@ -43,6 +69,32 @@ function createEmergencyRequestHandlers({
     saveEmergencySafetyAssessment,
     updateEmergencyDraft,
   } = service;
+  const {
+    listProfessionalEmergencyOpportunities,
+  } = opportunityService;
+
+  async function listProfessionalOpportunities(req, res) {
+    try {
+      const result =
+        await listProfessionalEmergencyOpportunities({
+          pool: getPool(req),
+          professionalUserId: req.user.id,
+        });
+
+      return sendOpportunityResult(res, result);
+    } catch (error) {
+      return sendPublicDatabaseError({
+        res,
+        error,
+        operation:
+          "list_professional_emergency_opportunities",
+        code:
+          "EMERGENCY_OPPORTUNITIES_FETCH_FAILED",
+        message:
+          "Emergency opportunities could not be loaded.",
+      });
+    }
+  }
 
   async function createDraft(req, res) {
     try {
@@ -184,6 +236,7 @@ function createEmergencyRequestHandlers({
     cancelRequest,
     createDraft,
     getRequest,
+    listProfessionalOpportunities,
     prepareRequest,
     saveSafetyAssessment,
     updateDraft,
@@ -196,6 +249,7 @@ function registerEmergencyRequestRoutes({
   getPool,
   sendPublicDatabaseError,
   service = emergencyRequestService,
+  opportunityService = emergencyOpportunityService,
 }) {
   if (!app) {
     throw new TypeError(
@@ -213,7 +267,14 @@ function registerEmergencyRequestRoutes({
     getPool,
     sendPublicDatabaseError,
     service,
+    opportunityService,
   });
+
+  app.get(
+    "/professional-emergency-opportunities",
+    authMiddleware,
+    handlers.listProfessionalOpportunities
+  );
 
   app.post(
     "/emergency-requests/drafts",
@@ -257,5 +318,6 @@ function registerEmergencyRequestRoutes({
 module.exports = {
   createEmergencyRequestHandlers,
   registerEmergencyRequestRoutes,
+  sendOpportunityResult,
   sendServiceResult,
 };

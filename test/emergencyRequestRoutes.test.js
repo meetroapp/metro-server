@@ -184,6 +184,11 @@ test(
       })),
       [
         {
+          method: "GET",
+          path:
+            "/professional-emergency-opportunities",
+        },
+        {
           method: "POST",
           path: "/emergency-requests/drafts",
         },
