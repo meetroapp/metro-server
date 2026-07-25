@@ -3,6 +3,9 @@
 const emergencySelectionService = require(
   "./emergencySelectionService"
 );
+const emergencyDispatchService = require(
+  "./emergencyDispatchService"
+);
 
 const emergencyOpportunityService = require("./emergencyOpportunityService");
 const emergencyRequestService = require("./emergencyRequestService");
@@ -56,6 +59,31 @@ function sendOpportunityResult(res, result) {
   });
 }
 
+function sendDispatchResult(res, result) {
+  if (!result || result.success !== true) {
+    return res.status(result?.status || 500).json({
+      success: false,
+      code:
+        result?.code ||
+        "EMERGENCY_DISPATCH_FAILED",
+      message:
+        result?.message ||
+        "The Emergency dispatch transition could not be completed.",
+    });
+  }
+
+  return res.status(result.status || 200).json({
+    success: true,
+    code: result.code,
+    alreadyApplied: Boolean(
+      result.alreadyApplied
+    ),
+    emergencyRequest: result.emergencyRequest,
+    relationship: result.relationship,
+    conversation: result.conversation,
+  });
+}
+
 function createEmergencyRequestHandlers({
   getPool,
   sendPublicDatabaseError,
@@ -63,6 +91,7 @@ function createEmergencyRequestHandlers({
   opportunityService = emergencyOpportunityService,
   relationshipService = requestRelationshipService,
   selectionService = emergencySelectionService,
+  dispatchService = emergencyDispatchService,
 }) {
   if (typeof getPool !== "function") {
     throw new TypeError("getPool must be a function.");
@@ -93,6 +122,12 @@ function createEmergencyRequestHandlers({
   const {
     selectHomeownerEmergencyResponse,
   } = selectionService;
+  const {
+    completeEmergencyWork,
+    markEmergencyArrived,
+    markEmergencyEnRoute,
+    startEmergencyWork,
+  } = dispatchService;
 
   async function listProfessionalOpportunities(req, res) {
     try {
@@ -314,6 +349,69 @@ function createEmergencyRequestHandlers({
     }
   }
 
+  async function runDispatchCommand(
+    req,
+    res,
+    command,
+    operation
+  ) {
+    try {
+      const result = await command({
+        pool: getPool(req),
+        authenticatedUserId: req.user.id,
+        emergencyRequestId:
+          req.params.emergencyRequestId,
+      });
+
+      return sendDispatchResult(res, result);
+    } catch (error) {
+      return sendPublicDatabaseError({
+        res,
+        error,
+        operation,
+        code: "EMERGENCY_DISPATCH_FAILED",
+        message:
+          "The Emergency dispatch transition could not be completed.",
+      });
+    }
+  }
+
+  async function markEnRoute(req, res) {
+    return runDispatchCommand(
+      req,
+      res,
+      markEmergencyEnRoute,
+      "mark_emergency_en_route"
+    );
+  }
+
+  async function markArrived(req, res) {
+    return runDispatchCommand(
+      req,
+      res,
+      markEmergencyArrived,
+      "mark_emergency_arrived"
+    );
+  }
+
+  async function startWork(req, res) {
+    return runDispatchCommand(
+      req,
+      res,
+      startEmergencyWork,
+      "start_emergency_work"
+    );
+  }
+
+  async function completeWork(req, res) {
+    return runDispatchCommand(
+      req,
+      res,
+      completeEmergencyWork,
+      "complete_emergency_work"
+    );
+  }
+
   async function updateDraft(req, res) {
     try {
       const result = await updateEmergencyDraft({
@@ -409,14 +507,18 @@ function createEmergencyRequestHandlers({
 
   return {
     cancelRequest,
+    completeWork,
     createDraft,
     getRequest,
     listHomeownerResponses,
     listProfessionalOpportunities,
+    markArrived,
+    markEnRoute,
     prepareRequest,
     respondToProfessionalOpportunity,
     selectHomeownerResponse,
     saveSafetyAssessment,
+    startWork,
     updateDraft,
   };
 }
@@ -430,6 +532,7 @@ function registerEmergencyRequestRoutes({
   opportunityService = emergencyOpportunityService,
   relationshipService = requestRelationshipService,
   selectionService = emergencySelectionService,
+  dispatchService = emergencyDispatchService,
 }) {
   if (!app) {
     throw new TypeError(
@@ -450,6 +553,7 @@ function registerEmergencyRequestRoutes({
     opportunityService,
     relationshipService,
     selectionService,
+    dispatchService,
   });
 
   app.get(
@@ -488,6 +592,30 @@ function registerEmergencyRequestRoutes({
     handlers.selectHomeownerResponse
   );
 
+  app.post(
+    "/emergency-requests/:emergencyRequestId/en-route",
+    authMiddleware,
+    handlers.markEnRoute
+  );
+
+  app.post(
+    "/emergency-requests/:emergencyRequestId/arrived",
+    authMiddleware,
+    handlers.markArrived
+  );
+
+  app.post(
+    "/emergency-requests/:emergencyRequestId/start",
+    authMiddleware,
+    handlers.startWork
+  );
+
+  app.post(
+    "/emergency-requests/:emergencyRequestId/complete",
+    authMiddleware,
+    handlers.completeWork
+  );
+
   app.patch(
     "/emergency-requests/:emergencyRequestId",
     authMiddleware,
@@ -518,6 +646,7 @@ function registerEmergencyRequestRoutes({
 module.exports = {
   createEmergencyRequestHandlers,
   registerEmergencyRequestRoutes,
+  sendDispatchResult,
   sendOpportunityResult,
   sendServiceResult,
 };

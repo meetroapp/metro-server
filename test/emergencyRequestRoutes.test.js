@@ -213,6 +213,26 @@ test(
             "/emergency-requests/:emergencyRequestId/responses/:relationshipId/select",
         },
         {
+          method: "POST",
+          path:
+            "/emergency-requests/:emergencyRequestId/en-route",
+        },
+        {
+          method: "POST",
+          path:
+            "/emergency-requests/:emergencyRequestId/arrived",
+        },
+        {
+          method: "POST",
+          path:
+            "/emergency-requests/:emergencyRequestId/start",
+        },
+        {
+          method: "POST",
+          path:
+            "/emergency-requests/:emergencyRequestId/complete",
+        },
+        {
           method: "PATCH",
           path:
             "/emergency-requests/:emergencyRequestId",
