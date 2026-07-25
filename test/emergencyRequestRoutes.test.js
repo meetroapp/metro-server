@@ -208,6 +208,11 @@ test(
             "/emergency-requests/:emergencyRequestId/responses",
         },
         {
+          method: "POST",
+          path:
+            "/emergency-requests/:emergencyRequestId/responses/:relationshipId/select",
+        },
+        {
           method: "PATCH",
           path:
             "/emergency-requests/:emergencyRequestId",

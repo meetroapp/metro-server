@@ -1,5 +1,9 @@
 "use strict";
 
+const emergencySelectionService = require(
+  "./emergencySelectionService"
+);
+
 const emergencyOpportunityService = require("./emergencyOpportunityService");
 const emergencyRequestService = require("./emergencyRequestService");
 const requestRelationshipService = require(
@@ -58,6 +62,7 @@ function createEmergencyRequestHandlers({
   service = emergencyRequestService,
   opportunityService = emergencyOpportunityService,
   relationshipService = requestRelationshipService,
+  selectionService = emergencySelectionService,
 }) {
   if (typeof getPool !== "function") {
     throw new TypeError("getPool must be a function.");
@@ -85,6 +90,9 @@ function createEmergencyRequestHandlers({
     createProfessionalEmergencyResponse,
     listHomeownerEmergencyResponses,
   } = relationshipService;
+  const {
+    selectHomeownerEmergencyResponse,
+  } = selectionService;
 
   async function listProfessionalOpportunities(req, res) {
     try {
@@ -237,6 +245,75 @@ function createEmergencyRequestHandlers({
     }
   }
 
+  async function selectHomeownerResponse(req, res) {
+    try {
+      const result =
+        await selectHomeownerEmergencyResponse({
+          pool: getPool(req),
+          homeownerUserId: req.user.id,
+          emergencyRequestId:
+            req.params.emergencyRequestId,
+          relationshipId:
+            req.params.relationshipId,
+        });
+
+      if (!result || result.ok !== true) {
+        return res.status(result?.status || 500).json({
+          success: false,
+          code:
+            result?.code ||
+            "EMERGENCY_RESPONSE_SELECT_FAILED",
+          message:
+            result?.message ||
+            "The Emergency response could not be selected.",
+        });
+      }
+
+      return res.status(result.status || 200).json({
+        success: true,
+        code:
+          result.code ||
+          "EMERGENCY_RESPONSE_SELECTED",
+        alreadySelected:
+          Boolean(result.alreadySelected),
+        declinedResponseCount:
+          Number(result.declinedResponseCount || 0),
+        emergencyRequest: {
+          id: result.emergencyRequest.id,
+          status: result.emergencyRequest.status,
+          assignedAt:
+            result.emergencyRequest.assigned_at || null,
+          updatedAt:
+            result.emergencyRequest.updated_at || null,
+        },
+        relationship: {
+          id: result.relationship.id,
+          emergencyRequestId:
+            result.relationship.emergency_request_id,
+          status: result.relationship.status,
+          acceptedAt:
+            result.relationship.accepted_at || null,
+          conversationAvailable: true,
+        },
+        conversation: {
+          id: result.conversation.id,
+          relationshipId:
+            result.conversation.relationship_id,
+          status: result.conversation.status,
+        },
+      });
+    } catch (error) {
+      return sendPublicDatabaseError({
+        res,
+        error,
+        operation: "select_emergency_response",
+        code: "EMERGENCY_RESPONSE_SELECT_FAILED",
+        message:
+          "The Emergency response could not be selected.",
+      });
+    }
+  }
+
   async function updateDraft(req, res) {
     try {
       const result = await updateEmergencyDraft({
@@ -338,6 +415,7 @@ function createEmergencyRequestHandlers({
     listProfessionalOpportunities,
     prepareRequest,
     respondToProfessionalOpportunity,
+    selectHomeownerResponse,
     saveSafetyAssessment,
     updateDraft,
   };
@@ -351,6 +429,7 @@ function registerEmergencyRequestRoutes({
   service = emergencyRequestService,
   opportunityService = emergencyOpportunityService,
   relationshipService = requestRelationshipService,
+  selectionService = emergencySelectionService,
 }) {
   if (!app) {
     throw new TypeError(
@@ -370,6 +449,7 @@ function registerEmergencyRequestRoutes({
     service,
     opportunityService,
     relationshipService,
+    selectionService,
   });
 
   app.get(
@@ -400,6 +480,12 @@ function registerEmergencyRequestRoutes({
     "/emergency-requests/:emergencyRequestId/responses",
     authMiddleware,
     handlers.listHomeownerResponses
+  );
+
+  app.post(
+    "/emergency-requests/:emergencyRequestId/responses/:relationshipId/select",
+    authMiddleware,
+    handlers.selectHomeownerResponse
   );
 
   app.patch(

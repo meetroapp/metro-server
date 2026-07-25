@@ -288,13 +288,21 @@ test("existing authenticated Emergency homeowner routes remain registered", () =
     route.path.startsWith("/emergency-requests/")
   );
 
-  assert.equal(homeownerRoutes.length, 7);
+  assert.equal(homeownerRoutes.length, 8);
   assert.ok(
     homeownerRoutes.some(
       (route) =>
         route.method === "GET" &&
         route.path ===
           "/emergency-requests/:emergencyRequestId/responses"
+    )
+  );
+  assert.ok(
+    homeownerRoutes.some(
+      (route) =>
+        route.method === "POST" &&
+        route.path ===
+          "/emergency-requests/:emergencyRequestId/responses/:relationshipId/select"
     )
   );
   for (const route of homeownerRoutes) {
