@@ -414,11 +414,103 @@ async function createProfessionalEmergencyResponse({
   }
 }
 
+async function listHomeownerEmergencyResponses({
+  pool,
+  homeownerUserId,
+  emergencyRequestId: rawEmergencyRequestId,
+}) {
+  const emergencyRequestId = parsePositiveInteger(rawEmergencyRequestId);
+
+  if (!emergencyRequestId) {
+    return {
+      ok: false,
+      status: 400,
+      code: "INVALID_EMERGENCY_REQUEST_ID",
+      message: "A valid Emergency request ID is required.",
+    };
+  }
+
+  if (!pool || typeof pool.query !== "function") {
+    throw new TypeError("A database pool or client is required.");
+  }
+
+  const emergencyResult = await pool.query(
+    `
+    SELECT
+      id,
+      status
+    FROM emergency_requests
+    WHERE id = $1
+      AND homeowner_id = $2
+    LIMIT 1
+    `,
+    [emergencyRequestId, homeownerUserId]
+  );
+
+  if (emergencyResult.rows.length === 0) {
+    return {
+      ok: false,
+      status: 404,
+      code: "EMERGENCY_REQUEST_NOT_FOUND",
+      message: "The Emergency request was not found.",
+    };
+  }
+
+  const responseResult = await pool.query(
+    `
+    SELECT
+      request_relationships.id,
+      request_relationships.emergency_request_id,
+      request_relationships.status,
+      request_relationships.responded_at,
+      request_relationships.created_at,
+      request_relationships.accepted_at,
+      request_relationships.declined_at,
+      request_relationships.withdrawn_at,
+      request_relationships.closed_at,
+      contractor_profiles.business_name,
+      contractor_profiles.category AS professional_category,
+      contractor_profiles.image_url AS business_image_url,
+      COALESCE(
+        contractor_profiles.profile_details->'service_specialties',
+        '[]'::jsonb
+      ) AS service_specialties,
+      EXISTS (
+        SELECT 1
+        FROM conversations
+        WHERE conversations.relationship_id =
+          request_relationships.id
+      ) AS canonical_conversation_exists
+    FROM request_relationships
+    INNER JOIN contractor_profiles
+      ON contractor_profiles.id =
+        request_relationships.contractor_id
+    WHERE request_relationships.emergency_request_id = $1
+      AND request_relationships.post_id IS NULL
+      AND request_relationships.homeowner_id = $2
+    ORDER BY
+      request_relationships.responded_at ASC NULLS LAST,
+      request_relationships.created_at ASC,
+      request_relationships.id ASC
+    `,
+    [emergencyRequestId, homeownerUserId]
+  );
+
+  return {
+    ok: true,
+    status: 200,
+    code: "EMERGENCY_RESPONSES_FOUND",
+    emergencyRequest: emergencyResult.rows[0],
+    responses: responseResult.rows,
+  };
+}
+
 module.exports = {
   acceptHomeownerRequestRelationship,
   createProfessionalEmergencyResponse,
   createProfessionalRequestRelationship,
   declineHomeownerRequestRelationship,
+  listHomeownerEmergencyResponses,
   listHomeownerRequestRelationships,
   listProfessionalRequestRelationships,
   updateHomeownerRelationshipStatus,

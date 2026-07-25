@@ -288,7 +288,15 @@ test("existing authenticated Emergency homeowner routes remain registered", () =
     route.path.startsWith("/emergency-requests/")
   );
 
-  assert.equal(homeownerRoutes.length, 6);
+  assert.equal(homeownerRoutes.length, 7);
+  assert.ok(
+    homeownerRoutes.some(
+      (route) =>
+        route.method === "GET" &&
+        route.path ===
+          "/emergency-requests/:emergencyRequestId/responses"
+    )
+  );
   for (const route of homeownerRoutes) {
     assert.equal(route.handlers[0], authMiddleware);
   }

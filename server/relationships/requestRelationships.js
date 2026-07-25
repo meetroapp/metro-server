@@ -157,6 +157,53 @@ function serializeEmergencyResponseRelationship(row = {}) {
   };
 }
 
+function normalizeServiceSpecialties(value) {
+  let specialties = value;
+
+  if (typeof specialties === "string") {
+    try {
+      specialties = JSON.parse(specialties);
+    } catch {
+      specialties = [];
+    }
+  }
+
+  if (!Array.isArray(specialties)) {
+    return [];
+  }
+
+  return specialties
+    .filter((specialty) => typeof specialty === "string")
+    .map((specialty) => specialty.trim())
+    .filter(Boolean);
+}
+
+function serializeHomeownerEmergencyResponse(row = {}) {
+  return {
+    id: row.id,
+    emergencyRequestId: row.emergency_request_id,
+    status: row.status,
+    respondedAt: row.responded_at,
+    createdAt: row.created_at,
+    acceptedAt: row.accepted_at ?? null,
+    declinedAt: row.declined_at ?? null,
+    withdrawnAt: row.withdrawn_at ?? null,
+    closedAt: row.closed_at ?? null,
+    conversationAvailable:
+      row.status === RELATIONSHIP_STATUSES.ACTIVE &&
+      row.canonical_conversation_exists === true,
+    professional: {
+      businessName: row.business_name || "",
+      category: row.professional_category || "",
+      serviceSpecialties: normalizeServiceSpecialties(
+        row.service_specialties
+      ),
+      profileImageUrl: null,
+      businessLogoUrl: row.business_image_url || null,
+    },
+  };
+}
+
 module.exports = {
   RELATIONSHIP_STATUSES,
   RELATIONSHIP_STATUS_VALUES,
@@ -168,6 +215,7 @@ module.exports = {
   isValidPositiveInteger,
   parsePositiveInteger,
   serializeEmergencyResponseRelationship,
+  serializeHomeownerEmergencyResponse,
   serializePendingRelationshipForHomeowner,
   serializeRelationshipForProfessional,
   validateEmergencyResponsePayload,

@@ -203,6 +203,11 @@ test(
             "/emergency-requests/:emergencyRequestId",
         },
         {
+          method: "GET",
+          path:
+            "/emergency-requests/:emergencyRequestId/responses",
+        },
+        {
           method: "PATCH",
           path:
             "/emergency-requests/:emergencyRequestId",

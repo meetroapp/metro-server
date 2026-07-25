@@ -7,6 +7,7 @@ const requestRelationshipService = require(
 );
 const {
   serializeEmergencyResponseRelationship,
+  serializeHomeownerEmergencyResponse,
 } = require("../relationships/requestRelationships");
 
 function sendServiceResult(res, result) {
@@ -82,6 +83,7 @@ function createEmergencyRequestHandlers({
   } = opportunityService;
   const {
     createProfessionalEmergencyResponse,
+    listHomeownerEmergencyResponses,
   } = relationshipService;
 
   async function listProfessionalOpportunities(req, res) {
@@ -189,6 +191,52 @@ function createEmergencyRequestHandlers({
     }
   }
 
+  async function listHomeownerResponses(req, res) {
+    try {
+      const result = await listHomeownerEmergencyResponses({
+        pool: getPool(req),
+        homeownerUserId: req.user.id,
+        emergencyRequestId:
+          req.params.emergencyRequestId,
+      });
+
+      if (!result || result.ok !== true) {
+        return res.status(result?.status || 500).json({
+          success: false,
+          code:
+            result?.code ||
+            "EMERGENCY_RESPONSES_FETCH_FAILED",
+          message:
+            result?.message ||
+            "Emergency responses could not be loaded.",
+        });
+      }
+
+      return res.status(result.status || 200).json({
+        success: true,
+        code: "EMERGENCY_RESPONSES_FOUND",
+        emergencyRequest: {
+          id: result.emergencyRequest.id,
+          status: result.emergencyRequest.status,
+        },
+        responses: Array.isArray(result.responses)
+          ? result.responses.map(
+              serializeHomeownerEmergencyResponse
+            )
+          : [],
+      });
+    } catch (error) {
+      return sendPublicDatabaseError({
+        res,
+        error,
+        operation: "fetch_emergency_responses",
+        code: "EMERGENCY_RESPONSES_FETCH_FAILED",
+        message:
+          "Emergency responses could not be loaded.",
+      });
+    }
+  }
+
   async function updateDraft(req, res) {
     try {
       const result = await updateEmergencyDraft({
@@ -286,6 +334,7 @@ function createEmergencyRequestHandlers({
     cancelRequest,
     createDraft,
     getRequest,
+    listHomeownerResponses,
     listProfessionalOpportunities,
     prepareRequest,
     respondToProfessionalOpportunity,
@@ -345,6 +394,12 @@ function registerEmergencyRequestRoutes({
     "/emergency-requests/:emergencyRequestId",
     authMiddleware,
     handlers.getRequest
+  );
+
+  app.get(
+    "/emergency-requests/:emergencyRequestId/responses",
+    authMiddleware,
+    handlers.listHomeownerResponses
   );
 
   app.patch(

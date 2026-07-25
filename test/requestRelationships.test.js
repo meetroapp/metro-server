@@ -13,6 +13,7 @@ const {
   isValidPositiveInteger,
   parsePositiveInteger,
   serializeEmergencyResponseRelationship,
+  serializeHomeownerEmergencyResponse,
   serializePendingRelationshipForHomeowner,
   serializeRelationshipForProfessional,
   validateEmergencyResponsePayload,
@@ -248,6 +249,137 @@ test("Emergency response serializer exposes only the approved pending projection
     "createdAt",
     "respondedAt",
   ]);
+});
+
+test("homeowner Emergency response serializer exposes the exact approved projection", () => {
+  const base = {
+    id: 151,
+    emergency_request_id: 41,
+    homeowner_id: 7,
+    contractor_id: 80,
+    professional_user_id: 9,
+    post_id: null,
+    status: "active",
+    introduction_text: "Private",
+    responded_at: "responded",
+    created_at: "created",
+    accepted_at: "accepted",
+    declined_at: null,
+    withdrawn_at: null,
+    closed_at: null,
+    canonical_conversation_exists: true,
+    conversation_id: 91,
+    business_name: "Example Electric",
+    professional_category: "electrical",
+    service_specialties:
+      '["emergency_wiring","  panel_repair  ",null,""]',
+    business_image_url:
+      "https://example.test/business-logo.jpg",
+    profile_details: { private: true },
+    email: "private@example.test",
+  };
+  const serialized =
+    serializeHomeownerEmergencyResponse(base);
+
+  assert.deepEqual(serialized, {
+    id: 151,
+    emergencyRequestId: 41,
+    status: "active",
+    respondedAt: "responded",
+    createdAt: "created",
+    acceptedAt: "accepted",
+    declinedAt: null,
+    withdrawnAt: null,
+    closedAt: null,
+    conversationAvailable: true,
+    professional: {
+      businessName: "Example Electric",
+      category: "electrical",
+      serviceSpecialties: [
+        "emergency_wiring",
+        "panel_repair",
+      ],
+      profileImageUrl: null,
+      businessLogoUrl:
+        "https://example.test/business-logo.jpg",
+    },
+  });
+  assert.deepEqual(Object.keys(serialized), [
+    "id",
+    "emergencyRequestId",
+    "status",
+    "respondedAt",
+    "createdAt",
+    "acceptedAt",
+    "declinedAt",
+    "withdrawnAt",
+    "closedAt",
+    "conversationAvailable",
+    "professional",
+  ]);
+  assert.deepEqual(Object.keys(serialized.professional), [
+    "businessName",
+    "category",
+    "serviceSpecialties",
+    "profileImageUrl",
+    "businessLogoUrl",
+  ]);
+  assert.doesNotMatch(
+    JSON.stringify(serialized),
+    /homeowner_id|contractor_id|professional_user_id|post_id|introduction_text|conversation_id|profile_details|private@example/
+  );
+});
+
+test("homeowner Emergency response serializer derives conversation availability from canonical state", () => {
+  for (const [
+    status,
+    canonicalConversationExists,
+    expected,
+  ] of [
+    ["pending", true, false],
+    ["active", true, true],
+    ["active", false, false],
+    ["declined", true, false],
+    ["withdrawn", true, false],
+    ["closed", true, false],
+  ]) {
+    const serialized =
+      serializeHomeownerEmergencyResponse({
+        id: 151,
+        emergency_request_id: 41,
+        status,
+        responded_at: "responded",
+        created_at: "created",
+        accepted_at:
+          status === "active" ? "accepted" : null,
+        declined_at:
+          status === "declined" ? "declined" : null,
+        withdrawn_at:
+          status === "withdrawn" ? "withdrawn" : null,
+        closed_at:
+          status === "closed" ? "closed" : null,
+        canonical_conversation_exists:
+          canonicalConversationExists,
+      });
+
+    assert.equal(
+      serialized.conversationAvailable,
+      expected
+    );
+    assert.equal(serialized.status, status);
+    assert.equal(
+      serialized.declinedAt,
+      status === "declined" ? "declined" : null
+    );
+    assert.equal(
+      serialized.withdrawnAt,
+      status === "withdrawn" ? "withdrawn" : null
+    );
+    assert.equal(
+      serialized.closedAt,
+      status === "closed" ? "closed" : null
+    );
+  }
 });
 
 test("cleanText normalizes null values and trims bounded text", () => {
