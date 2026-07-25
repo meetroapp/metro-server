@@ -9,10 +9,13 @@ const {
   canHomeownerDeclineRelationship,
   canProfessionalWithdrawRelationship,
   cleanText,
+  isPlainObject,
   isValidPositiveInteger,
   parsePositiveInteger,
+  serializeEmergencyResponseRelationship,
   serializePendingRelationshipForHomeowner,
   serializeRelationshipForProfessional,
+  validateEmergencyResponsePayload,
   validateProfessionalResponsePayload,
   validateRelationshipStatus,
 } = require("../server/relationships/requestRelationships");
@@ -86,6 +89,31 @@ test("professional introductions are bounded", () => {
 
   assert.equal(result.valid, true);
   assert.equal(result.value.introductionText.length, 2000);
+});
+
+test("Emergency response payload accepts only an absent or empty plain object", () => {
+  assert.equal(validateEmergencyResponsePayload(undefined).valid, true);
+  assert.equal(validateEmergencyResponsePayload({}).valid, true);
+  assert.equal(isPlainObject({}), true);
+  assert.equal(isPlainObject(Object.create(null)), true);
+
+  for (const payload of [
+    null,
+    [],
+    "",
+    0,
+    false,
+    new Date(),
+    { status: "pending" },
+    { introduction_text: "I can help." },
+  ]) {
+    const result = validateEmergencyResponsePayload(payload);
+    assert.equal(result.valid, false);
+    assert.equal(
+      result.code,
+      "UNSUPPORTED_EMERGENCY_RESPONSE_FIELDS"
+    );
+  }
 });
 
 test("pending relationship transitions enforce participant ownership", () => {
@@ -185,6 +213,41 @@ test("professional serializer exposes request-safe relationship state", () => {
   assert.equal(serialized.conversation_available, true);
   assert.equal(Object.hasOwn(serialized, "homeowner_id"), false);
   assert.equal(Object.hasOwn(serialized, "professional_user_id"), false);
+});
+
+test("Emergency response serializer exposes only the approved pending projection", () => {
+  const serialized = serializeEmergencyResponseRelationship({
+    id: 151,
+    post_id: null,
+    emergency_request_id: 41,
+    homeowner_id: 7,
+    contractor_id: 80,
+    professional_user_id: 9,
+    status: "pending",
+    introduction_text: "",
+    created_at: "created",
+    responded_at: "responded",
+    location_text: "Private",
+    disposition: "continue",
+    conversation_id: 91,
+  });
+
+  assert.deepEqual(serialized, {
+    id: 151,
+    emergencyRequestId: 41,
+    status: "pending",
+    conversationAvailable: false,
+    createdAt: "created",
+    respondedAt: "responded",
+  });
+  assert.deepEqual(Object.keys(serialized), [
+    "id",
+    "emergencyRequestId",
+    "status",
+    "conversationAvailable",
+    "createdAt",
+    "respondedAt",
+  ]);
 });
 
 test("cleanText normalizes null values and trims bounded text", () => {

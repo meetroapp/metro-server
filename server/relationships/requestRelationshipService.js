@@ -2,6 +2,7 @@
 
 const {
   parsePositiveInteger,
+  validateEmergencyResponsePayload,
   validateProfessionalResponsePayload,
 } = require("./requestRelationships");
 
@@ -198,8 +199,224 @@ async function createProfessionalRequestRelationship({
   }
 }
 
+async function createProfessionalEmergencyResponse({
+  pool,
+  professionalUserId,
+  emergencyRequestId: rawEmergencyRequestId,
+  payload,
+  professionalCanSeeEmergencyOpportunity,
+}) {
+  const emergencyRequestId = parsePositiveInteger(rawEmergencyRequestId);
+  const responseValidation = validateEmergencyResponsePayload(payload);
+
+  if (!emergencyRequestId) {
+    return {
+      ok: false,
+      status: 400,
+      code: "INVALID_EMERGENCY_REQUEST_ID",
+      message: "A valid Emergency request ID is required.",
+    };
+  }
+
+  if (!responseValidation.valid) {
+    return {
+      ok: false,
+      status: 400,
+      code: responseValidation.code,
+      message: responseValidation.message,
+    };
+  }
+
+  if (!pool || typeof pool.query !== "function") {
+    throw new TypeError("A database pool or client is required.");
+  }
+
+  if (typeof professionalCanSeeEmergencyOpportunity !== "function") {
+    throw new TypeError(
+      "professionalCanSeeEmergencyOpportunity is required."
+    );
+  }
+
+  const client =
+    typeof pool.connect === "function"
+      ? await pool.connect()
+      : pool;
+
+  try {
+    await client.query("BEGIN");
+
+    const profileResult = await client.query(
+      `
+      SELECT
+        id,
+        user_id,
+        category,
+        profile_details
+      FROM contractor_profiles
+      WHERE user_id = $1
+      ORDER BY id ASC
+      LIMIT 1
+      FOR SHARE
+      `,
+      [professionalUserId]
+    );
+
+    if (profileResult.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return {
+        ok: false,
+        status: 403,
+        code: "PROFESSIONAL_PROFILE_REQUIRED",
+        message:
+          "A business profile is required to respond to Emergency opportunities.",
+      };
+    }
+
+    const profile = profileResult.rows[0];
+    const requestResult = await client.query(
+      `
+      SELECT
+        emergency_requests.id,
+        emergency_requests.homeowner_id,
+        emergency_requests.category,
+        emergency_requests.service_domain,
+        emergency_requests.service_specialty,
+        emergency_requests.title,
+        emergency_requests.description,
+        emergency_requests.location_text,
+        emergency_requests.status,
+        emergency_requests.requested_at,
+        emergency_requests.created_at,
+        emergency_requests.updated_at,
+        emergency_requests.expired_at,
+        emergency_request_safety_assessments.disposition
+      FROM emergency_requests
+      INNER JOIN emergency_request_safety_assessments
+        ON emergency_request_safety_assessments.emergency_request_id =
+          emergency_requests.id
+      WHERE emergency_requests.id = $1
+        AND emergency_requests.status = 'ready_for_distribution'
+        AND emergency_requests.homeowner_id <> $2
+        AND emergency_requests.expired_at IS NULL
+        AND emergency_request_safety_assessments.disposition = 'continue'
+      LIMIT 1
+      FOR UPDATE OF emergency_requests
+      `,
+      [emergencyRequestId, professionalUserId]
+    );
+
+    if (requestResult.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return {
+        ok: false,
+        status: 404,
+        code: "EMERGENCY_OPPORTUNITY_NOT_AVAILABLE",
+        message: "The Emergency opportunity is not available for response.",
+      };
+    }
+
+    const emergencyRequest = requestResult.rows[0];
+    if (
+      !professionalCanSeeEmergencyOpportunity(
+        profile,
+        emergencyRequest,
+        professionalUserId
+      )
+    ) {
+      await client.query("ROLLBACK");
+      return {
+        ok: false,
+        status: 403,
+        code: "EMERGENCY_OPPORTUNITY_NOT_ELIGIBLE",
+        message:
+          "This business is not eligible to respond to the Emergency opportunity.",
+      };
+    }
+
+    const relationshipResult = await client.query(
+      `
+      WITH inserted AS (
+        INSERT INTO request_relationships
+        (
+          post_id,
+          emergency_request_id,
+          homeowner_id,
+          contractor_id,
+          professional_user_id,
+          status,
+          introduction_text
+        )
+        VALUES (NULL, $1, $2, $3, $4, 'pending', '')
+        ON CONFLICT (emergency_request_id, contractor_id)
+        WHERE emergency_request_id IS NOT NULL
+        DO NOTHING
+        RETURNING *, TRUE AS created
+      )
+      SELECT * FROM inserted
+
+      UNION ALL
+
+      SELECT request_relationships.*, FALSE AS created
+      FROM request_relationships
+      WHERE emergency_request_id = $1
+        AND homeowner_id = $2
+        AND contractor_id = $3
+        AND professional_user_id = $4
+
+      LIMIT 1
+      `,
+      [
+        emergencyRequest.id,
+        emergencyRequest.homeowner_id,
+        profile.id,
+        professionalUserId,
+      ]
+    );
+
+    const relationship = relationshipResult.rows[0];
+    if (!relationship) {
+      throw new Error(
+        "The Emergency relationship could not be created or resolved."
+      );
+    }
+
+    if (relationship.status !== "pending") {
+      await client.query("ROLLBACK");
+      return {
+        ok: false,
+        status: 409,
+        code: "EMERGENCY_RESPONSE_NOT_PENDING",
+        message: "This Emergency response is no longer pending.",
+      };
+    }
+
+    await client.query("COMMIT");
+    return {
+      ok: true,
+      status: relationship.created ? 201 : 200,
+      code: relationship.created
+        ? "EMERGENCY_RESPONSE_CREATED"
+        : "EMERGENCY_RESPONSE_EXISTS",
+      created: Boolean(relationship.created),
+      relationship,
+    };
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Preserve the original persistence error.
+    }
+    throw error;
+  } finally {
+    if (client !== pool && typeof client.release === "function") {
+      client.release();
+    }
+  }
+}
+
 module.exports = {
   acceptHomeownerRequestRelationship,
+  createProfessionalEmergencyResponse,
   createProfessionalRequestRelationship,
   declineHomeownerRequestRelationship,
   listHomeownerRequestRelationships,

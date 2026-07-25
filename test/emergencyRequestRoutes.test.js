@@ -190,6 +190,11 @@ test(
         },
         {
           method: "POST",
+          path:
+            "/professional-emergency-opportunities/:emergencyRequestId/respond",
+        },
+        {
+          method: "POST",
           path: "/emergency-requests/drafts",
         },
         {

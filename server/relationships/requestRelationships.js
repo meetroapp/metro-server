@@ -40,6 +40,31 @@ function parsePositiveInteger(value) {
   return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
+function isPlainObject(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function validateEmergencyResponsePayload(payload) {
+  if (payload === undefined) {
+    return { valid: true, value: {} };
+  }
+
+  if (!isPlainObject(payload) || Object.keys(payload).length > 0) {
+    return {
+      valid: false,
+      code: "UNSUPPORTED_EMERGENCY_RESPONSE_FIELDS",
+      message: "Emergency responses do not accept request fields.",
+    };
+  }
+
+  return { valid: true, value: {} };
+}
+
 function validateProfessionalResponsePayload(payload = {}) {
   const introductionText = cleanText(payload.introduction_text, 2000);
 
@@ -121,6 +146,17 @@ function serializeRelationshipForProfessional(row = {}) {
   };
 }
 
+function serializeEmergencyResponseRelationship(row = {}) {
+  return {
+    id: row.id,
+    emergencyRequestId: row.emergency_request_id,
+    status: row.status,
+    conversationAvailable: false,
+    createdAt: row.created_at,
+    respondedAt: row.responded_at,
+  };
+}
+
 module.exports = {
   RELATIONSHIP_STATUSES,
   RELATIONSHIP_STATUS_VALUES,
@@ -128,10 +164,13 @@ module.exports = {
   canHomeownerDeclineRelationship,
   canProfessionalWithdrawRelationship,
   cleanText,
+  isPlainObject,
   isValidPositiveInteger,
   parsePositiveInteger,
+  serializeEmergencyResponseRelationship,
   serializePendingRelationshipForHomeowner,
   serializeRelationshipForProfessional,
+  validateEmergencyResponsePayload,
   validateProfessionalResponsePayload,
   validateRelationshipStatus,
 };

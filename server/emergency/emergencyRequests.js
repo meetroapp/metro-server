@@ -2,6 +2,12 @@
 
 const emergencyOpportunityService = require("./emergencyOpportunityService");
 const emergencyRequestService = require("./emergencyRequestService");
+const requestRelationshipService = require(
+  "../relationships/requestRelationshipService"
+);
+const {
+  serializeEmergencyResponseRelationship,
+} = require("../relationships/requestRelationships");
 
 function sendServiceResult(res, result) {
   if (!result || result.ok !== true) {
@@ -50,6 +56,7 @@ function createEmergencyRequestHandlers({
   sendPublicDatabaseError,
   service = emergencyRequestService,
   opportunityService = emergencyOpportunityService,
+  relationshipService = requestRelationshipService,
 }) {
   if (typeof getPool !== "function") {
     throw new TypeError("getPool must be a function.");
@@ -71,7 +78,11 @@ function createEmergencyRequestHandlers({
   } = service;
   const {
     listProfessionalEmergencyOpportunities,
+    professionalCanSeeEmergencyOpportunity,
   } = opportunityService;
+  const {
+    createProfessionalEmergencyResponse,
+  } = relationshipService;
 
   async function listProfessionalOpportunities(req, res) {
     try {
@@ -92,6 +103,45 @@ function createEmergencyRequestHandlers({
           "EMERGENCY_OPPORTUNITIES_FETCH_FAILED",
         message:
           "Emergency opportunities could not be loaded.",
+      });
+    }
+  }
+
+  async function respondToProfessionalOpportunity(req, res) {
+    try {
+      const result = await createProfessionalEmergencyResponse({
+        pool: getPool(req),
+        professionalUserId: req.user.id,
+        emergencyRequestId: req.params.emergencyRequestId,
+        payload: req.body,
+        professionalCanSeeEmergencyOpportunity,
+      });
+
+      if (!result || result.ok !== true) {
+        return res.status(result?.status || 500).json({
+          success: false,
+          code: result?.code || "EMERGENCY_RESPONSE_CREATE_FAILED",
+          message:
+            result?.message ||
+            "The Emergency response could not be created.",
+        });
+      }
+
+      return res.status(result.status || 200).json({
+        success: true,
+        code: result.code,
+        created: Boolean(result.created),
+        relationship: serializeEmergencyResponseRelationship(
+          result.relationship
+        ),
+      });
+    } catch (error) {
+      return sendPublicDatabaseError({
+        res,
+        error,
+        operation: "create_emergency_response",
+        code: "EMERGENCY_RESPONSE_CREATE_FAILED",
+        message: "The Emergency response could not be created.",
       });
     }
   }
@@ -238,6 +288,7 @@ function createEmergencyRequestHandlers({
     getRequest,
     listProfessionalOpportunities,
     prepareRequest,
+    respondToProfessionalOpportunity,
     saveSafetyAssessment,
     updateDraft,
   };
@@ -250,6 +301,7 @@ function registerEmergencyRequestRoutes({
   sendPublicDatabaseError,
   service = emergencyRequestService,
   opportunityService = emergencyOpportunityService,
+  relationshipService = requestRelationshipService,
 }) {
   if (!app) {
     throw new TypeError(
@@ -268,12 +320,19 @@ function registerEmergencyRequestRoutes({
     sendPublicDatabaseError,
     service,
     opportunityService,
+    relationshipService,
   });
 
   app.get(
     "/professional-emergency-opportunities",
     authMiddleware,
     handlers.listProfessionalOpportunities
+  );
+
+  app.post(
+    "/professional-emergency-opportunities/:emergencyRequestId/respond",
+    authMiddleware,
+    handlers.respondToProfessionalOpportunity
   );
 
   app.post(
