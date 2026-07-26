@@ -28,8 +28,8 @@ function successfulEmergencyRequest(overrides = {}) {
   return {
     id: 41,
     category: "home_repair",
-    serviceDomain: "electrical",
-    serviceSpecialty: "emergency_wiring",
+    serviceDomain: "home_services",
+    serviceSpecialty: "electrical",
     title: "Power issue",
     description: "Partial outage.",
     locationText: "Cape Coral",
@@ -342,8 +342,8 @@ test(
 
     const body = {
       category: "Home Repair",
-      serviceDomain: "Electrical",
-      serviceSpecialty: "Emergency Wiring",
+      serviceDomain: "Home Services",
+      serviceSpecialty: "Electrical",
       title: "Power issue",
       description: "Partial outage.",
       locationText: "Cape Coral",
@@ -373,6 +373,55 @@ test(
       res.payload.emergencyRequest.homeowner_id,
       undefined
     );
+  }
+);
+
+test(
+  "taxonomy mismatch preserves the service-layer 400 error contract",
+  async () => {
+    const service = createService({
+      async createEmergencyDraft() {
+        return {
+          ok: false,
+          status: 400,
+          code:
+            "EMERGENCY_SERVICE_TAXONOMY_MISMATCH",
+          message:
+            "serviceDomain is not compatible with serviceSpecialty.",
+        };
+      },
+    });
+    const { pool, handlers } =
+      createHandlers(service);
+    const res = createResponse();
+
+    await handlers.createDraft(
+      {
+        pool,
+        user: { id: 7 },
+        body: {
+          category: "Home Repair",
+          serviceDomain: "Electrical",
+          serviceSpecialty: "Electrical",
+          title: "Power issue",
+          description: "Partial outage.",
+          locationText: "Cape Coral",
+          unitNumber: "",
+          accessNotes: "Call first.",
+        },
+        params: {},
+      },
+      res
+    );
+
+    assert.equal(res.statusCode, 400);
+    assert.deepEqual(res.payload, {
+      success: false,
+      code:
+        "EMERGENCY_SERVICE_TAXONOMY_MISMATCH",
+      message:
+        "serviceDomain is not compatible with serviceSpecialty.",
+    });
   }
 );
 

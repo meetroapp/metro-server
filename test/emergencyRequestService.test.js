@@ -47,8 +47,8 @@ test("Emergency identifiers accept only safe positive integers", () => {
 test("Emergency draft validation allowlists and normalizes fields", () => {
   const result = validateEmergencyDraftPayload({
     category: "Home Repair",
-    serviceDomain: "Electrical",
-    serviceSpecialty: "Emergency Wiring",
+    serviceDomain: "Home Services",
+    serviceSpecialty: "Electrical",
     title: "Power issue",
     description: "Partial outage in the home.",
     locationText: "Cape Coral, FL",
@@ -59,8 +59,8 @@ test("Emergency draft validation allowlists and normalizes fields", () => {
   assert.equal(result.valid, true);
   assert.deepEqual(result.value, {
     category: "home_repair",
-    serviceDomain: "electrical",
-    serviceSpecialty: "emergency_wiring",
+    serviceDomain: "home_services",
+    serviceSpecialty: "electrical",
     title: "Power issue",
     description: "Partial outage in the home.",
     locationText: "Cape Coral, FL",
@@ -71,8 +71,8 @@ test("Emergency draft validation allowlists and normalizes fields", () => {
   assert.equal(
     validateEmergencyDraftPayload({
       category: "repair",
-      serviceDomain: "electrical",
-      serviceSpecialty: "wiring",
+      serviceDomain: "home_services",
+      serviceSpecialty: "electrical",
       title: "Issue",
       description: "",
       locationText: "Cape Coral",
@@ -82,6 +82,79 @@ test("Emergency draft validation allowlists and normalizes fields", () => {
     }).code,
     "UNSUPPORTED_EMERGENCY_FIELDS"
   );
+});
+
+test("Emergency taxonomy derives canonical domains and rejects invalid pairs", () => {
+  const omittedDomain = validateEmergencyDraftPayload({
+    category: "Home Repair",
+    serviceSpecialty: "Electrical",
+    title: "Power issue",
+    description: "Partial outage in the home.",
+    locationText: "Cape Coral, FL",
+    unitNumber: "",
+    accessNotes: "Call before arrival.",
+  });
+
+  assert.equal(omittedDomain.valid, true);
+  assert.equal(
+    omittedDomain.value.serviceDomain,
+    "home_services"
+  );
+  assert.equal(
+    omittedDomain.value.serviceSpecialty,
+    "electrical"
+  );
+
+  const mismatch = validateEmergencyDraftPayload({
+    category: "Home Repair",
+    serviceDomain: "Electrical",
+    serviceSpecialty: "Electrical",
+    title: "Power issue",
+    description: "Partial outage in the home.",
+    locationText: "Cape Coral, FL",
+    unitNumber: "",
+    accessNotes: "Call before arrival.",
+  });
+
+  assert.equal(mismatch.valid, false);
+  assert.equal(
+    mismatch.code,
+    "EMERGENCY_SERVICE_TAXONOMY_MISMATCH"
+  );
+  assert.equal(
+    mismatch.message,
+    "serviceDomain is not compatible with serviceSpecialty."
+  );
+
+  const unknown = validateEmergencyDraftPayload({
+    category: "Home Repair",
+    serviceDomain: "Home Services",
+    serviceSpecialty: "not_a_real_specialty",
+    title: "Power issue",
+    description: "Partial outage in the home.",
+    locationText: "Cape Coral, FL",
+    unitNumber: "",
+    accessNotes: "Call before arrival.",
+  });
+
+  assert.equal(unknown.valid, false);
+  assert.equal(
+    unknown.code,
+    "INVALID_EMERGENCY_SERVICE_SPECIALTY"
+  );
+
+  const missing = validateEmergencyDraftPayload({
+    category: "Home Repair",
+    serviceDomain: "Home Services",
+    title: "Power issue",
+    description: "Partial outage in the home.",
+    locationText: "Cape Coral, FL",
+    unitNumber: "",
+    accessNotes: "Call before arrival.",
+  });
+
+  assert.equal(missing.valid, false);
+  assert.equal(missing.code, "INVALID_EMERGENCY_FIELD");
 });
 
 test("Emergency partial updates require at least one editable field", () => {
@@ -167,8 +240,8 @@ test("Emergency serializer excludes homeowner and persistence authority", () => 
       id: 8,
       homeowner_id: 91,
       category: "home_repair",
-      service_domain: "electrical",
-      service_specialty: "emergency_wiring",
+      service_domain: "home_services",
+      service_specialty: "electrical",
       title: "Power issue",
       description: "Partial outage.",
       location_text: "Cape Coral",
@@ -243,8 +316,8 @@ function persistedEmergencyRow(overrides = {}) {
     id: 41,
     homeowner_id: 7,
     category: "home_repair",
-    service_domain: "electrical",
-    service_specialty: "emergency_wiring",
+    service_domain: "home_services",
+    service_specialty: "electrical",
     title: "Power issue",
     description: "Partial outage.",
     location_text: "Cape Coral",
@@ -290,8 +363,8 @@ test("draft creation persists authenticated owner and governed fields", async ()
     assert.deepEqual(params, [
       7,
       "home_repair",
+      "home_services",
       "electrical",
-      "emergency_wiring",
       "Power issue",
       "Partial outage.",
       "Cape Coral",
@@ -307,8 +380,8 @@ test("draft creation persists authenticated owner and governed fields", async ()
     homeownerUserId: 7,
     payload: {
       category: "Home Repair",
-      serviceDomain: "Electrical",
-      serviceSpecialty: "Emergency Wiring",
+      serviceDomain: "Home Services",
+      serviceSpecialty: "Electrical",
       title: "Power issue",
       description: "Partial outage.",
       locationText: "Cape Coral",
@@ -321,6 +394,97 @@ test("draft creation persists authenticated owner and governed fields", async ()
   assert.equal(result.status, 201);
   assert.equal(result.emergencyRequest.id, 41);
   assert.equal(result.emergencyRequest.homeowner_id, undefined);
+});
+
+test("draft creation derives an omitted canonical service domain", async () => {
+  const pool = createEmergencyMockPool(({ sql, params }) => {
+    assert.match(sql, /^INSERT INTO emergency_requests/i);
+    assert.equal(params[2], "home_services");
+    assert.equal(params[3], "electrical");
+
+    return {
+      rows: [
+        persistedEmergencyRow({
+          service_domain: params[2],
+          service_specialty: params[3],
+        }),
+      ],
+    };
+  });
+
+  const result = await createEmergencyDraft({
+    pool,
+    homeownerUserId: 7,
+    payload: {
+      category: "Home Repair",
+      serviceSpecialty: "Electrical",
+      title: "Power issue",
+      description: "Partial outage.",
+      locationText: "Cape Coral",
+      unitNumber: "",
+      accessNotes: "Call first.",
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(
+    result.emergencyRequest.serviceDomain,
+    "home_services"
+  );
+  assert.equal(
+    result.emergencyRequest.serviceSpecialty,
+    "electrical"
+  );
+});
+
+test("invalid Emergency taxonomy performs no draft insert", async () => {
+  for (const payload of [
+    {
+      serviceDomain: "Electrical",
+      serviceSpecialty: "Electrical",
+      expectedCode: "EMERGENCY_SERVICE_TAXONOMY_MISMATCH",
+    },
+    {
+      serviceDomain: "Home Services",
+      serviceSpecialty: "not_a_real_specialty",
+      expectedCode: "INVALID_EMERGENCY_SERVICE_SPECIALTY",
+    },
+    {
+      serviceDomain: "Home Services",
+      expectedCode: "INVALID_EMERGENCY_FIELD",
+    },
+  ]) {
+    let queryCount = 0;
+    const result = await createEmergencyDraft({
+      pool: {
+        async query() {
+          queryCount += 1;
+          throw new Error("Database must not be reached.");
+        },
+      },
+      homeownerUserId: 7,
+      payload: {
+        category: "Home Repair",
+        serviceDomain: payload.serviceDomain,
+        ...(payload.serviceSpecialty
+          ? {
+              serviceSpecialty:
+                payload.serviceSpecialty,
+            }
+          : {}),
+        title: "Power issue",
+        description: "Partial outage.",
+        locationText: "Cape Coral",
+        unitNumber: "",
+        accessNotes: "Call first.",
+      },
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 400);
+    assert.equal(result.code, payload.expectedCode);
+    assert.equal(queryCount, 0);
+  }
 });
 
 test("owned read scopes request identity to homeowner identity", async () => {
@@ -373,6 +537,93 @@ test("draft update locks, commits, and releases the transaction client", async (
   assert.equal(result.ok, true);
   assert.equal(result.emergencyRequest.title, "Updated title");
   assert.equal(pool.released, true);
+});
+
+test("draft specialty updates persist the derived canonical domain", async () => {
+  const pool = createEmergencyMockPool(({ sql, params }) => {
+    if (sql === "BEGIN" || sql === "COMMIT") return { rows: [] };
+
+    if (/SELECT emergency_requests\.\*/i.test(sql)) {
+      return { rows: [persistedEmergencyRow()] };
+    }
+
+    if (
+      /^UPDATE emergency_requests SET service_specialty = \$1, service_domain = \$2/i.test(
+        sql
+      )
+    ) {
+      assert.deepEqual(params, [
+        "electrical",
+        "home_services",
+        41,
+      ]);
+      return {
+        rows: [
+          persistedEmergencyRow({
+            service_domain: "home_services",
+            service_specialty: "electrical",
+          }),
+        ],
+      };
+    }
+
+    throw new Error(`Unexpected SQL: ${sql}`);
+  });
+
+  const result = await updateEmergencyDraft({
+    pool,
+    homeownerUserId: 7,
+    emergencyRequestId: 41,
+    payload: {
+      serviceSpecialty: "Electrical",
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(
+    result.emergencyRequest.serviceDomain,
+    "home_services"
+  );
+  assert.equal(
+    result.emergencyRequest.serviceSpecialty,
+    "electrical"
+  );
+});
+
+test("draft domain-only updates reject a mismatch before persistence", async () => {
+  let updated = false;
+  const pool = createEmergencyMockPool(({ sql }) => {
+    if (sql === "BEGIN" || sql === "ROLLBACK") {
+      return { rows: [] };
+    }
+
+    if (/SELECT emergency_requests\.\*/i.test(sql)) {
+      return { rows: [persistedEmergencyRow()] };
+    }
+
+    if (/^UPDATE emergency_requests/i.test(sql)) {
+      updated = true;
+    }
+
+    throw new Error(`Unexpected SQL: ${sql}`);
+  });
+
+  const result = await updateEmergencyDraft({
+    pool,
+    homeownerUserId: 7,
+    emergencyRequestId: 41,
+    payload: {
+      serviceDomain: "Electrical",
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 400);
+  assert.equal(
+    result.code,
+    "EMERGENCY_SERVICE_TAXONOMY_MISMATCH"
+  );
+  assert.equal(updated, false);
 });
 
 test("unsafe assessment derives disposition and safety-blocks atomically", async () => {

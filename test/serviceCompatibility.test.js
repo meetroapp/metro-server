@@ -61,6 +61,13 @@ test("every canonical request service has an exact professional match", () => {
   }
 });
 
+test("electrical resolves to the canonical home services domain", () => {
+  assert.equal(
+    getRequestServiceDomain("electrical"),
+    "home_services"
+  );
+});
+
 test("every professional service is exact-matchable or explicitly excluded from Request Help", () => {
   const inventory = getTaxonomyCompatibilityInventory();
   assert.equal(inventory.length, PROFESSIONAL_SERVICE_IDS.size);

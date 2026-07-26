@@ -3,6 +3,8 @@
 const crypto = require("node:crypto");
 const {
   getProfessionalServiceDomain,
+  getRequestServiceDomain,
+  normalizeRequestServiceId,
 } = require("../server/requests/serviceCompatibility");
 
 const EXPECTED_HOST =
@@ -353,11 +355,25 @@ function recordCheck(
   });
 }
 
-function buildEmergencyDraft(runId) {
+function buildEmergencyDraft(
+  runId,
+  rawServiceSpecialty = "electrical"
+) {
+  const serviceSpecialty =
+    normalizeRequestServiceId(rawServiceSpecialty);
+  const serviceDomain =
+    getRequestServiceDomain(serviceSpecialty);
+
+  if (!serviceDomain) {
+    throw new VerificationFailure(
+      "The Emergency certification service specialty is unsupported."
+    );
+  }
+
   return {
     category: "Home Repair",
-    serviceDomain: "Electrical",
-    serviceSpecialty: "Electrical",
+    serviceDomain,
+    serviceSpecialty,
     title:
       `Emergency staging certification ${runId}`,
     description:

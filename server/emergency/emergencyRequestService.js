@@ -1,5 +1,10 @@
 "use strict";
 
+const {
+  getRequestServiceDomain,
+  normalizeRequestServiceId,
+} = require("../requests/serviceCompatibility");
+
 const EMERGENCY_REQUEST_STATUSES = Object.freeze([
   "draft",
   "ready_for_distribution",
@@ -63,6 +68,49 @@ function normalizeIdentifier(value) {
     .replace(/^_+|_+$/g, "");
 }
 
+function validateEmergencyTaxonomy({
+  serviceDomain,
+  serviceSpecialty,
+  serviceDomainSupplied = false,
+}) {
+  const normalizedSpecialty =
+    normalizeRequestServiceId(serviceSpecialty);
+  const canonicalServiceDomain =
+    getRequestServiceDomain(normalizedSpecialty);
+
+  if (!normalizedSpecialty || !canonicalServiceDomain) {
+    return {
+      valid: false,
+      code: "INVALID_EMERGENCY_SERVICE_SPECIALTY",
+      message:
+        "A supported Emergency service specialty is required.",
+    };
+  }
+
+  const normalizedServiceDomain =
+    normalizeIdentifier(serviceDomain);
+
+  if (
+    serviceDomainSupplied &&
+    normalizedServiceDomain !== canonicalServiceDomain
+  ) {
+    return {
+      valid: false,
+      code: "EMERGENCY_SERVICE_TAXONOMY_MISMATCH",
+      message:
+        "serviceDomain is not compatible with serviceSpecialty.",
+    };
+  }
+
+  return {
+    valid: true,
+    value: {
+      serviceDomain: canonicalServiceDomain,
+      serviceSpecialty: normalizedSpecialty,
+    },
+  };
+}
+
 function validateEmergencyDraftPayload(body, { partial = false } = {}) {
   if (!isRecord(body)) {
     return {
@@ -104,7 +152,7 @@ function validateEmergencyDraftPayload(body, { partial = false } = {}) {
       required: !partial || body.category !== undefined,
     }),
     serviceDomain: cleanText(body.serviceDomain, 100, {
-      required: !partial || body.serviceDomain !== undefined,
+      required: body.serviceDomain !== undefined,
     }),
     serviceSpecialty: cleanText(body.serviceSpecialty, 160, {
       required: !partial || body.serviceSpecialty !== undefined,
@@ -135,6 +183,19 @@ function validateEmergencyDraftPayload(body, { partial = false } = {}) {
         ? normalizeIdentifier(fieldValue)
         : fieldValue;
     }
+  }
+
+  if (!partial || body.serviceSpecialty !== undefined) {
+    const taxonomy = validateEmergencyTaxonomy({
+      serviceDomain: value.serviceDomain,
+      serviceSpecialty: value.serviceSpecialty,
+      serviceDomainSupplied: body.serviceDomain !== undefined,
+    });
+
+    if (!taxonomy.valid) return taxonomy;
+
+    value.serviceDomain = taxonomy.value.serviceDomain;
+    value.serviceSpecialty = taxonomy.value.serviceSpecialty;
   }
 
   return { valid: true, value };
@@ -473,6 +534,30 @@ async function updateEmergencyDraft({
         code: "EMERGENCY_REQUEST_NOT_EDITABLE",
         message: "Only draft Emergency requests can be edited.",
       };
+    }
+
+    if (
+      Object.hasOwn(validation.value, "serviceDomain") &&
+      !Object.hasOwn(validation.value, "serviceSpecialty")
+    ) {
+      const taxonomy = validateEmergencyTaxonomy({
+        serviceDomain: validation.value.serviceDomain,
+        serviceSpecialty: current.row.service_specialty,
+        serviceDomainSupplied: true,
+      });
+
+      if (!taxonomy.valid) {
+        await client.query("ROLLBACK");
+        return {
+          ok: false,
+          status: 400,
+          code: taxonomy.code,
+          message: taxonomy.message,
+        };
+      }
+
+      validation.value.serviceDomain =
+        taxonomy.value.serviceDomain;
     }
 
     const columns = {

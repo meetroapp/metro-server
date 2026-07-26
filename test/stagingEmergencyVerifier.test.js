@@ -427,6 +427,23 @@ test(
       draft.title,
       /run-123/
     );
+    assert.equal(
+      draft.serviceSpecialty,
+      "electrical"
+    );
+    assert.equal(
+      draft.serviceDomain,
+      "home_services"
+    );
+
+    assert.throws(
+      () =>
+        buildEmergencyDraft(
+          "run-unsupported",
+          "not_a_real_specialty"
+        ),
+      /service specialty is unsupported/i
+    );
 
     const assessment =
       buildSafeAssessment();

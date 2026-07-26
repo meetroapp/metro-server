@@ -47,7 +47,7 @@ function distributableEmergency(overrides = {}) {
     homeowner_id: 9,
     category: "home_repair",
     service_domain: "home_services",
-    service_specialty: "emergency_electrical_service",
+    service_specialty: "electrical",
     title: "Partial power outage",
     description: "Several rooms have lost power.",
     location_text: "Cape Coral, FL",
@@ -232,7 +232,7 @@ test("query selects only safety-cleared distributable requests in stable order",
   );
 });
 
-test("eligible professional receives one privacy-safe Emergency opportunity", async () => {
+test("canonical electrical Emergency remains visible and privacy-safe", async () => {
   const pool = createReadOnlyPool();
 
   const result = await listProfessionalEmergencyOpportunities({
@@ -248,7 +248,7 @@ test("eligible professional receives one privacy-safe Emergency opportunity", as
       sourceType: "emergency",
       category: "home_repair",
       serviceDomain: "home_services",
-      serviceSpecialty: "emergency_electrical_service",
+      serviceSpecialty: "electrical",
       title: "Partial power outage",
       description: "Several rooms have lost power.",
       status: "ready_for_distribution",
@@ -266,6 +266,7 @@ test("service compatibility fails closed for specialty, domain, and area mismatc
     distributableEmergency({
       service_specialty: "unsupported_emergency_service",
     }),
+    distributableEmergency({ service_domain: "electrical" }),
     distributableEmergency({ service_domain: "healthcare" }),
     distributableEmergency({ location_text: "Miami, FL" }),
   ]) {
