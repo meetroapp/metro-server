@@ -38,6 +38,10 @@ function successfulEmergencyRequest(overrides = {}) {
     status: "draft",
     requestedAt: null,
     assignedAt: null,
+    enRouteAt: null,
+    arrivedAt: null,
+    workStartedAt: null,
+    completedAt: null,
     resolvedAt: null,
     cancelledAt: null,
     expiredAt: null,
@@ -517,6 +521,82 @@ test(
       res.payload.success,
       true
     );
+  }
+);
+
+test(
+  "owner-scoped retrieval returns every canonical dispatch lifecycle stage",
+  async (t) => {
+    const stages = [
+      {
+        status: "professional_en_route",
+        enRouteAt: "en-route",
+        arrivedAt: null,
+        workStartedAt: null,
+        completedAt: null,
+      },
+      {
+        status: "professional_arrived",
+        enRouteAt: "en-route",
+        arrivedAt: "arrived",
+        workStartedAt: null,
+        completedAt: null,
+      },
+      {
+        status: "work_in_progress",
+        enRouteAt: "en-route",
+        arrivedAt: "arrived",
+        workStartedAt: "work-started",
+        completedAt: null,
+      },
+      {
+        status: "completed",
+        enRouteAt: "en-route",
+        arrivedAt: "arrived",
+        workStartedAt: "work-started",
+        completedAt: "completed",
+      },
+    ];
+
+    for (const stage of stages) {
+      await t.test(stage.status, async () => {
+        const emergencyRequest =
+          successfulEmergencyRequest({
+            ...stage,
+            assignedAt: "assigned",
+          });
+        const service = createService({
+          async getOwnedEmergencyRequest() {
+            return {
+              ok: true,
+              status: 200,
+              code: "EMERGENCY_REQUEST_FOUND",
+              emergencyRequest,
+            };
+          },
+        });
+        const { pool, handlers } =
+          createHandlers(service);
+        const res = createResponse();
+
+        await handlers.getRequest(
+          {
+            pool,
+            user: { id: 7 },
+            params: {
+              emergencyRequestId: "41",
+            },
+          },
+          res
+        );
+
+        assert.equal(res.statusCode, 200);
+        assert.deepEqual(
+          res.payload.emergencyRequest,
+          emergencyRequest
+        );
+      });
+    }
   }
 );
 

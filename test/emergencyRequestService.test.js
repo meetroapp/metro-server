@@ -250,6 +250,10 @@ test("Emergency serializer excludes homeowner and persistence authority", () => 
       status: "draft",
       requested_at: null,
       assigned_at: null,
+      en_route_at: null,
+      arrived_at: null,
+      work_started_at: null,
+      completed_at: null,
       resolved_at: null,
       cancelled_at: null,
       expired_at: null,
@@ -278,7 +282,90 @@ test("Emergency serializer excludes homeowner and persistence authority", () => 
   assert.equal(serialized.id, 8);
   assert.equal(serialized.homeowner_id, undefined);
   assert.equal(serialized.status, "draft");
+  assert.deepEqual(
+    {
+      assignedAt: serialized.assignedAt,
+      enRouteAt: serialized.enRouteAt,
+      arrivedAt: serialized.arrivedAt,
+      workStartedAt: serialized.workStartedAt,
+      completedAt: serialized.completedAt,
+    },
+    {
+      assignedAt: null,
+      enRouteAt: null,
+      arrivedAt: null,
+      workStartedAt: null,
+      completedAt: null,
+    }
+  );
   assert.equal(serialized.safetyAssessment.disposition, "continue");
+});
+
+test("Emergency serializer preserves canonical dispatch lifecycle state", () => {
+  const stages = [
+    {
+      status: "professional_en_route",
+      enRouteAt: "en-route",
+      arrivedAt: null,
+      workStartedAt: null,
+      completedAt: null,
+    },
+    {
+      status: "professional_arrived",
+      enRouteAt: "en-route",
+      arrivedAt: "arrived",
+      workStartedAt: null,
+      completedAt: null,
+    },
+    {
+      status: "work_in_progress",
+      enRouteAt: "en-route",
+      arrivedAt: "arrived",
+      workStartedAt: "work-started",
+      completedAt: null,
+    },
+    {
+      status: "completed",
+      enRouteAt: "en-route",
+      arrivedAt: "arrived",
+      workStartedAt: "work-started",
+      completedAt: "completed",
+    },
+  ];
+
+  for (const stage of stages) {
+    const serialized = serializeEmergencyRequest({
+      status: stage.status,
+      assigned_at: "assigned",
+      en_route_at: stage.enRouteAt,
+      arrived_at: stage.arrivedAt,
+      work_started_at: stage.workStartedAt,
+      completed_at: stage.completedAt,
+      professional_email: "private@example.com",
+      professional_phone: "private-phone",
+    });
+
+    assert.deepEqual(
+      {
+        status: serialized.status,
+        assignedAt: serialized.assignedAt,
+        enRouteAt: serialized.enRouteAt,
+        arrivedAt: serialized.arrivedAt,
+        workStartedAt: serialized.workStartedAt,
+        completedAt: serialized.completedAt,
+      },
+      {
+        status: stage.status,
+        assignedAt: "assigned",
+        enRouteAt: stage.enRouteAt,
+        arrivedAt: stage.arrivedAt,
+        workStartedAt: stage.workStartedAt,
+        completedAt: stage.completedAt,
+      }
+    );
+    assert.equal(serialized.professional_email, undefined);
+    assert.equal(serialized.professional_phone, undefined);
+  }
 });
 
 
@@ -326,6 +413,10 @@ function persistedEmergencyRow(overrides = {}) {
     status: "draft",
     requested_at: null,
     assigned_at: null,
+    en_route_at: null,
+    arrived_at: null,
+    work_started_at: null,
+    completed_at: null,
     resolved_at: null,
     cancelled_at: null,
     expired_at: null,

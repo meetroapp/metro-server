@@ -192,7 +192,7 @@ function requireToken(env, name) {
   return value;
 }
 
-function createRunId(now = Date.now) {
+function createRunId(now = Date.now()) {
   return [
     "mc-emergency",
     new Date(now)

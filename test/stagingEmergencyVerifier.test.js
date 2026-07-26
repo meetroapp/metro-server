@@ -11,6 +11,7 @@ const {
   buildEmergencyDraft,
   buildSafeAssessment,
   createHttpClient,
+  createRunId,
   redact,
   runEmergencyCertification,
   validateTarget,
@@ -320,6 +321,21 @@ test(
 );
 
 test(
+  "run ID generation uses a valid timestamp by default",
+  () => {
+    assert.match(
+      createRunId(),
+      /^mc-emergency-\d{14}-[a-f0-9]{8}$/
+    );
+
+    assert.match(
+      createRunId(Date.UTC(2026, 6, 25, 12, 34, 56)),
+      /^mc-emergency-20260725123456-[a-f0-9]{8}$/
+    );
+  }
+);
+
+test(
   "both explicit live gates are required",
   () => {
     assert.throws(
@@ -547,6 +563,7 @@ test(
       });
 
     assert.equal(summary.success, true);
+    assert.equal(summary.runId, "test-run");
 
     assert.deepEqual(
       summary.resources,
@@ -593,6 +610,39 @@ test(
         "professional-token"
       ),
       false
+    );
+  }
+);
+
+test(
+  "mocked certification generates a run ID when the environment omits one",
+  async () => {
+    const fake = successfulFetch();
+
+    const summary =
+      await runEmergencyCertification({
+        env: {
+          RUN_EMERGENCY_STAGING_CERTIFICATION:
+            "true",
+          CONFIRM_EMERGENCY_STAGING_MUTATION:
+            REQUIRED_CONFIRMATION,
+          EMERGENCY_STAGING_BASE_URL:
+            `https://${EXPECTED_HOST}`,
+          EMERGENCY_HOMEOWNER_BEARER_TOKEN:
+            "homeowner-token",
+          EMERGENCY_PROFESSIONAL_BEARER_TOKEN:
+            "professional-token",
+        },
+        fetchImpl: fake.fetchImpl,
+        logger: {
+          error() {},
+        },
+      });
+
+    assert.equal(summary.success, true);
+    assert.match(
+      summary.runId,
+      /^mc-emergency-\d{14}-[a-f0-9]{8}$/
     );
   }
 );

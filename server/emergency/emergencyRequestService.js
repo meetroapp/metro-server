@@ -17,6 +17,10 @@ const EMERGENCY_REQUEST_STATUSES = Object.freeze([
   "expired",
   "unable_to_match",
   "safety_blocked",
+  "professional_en_route",
+  "professional_arrived",
+  "work_in_progress",
+  "completed",
 ]);
 
 const SAFETY_DISPOSITIONS = Object.freeze([
@@ -307,6 +311,10 @@ function serializeEmergencyRequest(row = {}, assessment = null) {
       : "draft",
     requestedAt: row.requested_at,
     assignedAt: row.assigned_at,
+    enRouteAt: row.en_route_at ?? null,
+    arrivedAt: row.arrived_at ?? null,
+    workStartedAt: row.work_started_at ?? null,
+    completedAt: row.completed_at ?? null,
     resolvedAt: row.resolved_at,
     cancelledAt: row.cancelled_at,
     expiredAt: row.expired_at,
