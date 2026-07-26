@@ -9,7 +9,7 @@ const { Pool } = require("pg");
 const EXPECTED_PROJECT = "profound-magic";
 const EXPECTED_ENVIRONMENT = "production";
 const EXPECTED_SERVICE =
-  "athletic-rebirth-production-0a28";
+  "athletic-rebirth";
 const REQUIRED_CONFIRMATION = "YES";
 
 const MIGRATIONS_DIRECTORY = path.join(

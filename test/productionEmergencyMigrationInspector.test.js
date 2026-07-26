@@ -19,7 +19,7 @@ const SAFE_ENV = Object.freeze({
   RAILWAY_ENVIRONMENT_NAME:
     "production",
   RAILWAY_SERVICE_NAME:
-    "athletic-rebirth-production-0a28",
+    "athletic-rebirth",
   CONFIRM_PRODUCTION_EMERGENCY_INSPECTION:
     "YES",
 });
