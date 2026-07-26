@@ -48,10 +48,25 @@ const APPROVED_FILENAMES = runner.APPROVED_MIGRATIONS.map(
 );
 const LOADED_MIGRATIONS = runner.loadApprovedMigrations();
 
+function approvedLedgerEntry(
+  migration
+) {
+  return {
+    filename: migration.filename,
+    checksum: migration.checksum,
+    executionTarget:
+      "production-governed-emergency",
+    applied: true,
+  };
+}
+
 function absentSchema() {
   return {
     classification: "ABSENT",
     foundationComplete: false,
+    emergencyFoundationComplete: false,
+    exactMigration1Prefix: false,
+    migration2Residue: false,
     dispatchComplete: false,
     singleActiveComplete: false,
     emergencyTableExists: false,
@@ -75,6 +90,9 @@ function completeSchema() {
   return {
     classification: "COMPLETE",
     foundationComplete: true,
+    emergencyFoundationComplete: true,
+    exactMigration1Prefix: false,
+    migration2Residue: true,
     dispatchComplete: true,
     singleActiveComplete: true,
     emergencyTableExists: true,
@@ -94,12 +112,57 @@ function completeSchema() {
   };
 }
 
+function prefixSchema({
+  migration2Residue = false,
+} = {}) {
+  return {
+    classification: "PARTIAL",
+    foundationComplete: false,
+    emergencyFoundationComplete: true,
+    exactMigration1Prefix:
+      !migration2Residue,
+    migration2Residue,
+    dispatchComplete: false,
+    singleActiveComplete: false,
+    emergencyTableExists: true,
+    safetyTableExists: false,
+    unsupportedStatuses: [],
+    relationship: {
+      emergencyRequestColumn:
+        migration2Residue,
+      sourceConstraint: false,
+      singleActiveIndex: false,
+    },
+    dispatchColumns: {
+      en_route_at: false,
+      arrived_at: false,
+      work_started_at: false,
+      completed_at: false,
+    },
+  };
+}
+
+function prerequisites({
+  requestRelationshipsTableExists = true,
+  conversationsTableExists = true,
+} = {}) {
+  return {
+    requestRelationshipsTableExists,
+    conversationsTableExists,
+    complete:
+      requestRelationshipsTableExists &&
+      conversationsTableExists,
+  };
+}
+
 function absentReport(overrides = {}) {
   return {
     success: true,
     decision: "PASS_READY_FOR_MIGRATION_PLANNING",
     code: "PRODUCTION_EMERGENCY_MIGRATIONS_MISSING",
     readOnly: true,
+    prerequisites:
+      prerequisites(),
     schema: absentSchema(),
     ledger: {
       entries: [],
@@ -119,12 +182,15 @@ function completeReport(overrides = {}) {
     decision: "ALREADY_APPLIED",
     code: "PRODUCTION_EMERGENCY_READY",
     readOnly: true,
+    prerequisites:
+      prerequisites(),
     schema: completeSchema(),
     ledger: {
-      entries: runner.APPROVED_MIGRATIONS.map((migration) => ({
-        filename: migration.filename,
-        checksum: migration.checksum,
-      })),
+      entries:
+        runner.APPROVED_MIGRATIONS
+          .map(
+            approvedLedgerEntry
+          ),
       missing: [],
       checksumDrift: [],
       duplicateFilenames: [],
@@ -132,6 +198,65 @@ function completeReport(overrides = {}) {
       allChecksumsMatch: true,
     },
     ...overrides,
+  };
+}
+
+function prefixReport({
+  prerequisiteState =
+    prerequisites(),
+  schema =
+    prefixSchema(),
+  ledgerEntries =
+    [
+      approvedLedgerEntry(
+        runner.APPROVED_MIGRATIONS[0]
+      ),
+    ],
+  missing =
+    APPROVED_FILENAMES.slice(1),
+  checksumDrift = [],
+  duplicateFilenames = [],
+} = {}) {
+  const ready =
+    prerequisiteState.complete;
+
+  return {
+    success: ready,
+    decision: ready
+      ? "SAFE_PARTIAL_PREFIX_READY_TO_RESUME"
+      : "SAFE_PARTIAL_PREFIX_BLOCKED_ON_PREREQUISITES",
+    code: ready
+      ? "PRODUCTION_EMERGENCY_SAFE_PREFIX_READY"
+      : "CANONICAL_PREREQUISITES_MISSING",
+    readOnly: true,
+    prerequisites:
+      prerequisiteState,
+    schema,
+    ledger: {
+      entries:
+        ledgerEntries,
+      missing,
+      checksumDrift,
+      duplicateFilenames,
+      allRecorded: false,
+      allChecksumsMatch:
+        checksumDrift.length === 0,
+    },
+  };
+}
+
+function missingPrerequisiteReport(
+  prerequisiteState
+) {
+  return {
+    ...absentReport(),
+    success: false,
+    decision:
+      "BLOCKED_MISSING_CANONICAL_PREREQUISITES",
+    code:
+      "CANONICAL_PREREQUISITES_MISSING",
+    prerequisites:
+      prerequisiteState,
   };
 }
 
@@ -149,6 +274,8 @@ function createExecutionPool({
   failMigrationIndex = -1,
   failVerificationIndex = -1,
   failLedgerIndex = -1,
+  requestRelationshipsTableExists = true,
+  conversationsTableExists = true,
   connectFailure = false,
   rawError = "private database failure",
 } = {}) {
@@ -174,7 +301,20 @@ function createExecutionPool({
       calls.push({ sql, values });
       const normalized = String(sql).replace(/\s+/g, " ").trim();
       if (migrationSqlIndex.has(sql)) {
-        if (migrationSqlIndex.get(sql) === failMigrationIndex) {
+        const migrationIndex =
+          migrationSqlIndex.get(sql);
+        if (
+          migrationIndex === 1 &&
+          (
+            !requestRelationshipsTableExists ||
+            !conversationsTableExists
+          )
+        ) {
+          throw new Error(
+            "missing canonical prerequisite"
+          );
+        }
+        if (migrationIndex === failMigrationIndex) {
           throw new Error(rawError);
         }
         return { rows: [] };
@@ -480,6 +620,168 @@ test("exact absent preflight executes five transactions in order", async () => {
   }
 });
 
+test("missing canonical prerequisites block before execution pool construction", async () => {
+  for (const prerequisiteState of [
+    prerequisites({
+      requestRelationshipsTableExists:
+        false,
+    }),
+    prerequisites({
+      conversationsTableExists:
+        false,
+    }),
+    prerequisites({
+      requestRelationshipsTableExists:
+        false,
+      conversationsTableExists:
+        false,
+    }),
+  ]) {
+    let poolCalls = 0;
+    const result =
+      await runner
+        .runProductionEmergencyMigrations({
+          env: SAFE_ENV,
+          inspect:
+            sequenceInspector([
+              missingPrerequisiteReport(
+                prerequisiteState
+              ),
+            ]),
+          poolFactory: () => {
+            poolCalls += 1;
+          },
+        });
+
+    assert.equal(
+      result.code,
+      "CANONICAL_PREREQUISITES_MISSING"
+    );
+    assert.equal(
+      result.mutationStarted,
+      false
+    );
+    assert.equal(poolCalls, 0);
+  }
+});
+
+test("observed production prefix remains blocked without prerequisites", async () => {
+  const observedProductionShape = {
+    postsTableExists: true,
+    requestRelationshipsTableExists:
+      false,
+    conversationsTableExists:
+      false,
+  };
+  let poolCalls = 0;
+  const result =
+    await runner
+      .runProductionEmergencyMigrations({
+        env: SAFE_ENV,
+        inspect:
+          sequenceInspector([
+            prefixReport({
+              prerequisiteState:
+                prerequisites(
+                  observedProductionShape
+                ),
+            }),
+          ]),
+        poolFactory: () => {
+          poolCalls += 1;
+        },
+      });
+
+  assert.equal(
+    observedProductionShape
+      .postsTableExists,
+    true
+  );
+  assert.equal(
+    result.preflight.decision,
+    "SAFE_PARTIAL_PREFIX_BLOCKED_ON_PREREQUISITES"
+  );
+  assert.equal(
+    result.code,
+    "CANONICAL_PREREQUISITES_MISSING"
+  );
+  assert.equal(
+    result.mutationStarted,
+    false
+  );
+  assert.deepEqual(
+    result.execution
+      .skippedVerifiedPrefix,
+    [APPROVED_FILENAMES[0]]
+  );
+  assert.deepEqual(
+    result.execution.notAttempted,
+    APPROVED_FILENAMES.slice(1)
+  );
+  assert.equal(poolCalls, 0);
+});
+
+test("exact verified prefix executes migrations two through five only", async () => {
+  const inspect =
+    sequenceInspector([
+      prefixReport(),
+      completeReport(),
+    ]);
+  const pool =
+    createExecutionPool();
+  const result =
+    await runner
+      .runProductionEmergencyMigrations({
+        env: SAFE_ENV,
+        inspect,
+        poolFactory:
+          pool.factory,
+      });
+
+  assert.equal(result.success, true);
+  assert.equal(
+    result.decision,
+    "APPLIED_AND_VERIFIED"
+  );
+  assert.deepEqual(
+    result.execution
+      .skippedVerifiedPrefix,
+    [APPROVED_FILENAMES[0]]
+  );
+  assert.deepEqual(
+    result.execution.committed,
+    APPROVED_FILENAMES.slice(1)
+  );
+  assert.deepEqual(
+    result.execution.notAttempted,
+    []
+  );
+  assert.equal(
+    pool.calls.some(
+      ({ sql }) =>
+        sql ===
+        LOADED_MIGRATIONS[0].sql
+    ),
+    false
+  );
+  assert.equal(
+    pool.ledger.has(
+      APPROVED_FILENAMES[0]
+    ),
+    false
+  );
+  assert.equal(
+    pool.calls.filter(
+      ({ sql }) => sql === "BEGIN"
+    ).length,
+    4
+  );
+  assert.equal(
+    result.mutationStarted,
+    true
+  );
+});
+
 test("migration failure rolls back current work and stops later files", async () => {
   const pool = createExecutionPool({
     failMigrationIndex: 1,
@@ -578,6 +880,81 @@ test("partial, conflicting, and unsupported preflight states block mutation", as
       decision: "BLOCKED_PARTIAL_OR_UNRECORDED_SCHEMA",
       code: "PRODUCTION_EMERGENCY_SCHEMA_REQUIRES_REVIEW",
       ledger: absentReport().ledger,
+    }),
+    prefixReport({
+      ledgerEntries: [
+        approvedLedgerEntry(
+          runner
+            .APPROVED_MIGRATIONS[1]
+        ),
+      ],
+      missing: [
+        APPROVED_FILENAMES[0],
+        ...APPROVED_FILENAMES
+          .slice(2),
+      ],
+    }),
+    prefixReport({
+      ledgerEntries: [
+        approvedLedgerEntry(
+          runner
+            .APPROVED_MIGRATIONS[0]
+        ),
+        approvedLedgerEntry(
+          runner
+            .APPROVED_MIGRATIONS[2]
+        ),
+      ],
+      missing: [
+        APPROVED_FILENAMES[1],
+        ...APPROVED_FILENAMES
+          .slice(3),
+      ],
+    }),
+    prefixReport({
+      ledgerEntries: [
+        {
+          ...approvedLedgerEntry(
+            runner
+              .APPROVED_MIGRATIONS[0]
+          ),
+          checksum:
+            "0".repeat(64),
+        },
+      ],
+      checksumDrift: [
+        APPROVED_FILENAMES[0],
+      ],
+    }),
+    prefixReport({
+      schema:
+        prefixSchema({
+          migration2Residue:
+            true,
+        }),
+    }),
+    prefixReport({
+      ledgerEntries: [
+        {
+          ...approvedLedgerEntry(
+            runner
+              .APPROVED_MIGRATIONS[0]
+          ),
+          executionTarget:
+            "staging",
+        },
+      ],
+    }),
+    prefixReport({
+      ledgerEntries: [
+        {
+          ...approvedLedgerEntry(
+            runner
+              .APPROVED_MIGRATIONS[0]
+          ),
+          applied: false,
+        },
+      ],
     }),
     {
       success: false,

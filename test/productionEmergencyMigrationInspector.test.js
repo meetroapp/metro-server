@@ -33,47 +33,121 @@ function ledgerRows() {
       checksum:
         migration.checksum,
       execution_target:
-        "production-governed-additive",
+        "production-governed-emergency",
       applied_at:
         "2026-07-26T00:00:00.000Z",
     }));
 }
 
+function prefixLedgerRows() {
+  return ledgerRows().slice(0, 1);
+}
+
+function foundationColumns() {
+  const definitions = {
+    id: ["integer", "NO", "sequence"],
+    homeowner_id: ["integer", "NO", null],
+    category: ["text", "NO", null],
+    service_domain: ["text", "NO", null],
+    service_specialty: ["text", "NO", null],
+    title: ["text", "NO", null],
+    description: ["text", "NO", "empty"],
+    location_text: ["text", "NO", null],
+    unit_number: ["text", "NO", "empty"],
+    access_notes: ["text", "NO", "empty"],
+    status: ["text", "NO", "draft"],
+    requested_at: [
+      "timestamp without time zone",
+      "YES",
+      null,
+    ],
+    assigned_at: [
+      "timestamp without time zone",
+      "YES",
+      null,
+    ],
+    resolved_at: [
+      "timestamp without time zone",
+      "YES",
+      null,
+    ],
+    cancelled_at: [
+      "timestamp without time zone",
+      "YES",
+      null,
+    ],
+    expired_at: [
+      "timestamp without time zone",
+      "YES",
+      null,
+    ],
+    created_at: [
+      "timestamp without time zone",
+      "NO",
+      "now",
+    ],
+    updated_at: [
+      "timestamp without time zone",
+      "NO",
+      "now",
+    ],
+  };
+
+  return Object.entries(definitions)
+    .map(
+      ([
+        column_name,
+        [
+          data_type,
+          is_nullable,
+          column_default,
+        ],
+      ]) => ({
+        column_name,
+        data_type,
+        is_nullable,
+        column_default,
+      })
+    );
+}
+
 function createPool({
   fullSchema = true,
+  foundationOnly = false,
   canonicalSafetyTable = fullSchema,
+  requestRelationshipsTableExists = true,
+  conversationsTableExists = true,
+  malformedPrerequisite = null,
   ledger = ledgerRows(),
   databaseName = "railway",
 } = {}) {
   const calls = [];
 
   const emergencyColumns =
-    fullSchema
+    fullSchema || foundationOnly
       ? [
-          "id",
-          "homeowner_id",
-          "status",
-          "assigned_at",
-          "en_route_at",
-          "arrived_at",
-          "work_started_at",
-          "completed_at",
-        ].map((column_name) => ({
-          column_name,
-          data_type:
-            column_name === "id"
-              ? "bigint"
-              : column_name === "status"
-                ? "text"
-                : "timestamp without time zone",
-          is_nullable:
-            ["id", "homeowner_id", "status"].includes(
-              column_name
-            )
-              ? "NO"
-              : "YES",
-          column_default: null,
-        }))
+          ...foundationColumns(),
+          ...(
+            fullSchema
+              ? [
+                  "en_route_at",
+                  "arrived_at",
+                  "work_started_at",
+                  "completed_at",
+                ].map(
+                  (column_name) => ({
+                    column_name,
+                    data_type:
+                      "timestamp without time zone",
+                    is_nullable:
+                      "YES",
+                    column_default:
+                      null,
+                  })
+                )
+              : []
+          ),
+        ]
       : [];
 
   function normalizeSql(sql) {
@@ -158,7 +232,8 @@ function createPool({
           rows: [
             {
               exists:
-                fullSchema,
+                fullSchema ||
+                foundationOnly,
             },
           ],
         };
@@ -188,8 +263,25 @@ function createPool({
       ) {
         return {
           rows:
-            fullSchema
+            fullSchema ||
+            foundationOnly
               ? [
+                  {
+                    constraint_name:
+                      "emergency_requests_pkey",
+                    constraint_type:
+                      "PRIMARY KEY",
+                    constraint_definition:
+                      "PRIMARY KEY (id)",
+                  },
+                  {
+                    constraint_name:
+                      "emergency_requests_homeowner_id_fkey",
+                    constraint_type:
+                      "FOREIGN KEY",
+                    constraint_definition:
+                      "FOREIGN KEY (homeowner_id) REFERENCES users(id)",
+                  },
                   {
                     constraint_name:
                       "emergency_requests_status_check",
@@ -213,13 +305,20 @@ function createPool({
       ) {
         return {
           rows:
-            fullSchema
+            fullSchema ||
+            foundationOnly
               ? [
                   {
                     index_name:
-                      "idx_emergency_requests_status",
+                      "emergency_requests_homeowner_idx",
                     index_definition:
-                      "CREATE INDEX idx_emergency_requests_status ON emergency_requests(status)",
+                      "CREATE INDEX emergency_requests_homeowner_idx ON emergency_requests(homeowner_id, created_at DESC)",
+                  },
+                  {
+                    index_name:
+                      "emergency_requests_status_service_idx",
+                    index_definition:
+                      "CREATE INDEX emergency_requests_status_service_idx ON emergency_requests(status, service_domain, service_specialty, created_at DESC)",
                   },
                 ]
               : [],
@@ -237,6 +336,24 @@ function createPool({
               exists:
                 canonicalSafetyTable,
             },
+          ],
+        };
+      }
+
+      if (
+        compact.includes(
+          "to_regclass('public.request_relationships')"
+        )
+      ) {
+        return {
+          rows: [
+            malformedPrerequisite ===
+            "request_relationships"
+              ? {}
+              : {
+                  exists:
+                    requestRelationshipsTableExists,
+                },
           ],
         };
       }
@@ -278,7 +395,8 @@ function createPool({
       ) {
         return {
           rows:
-            fullSchema
+            fullSchema &&
+            requestRelationshipsTableExists
               ? [
                   {
                     column_name:
@@ -305,7 +423,8 @@ function createPool({
       ) {
         return {
           rows:
-            fullSchema
+            fullSchema &&
+            requestRelationshipsTableExists
               ? [
                   {
                     constraint_name:
@@ -330,7 +449,8 @@ function createPool({
       ) {
         return {
           rows:
-            fullSchema
+            fullSchema &&
+            requestRelationshipsTableExists
               ? [
                   {
                     index_name:
@@ -350,10 +470,13 @@ function createPool({
       ) {
         return {
           rows: [
-            {
-              exists:
-                fullSchema,
-            },
+            malformedPrerequisite ===
+            "conversations"
+              ? {}
+              : {
+                  exists:
+                    conversationsTableExists,
+                },
           ],
         };
       }
@@ -682,6 +805,200 @@ test(
 );
 
 test(
+  "fresh planning requires both canonical prerequisite tables",
+  async () => {
+    for (const prerequisites of [
+      {
+        requestRelationshipsTableExists:
+          false,
+        conversationsTableExists:
+          true,
+      },
+      {
+        requestRelationshipsTableExists:
+          true,
+        conversationsTableExists:
+          false,
+      },
+      {
+        requestRelationshipsTableExists:
+          false,
+        conversationsTableExists:
+          false,
+      },
+    ]) {
+      const pool =
+        createPool({
+          fullSchema:
+            false,
+          ledger: [],
+          ...prerequisites,
+        });
+
+      const result =
+        await inspector
+          .inspectProductionEmergencyState({
+            env:
+              SAFE_ENV,
+            poolFactory:
+              pool.factory,
+          });
+
+      assert.equal(
+        result.decision,
+        "BLOCKED_MISSING_CANONICAL_PREREQUISITES"
+      );
+      assert.equal(
+        result.code,
+        "CANONICAL_PREREQUISITES_MISSING"
+      );
+      assert.equal(
+        result.prerequisites.complete,
+        false
+      );
+      assert.ok(
+        pool.calls.includes(
+          "ROLLBACK"
+        )
+      );
+    }
+  }
+);
+
+test(
+  "observed migration-one prefix is identified and blocked on prerequisites",
+  async () => {
+    const pool =
+      createPool({
+        fullSchema:
+          false,
+        foundationOnly:
+          true,
+        ledger:
+          prefixLedgerRows(),
+        requestRelationshipsTableExists:
+          false,
+        conversationsTableExists:
+          false,
+      });
+
+    const result =
+      await inspector
+        .inspectProductionEmergencyState({
+          env:
+            SAFE_ENV,
+          poolFactory:
+            pool.factory,
+        });
+
+    assert.equal(
+      result.decision,
+      "SAFE_PARTIAL_PREFIX_BLOCKED_ON_PREREQUISITES"
+    );
+    assert.equal(
+      result.code,
+      "CANONICAL_PREREQUISITES_MISSING"
+    );
+    assert.equal(
+      result.schema
+        .exactMigration1Prefix,
+      true
+    );
+    assert.equal(
+      result.schema
+        .migration2Residue,
+      false
+    );
+    assert.equal(
+      result.prerequisites.complete,
+      false
+    );
+  }
+);
+
+test(
+  "exact migration-one prefix becomes resumable only after prerequisites exist",
+  async () => {
+    const pool =
+      createPool({
+        fullSchema:
+          false,
+        foundationOnly:
+          true,
+        ledger:
+          prefixLedgerRows(),
+      });
+
+    const result =
+      await inspector
+        .inspectProductionEmergencyState({
+          env:
+            SAFE_ENV,
+          poolFactory:
+            pool.factory,
+        });
+
+    assert.equal(
+      result.decision,
+      "SAFE_PARTIAL_PREFIX_READY_TO_RESUME"
+    );
+    assert.equal(
+      result.code,
+      "PRODUCTION_EMERGENCY_SAFE_PREFIX_READY"
+    );
+    assert.equal(
+      result.success,
+      true
+    );
+    assert.equal(
+      result.prerequisites.complete,
+      true
+    );
+  }
+);
+
+test(
+  "malformed prerequisite query results fail closed",
+  async () => {
+    for (const malformedPrerequisite of [
+      "request_relationships",
+      "conversations",
+    ]) {
+      const pool =
+        createPool({
+          fullSchema:
+            false,
+          ledger: [],
+          malformedPrerequisite,
+        });
+
+      const result =
+        await inspector
+          .inspectProductionEmergencyState({
+            env:
+              SAFE_ENV,
+            poolFactory:
+              pool.factory,
+          });
+
+      assert.equal(
+        result.decision,
+        "FAIL"
+      );
+      assert.equal(
+        result.code,
+        "INSPECTION_PREREQUISITE_RESULT_INVALID"
+      );
+      assert.ok(
+        pool.calls.includes(
+          "ROLLBACK"
+        )
+      );
+    }
+  }
+);
+
+test(
   "partial or unrecorded production schema blocks automatically",
   async () => {
     const pool =
@@ -773,6 +1090,55 @@ test(
       result.code,
       "MIGRATION_LEDGER_CONFLICT"
     );
+  }
+);
+
+test(
+  "ledger authority and application metadata fail closed",
+  async () => {
+    for (const mutate of [
+      (row) => ({
+        ...row,
+        execution_target:
+          "staging",
+      }),
+      (row) => ({
+        ...row,
+        applied_at:
+          null,
+      }),
+    ]) {
+      const rows =
+        ledgerRows();
+
+      rows[0] =
+        mutate(rows[0]);
+
+      const pool =
+        createPool({
+          ledger:
+            rows,
+        });
+
+      const result =
+        await inspector
+          .inspectProductionEmergencyState({
+            env:
+              SAFE_ENV,
+            poolFactory:
+              pool.factory,
+          });
+
+      assert.equal(
+        result.decision,
+        "BLOCKED_PARTIAL_OR_UNRECORDED_SCHEMA"
+      );
+
+      assert.equal(
+        result.code,
+        "PRODUCTION_EMERGENCY_SCHEMA_REQUIRES_REVIEW"
+      );
+    }
   }
 );
 

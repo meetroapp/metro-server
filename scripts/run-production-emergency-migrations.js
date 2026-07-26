@@ -448,6 +448,12 @@ function summarizeInspection(report) {
     schema: {
       classification: report?.schema?.classification || null,
       foundationComplete: report?.schema?.foundationComplete === true,
+      emergencyFoundationComplete:
+        report?.schema?.emergencyFoundationComplete === true,
+      exactMigration1Prefix:
+        report?.schema?.exactMigration1Prefix === true,
+      migration2Residue:
+        report?.schema?.migration2Residue === true,
       dispatchComplete: report?.schema?.dispatchComplete === true,
       singleActiveComplete: report?.schema?.singleActiveComplete === true,
       emergencyTableExists: report?.schema?.emergencyTableExists === true,
@@ -468,11 +474,23 @@ function summarizeInspection(report) {
         )
       ),
     },
+    prerequisites: {
+      requestRelationshipsTableExists:
+        report?.prerequisites?.requestRelationshipsTableExists === true,
+      conversationsTableExists:
+        report?.prerequisites?.conversationsTableExists === true,
+      complete:
+        report?.prerequisites?.complete === true,
+    },
     ledger: {
       entries: Array.isArray(report?.ledger?.entries)
         ? report.ledger.entries.map((entry) => ({
             filename: entry.filename,
             checksum: entry.checksum,
+            executionTarget:
+              entry.executionTarget,
+            applied:
+              entry.applied === true,
           }))
         : [],
       missing: Array.isArray(report?.ledger?.missing)
@@ -497,9 +515,34 @@ function exactApprovedEntries(entries) {
   return APPROVED_MIGRATIONS.every((approved, index) => {
     const entry = entries[index];
     return (
-      entry?.filename === approved.filename && entry?.checksum === approved.checksum
+      entry?.filename ===
+        approved.filename &&
+      entry?.checksum ===
+        approved.checksum &&
+      entry?.executionTarget ===
+        EXECUTION_TARGET &&
+      entry?.applied === true
     );
   });
+}
+
+function exactMigration1PrefixEntries(
+  entries
+) {
+  const first =
+    APPROVED_MIGRATIONS[0];
+
+  return (
+    Array.isArray(entries) &&
+    entries.length === 1 &&
+    entries[0]?.filename ===
+      first.filename &&
+    entries[0]?.checksum ===
+      first.checksum &&
+    entries[0]?.executionTarget ===
+      EXECUTION_TARGET &&
+    entries[0]?.applied === true
+  );
 }
 
 function isReadyPreflight(summary) {
@@ -510,6 +553,9 @@ function isReadyPreflight(summary) {
     summary.decision === "PASS_READY_FOR_MIGRATION_PLANNING" &&
     summary.code === "PRODUCTION_EMERGENCY_MIGRATIONS_MISSING" &&
     summary.readOnly &&
+    summary.prerequisites.complete &&
+    summary.prerequisites.requestRelationshipsTableExists &&
+    summary.prerequisites.conversationsTableExists &&
     schema.classification === "ABSENT" &&
     !schema.emergencyTableExists &&
     !schema.safetyTableExists &&
@@ -529,6 +575,54 @@ function isReadyPreflight(summary) {
   );
 }
 
+function isSafePrefixPreflight(
+  summary
+) {
+  const schema = summary.schema;
+  const ledger = summary.ledger;
+
+  return (
+    summary.success &&
+    summary.decision ===
+      "SAFE_PARTIAL_PREFIX_READY_TO_RESUME" &&
+    summary.code ===
+      "PRODUCTION_EMERGENCY_SAFE_PREFIX_READY" &&
+    summary.readOnly &&
+    summary.prerequisites.complete &&
+    summary.prerequisites.requestRelationshipsTableExists &&
+    summary.prerequisites.conversationsTableExists &&
+    schema.classification === "PARTIAL" &&
+    schema.emergencyFoundationComplete &&
+    schema.exactMigration1Prefix &&
+    !schema.migration2Residue &&
+    schema.emergencyTableExists &&
+    !schema.safetyTableExists &&
+    !schema.relationship.emergencyRequestColumn &&
+    !schema.relationship.sourceConstraint &&
+    !schema.relationship.singleActiveIndex &&
+    Object.values(
+      schema.dispatchColumns
+    ).every((value) => !value) &&
+    schema.unsupportedStatuses.length === 0 &&
+    exactMigration1PrefixEntries(
+      ledger.entries
+    ) &&
+    ledger.missing.length ===
+      APPROVED_MIGRATIONS.length - 1 &&
+    APPROVED_MIGRATIONS
+      .slice(1)
+      .every((migration) =>
+        ledger.missing.includes(
+          migration.filename
+        )
+      ) &&
+    ledger.checksumDrift.length === 0 &&
+    ledger.duplicateFilenames.length === 0 &&
+    !ledger.allRecorded &&
+    ledger.allChecksumsMatch
+  );
+}
+
 function isAlreadyApplied(summary) {
   const schema = summary.schema;
   const ledger = summary.ledger;
@@ -537,6 +631,9 @@ function isAlreadyApplied(summary) {
     summary.decision === "ALREADY_APPLIED" &&
     summary.code === "PRODUCTION_EMERGENCY_READY" &&
     summary.readOnly &&
+    summary.prerequisites.complete &&
+    summary.prerequisites.requestRelationshipsTableExists &&
+    summary.prerequisites.conversationsTableExists &&
     schema.classification === "COMPLETE" &&
     schema.foundationComplete &&
     schema.dispatchComplete &&
@@ -557,11 +654,18 @@ function isAlreadyApplied(summary) {
   );
 }
 
-function emptyExecution() {
+function emptyExecution({
+  startIndex = 0,
+  skippedVerifiedPrefix = [],
+} = {}) {
   return {
     committed: [],
+    skippedVerifiedPrefix:
+      [...skippedVerifiedPrefix],
     failedMigration: null,
-    notAttempted: APPROVED_MIGRATIONS.map(({ filename }) => filename),
+    notAttempted: APPROVED_MIGRATIONS
+      .slice(startIndex)
+      .map(({ filename }) => filename),
   };
 }
 
@@ -645,7 +749,52 @@ async function runProductionEmergencyMigrations(options = {}) {
     };
   }
 
-  if (!isReadyPreflight(preflight)) {
+  const blockedOnPrerequisites =
+    preflight.code ===
+      "CANONICAL_PREREQUISITES_MISSING" &&
+    [
+      "BLOCKED_MISSING_CANONICAL_PREREQUISITES",
+      "SAFE_PARTIAL_PREFIX_BLOCKED_ON_PREREQUISITES",
+    ].includes(
+      preflight.decision
+    );
+
+  if (blockedOnPrerequisites) {
+    return failureResult({
+      code:
+        "CANONICAL_PREREQUISITES_MISSING",
+      target,
+      preflight,
+      execution:
+        emptyExecution({
+          startIndex:
+            preflight.decision ===
+            "SAFE_PARTIAL_PREFIX_BLOCKED_ON_PREREQUISITES"
+              ? 1
+              : 0,
+          skippedVerifiedPrefix:
+            preflight.decision ===
+            "SAFE_PARTIAL_PREFIX_BLOCKED_ON_PREREQUISITES"
+              ? [
+                  APPROVED_MIGRATIONS[0]
+                    .filename,
+                ]
+              : [],
+        }),
+    });
+  }
+
+  const freshExecution =
+    isReadyPreflight(preflight);
+  const safePrefixExecution =
+    isSafePrefixPreflight(
+      preflight
+    );
+
+  if (
+    !freshExecution &&
+    !safePrefixExecution
+  ) {
     return failureResult({
       code: "PREFLIGHT_STATE_BLOCKED",
       target,
@@ -653,12 +802,25 @@ async function runProductionEmergencyMigrations(options = {}) {
     });
   }
 
+  const startIndex =
+    safePrefixExecution ? 1 : 0;
+  const skippedVerifiedPrefix =
+    safePrefixExecution
+      ? [
+          APPROVED_MIGRATIONS[0]
+            .filename,
+        ]
+      : [];
+
   const poolFactory = options.poolFactory || ((configuration) => new Pool(configuration));
   let pool;
   let client;
   let transactionStarted = false;
   let mutationStarted = false;
-  const execution = emptyExecution();
+  const execution = emptyExecution({
+    startIndex,
+    skippedVerifiedPrefix,
+  });
 
   try {
     pool = poolFactory({
@@ -686,7 +848,11 @@ async function runProductionEmergencyMigrations(options = {}) {
 
   let executionFailure = null;
   try {
-    for (let index = 0; index < migrations.length; index += 1) {
+    for (
+      let index = startIndex;
+      index < migrations.length;
+      index += 1
+    ) {
       const migration = migrations[index];
       execution.notAttempted = migrations
         .slice(index)

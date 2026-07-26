@@ -131,6 +131,46 @@ container where private database networking is available. No other migration
 may use this runner. Future production migration chains require separately
 reviewed, dedicated governance.
 
+The Emergency chain requires the canonical relationship and conversation
+tables created by:
+
+```text
+202607200002_create_request_relationships.sql
+202607200003_create_conversations.sql
+```
+
+Those migrations are owned only by the separate dedicated production
+conversation prerequisite runner in
+`scripts/run-production-conversation-prerequisites.js`. That runner owns those
+two pinned files in their exact order and must never execute an Emergency
+migration. The Emergency runner must fail before mutation when either
+prerequisite table is absent and must never apply or record either prerequisite
+migration.
+
+The prerequisite runner requires the exact approved Railway production project,
+environment, service identity, migration-chain confirmation, target
+confirmation, and mutation confirmation. It may execute only by direct Node
+invocation inside the approved Railway production application container after a
+separately reviewed execution approval. It is not registered as a package
+script, and the generic runner remains production-prohibited.
+
+Successful read-only prerequisite verification and exact ledger recording are
+required before the Emergency safe-prefix resume may begin. No arbitrary
+production migration chaining is authorized; future prerequisite chains require
+their own reviewed governance.
+
+After a governed prerequisite milestone, the Emergency runner may resume only
+from the exact verified prefix in which
+`202607230001_create_emergency_requests.sql` is applied once with its approved
+checksum and schema, migrations 2 through 5 are absent, and migration 2 left no
+schema residue. The runner verifies and skips migration 1, then executes
+migrations 2 through 5 in order. Arbitrary, noncontiguous, drifted, incomplete,
+or residue-bearing partial chains are prohibited.
+
+No Emergency production migration retry is permitted after a failure until a
+read-only investigation establishes the exact schema and ledger state and a new
+explicit execution approval is issued.
+
 ## Account-Security Deployment Order
 
 1. Commit the governed migration foundation.

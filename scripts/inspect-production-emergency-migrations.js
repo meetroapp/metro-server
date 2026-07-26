@@ -77,6 +77,107 @@ const EXPECTED_EMERGENCY_STATUSES =
     "completed",
   ]);
 
+const EXPECTED_FOUNDATION_COLUMNS =
+  Object.freeze({
+    id: Object.freeze({
+      dataType: "integer",
+      nullable: "NO",
+      hasDefault: true,
+    }),
+    homeowner_id: Object.freeze({
+      dataType: "integer",
+      nullable: "NO",
+      hasDefault: false,
+    }),
+    category: Object.freeze({
+      dataType: "text",
+      nullable: "NO",
+      hasDefault: false,
+    }),
+    service_domain: Object.freeze({
+      dataType: "text",
+      nullable: "NO",
+      hasDefault: false,
+    }),
+    service_specialty: Object.freeze({
+      dataType: "text",
+      nullable: "NO",
+      hasDefault: false,
+    }),
+    title: Object.freeze({
+      dataType: "text",
+      nullable: "NO",
+      hasDefault: false,
+    }),
+    description: Object.freeze({
+      dataType: "text",
+      nullable: "NO",
+      hasDefault: true,
+    }),
+    location_text: Object.freeze({
+      dataType: "text",
+      nullable: "NO",
+      hasDefault: false,
+    }),
+    unit_number: Object.freeze({
+      dataType: "text",
+      nullable: "NO",
+      hasDefault: true,
+    }),
+    access_notes: Object.freeze({
+      dataType: "text",
+      nullable: "NO",
+      hasDefault: true,
+    }),
+    status: Object.freeze({
+      dataType: "text",
+      nullable: "NO",
+      hasDefault: true,
+    }),
+    requested_at: Object.freeze({
+      dataType:
+        "timestamp without time zone",
+      nullable: "YES",
+      hasDefault: false,
+    }),
+    assigned_at: Object.freeze({
+      dataType:
+        "timestamp without time zone",
+      nullable: "YES",
+      hasDefault: false,
+    }),
+    resolved_at: Object.freeze({
+      dataType:
+        "timestamp without time zone",
+      nullable: "YES",
+      hasDefault: false,
+    }),
+    cancelled_at: Object.freeze({
+      dataType:
+        "timestamp without time zone",
+      nullable: "YES",
+      hasDefault: false,
+    }),
+    expired_at: Object.freeze({
+      dataType:
+        "timestamp without time zone",
+      nullable: "YES",
+      hasDefault: false,
+    }),
+    created_at: Object.freeze({
+      dataType:
+        "timestamp without time zone",
+      nullable: "NO",
+      hasDefault: true,
+    }),
+    updated_at: Object.freeze({
+      dataType:
+        "timestamp without time zone",
+      nullable: "NO",
+      hasDefault: true,
+    }),
+  });
+
 const INSPECTION_SQL = Object.freeze({
   begin:
     "BEGIN TRANSACTION READ ONLY",
@@ -161,6 +262,12 @@ const INSPECTION_SQL = Object.freeze({
       AND table_name =
         'emergency_request_safety_assessments'
     ORDER BY ordinal_position
+  `,
+  relationshipTableExists: `
+    SELECT
+      to_regclass(
+        'public.request_relationships'
+      ) IS NOT NULL AS exists
   `,
   relationshipColumns: `
     SELECT
@@ -686,7 +793,41 @@ function sanitizeStatusCounts(
     );
 }
 
+function hasExpectedFoundationColumns(
+  columns
+) {
+  return Object.entries(
+    EXPECTED_FOUNDATION_COLUMNS
+  ).every(
+    ([name, expected]) => {
+      const actual =
+        columns[name];
+
+      return (
+        actual &&
+        actual.dataType ===
+          expected.dataType &&
+        actual.nullable ===
+          expected.nullable &&
+        actual.hasDefault ===
+          expected.hasDefault
+      );
+    }
+  );
+}
+
+function hasNamedDefinition(
+  definitions,
+  name
+) {
+  return definitions.some(
+    (definition) =>
+      definition.name === name
+  );
+}
+
 function classifySchema({
+  requestRelationshipsTableExists,
   emergencyTableExists,
   safetyTableExists,
   conversationTableExists,
@@ -749,10 +890,45 @@ function classifySchema({
         )
     );
 
-  const foundationComplete =
+  const emergencyFoundationComplete =
     emergencyTableExists &&
+    hasExpectedFoundationColumns(
+      emergencyColumns
+    ) &&
+    hasNamedDefinition(
+      emergencyConstraints,
+      "emergency_requests_pkey"
+    ) &&
+    hasNamedDefinition(
+      emergencyConstraints,
+      "emergency_requests_homeowner_id_fkey"
+    ) &&
+    hasNamedDefinition(
+      emergencyConstraints,
+      "emergency_requests_status_check"
+    ) &&
+    hasNamedDefinition(
+      emergencyIndexes,
+      "emergency_requests_homeowner_idx"
+    ) &&
+    hasNamedDefinition(
+      emergencyIndexes,
+      "emergency_requests_status_service_idx"
+    );
+
+  const prerequisites = {
+    requestRelationshipsTableExists,
+    conversationsTableExists:
+      conversationTableExists,
+    complete:
+      requestRelationshipsTableExists &&
+      conversationTableExists,
+  };
+
+  const foundationComplete =
+    emergencyFoundationComplete &&
     safetyTableExists &&
-    conversationTableExists &&
+    prerequisites.complete &&
     hasEmergencyRelationshipColumn &&
     hasEmergencyRelationshipConstraint;
 
@@ -778,6 +954,30 @@ function classifySchema({
     dispatchComplete ||
     singleActiveComplete;
 
+  const migration2Residue =
+    hasEmergencyRelationshipColumn ||
+    hasEmergencyRelationshipConstraint ||
+    relationshipIndexes.some(
+      (index) =>
+        /emergency/i.test(
+          `${index.name} ${index.definition}`
+        )
+    );
+
+  const exactMigration1Prefix =
+    emergencyFoundationComplete &&
+    Object.keys(
+      emergencyColumns
+    ).length ===
+      Object.keys(
+        EXPECTED_FOUNDATION_COLUMNS
+      ).length &&
+    !safetyTableExists &&
+    !migration2Residue &&
+    !dispatchComplete &&
+    !singleActiveComplete &&
+    unsupportedStatuses.length === 0;
+
   return {
     classification: complete
       ? "COMPLETE"
@@ -785,11 +985,15 @@ function classifySchema({
         ? "PARTIAL"
         : "ABSENT",
     foundationComplete,
+    emergencyFoundationComplete,
+    exactMigration1Prefix,
+    migration2Residue,
     dispatchComplete,
     singleActiveComplete,
     emergencyTableExists,
     safetyTableExists,
     conversationTableExists,
+    prerequisites,
     dispatchColumns,
     unsupportedStatuses,
     relationship: {
@@ -819,6 +1023,58 @@ function classifySchema({
         relationshipIndexes.length,
     },
   };
+}
+
+function hasExactMigration1LedgerPrefix(
+  ledger
+) {
+  const first =
+    EMERGENCY_MIGRATIONS[0];
+
+  return (
+    ledger.entries.length === 1 &&
+    ledger.entries[0].filename ===
+      first.filename &&
+    ledger.entries[0].checksum ===
+      first.checksum &&
+    ledger.entries[0].executionTarget ===
+      "production-governed-emergency" &&
+    ledger.entries[0].applied === true &&
+    ledger.missing.length ===
+      EMERGENCY_MIGRATIONS.length - 1 &&
+    EMERGENCY_MIGRATIONS
+      .slice(1)
+      .every((migration) =>
+        ledger.missing.includes(
+          migration.filename
+        )
+      )
+  );
+}
+
+function hasExactCompleteEmergencyLedger(
+  ledger
+) {
+  return (
+    ledger.entries.length ===
+      EMERGENCY_MIGRATIONS.length &&
+    EMERGENCY_MIGRATIONS.every(
+      (migration, index) => {
+        const entry =
+          ledger.entries[index];
+
+        return (
+          entry?.filename ===
+            migration.filename &&
+          entry?.checksum ===
+            migration.checksum &&
+          entry?.executionTarget ===
+            "production-governed-emergency" &&
+          entry?.applied === true
+        );
+      }
+    )
+  );
 }
 
 function decisionFor({
@@ -851,8 +1107,41 @@ function decisionFor({
     };
   }
 
+  const exactSafePrefix =
+    hasExactMigration1LedgerPrefix(
+      ledger
+    ) &&
+    schema.exactMigration1Prefix;
+
   if (
-    ledger.allRecorded &&
+    exactSafePrefix &&
+    !schema.prerequisites.complete
+  ) {
+    return {
+      decision:
+        "SAFE_PARTIAL_PREFIX_BLOCKED_ON_PREREQUISITES",
+      code:
+        "CANONICAL_PREREQUISITES_MISSING",
+    };
+  }
+
+  if (
+    exactSafePrefix &&
+    schema.prerequisites.complete
+  ) {
+    return {
+      decision:
+        "SAFE_PARTIAL_PREFIX_READY_TO_RESUME",
+      code:
+        "PRODUCTION_EMERGENCY_SAFE_PREFIX_READY",
+    };
+  }
+
+  if (
+    hasExactCompleteEmergencyLedger(
+      ledger
+    ) &&
+    schema.prerequisites.complete &&
     schema.classification ===
       "COMPLETE"
   ) {
@@ -860,6 +1149,17 @@ function decisionFor({
       decision: "ALREADY_APPLIED",
       code:
         "PRODUCTION_EMERGENCY_READY",
+    };
+  }
+
+  if (
+    !schema.prerequisites.complete
+  ) {
+    return {
+      decision:
+        "BLOCKED_MISSING_CANONICAL_PREREQUISITES",
+      code:
+        "CANONICAL_PREREQUISITES_MISSING",
     };
   }
 
@@ -1126,29 +1426,27 @@ async function inspectProductionEmergencyState(
           ).rows
         : [];
 
-    const relationshipColumnRows =
-      (
-        await client.query(
-          INSPECTION_SQL
-            .relationshipColumns
-        )
-      ).rows;
+    const relationshipTableResult =
+      await client.query(
+        INSPECTION_SQL
+          .relationshipTableExists
+      );
 
-    const relationshipConstraintRows =
-      (
-        await client.query(
-          INSPECTION_SQL
-            .relationshipConstraints
-        )
-      ).rows;
+    const relationshipExistsValue =
+      relationshipTableResult.rows?.[0]
+        ?.exists;
 
-    const relationshipIndexRows =
-      (
-        await client.query(
-          INSPECTION_SQL
-            .relationshipIndexes
-        )
-      ).rows;
+    if (
+      typeof relationshipExistsValue !==
+      "boolean"
+    ) {
+      throw new InspectionFailure(
+        "INSPECTION_PREREQUISITE_RESULT_INVALID"
+      );
+    }
+
+    const requestRelationshipsTableExists =
+      relationshipExistsValue;
 
     const conversationTableResult =
       await client.query(
@@ -1156,9 +1454,51 @@ async function inspectProductionEmergencyState(
           .conversationTableExists
       );
 
-    const conversationTableExists =
+    const conversationExistsValue =
       conversationTableResult.rows?.[0]
-        ?.exists === true;
+        ?.exists;
+
+    if (
+      typeof conversationExistsValue !==
+      "boolean"
+    ) {
+      throw new InspectionFailure(
+        "INSPECTION_PREREQUISITE_RESULT_INVALID"
+      );
+    }
+
+    const conversationTableExists =
+      conversationExistsValue;
+
+    const relationshipColumnRows =
+      requestRelationshipsTableExists
+        ? (
+            await client.query(
+              INSPECTION_SQL
+                .relationshipColumns
+            )
+          ).rows
+        : [];
+
+    const relationshipConstraintRows =
+      requestRelationshipsTableExists
+        ? (
+            await client.query(
+              INSPECTION_SQL
+                .relationshipConstraints
+            )
+          ).rows
+        : [];
+
+    const relationshipIndexRows =
+      requestRelationshipsTableExists
+        ? (
+            await client.query(
+              INSPECTION_SQL
+                .relationshipIndexes
+            )
+          ).rows
+        : [];
 
     const statusRows =
       emergencyTableExists
@@ -1178,6 +1518,7 @@ async function inspectProductionEmergencyState(
 
     const schema =
       classifySchema({
+        requestRelationshipsTableExists,
         emergencyTableExists,
         safetyTableExists,
         conversationTableExists,
@@ -1235,6 +1576,7 @@ async function inspectProductionEmergencyState(
         [
           "ALREADY_APPLIED",
           "PASS_READY_FOR_MIGRATION_PLANNING",
+          "SAFE_PARTIAL_PREFIX_READY_TO_RESUME",
         ].includes(
           decision.decision
         ),
@@ -1247,6 +1589,8 @@ async function inspectProductionEmergencyState(
       localMigrations,
       ledger,
       schema,
+      prerequisites:
+        schema.prerequisites,
       statusCounts:
         sanitizeStatusCounts(
           statusRows
@@ -1321,7 +1665,9 @@ function exitCodeForDecision(
 
   if (
     decision ===
-    "PASS_READY_FOR_MIGRATION_PLANNING"
+      "PASS_READY_FOR_MIGRATION_PLANNING" ||
+    decision ===
+      "SAFE_PARTIAL_PREFIX_READY_TO_RESUME"
   ) {
     return 2;
   }
@@ -1359,6 +1705,9 @@ async function runInspectionCli(
       ![
         "ALREADY_APPLIED",
         "PASS_READY_FOR_MIGRATION_PLANNING",
+        "SAFE_PARTIAL_PREFIX_READY_TO_RESUME",
+        "SAFE_PARTIAL_PREFIX_BLOCKED_ON_PREREQUISITES",
+        "BLOCKED_MISSING_CANONICAL_PREREQUISITES",
         "BLOCKED_TARGET_NOT_PROVEN",
         "BLOCKED_PARTIAL_OR_UNRECORDED_SCHEMA",
         "FAIL",
