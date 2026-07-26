@@ -1056,17 +1056,35 @@ async function runEmergencyCertification({
       "Canonical conversation detail"
     );
 
+    const conversationDetail =
+      conversationResponse.body;
+
     if (
       Number(
-        conversationResponse.body?.conversation_id ??
-          conversationResponse.body?.conversationId ??
-          conversationResponse.body?.id
-      ) !== conversationId
+        conversationDetail?.conversation?.id
+      ) !== conversationId ||
+      conversationDetail?.conversation?.type !==
+        "emergency" ||
+      Number(
+        conversationDetail?.relationship?.id
+      ) !== relationshipId ||
+      Number(
+        conversationDetail?.relationship
+          ?.emergencyRequestId
+      ) !== emergencyRequestId ||
+      conversationDetail?.relationship?.source
+        ?.type !== "emergency" ||
+      Number(
+        conversationDetail?.relationship?.source
+          ?.id
+      ) !== emergencyRequestId ||
+      conversationDetail?.permissions?.canRead !==
+        true
     ) {
       throw new VerificationFailure(
-        "Canonical conversation detail did not resolve the selected conversation.",
+        "Canonical conversation detail did not resolve the selected Emergency conversation.",
         {
-          body: redact(conversationResponse.body),
+          body: redact(conversationDetail),
         }
       );
     }

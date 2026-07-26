@@ -275,7 +275,53 @@ function successfulFetch() {
     ) {
       return response(200, {
         success: true,
-        conversation_id: conversationId,
+        conversation: {
+          id: conversationId,
+          type: "emergency",
+          status: "active",
+          createdAt: "created",
+          updatedAt: "updated",
+          closedAt: null,
+        },
+        participants: {
+          viewer: {
+            id: 7,
+            role: "homeowner",
+          },
+          homeowner: {
+            id: 7,
+            displayName: "Homeowner",
+          },
+          business: {
+            id: 80,
+            userId: 9,
+            name: "Professional Business",
+            imageUrl: "",
+            category: "plumbing",
+          },
+        },
+        relationship: {
+          id: relationshipId,
+          emergencyRequestId,
+          title: "Emergency certification",
+          source: {
+            type: "emergency",
+            id: emergencyRequestId,
+            title: "Emergency certification",
+            serviceDomain: "home_services",
+            serviceSpecialty: "electrical",
+            isEmergency: true,
+          },
+        },
+        workflow: {
+          status: null,
+          stage: null,
+        },
+        permissions: {
+          canRead: true,
+          canSendMessages: true,
+          canManageWorkflow: false,
+        },
       });
     }
 
