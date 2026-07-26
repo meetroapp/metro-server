@@ -41,6 +41,7 @@ function ledgerRows() {
 
 function createPool({
   fullSchema = true,
+  canonicalSafetyTable = fullSchema,
   ledger = ledgerRows(),
   databaseName = "railway",
 } = {}) {
@@ -227,14 +228,14 @@ function createPool({
 
       if (
         compact.includes(
-          "to_regclass('public.emergency_safety_assessments')"
+          "to_regclass('public.emergency_request_safety_assessments')"
         )
       ) {
         return {
           rows: [
             {
               exists:
-                fullSchema,
+                canonicalSafetyTable,
             },
           ],
         };
@@ -245,12 +246,12 @@ function createPool({
           "frominformation_schema.columns"
         ) &&
         compact.includes(
-          "table_name='emergency_safety_assessments'"
+          "table_name='emergency_request_safety_assessments'"
         )
       ) {
         return {
           rows:
-            fullSchema
+            canonicalSafetyTable
               ? [
                   {
                     column_name:
@@ -531,6 +532,28 @@ test(
 );
 
 test(
+  "inspector uses only the canonical Emergency safety-assessment table",
+  () => {
+    assert.match(
+      inspector.INSPECTION_SQL.safetyTableExists,
+      /emergency_request_safety_assessments/
+    );
+    assert.match(
+      inspector.INSPECTION_SQL.safetyColumns,
+      /emergency_request_safety_assessments/
+    );
+    assert.doesNotMatch(
+      inspector.INSPECTION_SQL.safetyTableExists,
+      /public\.emergency_safety_assessments/
+    );
+    assert.doesNotMatch(
+      inspector.INSPECTION_SQL.safetyColumns,
+      /table_name\s*=\s*'emergency_safety_assessments'/
+    );
+  }
+);
+
+test(
   "complete production schema and ledger report already applied",
   async () => {
     const pool =
@@ -590,6 +613,35 @@ test(
       ),
       false
     );
+  }
+);
+
+test(
+  "missing canonical safety table blocks an otherwise migrated schema",
+  async () => {
+    const pool = createPool({
+      canonicalSafetyTable: false,
+    });
+
+    const result =
+      await inspector.inspectProductionEmergencyState({
+        env: SAFE_ENV,
+        poolFactory: pool.factory,
+      });
+
+    assert.equal(
+      result.decision,
+      "BLOCKED_PARTIAL_OR_UNRECORDED_SCHEMA"
+    );
+    assert.equal(
+      result.schema.classification,
+      "PARTIAL"
+    );
+    assert.equal(
+      result.schema.safetyTableExists,
+      false
+    );
+    assert.ok(pool.calls.includes("ROLLBACK"));
   }
 );
 

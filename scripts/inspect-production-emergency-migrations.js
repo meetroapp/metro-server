@@ -147,7 +147,7 @@ const INSPECTION_SQL = Object.freeze({
   safetyTableExists: `
     SELECT
       to_regclass(
-        'public.emergency_safety_assessments'
+        'public.emergency_request_safety_assessments'
       ) IS NOT NULL AS exists
   `,
   safetyColumns: `
@@ -159,7 +159,7 @@ const INSPECTION_SQL = Object.freeze({
     FROM information_schema.columns
     WHERE table_schema = 'public'
       AND table_name =
-        'emergency_safety_assessments'
+        'emergency_request_safety_assessments'
     ORDER BY ordinal_position
   `,
   relationshipColumns: `

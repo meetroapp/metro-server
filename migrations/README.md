@@ -1,8 +1,8 @@
 # Governed Database Migrations
 
 This directory is the ordered source of truth for Meetro backend schema changes.
-Migrations are additive, reviewed SQL files; the runner does not provide a
-destructive reset path and does not support production execution.
+Migrations are additive, reviewed SQL files; the generic runner does not provide
+a destructive reset path and supports only local-test and staging execution.
 
 ## Naming and Inventory
 
@@ -117,9 +117,19 @@ Credentials are removed from inspected URLs and never printed in errors.
 
 ## Production Prohibition
 
-Production is not an allowed target. There is no production package command,
-and production-like target metadata is rejected. Migrations are never run from
+Production is not an allowed target for the generic migration runner, and
+production-like target metadata remains rejected. Migrations are never run from
 application startup, dependency installation, or the normal test command.
+
+The dedicated Emergency production runner owns only the five Emergency
+migrations listed as inventory entries 13 through 17, in that exact order.
+
+It is not a general production runner. It requires the exact approved Railway
+project, production environment, service identity, and external execution
+confirmations. It must run inside the approved Railway production application
+container where private database networking is available. No other migration
+may use this runner. Future production migration chains require separately
+reviewed, dedicated governance.
 
 ## Account-Security Deployment Order
 
