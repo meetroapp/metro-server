@@ -77,10 +77,14 @@ function successfulFetch() {
       return response(200, {
         profile: {
           id: 80,
-          category: "electrical",
-          service_area: "Cape Coral",
+          category: "Plumbing",
+          service_area:
+            "Cape Coral · 33990 · 15 miles",
           service_specialties: [
-            "electrical",
+            "plumbing_repair",
+            "lighting_installation",
+            "outlet_switch_installation",
+            "electrical_repair",
           ],
         },
       });
@@ -572,6 +576,180 @@ test(
         "professional-token"
       ),
       false
+    );
+  }
+);
+
+test(
+  "canonical specialty IDs make the professional profile usable without a literal electrical specialty",
+  async () => {
+    const fake = successfulFetch();
+    const logs = [];
+
+    const summary =
+      await runEmergencyCertification({
+        env: {
+          RUN_EMERGENCY_STAGING_CERTIFICATION:
+            "true",
+          CONFIRM_EMERGENCY_STAGING_MUTATION:
+            REQUIRED_CONFIRMATION,
+          EMERGENCY_STAGING_BASE_URL:
+            `https://${EXPECTED_HOST}`,
+          EMERGENCY_HOMEOWNER_BEARER_TOKEN:
+            "homeowner-token",
+          EMERGENCY_PROFESSIONAL_BEARER_TOKEN:
+            "professional-token",
+          EMERGENCY_CERTIFICATION_RUN_ID:
+            "canonical-specialty-run",
+        },
+        fetchImpl: fake.fetchImpl,
+        logger: {
+          error(value) {
+            logs.push(value);
+          },
+        },
+      });
+
+    assert.equal(summary.success, true);
+
+    const profileCheck =
+      summary.checks.find(
+        (check) =>
+          check.name ===
+          "professional_profile"
+      );
+
+    assert.ok(profileCheck);
+
+    assert.deepEqual(
+      profileCheck.details
+        .usableServiceSpecialties,
+      [
+        "plumbing_repair",
+        "lighting_installation",
+        "outlet_switch_installation",
+        "electrical_repair",
+      ]
+    );
+
+    assert.equal(
+      profileCheck.details
+        .serviceSpecialties.includes(
+          "electrical"
+        ),
+      false
+    );
+
+    assert.equal(logs.length, 1);
+  }
+);
+
+test(
+  "profile usability still fails closed when no specialty resolves to a canonical service domain",
+  async () => {
+    const fake = successfulFetch();
+    const original = fake.fetchImpl;
+
+    fake.fetchImpl = async (
+      url,
+      options
+    ) => {
+      if (
+        new URL(url).pathname ===
+        "/my-contractor-profile"
+      ) {
+        return response(200, {
+          profile: {
+            id: 80,
+            category: "Unknown",
+            service_area: "Cape Coral",
+            service_specialties: [
+              "unsupported_service",
+            ],
+          },
+        });
+      }
+
+      return original(url, options);
+    };
+
+    await assert.rejects(
+      runEmergencyCertification({
+        env: {
+          RUN_EMERGENCY_STAGING_CERTIFICATION:
+            "true",
+          CONFIRM_EMERGENCY_STAGING_MUTATION:
+            REQUIRED_CONFIRMATION,
+          EMERGENCY_STAGING_BASE_URL:
+            `https://${EXPECTED_HOST}`,
+          EMERGENCY_HOMEOWNER_BEARER_TOKEN:
+            "homeowner-token",
+          EMERGENCY_PROFESSIONAL_BEARER_TOKEN:
+            "professional-token",
+          EMERGENCY_CERTIFICATION_RUN_ID:
+            "unsupported-specialty-run",
+        },
+        fetchImpl: fake.fetchImpl,
+        logger: {
+          error() {},
+        },
+      }),
+      /not usable for Emergency opportunity evaluation/i
+    );
+  }
+);
+
+test(
+  "profile usability still requires a non-empty service area",
+  async () => {
+    const fake = successfulFetch();
+    const original = fake.fetchImpl;
+
+    fake.fetchImpl = async (
+      url,
+      options
+    ) => {
+      if (
+        new URL(url).pathname ===
+        "/my-contractor-profile"
+      ) {
+        return response(200, {
+          profile: {
+            id: 80,
+            category: "Plumbing",
+            service_area: "   ",
+            service_specialties: [
+              "electrical_repair",
+            ],
+          },
+        });
+      }
+
+      return original(url, options);
+    };
+
+    await assert.rejects(
+      runEmergencyCertification({
+        env: {
+          RUN_EMERGENCY_STAGING_CERTIFICATION:
+            "true",
+          CONFIRM_EMERGENCY_STAGING_MUTATION:
+            REQUIRED_CONFIRMATION,
+          EMERGENCY_STAGING_BASE_URL:
+            `https://${EXPECTED_HOST}`,
+          EMERGENCY_HOMEOWNER_BEARER_TOKEN:
+            "homeowner-token",
+          EMERGENCY_PROFESSIONAL_BEARER_TOKEN:
+            "professional-token",
+          EMERGENCY_CERTIFICATION_RUN_ID:
+            "missing-area-run",
+        },
+        fetchImpl: fake.fetchImpl,
+        logger: {
+          error() {},
+        },
+      }),
+      /not usable for Emergency opportunity evaluation/i
     );
   }
 );

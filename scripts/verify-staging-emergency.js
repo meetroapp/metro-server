@@ -1,6 +1,9 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const {
+  getProfessionalServiceDomain,
+} = require("../server/requests/serviceCompatibility");
 
 const EXPECTED_HOST =
   "athletic-rebirth-staging.up.railway.app";
@@ -439,25 +442,41 @@ async function verifyProfessionalProfile({
     ? profile.service_specialties
     : [];
 
+  const usableSpecialties = specialties.filter(
+    (specialty) =>
+      Boolean(
+        getProfessionalServiceDomain(specialty)
+      )
+  );
+
+  const serviceArea = String(
+    profile.service_area || ""
+  ).trim();
+
   if (
-    !specialties.includes("electrical") ||
-    !String(profile.service_area || "").trim()
+    usableSpecialties.length === 0 ||
+    !serviceArea
   ) {
     throw new VerificationFailure(
-      "The professional profile is not eligible for the certification request.",
+      "The professional profile is not usable for Emergency opportunity evaluation.",
       {
         profile: {
           id: profile.id,
           category: profile.category,
           serviceSpecialties: specialties,
-          serviceArea:
-            profile.service_area || "",
+          usableServiceSpecialties:
+            usableSpecialties,
+          serviceArea,
         },
       }
     );
   }
 
-  return profile;
+  return {
+    ...profile,
+    usableServiceSpecialties:
+      usableSpecialties,
+  };
 }
 
 async function runEmergencyCertification({
@@ -557,6 +576,9 @@ async function runEmergencyCertification({
           professionalProfile.service_area,
         serviceSpecialties:
           professionalProfile.service_specialties,
+        usableServiceSpecialties:
+          professionalProfile
+            .usableServiceSpecialties,
       }
     );
 
