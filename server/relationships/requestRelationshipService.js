@@ -142,6 +142,7 @@ async function createProfessionalRequestRelationship({
         )
         VALUES ($1, $2, $3, $4, 'pending', $5)
         ON CONFLICT (post_id, contractor_id)
+        WHERE post_id IS NOT NULL
         DO NOTHING
         RETURNING *, TRUE AS created
       )

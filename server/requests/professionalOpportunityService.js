@@ -134,6 +134,7 @@ async function materializeProfessionalOpportunities({
           ''
         FROM eligible_posts
         ON CONFLICT (post_id, contractor_id)
+        WHERE post_id IS NOT NULL
         DO UPDATE SET
           status = CASE
             WHEN request_relationships.status IN ('pending', 'active')

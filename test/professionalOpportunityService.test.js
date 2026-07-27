@@ -219,7 +219,10 @@ test("new eligible opportunity atomically materializes canonical identity", asyn
     call.sql.includes("INSERT INTO request_relationships")
   );
   assert.ok(materialization);
-  assert.match(materialization.sql, /ON CONFLICT \(post_id, contractor_id\)/);
+  assert.match(
+    materialization.sql,
+    /ON CONFLICT \(post_id, contractor_id\) WHERE post_id IS NOT NULL DO UPDATE SET/
+  );
   assert.match(materialization.sql, /ON CONFLICT \(relationship_id\)/);
   assert.match(materialization.sql, /request_relationships\.professional_user_id = EXCLUDED\.professional_user_id/);
   assert.match(materialization.sql, /conversations\.professional_user_id = EXCLUDED\.professional_user_id/);
@@ -238,6 +241,44 @@ test("repeated and concurrent refreshes resolve one relationship and conversatio
   );
   assert.equal(fake.state.relationships.size, 1);
   assert.equal(fake.state.conversations.size, 1);
+});
+
+test("post-backed materialization preserves a separate Emergency relationship", async () => {
+  const emergencyRelationship = {
+    id: 61,
+    post_id: null,
+    emergency_request_id: 71,
+    homeowner_id: 7,
+    contractor_id: 80,
+    professional_user_id: 9,
+    status: "pending",
+  };
+  const fake = createOpportunityPool({
+    relationships: [emergencyRelationship],
+  });
+
+  const result = await materialize(fake);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.opportunities[0].conversation_id, 91);
+  assert.equal(fake.state.relationships.size, 2);
+  assert.deepEqual(
+    fake.state.relationships.get("null:80"),
+    emergencyRelationship
+  );
+  assert.equal(fake.state.relationships.get("41:80").post_id, 41);
+
+  const materialization = fake.calls.find((call) =>
+    call.sql.includes("INSERT INTO request_relationships")
+  );
+  assert.match(
+    materialization.sql,
+    /ON CONFLICT \(post_id, contractor_id\) WHERE post_id IS NOT NULL/
+  );
+  assert.doesNotMatch(
+    materialization.sql,
+    /ON CONFLICT \(emergency_request_id, contractor_id\)/
+  );
 });
 
 test("ineligible and unowned professionals receive no canonical records", async () => {

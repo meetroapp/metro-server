@@ -149,6 +149,14 @@ test("eligible professional creates one pending request relationship", async () 
     9,
     "I can help.",
   ]);
+  assert.match(
+    insert.sql,
+    /ON CONFLICT \(post_id, contractor_id\) WHERE post_id IS NOT NULL DO NOTHING/
+  );
+  assert.doesNotMatch(
+    insert.sql,
+    /ON CONFLICT \(emergency_request_id, contractor_id\)/
+  );
 
   assert.equal(fake.wasReleased(), true);
 });

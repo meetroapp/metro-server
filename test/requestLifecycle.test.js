@@ -400,6 +400,10 @@ test("professional endpoint returns participant-scoped canonical identity withou
   );
   assert.ok(materialization);
   assert.deepEqual(materialization.values, [9, 80, [41, 44]]);
+  assert.match(
+    materialization.sql,
+    /ON CONFLICT \(post_id, contractor_id\) WHERE post_id IS NOT NULL DO UPDATE SET/
+  );
   assert.doesNotMatch(materialization.sql, /quote_requests/);
   assert.equal(
     fake.calls.filter((call) =>
