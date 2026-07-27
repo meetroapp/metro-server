@@ -970,6 +970,13 @@ test("homeowner inbox exposes governed Emergency source identity", async () => {
       source_type: "emergency",
       source_service_domain: "home_services",
       source_service_specialty: "plumbing",
+      source_relationship_status: "active",
+      source_workflow_status: "professional_en_route",
+      source_assigned_at: "2026-07-23T14:01:00.000Z",
+      source_en_route_at: "2026-07-23T14:05:00.000Z",
+      source_location_text: "101 Synthetic Test Ave",
+      source_unit_number: "Unit 2",
+      source_access_notes: "Use the test entrance",
       status: "active",
       homeowner_archived_at: null,
       professional_archived_at: null,
@@ -1005,6 +1012,75 @@ test("homeowner inbox exposes governed Emergency source identity", async () => {
     isEmergency: true,
   });
   assert.equal(conversation.permissions.canSendMessages, true);
+  assert.deepEqual(conversation.workflow, {
+    status: "professional_en_route",
+    assignedAt: "2026-07-23T14:01:00.000Z",
+    enRouteAt: "2026-07-23T14:05:00.000Z",
+    arrivedAt: null,
+    workStartedAt: null,
+    completedAt: null,
+    allowedActions: [],
+  });
+  assert.equal(conversation.viewer.role, "homeowner");
+  assert.equal(Object.hasOwn(conversation, "location"), false);
+  assert.equal(
+    JSON.stringify(conversation).includes(
+      "101 Synthetic Test Ave"
+    ),
+    false
+  );
+});
+
+test("professional inbox recovers the next governed Emergency action", async () => {
+  const fake = createConversationRoutePool({
+    professionalRows: [{
+      id: 191,
+      relationship_id: 151,
+      homeowner_id: 7,
+      contractor_id: 80,
+      professional_user_id: 9,
+      post_id: null,
+      emergency_request_id: 141,
+      source_type: "emergency",
+      source_service_domain: "home_services",
+      source_service_specialty: "plumbing",
+      source_relationship_status: "active",
+      source_workflow_status: "professional_en_route",
+      source_assigned_at: "2026-07-23T14:01:00.000Z",
+      source_en_route_at: "2026-07-23T14:05:00.000Z",
+      source_location_text: "101 Synthetic Test Ave",
+      source_unit_number: "Unit 2",
+      source_access_notes: "Use the test entrance",
+      status: "active",
+      homeowner_archived_at: null,
+      professional_archived_at: null,
+      created_at: "2026-07-23T14:00:00.000Z",
+      updated_at: "2026-07-23T14:05:00.000Z",
+      closed_at: null,
+      homeowner_display_name: "Synthetic Customer",
+      request_title: "Active Water Leak",
+    }],
+  });
+
+  const result = await invokeConversationInbox({
+    userId: 9,
+    perspective: "professional",
+    pool: fake.pool,
+  });
+
+  assert.equal(result.statusCode, 200);
+  const conversation = result.body.conversations[0];
+  assert.equal(conversation.emergency_request_id, 141);
+  assert.equal(conversation.viewer.role, "professional");
+  assert.deepEqual(
+    conversation.workflow.allowedActions,
+    ["mark_arrived"]
+  );
+  assert.equal(
+    conversation.permissions.canMarkArrived,
+    true
+  );
+  assert.equal(Object.hasOwn(conversation, "location"), false);
 });
 
 test("Emergency conversation detail preserves shared participant permissions", async () => {
@@ -1017,6 +1093,13 @@ test("Emergency conversation detail preserves shared participant permissions", a
       source_type: "emergency",
       source_service_domain: "home_services",
       source_service_specialty: "plumbing",
+      source_relationship_status: "active",
+      source_workflow_status: "professional_en_route",
+      source_assigned_at: "2026-07-23T14:01:00.000Z",
+      source_en_route_at: "2026-07-23T14:05:00.000Z",
+      source_location_text: "101 Synthetic Test Ave",
+      source_unit_number: "Unit 2",
+      source_access_notes: "Use the test entrance",
       homeowner_id: 7,
       contractor_id: 80,
       professional_user_id: 9,
@@ -1059,5 +1142,52 @@ test("Emergency conversation detail preserves shared participant permissions", a
     canRead: true,
     canSendMessages: true,
     canManageWorkflow: false,
+    canMarkEnRoute: false,
+    canMarkArrived: false,
+    canStartWork: false,
+    canCompleteWork: false,
   });
+  assert.deepEqual(result.body.workflow, {
+    status: "professional_en_route",
+    assignedAt: "2026-07-23T14:01:00.000Z",
+    enRouteAt: "2026-07-23T14:05:00.000Z",
+    arrivedAt: null,
+    workStartedAt: null,
+    completedAt: null,
+    allowedActions: [],
+  });
+  assert.deepEqual(result.body.location, {
+    locationText: "101 Synthetic Test Ave",
+    unitNumber: "Unit 2",
+    accessNotes: "Use the test entrance",
+  });
+  assert.equal(
+    JSON.stringify(result.body).includes("safety"),
+    false
+  );
+
+  const professionalResult =
+    await invokeConversationDetail({
+      userId: 9,
+      conversationId: "191",
+      pool: fake.pool,
+    });
+
+  assert.equal(professionalResult.statusCode, 200);
+  assert.equal(
+    professionalResult.body.participants.viewer.role,
+    "professional"
+  );
+  assert.deepEqual(
+    professionalResult.body.workflow.allowedActions,
+    ["mark_arrived"]
+  );
+  assert.equal(
+    professionalResult.body.permissions.canMarkArrived,
+    true
+  );
+  assert.deepEqual(
+    professionalResult.body.location,
+    result.body.location
+  );
 });

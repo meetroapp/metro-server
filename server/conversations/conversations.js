@@ -9,6 +9,13 @@ const CONVERSATION_STATUS_VALUES = Object.freeze(
   Object.values(CONVERSATION_STATUSES)
 );
 
+const EMERGENCY_ACTION_BY_STATUS = Object.freeze({
+  assigned: "mark_en_route",
+  professional_en_route: "mark_arrived",
+  professional_arrived: "start_work",
+  work_in_progress: "complete_work",
+});
+
 function isValidPositiveInteger(value) {
   const normalized = String(value ?? "").trim();
 
@@ -78,7 +85,22 @@ function canCloseConversation(conversation = {}, userId) {
   );
 }
 
+function hasExactlyOneConversationSource(row = {}) {
+  const hasRequest =
+    parsePositiveInteger(row.post_id) !== null;
+  const hasEmergency =
+    parsePositiveInteger(row.emergency_request_id) !== null;
+
+  return hasRequest !== hasEmergency;
+}
+
 function getConversationSource(row = {}) {
+  if (!hasExactlyOneConversationSource(row)) {
+    throw new TypeError(
+      "The conversation relationship source is invalid."
+    );
+  }
+
   const emergencyId = parsePositiveInteger(
     row.emergency_request_id
   );
@@ -104,6 +126,59 @@ function getConversationSource(row = {}) {
     serviceSpecialty: row.source_service_specialty || "",
     isEmergency: false,
   };
+}
+
+function deriveEmergencyWorkflow({
+  row = {},
+  viewerRole,
+} = {}) {
+  const isAuthorizedEmergency =
+    parsePositiveInteger(row.emergency_request_id) !== null &&
+    row.source_relationship_status === "active";
+  const canManage =
+    isAuthorizedEmergency &&
+    viewerRole === "professional" &&
+    row.status === CONVERSATION_STATUSES.ACTIVE;
+  const action = canManage
+    ? EMERGENCY_ACTION_BY_STATUS[
+        row.source_workflow_status
+      ] || null
+    : null;
+  const allowedActions = action ? [action] : [];
+
+  return {
+    workflow: {
+      status: row.source_workflow_status || null,
+      assignedAt: row.source_assigned_at || null,
+      enRouteAt: row.source_en_route_at || null,
+      arrivedAt: row.source_arrived_at || null,
+      workStartedAt:
+        row.source_work_started_at || null,
+      completedAt: row.source_completed_at || null,
+      allowedActions,
+    },
+    permissions: {
+      canSendMessages:
+        row.status === CONVERSATION_STATUSES.ACTIVE,
+      canManageWorkflow: allowedActions.length > 0,
+      canMarkEnRoute:
+        action === "mark_en_route",
+      canMarkArrived:
+        action === "mark_arrived",
+      canStartWork:
+        action === "start_work",
+      canCompleteWork:
+        action === "complete_work",
+    },
+  };
+}
+
+function requireActiveEmergencyRelationship(row = {}) {
+  if (row.source_relationship_status !== "active") {
+    throw new TypeError(
+      "An active Emergency relationship is required."
+    );
+  }
 }
 
 function serializeConversationForHomeowner(row = {}) {
@@ -150,6 +225,7 @@ function serializeConversationForProfessional(row = {}) {
 function serializeConversationSummaryForHomeowner(row = {}) {
   const conversationId = parsePositiveInteger(row.id);
   const requestId = parsePositiveInteger(row.post_id);
+  const source = getConversationSource(row);
 
   const value = {
     id: conversationId,
@@ -181,18 +257,30 @@ function serializeConversationSummaryForHomeowner(row = {}) {
     },
   };
 
-  if (parsePositiveInteger(row.emergency_request_id)) {
+  if (source.type === "emergency") {
+    requireActiveEmergencyRelationship(row);
+    const emergency = deriveEmergencyWorkflow({
+      row,
+      viewerRole: "homeowner",
+    });
+
     value.request_id = null;
     value.emergency_request_id = parsePositiveInteger(
       row.emergency_request_id
     );
-    value.source = getConversationSource(row);
+    value.source = source;
+    value.viewer = {
+      role: "homeowner",
+    };
+    value.workflow = emergency.workflow;
+    value.permissions = emergency.permissions;
   }
 
   return value;
 }
 
 function serializeConversationSummaryForProfessional(row = {}) {
+  const source = getConversationSource(row);
   const value = {
     id: row.id,
     relationship: {
@@ -218,11 +306,22 @@ function serializeConversationSummaryForProfessional(row = {}) {
       row.status === CONVERSATION_STATUSES.ACTIVE,
   };
 
-  if (parsePositiveInteger(row.emergency_request_id)) {
+  if (source.type === "emergency") {
+    requireActiveEmergencyRelationship(row);
+    const emergency = deriveEmergencyWorkflow({
+      row,
+      viewerRole: "professional",
+    });
+
     value.emergency_request_id = parsePositiveInteger(
       row.emergency_request_id
     );
-    value.source = getConversationSource(row);
+    value.source = source;
+    value.viewer = {
+      role: "professional",
+    };
+    value.workflow = emergency.workflow;
+    value.permissions = emergency.permissions;
   }
 
   return value;
@@ -276,6 +375,21 @@ function serializeConversationDetail(row = {}, viewerUserId) {
   }
 
   const source = getConversationSource(row);
+  const viewerRole = viewerIsHomeowner
+    ? "homeowner"
+    : "professional";
+
+  if (source.type === "emergency") {
+    requireActiveEmergencyRelationship(row);
+  }
+
+  const emergency =
+    source.type === "emergency"
+      ? deriveEmergencyWorkflow({
+          row,
+          viewerRole,
+        })
+      : null;
   const relationship =
     source.type === "emergency"
       ? {
@@ -290,7 +404,7 @@ function serializeConversationDetail(row = {}, viewerUserId) {
           title: row.request_title || "",
         };
 
-  return {
+  const value = {
     conversation: {
       id: row.id,
       type: source.type,
@@ -302,9 +416,7 @@ function serializeConversationDetail(row = {}, viewerUserId) {
     participants: {
       viewer: {
         id: viewerUserId,
-        role: viewerIsHomeowner
-          ? "homeowner"
-          : "professional",
+        role: viewerRole,
       },
       homeowner: {
         id: row.homeowner_id,
@@ -320,17 +432,32 @@ function serializeConversationDetail(row = {}, viewerUserId) {
       },
     },
     relationship,
-    workflow: {
+    workflow: emergency?.workflow || {
       status: null,
       stage: null,
     },
-    permissions: {
-      canRead: true,
-      canSendMessages:
-        row.status === CONVERSATION_STATUSES.ACTIVE,
-      canManageWorkflow: false,
-    },
+    permissions: emergency
+      ? {
+          canRead: true,
+          ...emergency.permissions,
+        }
+      : {
+          canRead: true,
+          canSendMessages:
+            row.status === CONVERSATION_STATUSES.ACTIVE,
+          canManageWorkflow: false,
+        },
   };
+
+  if (source.type === "emergency") {
+    value.location = {
+      locationText: row.source_location_text || "",
+      unitNumber: row.source_unit_number || "",
+      accessNotes: row.source_access_notes || "",
+    };
+  }
+
+  return value;
 }
 
 module.exports = {
@@ -339,7 +466,9 @@ module.exports = {
   canArchiveConversation,
   canCloseConversation,
   canRestoreConversation,
+  deriveEmergencyWorkflow,
   getConversationSource,
+  hasExactlyOneConversationSource,
   isConversationParticipant,
   isValidPositiveInteger,
   parsePositiveInteger,

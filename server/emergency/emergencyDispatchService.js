@@ -172,6 +172,7 @@ function serializeDispatchResult({
     conversation: {
       id: conversation.id,
       status: conversation.status,
+      updatedAt: conversation.updated_at || null,
     },
   };
 }
@@ -319,7 +320,8 @@ async function applyEmergencyTransition(input = {}, definition) {
         c.homeowner_id,
         c.contractor_id,
         c.professional_user_id,
-        c.status
+        c.status,
+        c.updated_at
       FROM conversations AS c
       WHERE c.relationship_id = $1
         AND c.homeowner_id = $2
@@ -327,7 +329,7 @@ async function applyEmergencyTransition(input = {}, definition) {
         AND c.professional_user_id = $4
         AND c.status = 'active'
       LIMIT 1
-      FOR SHARE OF c
+      FOR UPDATE OF c
       `,
       [
         relationship.id,
@@ -399,6 +401,27 @@ async function applyEmergencyTransition(input = {}, definition) {
       );
     }
 
+    const activityResult = await client.query(
+      `
+      UPDATE conversations
+      SET updated_at = CURRENT_TIMESTAMP
+      WHERE id = $1
+        AND status = 'active'
+      RETURNING
+        id,
+        status,
+        updated_at
+      `,
+      [conversation.id]
+    );
+
+    if (activityResult.rows.length === 0) {
+      return await failTransaction(
+        client,
+        emergencyConversationRequired()
+      );
+    }
+
     await client.query("COMMIT");
     transactionStarted = false;
 
@@ -407,7 +430,7 @@ async function applyEmergencyTransition(input = {}, definition) {
       alreadyApplied: false,
       emergencyRequest: updateResult.rows[0],
       relationship,
-      conversation,
+      conversation: activityResult.rows[0],
     });
   } catch {
     if (transactionStarted && client) {

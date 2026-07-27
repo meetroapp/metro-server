@@ -166,6 +166,7 @@ async function ensureConversation({
 const SOURCE_PROJECTION = `
   request_relationships.post_id,
   request_relationships.emergency_request_id,
+  request_relationships.status AS source_relationship_status,
   CASE
     WHEN request_relationships.emergency_request_id IS NOT NULL THEN 'emergency'
     ELSE 'request'
@@ -181,7 +182,16 @@ const SOURCE_PROJECTION = `
   CASE
     WHEN request_relationships.emergency_request_id IS NOT NULL THEN emergency_requests.service_specialty
     ELSE posts.service_specialty
-  END AS source_service_specialty
+  END AS source_service_specialty,
+  emergency_requests.status AS source_workflow_status,
+  emergency_requests.assigned_at AS source_assigned_at,
+  emergency_requests.en_route_at AS source_en_route_at,
+  emergency_requests.arrived_at AS source_arrived_at,
+  emergency_requests.work_started_at AS source_work_started_at,
+  emergency_requests.completed_at AS source_completed_at,
+  emergency_requests.location_text AS source_location_text,
+  emergency_requests.unit_number AS source_unit_number,
+  emergency_requests.access_notes AS source_access_notes
 `;
 
 const SOURCE_JOINS = `
@@ -223,6 +233,22 @@ async function listHomeownerConversations({
     ${SOURCE_JOINS}
     WHERE conversations.homeowner_id = $1
       AND request_relationships.homeowner_id = $1
+      AND contractor_profiles.user_id = conversations.professional_user_id
+      AND request_relationships.homeowner_id = conversations.homeowner_id
+      AND request_relationships.contractor_id = conversations.contractor_id
+      AND request_relationships.professional_user_id = conversations.professional_user_id
+      AND (
+        (
+          request_relationships.post_id IS NOT NULL
+          AND request_relationships.emergency_request_id IS NULL
+        )
+        OR
+        (
+          request_relationships.post_id IS NULL
+          AND request_relationships.emergency_request_id IS NOT NULL
+          AND request_relationships.status = 'active'
+        )
+      )
       AND (
         (request_relationships.post_id IS NOT NULL AND posts.user_id = $1)
         OR
@@ -268,7 +294,23 @@ async function listProfessionalConversations({
       ON conversations.homeowner_id = users.id
     WHERE conversations.professional_user_id = $1
       AND contractor_profiles.user_id = $1
+      AND contractor_profiles.user_id = conversations.professional_user_id
       AND request_relationships.professional_user_id = $1
+      AND request_relationships.homeowner_id = conversations.homeowner_id
+      AND request_relationships.contractor_id = conversations.contractor_id
+      AND request_relationships.professional_user_id = conversations.professional_user_id
+      AND (
+        (
+          request_relationships.post_id IS NOT NULL
+          AND request_relationships.emergency_request_id IS NULL
+        )
+        OR
+        (
+          request_relationships.post_id IS NULL
+          AND request_relationships.emergency_request_id IS NOT NULL
+          AND request_relationships.status = 'active'
+        )
+      )
       AND ($2::boolean = TRUE OR conversations.professional_archived_at IS NULL)
     ORDER BY conversations.updated_at DESC, conversations.id DESC
     `,
@@ -321,6 +363,22 @@ async function getConversation({
       ON conversations.homeowner_id = users.id
     WHERE conversations.id = $1
       AND (conversations.homeowner_id = $2 OR conversations.professional_user_id = $2)
+      AND contractor_profiles.user_id = conversations.professional_user_id
+      AND request_relationships.homeowner_id = conversations.homeowner_id
+      AND request_relationships.contractor_id = conversations.contractor_id
+      AND request_relationships.professional_user_id = conversations.professional_user_id
+      AND (
+        (
+          request_relationships.post_id IS NOT NULL
+          AND request_relationships.emergency_request_id IS NULL
+        )
+        OR
+        (
+          request_relationships.post_id IS NULL
+          AND request_relationships.emergency_request_id IS NOT NULL
+          AND request_relationships.status = 'active'
+        )
+      )
     LIMIT 1
     `,
     [conversationId, participantUserId]

@@ -291,6 +291,36 @@ test("homeowner conversation list is owner scoped", async () => {
 
     assert.match(
       sql,
+      /emergency_requests\.status AS source_workflow_status/
+    );
+
+    assert.match(
+      sql,
+      /emergency_requests\.access_notes AS source_access_notes/
+    );
+
+    assert.match(
+      sql,
+      /request_relationships\.homeowner_id = conversations\.homeowner_id/
+    );
+
+    assert.match(
+      sql,
+      /contractor_profiles\.user_id = conversations\.professional_user_id/
+    );
+
+    assert.match(
+      sql,
+      /request_relationships\.post_id IS NULL AND request_relationships\.emergency_request_id IS NOT NULL AND request_relationships\.status = 'active'/
+    );
+
+    assert.doesNotMatch(
+      sql,
+      /safety_assessment|additional_safety_context/i
+    );
+
+    assert.match(
+      sql,
       /ORDER BY conversations\.updated_at DESC, conversations\.id DESC/
     );
 
@@ -357,6 +387,26 @@ test("professional conversation list enforces business ownership", async () => {
       /request_relationships\.professional_user_id = \$1/
     );
 
+    assert.match(
+      sql,
+      /request_relationships\.contractor_id = conversations\.contractor_id/
+    );
+
+    assert.match(
+      sql,
+      /contractor_profiles\.user_id = conversations\.professional_user_id/
+    );
+
+    assert.match(
+      sql,
+      /request_relationships\.post_id IS NOT NULL AND request_relationships\.emergency_request_id IS NULL/
+    );
+
+    assert.match(
+      sql,
+      /request_relationships\.post_id IS NULL AND request_relationships\.emergency_request_id IS NOT NULL AND request_relationships\.status = 'active'/
+    );
+
     assert.deepEqual(params, [9, false]);
 
     return { rows };
@@ -410,6 +460,21 @@ test("conversation detail is available only to a participant", async () => {
     assert.match(
       sql,
       /conversations\.professional_user_id = \$2/
+    );
+
+    assert.match(
+      sql,
+      /request_relationships\.professional_user_id = conversations\.professional_user_id/
+    );
+
+    assert.match(
+      sql,
+      /contractor_profiles\.user_id = conversations\.professional_user_id/
+    );
+
+    assert.match(
+      sql,
+      /request_relationships\.post_id IS NULL AND request_relationships\.emergency_request_id IS NOT NULL AND request_relationships\.status = 'active'/
     );
 
     assert.deepEqual(params, [51, 7]);

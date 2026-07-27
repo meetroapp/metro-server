@@ -100,6 +100,9 @@ function classifySql(sql) {
   if (/^UPDATE emergency_requests SET/i.test(sql)) {
     return "update";
   }
+  if (/^UPDATE conversations SET/i.test(sql)) {
+    return "activity";
+  }
   return "unknown";
 }
 
@@ -181,6 +184,7 @@ function conversationRow(overrides = {}) {
     contractor_id: 83,
     professional_user_id: AUTHENTICATED_USER_ID,
     status: "active",
+    updated_at: "conversation-updated-original",
     created_at: "private-created",
     ...overrides,
   };
@@ -192,6 +196,7 @@ function createDispatchPool({
   conversation = conversationRow(),
   profileExists = true,
   updateReturnsRow = true,
+  activityReturnsRow = true,
   failAt = null,
   invalidClient = false,
 } = {}) {
@@ -283,6 +288,19 @@ function createDispatchPool({
             };
           }
 
+          if (kind === "activity") {
+            return {
+              rows: activityReturnsRow
+                ? [{
+                    id: conversation.id,
+                    status: conversation.status,
+                    updated_at:
+                      "conversation-updated-after-transition",
+                  }]
+                : [],
+            };
+          }
+
           throw new Error(`Unexpected SQL: ${sql}`);
         },
         release() {
@@ -347,6 +365,9 @@ function assertCanonicalSuccess(result, {
   code,
   alreadyApplied,
   status,
+  conversationUpdatedAt = alreadyApplied
+    ? "conversation-updated-original"
+    : "conversation-updated-after-transition",
 }) {
   assert.deepEqual(
     Object.keys(result).sort(),
@@ -381,7 +402,7 @@ function assertCanonicalSuccess(result, {
   );
   assert.deepEqual(
     Object.keys(result.conversation).sort(),
-    ["id", "status"]
+    ["id", "status", "updatedAt"]
   );
   assert.equal(result.emergencyRequest.status, status);
   assert.deepEqual(result.relationship, {
@@ -391,6 +412,7 @@ function assertCanonicalSuccess(result, {
   assert.deepEqual(result.conversation, {
     id: 97,
     status: "active",
+    updatedAt: conversationUpdatedAt,
   });
 }
 
@@ -519,6 +541,7 @@ test("all valid dispatch transitions lock, authorize, update, and serialize cano
           "relationship",
           "conversation",
           "update",
+          "activity",
           "commit",
         ]
       );
@@ -612,7 +635,7 @@ test("all valid dispatch transitions lock, authorize, update, and serialize cano
       );
       assert.match(
         conversationCall.sql,
-        /FOR SHARE OF c$/i
+        /FOR UPDATE OF c$/i
       );
       assert.deepEqual(conversationCall.params, [
         73,
@@ -685,6 +708,23 @@ test("all valid dispatch transitions lock, authorize, update, and serialize cano
       assertNoCreationOrDestruction(pool.calls);
       assert.equal(
         callsOf(pool, "update").length,
+        1
+      );
+      const activityCall = firstCall(
+        pool,
+        "activity"
+      );
+      assert.match(
+        activityCall.sql,
+        /SET updated_at = CURRENT_TIMESTAMP/i
+      );
+      assert.match(
+        activityCall.sql,
+        /WHERE id = \$1 AND status = 'active'/i
+      );
+      assert.deepEqual(activityCall.params, [97]);
+      assert.equal(
+        callsOf(pool, "activity").length,
         1
       );
     });
@@ -763,6 +803,10 @@ test("exact retries remain write-free after canonical validation", async (t) => 
       );
       assert.equal(
         callsOf(pool, "update").length,
+        0
+      );
+      assert.equal(
+        callsOf(pool, "activity").length,
         0
       );
       assert.equal(
@@ -1029,6 +1073,39 @@ test("a zero-row conditional update fails safely", async () => {
   assert.equal(pool.releaseCount, 1);
 });
 
+test("a zero-row conversation activity update rolls back the aggregate transition", async () => {
+  const pool = createDispatchPool({
+    activityReturnsRow: false,
+  });
+  const result = await markEmergencyEnRoute(
+    commandInput(pool)
+  );
+
+  assertFailure(
+    result,
+    409,
+    "EMERGENCY_CONVERSATION_REQUIRED"
+  );
+  assert.deepEqual(
+    pool.calls.map((call) => call.kind),
+    [
+      "begin",
+      "profile",
+      "request",
+      "relationship",
+      "conversation",
+      "update",
+      "activity",
+      "rollback",
+    ]
+  );
+  assert.equal(
+    callsOf(pool, "commit").length,
+    0
+  );
+  assert.equal(pool.releaseCount, 1);
+});
+
 test("transaction failures normalize safely, roll back when appropriate, and release once", async () => {
   for (const failAt of [
     "begin",
@@ -1037,6 +1114,7 @@ test("transaction failures normalize safely, roll back when appropriate, and rel
     "relationship",
     "conversation",
     "update",
+    "activity",
     "commit",
   ]) {
     const pool = createDispatchPool({ failAt });
@@ -1161,7 +1239,7 @@ test("service source cannot create canonical records or consume caller SQL autho
   );
   assert.doesNotMatch(
     source,
-    /\bINSERT\s+INTO\s+(?:emergency_requests|request_relationships|conversations|messages)\b/i
+    /\bINSERT\s+INTO\s+(?:emergency_requests|request_relationships|conversations|messages|workflow_events)\b/i
   );
   assert.doesNotMatch(source, /\bDELETE\s+FROM\b/i);
   assert.doesNotMatch(source, /\bDROP\s+TABLE\b/i);

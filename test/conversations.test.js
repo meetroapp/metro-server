@@ -9,6 +9,8 @@ const {
   canArchiveConversation,
   canCloseConversation,
   canRestoreConversation,
+  deriveEmergencyWorkflow,
+  hasExactlyOneConversationSource,
   isConversationParticipant,
   isValidPositiveInteger,
   parsePositiveInteger,
@@ -649,6 +651,16 @@ test("Emergency conversation serializers expose explicit Emergency source identi
     request_title: "Emergency Plumbing",
     source_service_domain: "home_services",
     source_service_specialty: "plumbing_repair",
+    source_relationship_status: "active",
+    source_workflow_status: "assigned",
+    source_assigned_at: "2026-07-23T14:00:30.000Z",
+    source_en_route_at: null,
+    source_arrived_at: null,
+    source_work_started_at: null,
+    source_completed_at: null,
+    source_location_text: "101 Synthetic Test Ave",
+    source_unit_number: "Unit 2",
+    source_access_notes: "Use the test entrance",
     homeowner_id: 7,
     contractor_id: 80,
     professional_user_id: 9,
@@ -665,11 +677,289 @@ test("Emergency conversation serializers expose explicit Emergency source identi
   assert.equal(homeowner.emergency_request_id, 61);
   assert.equal(homeowner.source.type, "emergency");
   assert.equal(homeowner.source.isEmergency, true);
+  assert.equal(homeowner.viewer.role, "homeowner");
+  assert.equal(homeowner.workflow.status, "assigned");
+  assert.deepEqual(homeowner.workflow.allowedActions, []);
+  assert.equal(homeowner.permissions.canMarkEnRoute, false);
+  assert.equal(Object.hasOwn(homeowner, "location"), false);
   const professional = serializeConversationSummaryForProfessional(row);
   assert.equal(professional.emergency_request_id, 61);
   assert.equal(professional.source.id, 61);
+  assert.equal(professional.viewer.role, "professional");
+  assert.deepEqual(
+    professional.workflow.allowedActions,
+    ["mark_en_route"]
+  );
+  assert.equal(professional.permissions.canMarkEnRoute, true);
+  assert.equal(Object.hasOwn(professional, "location"), false);
   const detail = serializeConversationDetail(row, 7);
   assert.equal(detail.conversation.type, "emergency");
   assert.equal(detail.relationship.emergencyRequestId, 61);
   assert.equal(Object.hasOwn(detail.relationship, "requestId"), false);
+  assert.deepEqual(detail.location, {
+    locationText: "101 Synthetic Test Ave",
+    unitNumber: "Unit 2",
+    accessNotes: "Use the test entrance",
+  });
+  assert.deepEqual(detail.workflow, {
+    status: "assigned",
+    assignedAt: "2026-07-23T14:00:30.000Z",
+    enRouteAt: null,
+    arrivedAt: null,
+    workStartedAt: null,
+    completedAt: null,
+    allowedActions: [],
+  });
+  assert.equal(
+    JSON.stringify(detail).includes("safety"),
+    false
+  );
+});
+
+test("Emergency workflow derivation grants only the professional's exact next action", () => {
+  const cases = [
+    ["ready_for_distribution", null],
+    ["assigned", "mark_en_route"],
+    ["professional_en_route", "mark_arrived"],
+    ["professional_arrived", "start_work"],
+    ["work_in_progress", "complete_work"],
+    ["completed", null],
+  ];
+
+  for (const [status, expectedAction] of cases) {
+    const row = {
+      emergency_request_id: 61,
+      source_relationship_status: "active",
+      source_workflow_status: status,
+      status: "active",
+    };
+    const professional = deriveEmergencyWorkflow({
+      row,
+      viewerRole: "professional",
+    });
+    const homeowner = deriveEmergencyWorkflow({
+      row,
+      viewerRole: "homeowner",
+    });
+
+    assert.deepEqual(
+      professional.workflow.allowedActions,
+      expectedAction ? [expectedAction] : []
+    );
+    assert.deepEqual(
+      homeowner.workflow.allowedActions,
+      []
+    );
+    assert.equal(
+      homeowner.permissions.canManageWorkflow,
+      false
+    );
+  }
+});
+
+test("both participants recover every Emergency dispatch stage from canonical rows", () => {
+  const cases = [
+    ["assigned", "mark_en_route"],
+    ["professional_en_route", "mark_arrived"],
+    ["professional_arrived", "start_work"],
+    ["work_in_progress", "complete_work"],
+    ["completed", null],
+  ];
+
+  for (const [status, expectedAction] of cases) {
+    const row = {
+      id: 92,
+      relationship_id: 52,
+      post_id: null,
+      emergency_request_id: 61,
+      source_relationship_status: "active",
+      source_workflow_status: status,
+      source_assigned_at: "assigned",
+      source_en_route_at:
+        status === "assigned" ? null : "en-route",
+      source_arrived_at: [
+        "professional_arrived",
+        "work_in_progress",
+        "completed",
+      ].includes(status)
+        ? "arrived"
+        : null,
+      source_work_started_at: [
+        "work_in_progress",
+        "completed",
+      ].includes(status)
+        ? "work-started"
+        : null,
+      source_completed_at:
+        status === "completed" ? "completed" : null,
+      homeowner_id: 7,
+      contractor_id: 80,
+      professional_user_id: 9,
+      status: "active",
+    };
+    const homeownerList =
+      serializeConversationSummaryForHomeowner(row);
+    const professionalList =
+      serializeConversationSummaryForProfessional(row);
+    const homeownerDetail =
+      serializeConversationDetail(row, 7);
+    const professionalDetail =
+      serializeConversationDetail(row, 9);
+
+    for (const projection of [
+      homeownerList,
+      professionalList,
+      homeownerDetail,
+      professionalDetail,
+    ]) {
+      assert.equal(projection.workflow.status, status);
+      assert.equal(
+        projection.workflow.completedAt,
+        status === "completed" ? "completed" : null
+      );
+    }
+
+    assert.deepEqual(
+      homeownerList.workflow.allowedActions,
+      []
+    );
+    assert.deepEqual(
+      homeownerDetail.workflow.allowedActions,
+      []
+    );
+    assert.deepEqual(
+      professionalList.workflow.allowedActions,
+      expectedAction ? [expectedAction] : []
+    );
+    assert.deepEqual(
+      professionalDetail.workflow.allowedActions,
+      expectedAction ? [expectedAction] : []
+    );
+  }
+});
+
+test("Emergency workflow derivation grants no actions for inactive authority", () => {
+  for (const row of [
+    {
+      emergency_request_id: 61,
+      source_relationship_status: "inactive",
+      source_workflow_status: "assigned",
+      status: "active",
+    },
+    {
+      emergency_request_id: 61,
+      source_relationship_status: "active",
+      source_workflow_status: "assigned",
+      status: "closed",
+    },
+  ]) {
+    const result = deriveEmergencyWorkflow({
+      row,
+      viewerRole: "professional",
+    });
+
+    assert.deepEqual(result.workflow.allowedActions, []);
+    assert.equal(
+      result.permissions.canManageWorkflow,
+      false
+    );
+  }
+});
+
+test("Emergency conversation serializers fail closed on malformed or inactive sources", () => {
+  assert.equal(
+    hasExactlyOneConversationSource({
+      post_id: 41,
+      emergency_request_id: null,
+    }),
+    true
+  );
+  assert.equal(
+    hasExactlyOneConversationSource({
+      post_id: null,
+      emergency_request_id: 61,
+    }),
+    true
+  );
+
+  for (const row of [
+    {
+      post_id: 41,
+      emergency_request_id: 61,
+      homeowner_id: 7,
+      professional_user_id: 9,
+    },
+    {
+      post_id: null,
+      emergency_request_id: null,
+      homeowner_id: 7,
+      professional_user_id: 9,
+    },
+  ]) {
+    assert.throws(
+      () => serializeConversationDetail(row, 7),
+      /source is invalid/
+    );
+    assert.throws(
+      () => serializeConversationSummaryForHomeowner(row),
+      /source is invalid/
+    );
+    assert.throws(
+      () => serializeConversationSummaryForProfessional(row),
+      /source is invalid/
+    );
+  }
+
+  assert.throws(
+    () =>
+      serializeConversationDetail(
+        {
+          post_id: null,
+          emergency_request_id: 61,
+          source_relationship_status: "inactive",
+          homeowner_id: 7,
+          professional_user_id: 9,
+        },
+        7
+      ),
+    /active Emergency relationship/
+  );
+});
+
+test("completed Emergency work remains an open conversation without fabricated closeout state", () => {
+  const detail = serializeConversationDetail(
+    {
+      id: 92,
+      relationship_id: 52,
+      post_id: null,
+      emergency_request_id: 61,
+      source_relationship_status: "active",
+      source_workflow_status: "completed",
+      source_completed_at: "2026-07-23T16:00:00.000Z",
+      homeowner_id: 7,
+      contractor_id: 80,
+      professional_user_id: 9,
+      status: "active",
+      closed_at: null,
+    },
+    9
+  );
+
+  assert.equal(detail.conversation.status, "active");
+  assert.equal(detail.conversation.closedAt, null);
+  assert.equal(detail.workflow.status, "completed");
+  assert.deepEqual(detail.workflow.allowedActions, []);
+
+  for (const fabricatedField of [
+    "archived",
+    "reviewReady",
+    "invoiceReady",
+    "history",
+    "closeout",
+  ]) {
+    assert.equal(
+      JSON.stringify(detail).includes(fabricatedField),
+      false
+    );
+  }
 });
