@@ -497,6 +497,7 @@ test(
       draft.serviceDomain,
       "home_services"
     );
+    assert.equal(draft.accessNotes, "");
 
     assert.throws(
       () =>

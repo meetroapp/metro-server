@@ -380,8 +380,7 @@ function buildEmergencyDraft(
       "Governed staging-only Emergency workflow certification.",
     locationText: "Cape Coral, FL 33904",
     unitNumber: "",
-    accessNotes:
-      `Certification marker: ${runId}`,
+    accessNotes: "",
   };
 }
 

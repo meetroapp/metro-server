@@ -839,7 +839,6 @@ async function prepareEmergencyRequest({
       current.row.title,
       current.row.description,
       current.row.location_text,
-      current.row.access_notes,
     ];
 
     if (

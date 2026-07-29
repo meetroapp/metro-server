@@ -448,6 +448,28 @@ function persistedAssessmentRow(overrides = {}) {
   };
 }
 
+function persistedSafeOwnedEmergencyRow(overrides = {}) {
+  return persistedEmergencyRow({
+    assessment_id: 51,
+    immediate_danger: false,
+    medical_emergency: false,
+    fire_or_smoke: false,
+    gas_odor_or_suspected_leak: false,
+    active_crime_or_threat: false,
+    electrical_immediate_hazard: false,
+    structural_collapse_risk: false,
+    flooding_or_water_damage: false,
+    occupants_unable_to_exit: false,
+    emergency_services_contacted: false,
+    safe_to_remain_at_location: true,
+    additional_safety_context: "",
+    disposition: "continue",
+    assessment_created_at: "assessment-created",
+    assessment_updated_at: "assessment-updated",
+    ...overrides,
+  });
+}
+
 test("draft creation persists authenticated owner and governed fields", async () => {
   const pool = createEmergencyMockPool(({ sql, params }) => {
     assert.match(sql, /^INSERT INTO emergency_requests/i);
@@ -763,24 +785,16 @@ test("unsafe assessment derives disposition and safety-blocks atomically", async
   assert.equal(result.emergencyRequest.status, "safety_blocked");
 });
 
-test("complete safe draft prepares to ready_for_distribution only", async () => {
-  const ownedRow = persistedEmergencyRow({
-    assessment_id: 51,
-    immediate_danger: false,
-    medical_emergency: false,
-    fire_or_smoke: false,
-    gas_odor_or_suspected_leak: false,
-    active_crime_or_threat: false,
-    electrical_immediate_hazard: false,
-    structural_collapse_risk: false,
-    flooding_or_water_damage: false,
-    occupants_unable_to_exit: false,
-    emergency_services_contacted: false,
-    safe_to_remain_at_location: true,
-    additional_safety_context: "",
-    disposition: "continue",
-    assessment_created_at: "assessment-created",
-    assessment_updated_at: "assessment-updated",
+test("complete safe plumbing draft prepares with empty optional fields", async () => {
+  const ownedRow = persistedSafeOwnedEmergencyRow({
+    category: "home_repair",
+    service_domain: "home_services",
+    service_specialty: "emergency_plumbing",
+    title: "Leak water",
+    description: "main housepipe leaking water",
+    location_text: "cape coral",
+    unit_number: "",
+    access_notes: "",
   });
 
   const pool = createEmergencyMockPool(({ sql }) => {
@@ -799,10 +813,11 @@ test("complete safe draft prepares to ready_for_distribution only", async () => 
 
       return {
         rows: [
-          persistedEmergencyRow({
+          {
+            ...ownedRow,
             status: "ready_for_distribution",
             requested_at: "requested",
-          }),
+          },
         ],
       };
     }
@@ -819,6 +834,118 @@ test("complete safe draft prepares to ready_for_distribution only", async () => 
   assert.equal(result.ok, true);
   assert.equal(result.code, "EMERGENCY_REQUEST_PREPARED");
   assert.equal(result.emergencyRequest.status, "ready_for_distribution");
+  assert.equal(result.emergencyRequest.unitNumber, "");
+  assert.equal(result.emergencyRequest.accessNotes, "");
+  assert.equal(
+    result.emergencyRequest.safetyAssessment.disposition,
+    "continue"
+  );
+  assert.equal(
+    result.emergencyRequest.safetyAssessment.emergencyServicesContacted,
+    false
+  );
+  assert.equal(
+    result.emergencyRequest.safetyAssessment.additionalSafetyContext,
+    ""
+  );
+  for (const field of [
+    "immediateDanger",
+    "medicalEmergency",
+    "fireOrSmoke",
+    "gasOdorOrSuspectedLeak",
+    "activeCrimeOrThreat",
+    "electricalImmediateHazard",
+    "structuralCollapseRisk",
+    "floodingOrWaterDamage",
+    "occupantsUnableToExit",
+  ]) {
+    assert.equal(
+      result.emergencyRequest.safetyAssessment[field],
+      false
+    );
+  }
+});
+
+test("prepare still rejects empty required details and missing safety", async () => {
+  const incompleteRows = [
+    persistedSafeOwnedEmergencyRow({ category: "" }),
+    persistedSafeOwnedEmergencyRow({ service_domain: "" }),
+    persistedSafeOwnedEmergencyRow({ service_specialty: "" }),
+    persistedSafeOwnedEmergencyRow({ title: "" }),
+    persistedSafeOwnedEmergencyRow({ description: "" }),
+    persistedSafeOwnedEmergencyRow({ location_text: "" }),
+    persistedEmergencyRow({
+      unit_number: "",
+      access_notes: "",
+    }),
+  ];
+
+  for (const ownedRow of incompleteRows) {
+    let updated = false;
+    const pool = createEmergencyMockPool(({ sql }) => {
+      if (sql === "BEGIN" || sql === "ROLLBACK") {
+        return { rows: [] };
+      }
+
+      if (/SELECT emergency_requests\.\*/i.test(sql)) {
+        return { rows: [ownedRow] };
+      }
+
+      if (/^UPDATE emergency_requests/i.test(sql)) {
+        updated = true;
+      }
+
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+
+    const result = await prepareEmergencyRequest({
+      pool,
+      homeownerUserId: 7,
+      emergencyRequestId: 41,
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 409);
+    assert.equal(result.code, "EMERGENCY_REQUEST_INCOMPLETE");
+    assert.equal(updated, false);
+  }
+});
+
+test("prepare still safety-blocks a non-continue assessment", async () => {
+  let updated = false;
+  const pool = createEmergencyMockPool(({ sql }) => {
+    if (sql === "BEGIN" || sql === "ROLLBACK") {
+      return { rows: [] };
+    }
+
+    if (/SELECT emergency_requests\.\*/i.test(sql)) {
+      return {
+        rows: [
+          persistedSafeOwnedEmergencyRow({
+            access_notes: "",
+            disposition: "manual_review",
+          }),
+        ],
+      };
+    }
+
+    if (/^UPDATE emergency_requests/i.test(sql)) {
+      updated = true;
+    }
+
+    throw new Error(`Unexpected SQL: ${sql}`);
+  });
+
+  const result = await prepareEmergencyRequest({
+    pool,
+    homeownerUserId: 7,
+    emergencyRequestId: 41,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 409);
+  assert.equal(result.code, "EMERGENCY_REQUEST_SAFETY_BLOCKED");
+  assert.equal(updated, false);
 });
 
 test("cancellation is timestamped and idempotent", async () => {
