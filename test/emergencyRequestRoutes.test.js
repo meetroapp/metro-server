@@ -203,6 +203,10 @@ test(
         },
         {
           method: "GET",
+          path: "/emergency-requests",
+        },
+        {
+          method: "GET",
           path:
             "/emergency-requests/:emergencyRequestId",
         },

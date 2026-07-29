@@ -4,6 +4,9 @@ const {
   getRequestServiceDomain,
   normalizeRequestServiceId,
 } = require("../requests/serviceCompatibility");
+const {
+  RELATIONSHIP_STATUSES,
+} = require("../relationships/requestRelationships");
 
 const EMERGENCY_REQUEST_STATUSES = Object.freeze([
   "draft",
@@ -22,6 +25,39 @@ const EMERGENCY_REQUEST_STATUSES = Object.freeze([
   "work_in_progress",
   "completed",
 ]);
+
+const ACTIVE_EMERGENCY_REQUEST_STATUSES = Object.freeze([
+  "draft",
+  "safety_blocked",
+  "ready_for_distribution",
+  "active",
+  "selection_pending",
+  "assigned",
+  "professional_en_route",
+  "professional_arrived",
+  "in_service",
+  "work_in_progress",
+]);
+
+const HISTORY_EMERGENCY_REQUEST_STATUSES = Object.freeze([
+  "completed",
+  "resolved",
+  "cancelled",
+  "expired",
+  "unable_to_match",
+]);
+
+const EMERGENCY_REQUEST_LIST_VIEWS = Object.freeze({
+  active: ACTIVE_EMERGENCY_REQUEST_STATUSES,
+  history: HISTORY_EMERGENCY_REQUEST_STATUSES,
+  all: Object.freeze([
+    ...ACTIVE_EMERGENCY_REQUEST_STATUSES,
+    ...HISTORY_EMERGENCY_REQUEST_STATUSES,
+  ]),
+});
+
+const DEFAULT_EMERGENCY_REQUEST_LIST_LIMIT = 25;
+const MAX_EMERGENCY_REQUEST_LIST_LIMIT = 50;
 
 const SAFETY_DISPOSITIONS = Object.freeze([
   "continue",
@@ -53,6 +89,57 @@ function parsePositiveInteger(value) {
   if (!/^[1-9]\d*$/.test(normalized)) return null;
   const parsed = Number(normalized);
   return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function invalidEmergencyRequestList() {
+  return {
+    ok: false,
+    valid: false,
+    status: 400,
+    code: "EMERGENCY_REQUEST_LIST_INVALID",
+    message: "The Emergency request list options are invalid.",
+  };
+}
+
+function validateEmergencyRequestListOptions(options = {}) {
+  if (!isRecord(options)) {
+    return invalidEmergencyRequestList();
+  }
+
+  const supportedFields = new Set(["view", "limit"]);
+  if (Object.keys(options).some((field) => !supportedFields.has(field))) {
+    return invalidEmergencyRequestList();
+  }
+
+  const view =
+    options.view === undefined || options.view === ""
+      ? "active"
+      : options.view;
+
+  if (
+    typeof view !== "string" ||
+    !Object.hasOwn(EMERGENCY_REQUEST_LIST_VIEWS, view)
+  ) {
+    return invalidEmergencyRequestList();
+  }
+
+  const rawLimit =
+    options.limit === undefined || options.limit === ""
+      ? DEFAULT_EMERGENCY_REQUEST_LIST_LIMIT
+      : options.limit;
+  const limit = parsePositiveInteger(rawLimit);
+
+  if (!limit || limit > MAX_EMERGENCY_REQUEST_LIST_LIMIT) {
+    return invalidEmergencyRequestList();
+  }
+
+  return {
+    valid: true,
+    value: {
+      view,
+      limit,
+    },
+  };
 }
 
 function cleanText(value, limit, { required = false } = {}) {
@@ -343,6 +430,123 @@ function serializeEmergencyRequest(row = {}, assessment = null) {
           updatedAt: assessment.updated_at,
         }
       : null,
+  };
+}
+
+function serializeEmergencyRequestSummary(row = {}) {
+  const availableResponseCount = Number(
+    row.available_response_count ?? 0
+  );
+
+  if (
+    !Number.isSafeInteger(availableResponseCount) ||
+    availableResponseCount < 0
+  ) {
+    throw new TypeError(
+      "Emergency response count must be a non-negative integer."
+    );
+  }
+
+  return {
+    emergencyRequestId: row.id,
+    title: row.title,
+    serviceSpecialty: row.service_specialty,
+    status: row.status,
+    createdAt: row.created_at,
+    requestedAt: row.requested_at ?? null,
+    assignedAt: row.assigned_at ?? null,
+    enRouteAt: row.en_route_at ?? null,
+    arrivedAt: row.arrived_at ?? null,
+    workStartedAt: row.work_started_at ?? null,
+    completedAt: row.completed_at ?? null,
+    cancelledAt: row.cancelled_at ?? null,
+    expiredAt: row.expired_at ?? null,
+    availableResponseCount,
+    hasSelectedProfessional:
+      row.has_selected_professional === true,
+  };
+}
+
+async function listOwnedEmergencyRequests({
+  pool,
+  homeownerUserId: rawHomeownerUserId,
+  options = {},
+}) {
+  const homeownerUserId = parsePositiveInteger(
+    rawHomeownerUserId
+  );
+  const validation =
+    validateEmergencyRequestListOptions(options);
+
+  if (!homeownerUserId || !validation.valid) {
+    return invalidEmergencyRequestList();
+  }
+
+  if (!pool || typeof pool.query !== "function") {
+    throw new TypeError("A database pool or client is required.");
+  }
+
+  const { view, limit } = validation.value;
+  const statuses = EMERGENCY_REQUEST_LIST_VIEWS[view];
+  const result = await pool.query(
+    `
+    SELECT
+      emergency_requests.id,
+      emergency_requests.title,
+      emergency_requests.service_specialty,
+      emergency_requests.status,
+      emergency_requests.created_at,
+      emergency_requests.requested_at,
+      emergency_requests.assigned_at,
+      emergency_requests.en_route_at,
+      emergency_requests.arrived_at,
+      emergency_requests.work_started_at,
+      emergency_requests.completed_at,
+      emergency_requests.cancelled_at,
+      emergency_requests.expired_at,
+      (
+        COUNT(request_relationships.id)
+        FILTER (
+          WHERE request_relationships.status = $4
+            AND request_relationships.post_id IS NULL
+        )
+      )::INTEGER AS available_response_count,
+      COALESCE(
+        BOOL_OR(
+          request_relationships.status = $5
+          AND request_relationships.post_id IS NULL
+        ),
+        FALSE
+      ) AS has_selected_professional
+    FROM emergency_requests
+    LEFT JOIN request_relationships
+      ON request_relationships.emergency_request_id =
+        emergency_requests.id
+      AND request_relationships.post_id IS NULL
+    WHERE emergency_requests.homeowner_id = $1
+      AND emergency_requests.status = ANY($2::text[])
+    GROUP BY emergency_requests.id
+    ORDER BY
+      emergency_requests.created_at DESC,
+      emergency_requests.id DESC
+    LIMIT $3
+    `,
+    [
+      homeownerUserId,
+      statuses,
+      limit,
+      RELATIONSHIP_STATUSES.PENDING,
+      RELATIONSHIP_STATUSES.ACTIVE,
+    ]
+  );
+
+  return {
+    ok: true,
+    status: 200,
+    code: "EMERGENCY_REQUESTS_RETRIEVED",
+    emergencyRequests: result.rows.map(
+      serializeEmergencyRequestSummary
+    ),
   };
 }
 
@@ -984,18 +1188,26 @@ async function cancelEmergencyRequest({
 }
 
 module.exports = {
+  ACTIVE_EMERGENCY_REQUEST_STATUSES,
+  DEFAULT_EMERGENCY_REQUEST_LIST_LIMIT,
   EMERGENCY_REQUEST_STATUSES,
+  EMERGENCY_REQUEST_LIST_VIEWS,
+  HISTORY_EMERGENCY_REQUEST_STATUSES,
+  MAX_EMERGENCY_REQUEST_LIST_LIMIT,
   SAFETY_BOOLEAN_FIELDS,
   SAFETY_DISPOSITIONS,
   cancelEmergencyRequest,
   createEmergencyDraft,
   deriveSafetyDisposition,
   getOwnedEmergencyRequest,
+  listOwnedEmergencyRequests,
   parsePositiveInteger,
   prepareEmergencyRequest,
   saveEmergencySafetyAssessment,
   serializeEmergencyRequest,
+  serializeEmergencyRequestSummary,
   updateEmergencyDraft,
   validateEmergencyDraftPayload,
+  validateEmergencyRequestListOptions,
   validateSafetyAssessmentPayload,
 };

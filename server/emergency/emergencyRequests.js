@@ -35,6 +35,32 @@ function sendServiceResult(res, result) {
   });
 }
 
+function sendEmergencyRequestListResult(res, result) {
+  if (!result || result.ok !== true) {
+    return res.status(result?.status || 500).json({
+      success: false,
+      code:
+        result?.code ||
+        "EMERGENCY_REQUESTS_FETCH_FAILED",
+      message:
+        result?.message ||
+        "Emergency requests could not be loaded.",
+    });
+  }
+
+  return res.status(result.status || 200).json({
+    success: true,
+    code:
+      result.code ||
+      "EMERGENCY_REQUESTS_RETRIEVED",
+    emergencyRequests: Array.isArray(
+      result.emergencyRequests
+    )
+      ? result.emergencyRequests
+      : [],
+  });
+}
+
 function sendOpportunityResult(res, result) {
   if (!result || result.ok !== true) {
     return res.status(result?.status || 500).json({
@@ -107,9 +133,11 @@ function createEmergencyRequestHandlers({
     cancelEmergencyRequest,
     createEmergencyDraft,
     getOwnedEmergencyRequest,
+    listOwnedEmergencyRequests,
     prepareEmergencyRequest,
     saveEmergencySafetyAssessment,
     updateEmergencyDraft,
+    validateEmergencyRequestListOptions,
   } = service;
   const {
     listProfessionalEmergencyOpportunities,
@@ -208,6 +236,54 @@ function createEmergencyRequestHandlers({
         code: "EMERGENCY_DRAFT_CREATE_FAILED",
         message:
           "The Emergency draft could not be created.",
+      });
+    }
+  }
+
+  async function listOwnedRequests(req, res) {
+    const hasUnexpectedBody =
+      req.body !== undefined &&
+      req.body !== null &&
+      (
+        typeof req.body !== "object" ||
+        Array.isArray(req.body) ||
+        Object.keys(req.body).length > 0
+      );
+    const validation = hasUnexpectedBody
+      ? {
+          valid: false,
+          status: 400,
+          code: "EMERGENCY_REQUEST_LIST_INVALID",
+          message:
+            "The Emergency request list options are invalid.",
+        }
+      : validateEmergencyRequestListOptions(req.query || {});
+
+    if (!validation.valid) {
+      return sendEmergencyRequestListResult(res, {
+        ok: false,
+        status: validation.status || 400,
+        code: validation.code,
+        message: validation.message,
+      });
+    }
+
+    try {
+      const result = await listOwnedEmergencyRequests({
+        pool: getPool(req),
+        homeownerUserId: req.user.id,
+        options: validation.value,
+      });
+
+      return sendEmergencyRequestListResult(res, result);
+    } catch (error) {
+      return sendPublicDatabaseError({
+        res,
+        error,
+        operation: "list_homeowner_emergency_requests",
+        code: "EMERGENCY_REQUESTS_FETCH_FAILED",
+        message:
+          "Emergency requests could not be loaded.",
       });
     }
   }
@@ -510,6 +586,7 @@ function createEmergencyRequestHandlers({
     completeWork,
     createDraft,
     getRequest,
+    listOwnedRequests,
     listHomeownerResponses,
     listProfessionalOpportunities,
     markArrived,
@@ -572,6 +649,12 @@ function registerEmergencyRequestRoutes({
     "/emergency-requests/drafts",
     authMiddleware,
     handlers.createDraft
+  );
+
+  app.get(
+    "/emergency-requests",
+    authMiddleware,
+    handlers.listOwnedRequests
   );
 
   app.get(
@@ -647,6 +730,7 @@ module.exports = {
   createEmergencyRequestHandlers,
   registerEmergencyRequestRoutes,
   sendDispatchResult,
+  sendEmergencyRequestListResult,
   sendOpportunityResult,
   sendServiceResult,
 };
