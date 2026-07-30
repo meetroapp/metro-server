@@ -204,6 +204,58 @@ test("collection defaults to active view and limit 25", async () => {
   });
 });
 
+test("collection response preserves only the approved Emergency relationship preview", async () => {
+  const summary = {
+    emergencyRequestId: 41,
+    title: "Active pipe leak",
+    serviceSpecialty: "emergency_plumbing",
+    status: "assigned",
+    createdAt: "2026-07-29T14:00:00.000Z",
+    requestedAt: "2026-07-29T14:02:00.000Z",
+    assignedAt: "2026-07-29T14:10:00.000Z",
+    enRouteAt: null,
+    arrivedAt: null,
+    workStartedAt: null,
+    completedAt: null,
+    cancelledAt: null,
+    expiredAt: null,
+    availableResponseCount: 0,
+    hasSelectedProfessional: true,
+    selectedProfessionalBusinessName:
+      "Molina Home Services",
+    conversationAvailable: true,
+    conversationId: 201,
+  };
+  const { pool, route } = register({
+    listOwnedEmergencyRequests: async () => ({
+      ok: true,
+      status: 200,
+      code: "EMERGENCY_REQUESTS_RETRIEVED",
+      emergencyRequests: [summary],
+    }),
+  });
+  const response = createResponse();
+
+  await route.handlers[1](
+    {
+      pool,
+      user: { id: 7 },
+      query: {},
+    },
+    response
+  );
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(
+    response.payload.emergencyRequests,
+    [summary]
+  );
+  assert.doesNotMatch(
+    JSON.stringify(response.payload),
+    /location|unitNumber|accessNotes|safety|email|phone|homeownerId|contractorId|relationshipId|message|unread/i
+  );
+});
+
 test("hostile owner authority and GET bodies are rejected before pool or service access", async () => {
   for (const request of [
     {

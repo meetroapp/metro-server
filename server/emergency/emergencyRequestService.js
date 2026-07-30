@@ -437,6 +437,16 @@ function serializeEmergencyRequestSummary(row = {}) {
   const availableResponseCount = Number(
     row.available_response_count ?? 0
   );
+  const hasSelectedProfessional =
+    row.has_selected_professional === true;
+  const selectedProfessionalBusinessName =
+    hasSelectedProfessional &&
+    typeof row.selected_professional_business_name === "string"
+      ? row.selected_professional_business_name.trim() || null
+      : null;
+  const conversationId = hasSelectedProfessional
+    ? parsePositiveInteger(row.canonical_conversation_id)
+    : null;
 
   if (
     !Number.isSafeInteger(availableResponseCount) ||
@@ -462,8 +472,10 @@ function serializeEmergencyRequestSummary(row = {}) {
     cancelledAt: row.cancelled_at ?? null,
     expiredAt: row.expired_at ?? null,
     availableResponseCount,
-    hasSelectedProfessional:
-      row.has_selected_professional === true,
+    hasSelectedProfessional,
+    selectedProfessionalBusinessName,
+    conversationAvailable: conversationId !== null,
+    conversationId,
   };
 }
 
@@ -504,28 +516,73 @@ async function listOwnedEmergencyRequests({
       emergency_requests.completed_at,
       emergency_requests.cancelled_at,
       emergency_requests.expired_at,
-      (
-        COUNT(request_relationships.id)
-        FILTER (
-          WHERE request_relationships.status = $4
-            AND request_relationships.post_id IS NULL
-        )
+      COALESCE(
+        relationship_summary.available_response_count,
+        0
       )::INTEGER AS available_response_count,
       COALESCE(
-        BOOL_OR(
-          request_relationships.status = $5
-          AND request_relationships.post_id IS NULL
-        ),
+        relationship_summary.has_selected_professional,
         FALSE
-      ) AS has_selected_professional
+      ) AS has_selected_professional,
+      selected_relationship.selected_professional_business_name,
+      selected_relationship.canonical_conversation_id
     FROM emergency_requests
-    LEFT JOIN request_relationships
-      ON request_relationships.emergency_request_id =
+    LEFT JOIN LATERAL (
+      SELECT
+        (
+          COUNT(request_relationships.id)
+          FILTER (
+            WHERE request_relationships.status = $4
+          )
+        )::INTEGER AS available_response_count,
+        COALESCE(
+          BOOL_OR(
+            request_relationships.status = $5
+          ),
+          FALSE
+        ) AS has_selected_professional
+      FROM request_relationships
+      WHERE request_relationships.emergency_request_id =
         emergency_requests.id
-      AND request_relationships.post_id IS NULL
+        AND request_relationships.post_id IS NULL
+        AND request_relationships.homeowner_id =
+          emergency_requests.homeowner_id
+    ) AS relationship_summary
+      ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT
+        NULLIF(
+          TRIM(contractor_profiles.business_name),
+          ''
+        ) AS selected_professional_business_name,
+        conversations.id AS canonical_conversation_id
+      FROM request_relationships
+      LEFT JOIN contractor_profiles
+        ON contractor_profiles.id =
+          request_relationships.contractor_id
+        AND contractor_profiles.user_id =
+          request_relationships.professional_user_id
+      LEFT JOIN conversations
+        ON conversations.relationship_id =
+          request_relationships.id
+        AND conversations.homeowner_id =
+          request_relationships.homeowner_id
+        AND conversations.contractor_id =
+          request_relationships.contractor_id
+        AND conversations.professional_user_id =
+          request_relationships.professional_user_id
+      WHERE request_relationships.emergency_request_id =
+        emergency_requests.id
+        AND request_relationships.post_id IS NULL
+        AND request_relationships.homeowner_id =
+          emergency_requests.homeowner_id
+        AND request_relationships.status = $5
+      ORDER BY request_relationships.id ASC
+      LIMIT 1
+    ) AS selected_relationship
+      ON TRUE
     WHERE emergency_requests.homeowner_id = $1
       AND emergency_requests.status = ANY($2::text[])
-    GROUP BY emergency_requests.id
     ORDER BY
       emergency_requests.created_at DESC,
       emergency_requests.id DESC

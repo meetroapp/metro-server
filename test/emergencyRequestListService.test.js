@@ -34,6 +34,8 @@ function summaryRow(overrides = {}) {
     expired_at: null,
     available_response_count: 0,
     has_selected_professional: false,
+    selected_professional_business_name: null,
+    canonical_conversation_id: null,
     ...overrides,
   };
 }
@@ -95,6 +97,9 @@ test("Emergency summary serializer exposes only the approved projection", () => 
     summaryRow({
       available_response_count: 2,
       has_selected_professional: true,
+      selected_professional_business_name:
+        "  Molina Home Services  ",
+      canonical_conversation_id: 201,
       homeowner_id: 7,
       location_text: "Private address",
       unit_number: "2A",
@@ -102,7 +107,7 @@ test("Emergency summary serializer exposes only the approved projection", () => 
       additional_safety_context: "Private safety context",
       contractor_id: 99,
       relationship_id: 151,
-      conversation_id: 201,
+      conversation_id: 999,
       professional_email: "private@example.com",
     })
   );
@@ -123,12 +128,39 @@ test("Emergency summary serializer exposes only the approved projection", () => 
     "expiredAt",
     "availableResponseCount",
     "hasSelectedProfessional",
+    "selectedProfessionalBusinessName",
+    "conversationAvailable",
+    "conversationId",
   ]);
   assert.equal(serialized.availableResponseCount, 2);
   assert.equal(serialized.hasSelectedProfessional, true);
+  assert.equal(
+    serialized.selectedProfessionalBusinessName,
+    "Molina Home Services"
+  );
+  assert.equal(serialized.conversationAvailable, true);
+  assert.equal(serialized.conversationId, 201);
+
+  for (const privateField of [
+    "homeownerId",
+    "contractorId",
+    "relationshipId",
+    "locationText",
+    "unitNumber",
+    "accessNotes",
+    "safetyAssessment",
+    "professionalEmail",
+    "professionalPhone",
+  ]) {
+    assert.equal(
+      Object.hasOwn(serialized, privateField),
+      false
+    );
+  }
+
   assert.doesNotMatch(
     JSON.stringify(serialized),
-    /Private|homeowner|contractor|relationship|conversation|email/i
+    /Private address|Private access|Private safety|private@example/i
   );
 });
 
@@ -141,6 +173,42 @@ test("Emergency summary rejects invalid aggregate counts", () => {
         ),
       /non-negative integer/
     );
+  }
+});
+
+test("Emergency summary enrichment fails closed when identity or conversation data is unavailable", () => {
+  for (const row of [
+    summaryRow({
+      has_selected_professional: true,
+    }),
+    summaryRow({
+      has_selected_professional: true,
+      selected_professional_business_name: "   ",
+      canonical_conversation_id: 0,
+    }),
+    summaryRow({
+      has_selected_professional: true,
+      selected_professional_business_name: null,
+      canonical_conversation_id: "not-an-id",
+    }),
+    summaryRow({
+      has_selected_professional: false,
+      selected_professional_business_name: "Hidden responder",
+      canonical_conversation_id: 201,
+    }),
+  ]) {
+    const serialized =
+      serializeEmergencyRequestSummary(row);
+
+    assert.equal(
+      serialized.selectedProfessionalBusinessName,
+      null
+    );
+    assert.equal(
+      serialized.conversationAvailable,
+      false
+    );
+    assert.equal(serialized.conversationId, null);
   }
 });
 
@@ -253,7 +321,7 @@ test("response aggregates include only pending Emergency relationships and activ
   const query = pool.calls[0].text;
   assert.match(
     query,
-    /COUNT\(request_relationships\.id\)[\s\S]*request_relationships\.status = \$4/i
+    /COUNT\(request_relationships\.id\)[\s\S]*FILTER \([\s\S]*request_relationships\.status = \$4/i
   );
   assert.match(
     query,
@@ -267,9 +335,68 @@ test("response aggregates include only pending Emergency relationships and activ
     query,
     /request_relationships\.post_id IS NULL/i
   );
+  assert.match(
+    query,
+    /LEFT JOIN LATERAL[\s\S]*AS relationship_summary[\s\S]*LEFT JOIN LATERAL[\s\S]*AS selected_relationship/i
+  );
+  assert.match(
+    query,
+    /request_relationships\.homeowner_id =\s*emergency_requests\.homeowner_id/i
+  );
+  assert.match(
+    query,
+    /request_relationships\.status = \$5/i
+  );
+  assert.match(
+    query,
+    /LEFT JOIN contractor_profiles[\s\S]*contractor_profiles\.id =\s*request_relationships\.contractor_id[\s\S]*contractor_profiles\.user_id =\s*request_relationships\.professional_user_id/i
+  );
+  assert.match(
+    query,
+    /LEFT JOIN conversations[\s\S]*conversations\.relationship_id =\s*request_relationships\.id[\s\S]*conversations\.homeowner_id =\s*request_relationships\.homeowner_id[\s\S]*conversations\.contractor_id =\s*request_relationships\.contractor_id[\s\S]*conversations\.professional_user_id =\s*request_relationships\.professional_user_id/i
+  );
+  assert.match(
+    query,
+    /ORDER BY request_relationships\.id ASC\s+LIMIT 1/i
+  );
   assert.doesNotMatch(
     query,
-    /conversations|contractor_profiles|professional_user_id/i
+    /\bGROUP BY\b/i
+  );
+});
+
+test("selected identity projection excludes non-active, non-Emergency, and cross-owner relationships", async () => {
+  const pool = createPool([]);
+  await listOwnedEmergencyRequests({
+    pool,
+    homeownerUserId: 7,
+  });
+
+  const query = pool.calls[0].text;
+  const selectedProjection = query.slice(
+    query.indexOf("selected_professional_business_name"),
+    query.indexOf(") AS selected_relationship")
+  );
+
+  assert.match(
+    selectedProjection,
+    /request_relationships\.emergency_request_id =\s*emergency_requests\.id/i
+  );
+  assert.match(
+    selectedProjection,
+    /request_relationships\.post_id IS NULL/i
+  );
+  assert.match(
+    selectedProjection,
+    /request_relationships\.status = \$5/i
+  );
+  assert.match(
+    selectedProjection,
+    /request_relationships\.homeowner_id =\s*emergency_requests\.homeowner_id/i
+  );
+  assert.doesNotMatch(
+    selectedProjection,
+    /status\s+IN|pending|declined|withdrawn|closed/i
   );
 });
 
