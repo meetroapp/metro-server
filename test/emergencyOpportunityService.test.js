@@ -6,6 +6,7 @@ const test = require("node:test");
 const {
   listProfessionalEmergencyOpportunities,
   professionalCanSeeEmergencyOpportunity,
+  serializeProfessionalEmergencyParticipation,
   serializeProfessionalEmergencyOpportunity,
 } = require("../server/emergency/emergencyOpportunityService");
 
@@ -56,6 +57,7 @@ function distributableEmergency(overrides = {}) {
     created_at: "2026-07-24T13:55:00.000Z",
     updated_at: "2026-07-24T14:05:00.000Z",
     disposition: "continue",
+    participation_status: null,
     ...overrides,
   };
 }
@@ -225,7 +227,21 @@ test("query selects only safety-cleared distributable requests in stable order",
     query.sql,
     /requested_at DESC NULLS LAST, emergency_requests\.created_at DESC, emergency_requests\.id DESC/
   );
-  assert.deepEqual(query.values, [7]);
+  assert.deepEqual(query.values, [7, 17]);
+  assert.match(
+    query.sql,
+    /request_relationships\.emergency_request_id = emergency_requests\.id/
+  );
+  assert.match(query.sql, /request_relationships\.contractor_id = \$2/);
+  assert.match(
+    query.sql,
+    /request_relationships\.professional_user_id = \$1/
+  );
+  assert.match(query.sql, /request_relationships\.post_id IS NULL/);
+  assert.match(
+    query.sql,
+    /ORDER BY request_relationships\.id ASC LIMIT 1/
+  );
   assert.doesNotMatch(
     query.sql,
     /unit_number|access_notes|additional_safety_context|homeowner.*(?:email|phone)|conversation_id|relationship_id/i
@@ -255,10 +271,87 @@ test("canonical electrical Emergency remains visible and privacy-safe", async ()
       requestedAt: "2026-07-24T14:00:00.000Z",
       createdAt: "2026-07-24T13:55:00.000Z",
       updatedAt: "2026-07-24T14:05:00.000Z",
+      participation: null,
       relationship: null,
       conversation: null,
     },
   ]);
+});
+
+test("participation is scoped to the exact authenticated professional identity", async () => {
+  const request = distributableEmergency({ participation_status: "pending" });
+  const firstPool = createReadOnlyPool({
+    profiles: [eligibleProfile({ id: 17, user_id: 7 })],
+    opportunities: [request],
+  });
+  const secondPool = createReadOnlyPool({
+    profiles: [eligibleProfile({ id: 18, user_id: 8 })],
+    opportunities: [
+      distributableEmergency({ participation_status: null }),
+    ],
+  });
+
+  const first = await listProfessionalEmergencyOpportunities({
+    pool: firstPool,
+    professionalUserId: 7,
+  });
+  const second = await listProfessionalEmergencyOpportunities({
+    pool: secondPool,
+    professionalUserId: 8,
+  });
+
+  assert.deepEqual(first.opportunities[0].participation, {
+    state: "pending",
+  });
+  assert.equal(second.opportunities[0].participation, null);
+  assert.deepEqual(emergencyQueries(firstPool)[0].values, [7, 17]);
+  assert.deepEqual(emergencyQueries(secondPool)[0].values, [8, 18]);
+});
+
+test("separate professional responses expose only their own bounded participation", async () => {
+  for (const [professionalUserId, contractorId, state] of [
+    [7, 17, "pending"],
+    [8, 18, "declined"],
+  ]) {
+    const pool = createReadOnlyPool({
+      profiles: [
+        eligibleProfile({ id: contractorId, user_id: professionalUserId }),
+      ],
+      opportunities: [
+        distributableEmergency({ participation_status: state }),
+      ],
+    });
+    const result = await listProfessionalEmergencyOpportunities({
+      pool,
+      professionalUserId,
+    });
+
+    assert.deepEqual(result.opportunities[0].participation, { state });
+    assert.deepEqual(emergencyQueries(pool)[0].values, [
+      professionalUserId,
+      contractorId,
+    ]);
+  }
+});
+
+test("canonical relationship states remain visible and unexpected states fail closed", () => {
+  for (const state of [
+    "pending",
+    "active",
+    "declined",
+    "withdrawn",
+    "closed",
+  ]) {
+    assert.deepEqual(serializeProfessionalEmergencyParticipation(state), {
+      state,
+    });
+  }
+
+  assert.equal(serializeProfessionalEmergencyParticipation(null), null);
+  assert.deepEqual(
+    serializeProfessionalEmergencyParticipation("unexpected_database_state"),
+    { state: "unknown" }
+  );
 });
 
 test("service compatibility fails closed for specialty, domain, and area mismatches", async () => {
@@ -340,6 +433,7 @@ test("serializer excludes owner, safety, access, relationship, and conversation 
       professional_user_id: 7,
       assigned_at: "assigned",
       updated_at: "updated",
+      participation_status: "pending",
     })
   );
 
@@ -382,6 +476,7 @@ test("serializer excludes owner, safety, access, relationship, and conversation 
     false
   );
   assert.equal(serialized.updatedAt, "updated");
+  assert.deepEqual(serialized.participation, { state: "pending" });
   assert.equal(serialized.relationship, null);
   assert.equal(serialized.conversation, null);
   assert.deepEqual(Object.keys(serialized), [
@@ -396,6 +491,7 @@ test("serializer excludes owner, safety, access, relationship, and conversation 
     "requestedAt",
     "createdAt",
     "updatedAt",
+    "participation",
     "relationship",
     "conversation",
   ]);

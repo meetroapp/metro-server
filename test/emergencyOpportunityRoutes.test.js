@@ -184,6 +184,7 @@ test("success and empty retrieval return the stable public contract", async () =
         requestedAt: "requested",
         createdAt: "created",
         updatedAt: "updated",
+        participation: null,
         relationship: null,
         conversation: null,
       },
@@ -212,6 +213,55 @@ test("success and empty retrieval return the stable public contract", async () =
       code: "EMERGENCY_OPPORTUNITIES_FOUND",
       opportunities,
     });
+  }
+});
+
+test("route preserves only bounded professional participation truth", async () => {
+  for (const participation of [{ state: "pending" }, null]) {
+    const opportunity = {
+      id: 41,
+      sourceType: "emergency",
+      category: "home_repair",
+      serviceDomain: "home_services",
+      serviceSpecialty: "emergency_electrical_service",
+      title: "Partial power outage",
+      description: "Several rooms have lost power.",
+      status: "ready_for_distribution",
+      requestedAt: "requested",
+      createdAt: "created",
+      updatedAt: "updated",
+      participation,
+      relationship: null,
+      conversation: null,
+    };
+    const { calls } = registerRoutes({
+      opportunityService: {
+        async listProfessionalEmergencyOpportunities() {
+          return {
+            ok: true,
+            status: 200,
+            code: "EMERGENCY_OPPORTUNITIES_FOUND",
+            opportunities: [opportunity],
+          };
+        },
+      },
+    });
+    const res = createResponse();
+
+    await opportunityRoute(calls).handlers[1](
+      { pool: {}, user: { id: participation ? 7 : 8 } },
+      res
+    );
+
+    assert.deepEqual(res.payload.opportunities, [opportunity]);
+    assert.equal(
+      Object.hasOwn(res.payload.opportunities[0], "relationshipId"),
+      false
+    );
+    assert.equal(
+      Object.hasOwn(res.payload.opportunities[0], "professionalUserId"),
+      false
+    );
   }
 });
 

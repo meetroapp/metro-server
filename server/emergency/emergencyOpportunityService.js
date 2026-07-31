@@ -9,6 +9,13 @@ const {
 
 const DISTRIBUTABLE_STATUS = "ready_for_distribution";
 const DISTRIBUTABLE_DISPOSITION = "continue";
+const PARTICIPATION_STATES = new Set([
+  "pending",
+  "active",
+  "declined",
+  "withdrawn",
+  "closed",
+]);
 
 function isRecord(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -49,6 +56,16 @@ function hasUsableEmergencyProfile(details = {}) {
   return hasServiceSpecialty && hasServiceArea;
 }
 
+function serializeProfessionalEmergencyParticipation(status) {
+  if (status === undefined || status === null) return null;
+
+  const state = String(status).trim().toLowerCase();
+
+  return {
+    state: PARTICIPATION_STATES.has(state) ? state : "unknown",
+  };
+}
+
 function serializeProfessionalEmergencyOpportunity(row = {}) {
   // Deliberately bounded: private location, access, safety, and participant
   // details must never be added to the professional opportunity projection.
@@ -64,6 +81,9 @@ function serializeProfessionalEmergencyOpportunity(row = {}) {
     requestedAt: row.requested_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    participation: serializeProfessionalEmergencyParticipation(
+      row.participation_status
+    ),
     relationship: null,
     conversation: null,
   };
@@ -152,7 +172,18 @@ async function listProfessionalEmergencyOpportunities({
       emergency_requests.requested_at,
       emergency_requests.created_at,
       emergency_requests.updated_at,
-      emergency_request_safety_assessments.disposition
+      emergency_request_safety_assessments.disposition,
+      (
+        SELECT request_relationships.status
+        FROM request_relationships
+        WHERE request_relationships.emergency_request_id =
+          emergency_requests.id
+          AND request_relationships.contractor_id = $2
+          AND request_relationships.professional_user_id = $1
+          AND request_relationships.post_id IS NULL
+        ORDER BY request_relationships.id ASC
+        LIMIT 1
+      ) AS participation_status
     FROM emergency_requests
     INNER JOIN emergency_request_safety_assessments
       ON emergency_request_safety_assessments.emergency_request_id =
@@ -165,7 +196,7 @@ async function listProfessionalEmergencyOpportunities({
       emergency_requests.created_at DESC,
       emergency_requests.id DESC
     `,
-    [professionalUserId]
+    [professionalUserId, profile.id]
   );
 
   return {
@@ -189,5 +220,6 @@ module.exports = {
   listProfessionalEmergencyOpportunities,
   parseProfileDetails,
   professionalCanSeeEmergencyOpportunity,
+  serializeProfessionalEmergencyParticipation,
   serializeProfessionalEmergencyOpportunity,
 };
