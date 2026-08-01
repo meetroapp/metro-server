@@ -1014,6 +1014,100 @@ test("cancellation is timestamped and idempotent", async () => {
   assert.equal(mutated, false);
 });
 
+test("cancellation allows only the canonical pre-selection states", async (t) => {
+  const cancellableStatuses = [
+    "draft",
+    "ready_for_distribution",
+    "active",
+    "selection_pending",
+  ];
+
+  for (const status of cancellableStatuses) {
+    await t.test(status, async () => {
+      let updated = false;
+      const pool = createEmergencyMockPool(({ sql }) => {
+        if (sql === "BEGIN" || sql === "COMMIT") return { rows: [] };
+
+        if (/SELECT emergency_requests\.\*/i.test(sql)) {
+          return { rows: [persistedEmergencyRow({ status })] };
+        }
+
+        if (/^UPDATE emergency_requests SET status = 'cancelled'/i.test(sql)) {
+          updated = true;
+          return {
+            rows: [persistedEmergencyRow({ status: "cancelled" })],
+          };
+        }
+
+        throw new Error(`Unexpected SQL: ${sql}`);
+      });
+
+      const result = await cancelEmergencyRequest({
+        pool,
+        homeownerUserId: 7,
+        emergencyRequestId: 41,
+      });
+
+      assert.equal(result.ok, true);
+      assert.equal(result.status, 200);
+      assert.equal(result.code, "EMERGENCY_REQUEST_CANCELLED");
+      assert.equal(updated, true);
+    });
+  }
+});
+
+test("cancellation rejects dispatch, terminal, and unknown states without writing", async (t) => {
+  const nonCancellableStatuses = [
+    "assigned",
+    "professional_en_route",
+    "professional_arrived",
+    "in_service",
+    "work_in_progress",
+    "resolved",
+    "completed",
+    "expired",
+    "unable_to_match",
+    "safety_blocked",
+    "unknown_future_state",
+  ];
+
+  for (const status of nonCancellableStatuses) {
+    await t.test(status, async () => {
+      let mutated = false;
+      let rolledBack = false;
+      const pool = createEmergencyMockPool(({ sql }) => {
+        if (sql === "BEGIN") return { rows: [] };
+        if (sql === "ROLLBACK") {
+          rolledBack = true;
+          return { rows: [] };
+        }
+
+        if (/SELECT emergency_requests\.\*/i.test(sql)) {
+          return { rows: [persistedEmergencyRow({ status })] };
+        }
+
+        if (/^UPDATE emergency_requests/i.test(sql)) {
+          mutated = true;
+        }
+
+        throw new Error(`Unexpected SQL: ${sql}`);
+      });
+
+      const result = await cancelEmergencyRequest({
+        pool,
+        homeownerUserId: 7,
+        emergencyRequestId: 41,
+      });
+
+      assert.equal(result.ok, false);
+      assert.equal(result.status, 409);
+      assert.equal(result.code, "EMERGENCY_REQUEST_NOT_CANCELLABLE");
+      assert.equal(mutated, false);
+      assert.equal(rolledBack, true);
+    });
+  }
+});
+
 test("persistence failure rolls back and releases the client", async () => {
   let rolledBack = false;
 

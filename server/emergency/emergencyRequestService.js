@@ -47,6 +47,13 @@ const HISTORY_EMERGENCY_REQUEST_STATUSES = Object.freeze([
   "unable_to_match",
 ]);
 
+const CANCELLABLE_EMERGENCY_REQUEST_STATUSES = Object.freeze([
+  "draft",
+  "ready_for_distribution",
+  "active",
+  "selection_pending",
+]);
+
 const EMERGENCY_REQUEST_LIST_VIEWS = Object.freeze({
   active: ACTIVE_EMERGENCY_REQUEST_STATUSES,
   history: HISTORY_EMERGENCY_REQUEST_STATUSES,
@@ -1198,7 +1205,7 @@ async function cancelEmergencyRequest({
       };
     }
 
-    if (["assigned", "in_service", "resolved"].includes(current.row.status)) {
+    if (!CANCELLABLE_EMERGENCY_REQUEST_STATUSES.includes(current.row.status)) {
       await client.query("ROLLBACK");
       return {
         ok: false,
