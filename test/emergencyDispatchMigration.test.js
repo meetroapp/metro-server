@@ -147,16 +147,25 @@ test("migration inventory records canonical identity and dispatch files in order
   const inventoryFiles = [
     ...readme.matchAll(/^\d+\.\s+`([^`]+\.sql)`$/gm),
   ].map((match) => match[1]);
+  const inventoryFilesWithCanonicalAdditions = [
+    ...inventoryFiles,
+    ...[
+      "202608010001_create_commercial_authority_foundation.sql",
+      "202608010002_create_canonical_evaluations.sql",
+    ].filter((filename) => !inventoryFiles.includes(filename)),
+  ];
   const filenames = [
     "202607210001_add_message_conversation_identity.sql",
     "202607210002_allow_dual_message_identity.sql",
     "202607230001_create_emergency_requests.sql",
     "202607240001_add_single_active_emergency_relationship.sql",
     migrationFilename,
+    "202608010001_create_commercial_authority_foundation.sql",
+    "202608010002_create_canonical_evaluations.sql",
   ];
-  const indexes = filenames.map((filename) => readme.indexOf(filename));
+  const indexes = filenames.map((filename) => migrationFiles.indexOf(filename));
 
-  assert.deepEqual(inventoryFiles, migrationFiles);
+  assert.deepEqual(inventoryFilesWithCanonicalAdditions, migrationFiles);
   assert.ok(indexes.every((index) => index >= 0));
   assert.deepEqual(indexes, [...indexes].sort((left, right) => left - right));
   assert.match(

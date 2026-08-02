@@ -21,12 +21,16 @@ const serviceSource = readFileSync(
 );
 const indexSource = readFileSync(join(repositoryRoot, "index.js"), "utf8");
 
-test("commercial authority migration is the next unique additive migration", () => {
+test("commercial authority foundation remains the first unique authority migration", () => {
   const migrations = readdirSync(join(repositoryRoot, "migrations"))
     .filter((name) => /^\d+.*\.sql$/.test(name))
     .sort();
 
-  assert.equal(migrations.at(-1), migrationName);
+  assert.ok(migrations.includes(migrationName));
+  assert.ok(
+    migrations.indexOf(migrationName) <
+      migrations.indexOf("202608010002_create_canonical_evaluations.sql")
+  );
   assert.equal(
     migrations.filter((name) => name.startsWith("202608010001_")).length,
     1

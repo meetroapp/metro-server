@@ -96,6 +96,10 @@ const {
   registerEmergencyRequestRoutes,
 } = require("./server/emergency/emergencyRequests");
 
+const {
+  registerEvaluationRoutes,
+} = require("./server/authorization/evaluations");
+
 
 const JWT_SECRET = resolveJwtSecret(process.env);
 const BCRYPT_ROUNDS = 10;
@@ -703,6 +707,13 @@ async function authMiddleware(req, res, next) {
 }
 
 registerEmergencyRequestRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerEvaluationRoutes({
   app,
   authMiddleware,
   getPool,
