@@ -318,8 +318,18 @@ test("owner-only edit persists canonical response and cross-user edit is not dis
       if (sql.includes("FROM users WHERE id = $1")) {
         return { rows: [{ id: values[0], email: "owner@example.test", role: "user", token_version: 0 }] };
       }
+      if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql)) {
+        return { rows: [] };
+      }
+      if (sql.startsWith("SELECT id, title") && sql.includes("FOR UPDATE")) {
+        return { rows: Number(values[1]) === 7 ? [row()] : [] };
+      }
       if (sql.startsWith("UPDATE posts")) {
-        return { rows: Number(values[7]) === 7 ? [row({ title: values[1], description: values[3], location: values[5] })] : [] };
+        return {
+          rows: Number(values[10]) === 7
+            ? [row({ title: values[1], description: values[3], location: values[5] })]
+            : [],
+        };
       }
       throw new Error(`Unexpected query: ${sql}`);
     },
@@ -330,7 +340,8 @@ test("owner-only edit persists canonical response and cross-user edit is not dis
   });
   assert.equal(updated.statusCode, 200);
   assert.equal(updated.body.code, "REQUEST_UPDATED");
-  assert.match(calls.at(-1).sql, /WHERE id = \$7 AND user_id = \$8 AND status = 'open'/);
+  assert.match(calls.find((call) => call.sql.includes("FOR UPDATE")).sql, /FOR UPDATE/);
+  assert.match(calls.find((call) => call.sql.startsWith("UPDATE posts")).sql, /WHERE id = \$10 AND user_id = \$11 AND status = 'open'/);
 
   const denied = await invoke("put", "/posts/:id", {
     userId: 8,

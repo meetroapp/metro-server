@@ -503,6 +503,40 @@ function toSafePostRow(row = {}) {
   return serializeOwnedRequest(row, requestPhotos);
 }
 
+function getRequestPhotoPublicId(photo = {}) {
+  return String(photo?.public_id || "").trim();
+}
+
+function getRemovedRequestPhotos(previousPhotos = [], replacementPhotos = []) {
+  const retainedPublicIds = new Set(
+    replacementPhotos.map(getRequestPhotoPublicId).filter(Boolean)
+  );
+  return previousPhotos.filter((photo) => {
+    const publicId = getRequestPhotoPublicId(photo);
+    return publicId && !retainedPublicIds.has(publicId);
+  });
+}
+
+async function cleanupRemovedRequestPhotos({
+  req,
+  removedPhotos = [],
+  userId,
+} = {}) {
+  if (!removedPhotos.length) return;
+
+  try {
+    const mediaService =
+      req.app?.locals?.cloudinaryMedia || createCloudinaryMedia({ env: process.env });
+    for (const media of removedPhotos) {
+      await safelyDeleteRequestPhoto(mediaService, media.public_id, userId);
+    }
+  } catch {
+    console.error("Request photo media cleanup failed", {
+      code: "REQUEST_PHOTO_DELETE_FAILED",
+    });
+  }
+}
+
 function buildUserPostsQuery(userId) {
   return {
     text: `
@@ -1465,6 +1499,7 @@ app.get("/posts/:id", authMiddleware, async (req, res) => {
 });
 
 app.put("/posts/:id", authMiddleware, async (req, res) => {
+  let transactionStarted = false;
   try {
     const validation = validateRequestPayload(req.body, { partial: true });
     if (!validation.ok) {
@@ -1475,14 +1510,56 @@ app.put("/posts/:id", authMiddleware, async (req, res) => {
       });
     }
     const request = validation.request;
-    const result = await getPool(req).query(
+    const replacesRequestPhotos = Object.hasOwn(req.body, "request_photos");
+    const pool = getPool(req);
+
+    await pool.query("BEGIN");
+    transactionStarted = true;
+
+    const existing = await pool.query(
+      `
+      SELECT id, title, description, location, category, request_category,
+             service_domain, service_specialty, unit_number, access_notes, status,
+             created_at, updated_at, cancelled_at, mage_url, image_url, request_photos
+      FROM posts
+      WHERE id = $1 AND user_id = $2 AND status = 'open'
+      FOR UPDATE
+      `,
+      [req.params.id, req.user.id]
+    );
+
+    if (existing.rows.length === 0) {
+      await pool.query("ROLLBACK");
+      transactionStarted = false;
+      return res.status(404).json({
+        success: false,
+        code: "REQUEST_NOT_FOUND",
+        message: "Request was not found or cannot be edited.",
+      });
+    }
+
+    const previousRequestPhotos = parseStoredRequestPhotos(
+      existing.rows[0].request_photos
+    );
+    const normalizedRequestPhotos = replacesRequestPhotos
+      ? normalizeRequestPhotoCollection(req.body.request_photos, {
+          userId: req.user.id,
+        })
+      : previousRequestPhotos;
+    const compatibilityImageUrl = replacesRequestPhotos
+      ? normalizedRequestPhotos[0]?.secure_url || null
+      : existing.rows[0].image_url;
+
+    const result = await pool.query(
       `
       UPDATE posts
       SET title = CASE WHEN $1::boolean THEN $2 ELSE title END,
           description = CASE WHEN $3::boolean THEN $4 ELSE description END,
           location = CASE WHEN $5::boolean THEN $6 ELSE location END,
+          request_photos = CASE WHEN $7::boolean THEN $8::jsonb ELSE request_photos END,
+          image_url = CASE WHEN $7::boolean THEN $9 ELSE image_url END,
           updated_at = CURRENT_TIMESTAMP
-      WHERE id = $7 AND user_id = $8 AND status = 'open'
+      WHERE id = $10 AND user_id = $11 AND status = 'open'
       RETURNING *
       `,
       [
@@ -1492,23 +1569,52 @@ app.put("/posts/:id", authMiddleware, async (req, res) => {
         request.description,
         req.body.location !== undefined,
         request.location,
+        replacesRequestPhotos,
+        JSON.stringify(normalizedRequestPhotos),
+        compatibilityImageUrl,
         req.params.id,
         req.user.id,
       ]
     );
     if (result.rows.length === 0) {
+      await pool.query("ROLLBACK");
+      transactionStarted = false;
       return res.status(404).json({
         success: false,
         code: "REQUEST_NOT_FOUND",
         message: "Request was not found or cannot be edited.",
       });
     }
+    await pool.query("COMMIT");
+    transactionStarted = false;
+
+    if (replacesRequestPhotos) {
+      await cleanupRemovedRequestPhotos({
+        req,
+        userId: req.user.id,
+        removedPhotos: getRemovedRequestPhotos(
+          previousRequestPhotos,
+          normalizedRequestPhotos
+        ),
+      });
+    }
+
     return res.json({
       success: true,
       code: "REQUEST_UPDATED",
       post: toSafePostRow(result.rows[0]),
     });
   } catch (error) {
+    if (transactionStarted) {
+      try {
+        await getPool(req).query("ROLLBACK");
+      } catch {
+        // The public update response below remains the canonical failure signal.
+      }
+    }
+    if (error instanceof MediaValidationError) {
+      return sendMediaError(res, error);
+    }
     return sendPublicDatabaseError({
       res,
       error,

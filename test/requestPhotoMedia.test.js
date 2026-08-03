@@ -133,6 +133,83 @@ function createPool({ failInsert = false } = {}) {
   };
 }
 
+function canonicalPhoto(index = 1, overrides = {}) {
+  return normalizeRequestPhoto(payload(index, overrides), {
+    env: TEST_ENV,
+    userId: 7,
+  });
+}
+
+function createUpdatePool({
+  existingPhotos = [canonicalPhoto(1), canonicalPhoto(2)],
+  found = true,
+  failUpdate = false,
+} = {}) {
+  const calls = [];
+  const user = {
+    id: 7,
+    email: "owner@example.test",
+    role: "user",
+    token_version: 0,
+  };
+  const baseRow = {
+    id: 301,
+    user_id: user.id,
+    title: "Leaking window",
+    description: "Water around the sill",
+    category: "handyman",
+    request_category: "handyman",
+    service_domain: "home_services",
+    service_specialty: "handyman",
+    location: "Cape Coral",
+    unit_number: "",
+    access_notes: "",
+    status: "open",
+    image_url: existingPhotos[0]?.secure_url || null,
+    request_photos: existingPhotos,
+    created_at: "2026-07-19T18:00:00.000Z",
+    updated_at: "2026-07-19T18:00:00.000Z",
+    cancelled_at: null,
+  };
+
+  return {
+    calls,
+    user,
+    async query(text, values = []) {
+      const sql = String(text).replace(/\s+/g, " ").trim();
+      calls.push({ sql, values });
+      if (sql === "SELECT id, email, role, token_version FROM users WHERE id = $1") {
+        return { rows: Number(values[0]) === user.id ? [user] : [] };
+      }
+      if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql)) {
+        return { rows: [] };
+      }
+      if (sql.startsWith("SELECT id, title") && sql.includes("FOR UPDATE")) {
+        return { rows: found && Number(values[1]) === user.id ? [baseRow] : [] };
+      }
+      if (sql.startsWith("UPDATE posts")) {
+        if (failUpdate) throw new Error("request update failed");
+        const replacesPhotos = values[6] === true;
+        const requestPhotos = replacesPhotos
+          ? JSON.parse(values[7])
+          : existingPhotos;
+        return {
+          rows: [{
+            ...baseRow,
+            title: values[0] ? values[1] : baseRow.title,
+            description: values[2] ? values[3] : baseRow.description,
+            location: values[4] ? values[5] : baseRow.location,
+            request_photos: requestPhotos,
+            image_url: replacesPhotos ? values[8] : baseRow.image_url,
+            updated_at: "2026-07-19T19:00:00.000Z",
+          }],
+        };
+      }
+      throw new Error(`Unexpected request photo update query: ${sql}`);
+    },
+  };
+}
+
 function getHandlers(method, path) {
   const layer = app.router.stack.find(
     (item) => item.route?.path === path && item.route.methods[method]
@@ -151,13 +228,13 @@ function createResponse() {
   };
 }
 
-async function invoke(method, path, { pool = createPool(), body, mediaService = createMediaService(), token } = {}) {
+async function invoke(method, path, { pool = createPool(), body, mediaService = createMediaService(), token, params = {} } = {}) {
   app.locals.pool = pool;
   app.locals.cloudinaryMedia = mediaService;
   const req = {
     app,
     body: body || {},
-    params: {},
+    params,
     headers: {
       authorization: token || `Bearer ${createToken(pool.user)}`,
     },
@@ -306,4 +383,167 @@ test("request-photo cleanup is authenticated and owner-scoped", async () => {
     }),
   });
   assert.equal(foreign.res.statusCode, 400);
+});
+
+test("request-photo update omission preserves existing collection exactly", async () => {
+  const existingPhotos = [canonicalPhoto(1), canonicalPhoto(2)];
+  const pool = createUpdatePool({ existingPhotos });
+  const mediaService = createMediaService();
+  const { res } = await invoke("put", "/posts/:id", {
+    pool,
+    mediaService,
+    params: { id: "301" },
+    body: { title: "Updated leaking window" },
+  });
+
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body.post.request_photos, existingPhotos);
+  assert.equal(mediaService.deletions.length, 0);
+  const update = pool.calls.find((call) => call.sql.startsWith("UPDATE posts"));
+  assert.equal(update.values[6], false);
+});
+
+test("request-photo update replaces, reorders, and returns canonical order", async () => {
+  const pool = createUpdatePool();
+  const { res, pool: usedPool } = await invoke("put", "/posts/:id", {
+    pool,
+    params: { id: "301" },
+    body: {
+      request_photos: [payload(2), payload(1)],
+    },
+  });
+
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(
+    res.body.post.request_photos.map((item) => item.public_id),
+    [media(2).public_id, media(1).public_id]
+  );
+  assert.deepEqual(
+    res.body.post.request_photos.map((item) => item.display_order),
+    [0, 1]
+  );
+  assert.equal(res.body.post.image_url, media(2).secure_url);
+  const update = usedPool.calls.find((call) => call.sql.startsWith("UPDATE posts"));
+  assert.equal(update.values[6], true);
+  assert.equal(JSON.parse(update.values[7])[0].public_id, media(2).public_id);
+});
+
+test("request-photo update clears all photos and deletes removed media after persistence", async () => {
+  const existingPhotos = [canonicalPhoto(1), canonicalPhoto(2)];
+  const pool = createUpdatePool({ existingPhotos });
+  const mediaService = createMediaService();
+  const { res } = await invoke("put", "/posts/:id", {
+    pool,
+    mediaService,
+    params: { id: "301" },
+    body: { request_photos: [] },
+  });
+
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body.post.request_photos, []);
+  assert.equal(res.body.post.image_url, "");
+  assert.deepEqual(
+    mediaService.deletions.map((item) => item.publicId),
+    [media(1).public_id, media(2).public_id]
+  );
+  const updateIndex = pool.calls.findIndex((call) => call.sql.startsWith("UPDATE posts"));
+  const commitIndex = pool.calls.findIndex((call) => call.sql === "COMMIT");
+  assert.ok(updateIndex >= 0);
+  assert.ok(commitIndex > updateIndex);
+});
+
+test("request-photo update rejects malformed duplicate excessive and foreign media", async () => {
+  const excessive = await invoke("put", "/posts/:id", {
+    pool: createUpdatePool(),
+    params: { id: "301" },
+    body: {
+      request_photos: Array.from(
+        { length: REQUEST_PHOTO_MAX_COUNT + 1 },
+        (_, index) => payload(index + 1)
+      ),
+    },
+  });
+  assert.equal(excessive.res.statusCode, 400);
+
+  const duplicate = await invoke("put", "/posts/:id", {
+    pool: createUpdatePool(),
+    params: { id: "301" },
+    body: { request_photos: [payload(1), payload(1)] },
+  });
+  assert.equal(duplicate.res.statusCode, 400);
+
+  const foreign = await invoke("put", "/posts/:id", {
+    pool: createUpdatePool(),
+    params: { id: "301" },
+    body: {
+      request_photos: [payload(1, {
+        public_id: "meetro/production/users/8/request-photos/photo-1",
+      })],
+    },
+  });
+  assert.equal(foreign.res.statusCode, 400);
+
+  const invalid = await invoke("put", "/posts/:id", {
+    pool: createUpdatePool(),
+    params: { id: "301" },
+    body: {
+      request_photos: [payload(1, { bytes: 0 })],
+    },
+  });
+  assert.equal(invalid.res.statusCode, 400);
+});
+
+test("request-photo update rejects cross-owner or non-open requests before persistence", async () => {
+  const pool = createUpdatePool({ found: false });
+  const { res } = await invoke("put", "/posts/:id", {
+    pool,
+    params: { id: "301" },
+    body: { request_photos: [payload(1)] },
+  });
+
+  assert.equal(res.statusCode, 404);
+  assert.equal(res.body.code, "REQUEST_NOT_FOUND");
+  assert.equal(
+    pool.calls.some((call) => call.sql.startsWith("UPDATE posts")),
+    false
+  );
+});
+
+test("request-photo update persistence failure does not delete retained existing media", async () => {
+  const pool = createUpdatePool({ failUpdate: true });
+  const mediaService = createMediaService();
+  const { res } = await invoke("put", "/posts/:id", {
+    pool,
+    mediaService,
+    params: { id: "301" },
+    body: { request_photos: [payload(1), payload(3)] },
+  });
+
+  assert.equal(res.statusCode, 500);
+  assert.equal(mediaService.deletions.length, 0);
+  assert.equal(pool.calls.some((call) => call.sql === "ROLLBACK"), true);
+});
+
+test("request-photo removed-media cleanup failure does not reverse canonical persistence", async () => {
+  const pool = createUpdatePool();
+  const mediaService = {
+    deletions: [],
+    async deleteOwnedAsset(publicId) {
+      this.deletions.push(publicId);
+      throw new Error("cleanup unavailable");
+    },
+  };
+  const { res } = await invoke("put", "/posts/:id", {
+    pool,
+    mediaService,
+    params: { id: "301" },
+    body: { request_photos: [payload(1)] },
+  });
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.code, "REQUEST_UPDATED");
+  assert.deepEqual(res.body.post.request_photos.map((item) => item.public_id), [
+    media(1).public_id,
+  ]);
+  assert.deepEqual(mediaService.deletions, [media(2).public_id]);
 });

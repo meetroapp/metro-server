@@ -46,7 +46,7 @@ function validateRequestPayload(body, { partial = false } = {}) {
   }
 
   const allowed = new Set(partial
-    ? ["title", "description", "location"]
+    ? ["title", "description", "location", "request_photos"]
     : [
         "title", "description", "category", "request_category", "service_domain",
         "service_specialty", "location", "unit_number", "access_notes", "request_photos",
@@ -56,7 +56,7 @@ function validateRequestPayload(body, { partial = false } = {}) {
   if (Object.keys(body).some((key) => !allowed.has(key))) {
     return { ok: false, status: 400, code: "UNSUPPORTED_REQUEST_FIELDS", message: "One or more request fields are not supported." };
   }
-  if (partial && !["title", "description", "location"].some((key) => body[key] !== undefined)) {
+  if (partial && !["title", "description", "location", "request_photos"].some((key) => body[key] !== undefined)) {
     return { ok: false, status: 400, code: "REQUEST_UPDATE_REQUIRED", message: "At least one editable request field is required." };
   }
 
