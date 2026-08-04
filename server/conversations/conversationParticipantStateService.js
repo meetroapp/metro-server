@@ -3,6 +3,9 @@
 const {
   parsePositiveInteger,
 } = require("./conversations");
+const {
+  resolveCommunicationMessageAlerts,
+} = require("../alerts/communicationAlertService");
 
 const CONVERSATION_PARTICIPANT_ROLES = Object.freeze({
   HOMEOWNER: "homeowner",
@@ -367,6 +370,12 @@ async function markConversationRead({
         lastReadMessageId: latestMessage?.id ?? null,
         lastReadAt: latestMessage?.created_at ?? null,
       });
+
+    await resolveCommunicationMessageAlerts({
+      client,
+      conversationId: conversation.id,
+      participantUserId,
+    });
 
     await client.query("COMMIT");
 

@@ -18,6 +18,35 @@ function normalizeSql(sql) {
     .trim();
 }
 
+function communicationAlertRow(recipientUserId = 9) {
+  return {
+    id: 301,
+    recipient_user_id: recipientUserId,
+    source_domain: "communication",
+    source_event_type: "conversation.message_created",
+    source_entity_type: "conversation",
+    source_entity_id: "91",
+    source_event_id: "201",
+    category: "communication",
+    priority: "normal",
+    title_key: "alerts.communication.newMessage.title",
+    message_key: "alerts.communication.newMessage.message",
+    safe_payload: { shortPreview: "Canonical hello", unreadCount: 1 },
+    destination_type: "conversation",
+    destination_payload: { conversationId: 91 },
+    dedupe_key: `communication:conversation:91:recipient:${recipientUserId}:after:0`,
+    lifecycle_state: "active",
+    available_at: "2026-07-21T12:00:00.000Z",
+    expires_at: null,
+    read_at: null,
+    dismissed_at: null,
+    resolved_at: null,
+    archived_at: null,
+    created_at: "2026-07-21T12:00:00.000Z",
+    updated_at: "2026-07-21T12:00:00.000Z",
+  };
+}
+
 function getHandlers(method, path) {
   const layer = app.router.stack.find(
     (item) =>
@@ -131,6 +160,13 @@ function createPool({
         }
 
         if (
+          sql.includes("FROM conversation_participant_state") &&
+          sql.includes("last_read_message_id")
+        ) {
+          return { rows: [{ last_read_message_id: null }] };
+        }
+
+        if (
           sql.includes(
             "INSERT INTO conversation_participant_state AS participant_state"
           )
@@ -181,6 +217,17 @@ function createPool({
 
         if (sql.includes("UPDATE conversations")) {
           return { rows: [], rowCount: 1 };
+        }
+
+        if (sql.includes("COUNT(*)::bigint AS unread_count")) {
+          return { rows: [{ unread_count: "1" }] };
+        }
+
+        if (sql.includes("INSERT INTO alerts")) {
+          return {
+            rows: [communicationAlertRow(values[0])],
+            rowCount: 1,
+          };
         }
 
         if (
@@ -443,19 +490,25 @@ test("canonical POST requires authentication without database access", async () 
   assert.equal(queried, false);
 });
 
-test("canonical POST database failures use the safe public contract", async () => {
-  const fake = createPool({ failOn: "INSERT INTO messages" });
-  const result = await invoke({
-    method: "post",
-    body: { message_text: "Hello" },
-    pool: fake.pool,
-  });
+test("canonical POST message and alert failures use the same safe public contract", async () => {
+  for (const failOn of ["INSERT INTO messages", "INSERT INTO alerts"]) {
+    const fake = createPool({ failOn });
+    const result = await invoke({
+      method: "post",
+      body: { message_text: "Hello" },
+      pool: fake.pool,
+    });
 
-  assert.equal(result.statusCode, 500);
-  assert.deepEqual(result.body, {
-    error: "CONVERSATION_MESSAGE_SEND_FAILED",
-    message: "The conversation message could not be sent.",
-  });
+    assert.equal(result.statusCode, 500);
+    assert.deepEqual(result.body, {
+      error: "CONVERSATION_MESSAGE_SEND_FAILED",
+      message: "The conversation message could not be sent.",
+    });
+    assert.doesNotMatch(
+      JSON.stringify(result.body),
+      /private simulated database failure|alert|recipient|dedupe/i
+    );
+  }
 });
 
 test("participant receives privacy-safe canonical messages", async () => {

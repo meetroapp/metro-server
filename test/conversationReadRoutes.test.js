@@ -145,6 +145,13 @@ function createPool({
       };
     }
 
+    if (
+      sql.includes("UPDATE alerts") &&
+      sql.includes("lifecycle_state = 'resolved'")
+    ) {
+      return { rows: [], rowCount: 0 };
+    }
+
     throw new Error(`Unexpected SQL: ${sql}`);
   };
 
@@ -277,7 +284,7 @@ test("outsider receives the privacy-safe conversation not-found contract", async
   });
 });
 
-test("repeated route calls remain successful and do not mutate messages or workflow", async () => {
+test("repeated route calls resolve communication attention without mutating messages or workflow", async () => {
   const fake = createPool();
 
   assert.equal((await invoke({ pool: fake.pool })).statusCode, 200);
@@ -289,23 +296,39 @@ test("repeated route calls remain successful and do not mutate messages or workf
     sql,
     /workflow_events|request_relationships|emergency_requests/i
   );
-  assert.doesNotMatch(sql, /alerts?|notifications?/i);
+  const alertResolutions = fake.calls.filter(({ sql: value }) =>
+    value.includes("UPDATE alerts") &&
+    value.includes("lifecycle_state = 'resolved'")
+  );
+  assert.equal(alertResolutions.length, 2);
+  assert.ok(alertResolutions.every(({ values }) =>
+    JSON.stringify(values.slice(0, 5)) === JSON.stringify([
+      "communication",
+      "conversation",
+      "91",
+      "conversation.message_created",
+      7,
+    ])
+  ));
 });
 
-test("mark-read database errors use the normalized public contract", async () => {
-  const fake = createPool({
-    failOn: "INSERT INTO conversation_participant_state",
-  });
-  const result = await invoke({ pool: fake.pool });
+test("mark-read state and alert-resolution failures use the normalized public contract", async () => {
+  for (const failOn of [
+    "INSERT INTO conversation_participant_state",
+    "UPDATE alerts",
+  ]) {
+    const fake = createPool({ failOn });
+    const result = await invoke({ pool: fake.pool });
 
-  assert.equal(result.statusCode, 500);
-  assert.deepEqual(result.body, {
-    error: "CONVERSATION_MARK_READ_FAILED",
-    message:
-      "The conversation read state could not be updated.",
-  });
-  assert.doesNotMatch(
-    JSON.stringify(result.body),
-    /private route database failure/
-  );
+    assert.equal(result.statusCode, 500);
+    assert.deepEqual(result.body, {
+      error: "CONVERSATION_MARK_READ_FAILED",
+      message:
+        "The conversation read state could not be updated.",
+    });
+    assert.doesNotMatch(
+      JSON.stringify(result.body),
+      /private route database failure|alert|recipient|dedupe/i
+    );
+  }
 });

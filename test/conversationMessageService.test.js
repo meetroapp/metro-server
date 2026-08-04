@@ -21,6 +21,35 @@ function normalizeSql(sql) {
     .trim();
 }
 
+function communicationAlertRow(recipientUserId = 9) {
+  return {
+    id: 301,
+    recipient_user_id: recipientUserId,
+    source_domain: "communication",
+    source_event_type: "conversation.message_created",
+    source_entity_type: "conversation",
+    source_entity_id: "91",
+    source_event_id: "201",
+    category: "communication",
+    priority: "normal",
+    title_key: "alerts.communication.newMessage.title",
+    message_key: "alerts.communication.newMessage.message",
+    safe_payload: { shortPreview: "Hello", unreadCount: 1 },
+    destination_type: "conversation",
+    destination_payload: { conversationId: 91 },
+    dedupe_key: `communication:conversation:91:recipient:${recipientUserId}:after:0`,
+    lifecycle_state: "active",
+    available_at: "2026-07-21T12:00:00.000Z",
+    expires_at: null,
+    read_at: null,
+    dismissed_at: null,
+    resolved_at: null,
+    archived_at: null,
+    created_at: "2026-07-21T12:00:00.000Z",
+    updated_at: "2026-07-21T12:00:00.000Z",
+  };
+}
+
 function createPool(rows = []) {
   const calls = [];
 
@@ -83,6 +112,13 @@ function createWritePool({
         return { rows: [], rowCount: 2 };
       }
 
+      if (
+        sql.includes("FROM conversation_participant_state") &&
+        sql.includes("last_read_message_id")
+      ) {
+        return { rows: [{ last_read_message_id: null }] };
+      }
+
       if (sql.includes("INSERT INTO messages")) {
         return {
           rows: [{
@@ -119,6 +155,17 @@ function createWritePool({
 
       if (sql.includes("UPDATE conversations")) {
         return { rows: [], rowCount: activityRowCount };
+      }
+
+      if (sql.includes("COUNT(*)::bigint AS unread_count")) {
+        return { rows: [{ unread_count: "1" }] };
+      }
+
+      if (sql.includes("INSERT INTO alerts")) {
+        return {
+          rows: [communicationAlertRow(params[0])],
+          rowCount: 1,
+        };
       }
 
       throw new Error(`Unexpected SQL: ${sql}`);
@@ -262,6 +309,29 @@ test("homeowner canonical send locks, inserts fixed identity, updates activity, 
 
   const activity = fake.calls.find(({ sql }) => sql.includes("UPDATE conversations"));
   assert.deepEqual(activity.params, [91, "2026-07-21T12:00:00.000Z"]);
+
+  const attentionWindow = fake.calls.find(({ sql }) =>
+    sql.includes("FROM conversation_participant_state") &&
+    sql.includes("FOR UPDATE")
+  );
+  const unreadCount = fake.calls.find(({ sql }) =>
+    sql.includes("COUNT(*)::bigint AS unread_count")
+  );
+  const alertInsert = fake.calls.find(({ sql }) =>
+    sql.includes("INSERT INTO alerts")
+  );
+  assert.deepEqual(attentionWindow.params, [91, 9]);
+  assert.deepEqual(unreadCount.params, [91, 9, null]);
+  assert.equal(alertInsert.params[0], 9);
+  assert.equal(alertInsert.params[4], "91");
+  assert.equal(alertInsert.params[5], "201");
+  assert.ok(fake.calls.indexOf(attentionWindow) < fake.calls.indexOf(inserted));
+  assert.ok(fake.calls.indexOf(inserted) < fake.calls.indexOf(unreadCount));
+  assert.ok(fake.calls.indexOf(activity) < fake.calls.indexOf(alertInsert));
+  assert.ok(
+    fake.calls.indexOf(alertInsert) <
+      fake.calls.findIndex(({ sql }) => sql === "COMMIT")
+  );
 });
 
 test("professional canonical send resolves the homeowner server-side", async () => {
@@ -345,8 +415,12 @@ test("non-participant and closed conversation failures roll back without inserti
   }
 });
 
-test("insert and activity failures roll back and release without commit", async () => {
-  for (const failOn of ["INSERT INTO messages", "UPDATE conversations"]) {
+test("message, activity, and alert failures roll back and release without commit", async () => {
+  for (const failOn of [
+    "INSERT INTO messages",
+    "UPDATE conversations",
+    "INSERT INTO alerts",
+  ]) {
     const fake = createWritePool({ failOn });
 
     await assert.rejects(
@@ -363,6 +437,40 @@ test("insert and activity failures roll back and release without commit", async 
     assert.equal(fake.calls.some(({ sql }) => sql === "COMMIT"), false);
     assert.equal(fake.releases, 1);
   }
+});
+
+test("alert persistence failure rolls back message, sender read state, and activity atomically", async () => {
+  const fake = createWritePool({ failOn: "INSERT INTO alerts" });
+
+  await assert.rejects(
+    createConversationMessage({
+      pool: fake.pool,
+      conversationId: 91,
+      senderUserId: 7,
+      payload: { message_text: "Atomic alert failure" },
+    }),
+    /private simulated database failure/
+  );
+
+  const insertedIndex = fake.calls.findIndex(({ sql }) =>
+    sql.includes("INSERT INTO messages")
+  );
+  const senderAdvanceIndex = fake.calls.findIndex(({ sql }) =>
+    sql.includes("INSERT INTO conversation_participant_state AS participant_state")
+  );
+  const activityIndex = fake.calls.findIndex(({ sql }) =>
+    sql.includes("UPDATE conversations")
+  );
+  const alertIndex = fake.calls.findIndex(({ sql }) =>
+    sql.includes("INSERT INTO alerts")
+  );
+  const rollbackIndex = fake.calls.findIndex(({ sql }) => sql === "ROLLBACK");
+  assert.ok(insertedIndex >= 0);
+  assert.ok(insertedIndex < senderAdvanceIndex);
+  assert.ok(senderAdvanceIndex < activityIndex);
+  assert.ok(activityIndex < alertIndex);
+  assert.ok(alertIndex < rollbackIndex);
+  assert.equal(fake.calls.some(({ sql }) => sql === "COMMIT"), false);
 });
 
 test("canonical sending supports a direct database client", async () => {

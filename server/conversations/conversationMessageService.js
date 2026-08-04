@@ -7,6 +7,11 @@ const {
   advanceConversationParticipantReadStateWithClient,
   ensureConversationParticipantStatesWithClient,
 } = require("./conversationParticipantStateService");
+const {
+  createOrRefreshCommunicationMessageAlert,
+  getCommunicationAttentionWindowWithClient,
+  resolveCommunicationRecipient,
+} = require("../alerts/communicationAlertService");
 
 const DEFAULT_MESSAGE_PAGE_SIZE = 50;
 const MAX_MESSAGE_PAGE_SIZE = 100;
@@ -214,14 +219,10 @@ async function createConversationMessage({
       };
     }
 
-    const receiverId =
-      Number(conversation.homeowner_id) === senderUserId
-        ? parsePositiveInteger(
-            conversation.professional_user_id
-          )
-        : parsePositiveInteger(
-            conversation.homeowner_id
-          );
+    const receiverId = resolveCommunicationRecipient(
+      conversation,
+      senderUserId
+    );
 
     if (!receiverId || receiverId === senderUserId) {
       throw new Error(
@@ -233,6 +234,13 @@ async function createConversationMessage({
       client,
       conversationId: conversation.id,
     });
+
+    const recipientAttentionWindow =
+      await getCommunicationAttentionWindowWithClient({
+        client,
+        conversationId: conversation.id,
+        recipientUserId: receiverId,
+      });
 
     const messageResult = await client.query(
       `
@@ -312,6 +320,16 @@ async function createConversationMessage({
         "Conversation activity could not be updated."
       );
     }
+
+    await createOrRefreshCommunicationMessageAlert({
+      client,
+      conversation,
+      senderUserId,
+      recipientUserId: receiverId,
+      recipientLastReadMessageId:
+        recipientAttentionWindow.lastReadMessageId,
+      message,
+    });
 
     await client.query("COMMIT");
 

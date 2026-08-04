@@ -100,6 +100,13 @@ function createMarkReadPool({
         };
       }
 
+      if (
+        sql.includes("UPDATE alerts") &&
+        sql.includes("lifecycle_state = 'resolved'")
+      ) {
+        return { rows: [], rowCount: 0 };
+      }
+
       throw new Error(`Unexpected SQL: ${sql}`);
     },
 
@@ -310,6 +317,22 @@ test("participant mark-read locks and authorizes before advancing to the current
   ]);
   assert.ok(fake.calls.indexOf(locked) < fake.calls.indexOf(latest));
   assert.ok(fake.calls.indexOf(latest) < fake.calls.indexOf(advanced));
+  const resolved = fake.calls.find(({ sql }) =>
+    sql.includes("UPDATE alerts") &&
+    sql.includes("lifecycle_state = 'resolved'")
+  );
+  assert.deepEqual(resolved.params.slice(0, 5), [
+    "communication",
+    "conversation",
+    "91",
+    "conversation.message_created",
+    7,
+  ]);
+  assert.ok(fake.calls.indexOf(advanced) < fake.calls.indexOf(resolved));
+  assert.ok(
+    fake.calls.indexOf(resolved) <
+      fake.calls.findIndex(({ sql }) => sql === "COMMIT")
+  );
 });
 
 test("mark-read remains successful and idempotent with no canonical messages", async () => {
@@ -439,6 +462,34 @@ test("mark-read rolls back transaction failures and releases the client", async 
   assert.equal(fake.releases, 1);
 });
 
+test("alert resolution failure rolls back the participant read marker", async () => {
+  const fake = createMarkReadPool({
+    failOn: "UPDATE alerts",
+  });
+
+  await assert.rejects(
+    markConversationRead({
+      pool: fake.pool,
+      conversationId: 91,
+      participantUserId: 7,
+    }),
+    /private simulated read-state failure/
+  );
+
+  const advanceIndex = fake.calls.findIndex(({ sql }) =>
+    sql.includes("INSERT INTO conversation_participant_state AS participant_state")
+  );
+  const resolveIndex = fake.calls.findIndex(({ sql }) =>
+    sql.includes("UPDATE alerts")
+  );
+  const rollbackIndex = fake.calls.findIndex(({ sql }) => sql === "ROLLBACK");
+  assert.ok(advanceIndex >= 0);
+  assert.ok(advanceIndex < resolveIndex);
+  assert.ok(resolveIndex < rollbackIndex);
+  assert.equal(fake.calls.some(({ sql }) => sql === "COMMIT"), false);
+  assert.equal(fake.releases, 1);
+});
+
 test("read-state serialization exposes only the viewer projection", () => {
   assert.deepEqual(
     serializeConversationReadState({
@@ -525,10 +576,8 @@ test("canonical summary path no longer hard-codes unread or preview placeholders
   );
 });
 
-test("004A participant state contains no alert or delivery implementation", () => {
+test("004A storage and summary remain separate from alert and delivery authority", () => {
   const sourcePaths = [
-    "server/conversations/conversationParticipantStateService.js",
-    "server/conversations/conversationMessageService.js",
     "server/conversations/conversationService.js",
     "migrations/202608030001_create_conversation_participant_state.sql",
   ];
@@ -545,4 +594,21 @@ test("004A participant state contains no alert or delivery implementation", () =
       /\b(?:alerts?|notifications?|createNotification|localStorage|sessionStorage|push_token|APNs|FCM|SMS)\b/i
     );
   }
+
+  const participantSource = fs.readFileSync(
+    path.join(
+      __dirname,
+      "..",
+      "server/conversations/conversationParticipantStateService.js"
+    ),
+    "utf8"
+  );
+  assert.match(
+    participantSource,
+    /resolveCommunicationMessageAlerts/
+  );
+  assert.doesNotMatch(
+    participantSource,
+    /localStorage|sessionStorage|push_token|APNs|FCM|SMS/i
+  );
 });

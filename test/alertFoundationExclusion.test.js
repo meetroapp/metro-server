@@ -55,9 +55,8 @@ test("004C registers only the five approved recipient alert routes", () => {
   }
 });
 
-test("004B does not wire alert producers into existing domains", () => {
+test("004D permits only the canonical communication producer and resolver", () => {
   const producerCandidates = [
-    "server/conversations/conversationMessageService.js",
     "server/emergency/emergencyDispatchService.js",
     "server/emergency/emergencyOpportunityService.js",
     "server/emergency/emergencyRequestService.js",
@@ -75,21 +74,50 @@ test("004B does not wire alert producers into existing domains", () => {
     );
   }
 
-
-  const allNonAlertServerSources = listJsFilesRecursively("server")
-    .filter((relativePath) => !relativePath.startsWith("server/alerts/"))
-    .map((relativePath) => read(relativePath))
-    .join("\n");
-  assert.doesNotMatch(
-    allNonAlertServerSources,
-    /require\(["'][^"']*\/alerts\/|createAlert\(|resolveAlertsBySource\(|expireAlert\(|archiveAlert\(/
+  const messageSource = read(
+    "server/conversations/conversationMessageService.js"
   );
+  const participantSource = read(
+    "server/conversations/conversationParticipantStateService.js"
+  );
+  assert.match(messageSource, /createOrRefreshCommunicationMessageAlert/);
+  assert.match(messageSource, /getCommunicationAttentionWindowWithClient/);
+  assert.match(participantSource, /resolveCommunicationMessageAlerts/);
+
+  const approved = new Set([
+    "server/conversations/conversationMessageService.js",
+    "server/conversations/conversationParticipantStateService.js",
+  ]);
+  for (const relativePath of listJsFilesRecursively("server")
+    .filter((item) => !item.startsWith("server/alerts/"))) {
+    const source = read(relativePath);
+    if (approved.has(relativePath)) continue;
+    assert.doesNotMatch(
+      source,
+      /require\(["'][^"']*\/alerts\/|createAlert\(|resolveAlertsBySource\(|createOrRefreshCommunicationMessageAlert|resolveCommunicationMessageAlerts/
+    );
+  }
 });
 
-test("004B keeps workflow events and 004A participant read state separate", () => {
-  const alertSources = listJsFiles("server/alerts")
+test("004D keeps generic alerts, workflow, and communication policy bounded", () => {
+  const genericAlertSources = listJsFiles("server/alerts")
+    .filter((relativePath) =>
+      !relativePath.endsWith("communicationAlertService.js")
+    )
     .map((relativePath) => read(relativePath))
     .join("\n");
-  assert.doesNotMatch(alertSources, /workflow_events/i);
-  assert.doesNotMatch(alertSources, /conversation_participant_state/i);
+  assert.doesNotMatch(genericAlertSources, /workflow_events/i);
+  assert.doesNotMatch(
+    genericAlertSources,
+    /conversation_participant_state/i
+  );
+
+  const communication = read(
+    "server/alerts/communicationAlertService.js"
+  );
+  assert.match(communication, /conversation_participant_state/);
+  assert.doesNotMatch(
+    communication,
+    /emergency_requests|workflow_events|request_relationships|evaluations|commercial/i
+  );
 });
