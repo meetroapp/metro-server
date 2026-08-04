@@ -122,6 +122,32 @@ function createPool({
         }
 
         if (
+          sql.includes("WITH participant_rows AS") &&
+          sql.includes(
+            "INSERT INTO conversation_participant_state"
+          )
+        ) {
+          return { rows: [], rowCount: 2 };
+        }
+
+        if (
+          sql.includes(
+            "INSERT INTO conversation_participant_state AS participant_state"
+          )
+        ) {
+          return {
+            rows: [{
+              conversation_id: values[0],
+              user_id: values[1],
+              participant_role: values[2],
+              last_read_message_id: values[3],
+              last_read_at: values[4],
+            }],
+            rowCount: 1,
+          };
+        }
+
+        if (
           sql.includes("FROM conversations") &&
           sql.includes(
             "WHERE conversations.id = $1"

@@ -84,6 +84,10 @@ const {
 } = require("./server/conversations/conversationMessageService");
 
 const {
+  markConversationRead,
+} = require("./server/conversations/conversationParticipantStateService");
+
+const {
   acceptHomeownerRequestRelationship,
   createProfessionalRequestRelationship,
   declineHomeownerRequestRelationship,
@@ -2077,6 +2081,46 @@ app.post(
         code: "CONVERSATION_MESSAGE_SEND_FAILED",
         message:
           "The conversation message could not be sent.",
+      });
+    }
+  }
+);
+
+app.post(
+  "/conversations/:conversationId/read",
+  authMiddleware,
+  async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+
+    try {
+      const result = await markConversationRead({
+        pool: getPool(req),
+        conversationId: req.params.conversationId,
+        participantUserId: req.user.id,
+      });
+
+      if (!result.ok) {
+        return res.status(result.status).json({
+          success: false,
+          code: result.code,
+          message: result.message,
+        });
+      }
+
+      return res.status(result.status).json({
+        success: true,
+        code: result.code,
+        conversationId: result.conversationId,
+        readState: result.readState,
+      });
+    } catch (error) {
+      return sendPublicDatabaseError({
+        res,
+        error,
+        operation: "mark_conversation_read",
+        code: "CONVERSATION_MARK_READ_FAILED",
+        message:
+          "The conversation read state could not be updated.",
       });
     }
   }

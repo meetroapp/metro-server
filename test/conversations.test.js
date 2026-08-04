@@ -257,6 +257,8 @@ test("homeowner conversation summary exposes UI-safe relationship and business c
     professional_archived_at: "2026-07-21T14:00:00.000Z",
     created_at: "2026-07-20T14:00:00.000Z",
     updated_at: "2026-07-22T14:00:00.000Z",
+    last_message_preview: "Latest canonical message",
+    unread_count: "3",
   });
 
   assert.deepEqual(summary, {
@@ -280,8 +282,8 @@ test("homeowner conversation summary exposes UI-safe relationship and business c
       requires_attention: false,
     },
     last_activity: "2026-07-22T14:00:00.000Z",
-    last_message_preview: null,
-    unread_count: 0,
+    last_message_preview: "Latest canonical message",
+    unread_count: 3,
     conversation_available: true,
     permissions: {
       canSendMessages: true,
@@ -317,6 +319,8 @@ test("professional conversation summary uses the same UI contract", () => {
     professional_archived_at: "2026-07-21T14:00:00.000Z",
     created_at: "2026-07-20T14:00:00.000Z",
     updated_at: "2026-07-22T14:00:00.000Z",
+    last_message_preview: "Professional summary message",
+    unread_count: 2,
   });
 
   assert.deepEqual(summary, {
@@ -338,8 +342,8 @@ test("professional conversation summary uses the same UI contract", () => {
       requires_attention: false,
     },
     last_activity: "2026-07-22T14:00:00.000Z",
-    last_message_preview: null,
-    unread_count: 0,
+    last_message_preview: "Professional summary message",
+    unread_count: 2,
     conversation_available: true,
   });
 

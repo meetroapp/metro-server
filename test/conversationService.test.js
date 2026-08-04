@@ -54,6 +54,14 @@ function createConversationPool({
         return { rows: conversationRows };
       }
 
+      if (
+        normalized.includes(
+          "INSERT INTO conversation_participant_state"
+        )
+      ) {
+        return { rows: [], rowCount: 2 };
+      }
+
       throw new Error(`Unexpected SQL: ${normalized}`);
     },
 
@@ -324,6 +332,33 @@ test("homeowner conversation list is owner scoped", async () => {
       /ORDER BY conversations\.updated_at DESC, conversations\.id DESC/
     );
 
+    assert.match(
+      sql,
+      /LEFT JOIN conversation_participant_state AS participant_state/
+    );
+
+    assert.match(
+      sql,
+      /messages\.conversation_id = conversations\.id/
+    );
+
+    assert.match(
+      sql,
+      /messages\.sender_id <> \$1/
+    );
+
+    assert.match(
+      sql,
+      /messages\.id > COALESCE\( participant_state\.last_read_message_id, 0 \)/
+    );
+
+    assert.match(
+      sql,
+      /THEN LEFT\( messages\.message_text, 160 \)/
+    );
+
+    assert.doesNotMatch(sql, /quote_request_id/);
+
     assert.deepEqual(params, [7, false]);
 
     return { rows };
@@ -405,6 +440,16 @@ test("professional conversation list enforces business ownership", async () => {
     assert.match(
       sql,
       /request_relationships\.post_id IS NULL AND request_relationships\.emergency_request_id IS NOT NULL AND request_relationships\.status = 'active'/
+    );
+
+    assert.match(
+      sql,
+      /LEFT JOIN conversation_participant_state AS participant_state/
+    );
+
+    assert.match(
+      sql,
+      /messages\.sender_id <> \$1/
     );
 
     assert.deepEqual(params, [9, false]);
@@ -614,6 +659,14 @@ test("client-level conversation ensure does not control the caller transaction",
         };
       }
 
+      if (
+        normalized.includes(
+          "INSERT INTO conversation_participant_state"
+        )
+      ) {
+        return { rows: [], rowCount: 2 };
+      }
+
       throw new Error(`Unexpected SQL: ${normalized}`);
     },
   };
@@ -676,6 +729,14 @@ test("client-level conversation ensure never releases a caller-owned client", as
             created: false,
           }],
         };
+      }
+
+      if (
+        normalized.includes(
+          "INSERT INTO conversation_participant_state"
+        )
+      ) {
+        return { rows: [], rowCount: 2 };
       }
 
       throw new Error(`Unexpected SQL: ${normalized}`);

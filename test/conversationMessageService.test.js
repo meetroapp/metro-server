@@ -76,6 +76,13 @@ function createWritePool({
         };
       }
 
+      if (
+        sql.includes("WITH participant_rows AS") &&
+        sql.includes("INSERT INTO conversation_participant_state")
+      ) {
+        return { rows: [], rowCount: 2 };
+      }
+
       if (sql.includes("INSERT INTO messages")) {
         return {
           rows: [{
@@ -90,6 +97,23 @@ function createWritePool({
             workflow_payload: {},
             created_at: "2026-07-21T12:00:00.000Z",
           }],
+        };
+      }
+
+      if (
+        sql.includes(
+          "INSERT INTO conversation_participant_state AS participant_state"
+        )
+      ) {
+        return {
+          rows: [{
+            conversation_id: params[0],
+            user_id: params[1],
+            participant_role: params[2],
+            last_read_message_id: params[3],
+            last_read_at: params[4],
+          }],
+          rowCount: 1,
         };
       }
 
@@ -204,6 +228,38 @@ test("homeowner canonical send locks, inserts fixed identity, updates activity, 
   assert.match(inserted.sql, /quote_request_id, conversation_id, sender_id, receiver_id/);
   assert.match(inserted.sql, /VALUES \( NULL, \$1, \$2, \$3, \$4, NULL, 'text', NULL, NULL, '\{\}'::jsonb \)/);
 
+  const participantEnsure = fake.calls.find(({ sql }) =>
+    sql.includes("WITH participant_rows AS")
+  );
+  const senderAdvance = fake.calls.find(({ sql }) =>
+    sql.includes(
+      "INSERT INTO conversation_participant_state AS participant_state"
+    )
+  );
+
+  assert.ok(participantEnsure);
+  assert.deepEqual(participantEnsure.params, [91]);
+  assert.ok(senderAdvance);
+  assert.deepEqual(senderAdvance.params, [
+    91,
+    7,
+    "homeowner",
+    201,
+    "2026-07-21T12:00:00.000Z",
+  ]);
+  assert.ok(
+    fake.calls.indexOf(participantEnsure) <
+      fake.calls.indexOf(inserted)
+  );
+  assert.ok(
+    fake.calls.indexOf(inserted) <
+      fake.calls.indexOf(senderAdvance)
+  );
+  assert.match(
+    senderAdvance.sql,
+    /ELSE GREATEST\( participant_state\.last_read_message_id, EXCLUDED\.last_read_message_id \)/
+  );
+
   const activity = fake.calls.find(({ sql }) => sql.includes("UPDATE conversations"));
   assert.deepEqual(activity.params, [91, "2026-07-21T12:00:00.000Z"]);
 });
@@ -220,6 +276,19 @@ test("professional canonical send resolves the homeowner server-side", async () 
 
   const inserted = fake.calls.find(({ sql }) => sql.includes("INSERT INTO messages"));
   assert.deepEqual(inserted.params, [91, 9, 7, "Hello homeowner"]);
+
+  const senderAdvance = fake.calls.find(({ sql }) =>
+    sql.includes(
+      "INSERT INTO conversation_participant_state AS participant_state"
+    )
+  );
+  assert.deepEqual(senderAdvance.params.slice(0, 4), [
+    91,
+    9,
+    "professional",
+    201,
+  ]);
+  assert.notEqual(senderAdvance.params[1], 7);
 });
 
 test("validation and invalid identity failures occur before database access", async () => {

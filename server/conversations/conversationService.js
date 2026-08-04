@@ -1,6 +1,11 @@
 "use strict";
 
 const { parsePositiveInteger } = require("./conversations");
+const {
+  ensureConversationParticipantStatesWithClient,
+} = require("./conversationParticipantStateService");
+
+const LAST_MESSAGE_PREVIEW_LENGTH = 160;
 
 function requireDatabasePool(pool) {
   if (!pool || typeof pool.query !== "function") {
@@ -110,6 +115,11 @@ async function ensureConversationWithClient({
     );
   }
 
+  await ensureConversationParticipantStatesWithClient({
+    client,
+    conversationId: conversation.id,
+  });
+
   return {
     ok: true,
     status: conversation.created ? 201 : 200,
@@ -201,6 +211,48 @@ const SOURCE_JOINS = `
     ON request_relationships.emergency_request_id = emergency_requests.id
 `;
 
+const PARTICIPANT_MESSAGE_PROJECTION = `
+  latest_message.last_message_preview,
+  CASE
+    WHEN participant_state.user_id IS NULL THEN 0
+    ELSE COALESCE(unread_messages.unread_count, 0)
+  END AS unread_count
+`;
+
+const PARTICIPANT_MESSAGE_JOINS = `
+  LEFT JOIN conversation_participant_state AS participant_state
+    ON participant_state.conversation_id = conversations.id
+    AND participant_state.user_id = $1
+  LEFT JOIN LATERAL (
+    SELECT
+      CASE
+        WHEN
+          messages.message_type = 'text'
+          AND NULLIF(TRIM(messages.message_text), '') IS NOT NULL
+          THEN LEFT(
+            messages.message_text,
+            ${LAST_MESSAGE_PREVIEW_LENGTH}
+          )
+        ELSE NULL
+      END AS last_message_preview
+    FROM messages
+    WHERE messages.conversation_id = conversations.id
+    ORDER BY messages.id DESC
+    LIMIT 1
+  ) AS latest_message ON TRUE
+  LEFT JOIN LATERAL (
+    SELECT COUNT(*)::integer AS unread_count
+    FROM messages
+    WHERE messages.conversation_id = conversations.id
+      AND messages.sender_id <> $1
+      AND participant_state.user_id IS NOT NULL
+      AND messages.id > COALESCE(
+        participant_state.last_read_message_id,
+        0
+      )
+  ) AS unread_messages ON TRUE
+`;
+
 async function listHomeownerConversations({
   pool,
   homeownerUserId,
@@ -222,6 +274,7 @@ async function listHomeownerConversations({
       conversations.closed_at,
       conversations.created_at,
       conversations.updated_at,
+      ${PARTICIPANT_MESSAGE_PROJECTION},
       contractor_profiles.business_name,
       contractor_profiles.image_url AS business_image_url,
       contractor_profiles.category AS professional_category
@@ -231,6 +284,7 @@ async function listHomeownerConversations({
     JOIN request_relationships
       ON conversations.relationship_id = request_relationships.id
     ${SOURCE_JOINS}
+    ${PARTICIPANT_MESSAGE_JOINS}
     WHERE conversations.homeowner_id = $1
       AND request_relationships.homeowner_id = $1
       AND contractor_profiles.user_id = conversations.professional_user_id
@@ -282,6 +336,7 @@ async function listProfessionalConversations({
       conversations.closed_at,
       conversations.created_at,
       conversations.updated_at,
+      ${PARTICIPANT_MESSAGE_PROJECTION},
       ${SOURCE_PROJECTION},
       COALESCE(NULLIF(TRIM(users.username), ''), 'Customer') AS homeowner_display_name
     FROM conversations
@@ -290,6 +345,7 @@ async function listProfessionalConversations({
     JOIN contractor_profiles
       ON conversations.contractor_id = contractor_profiles.id
     ${SOURCE_JOINS}
+    ${PARTICIPANT_MESSAGE_JOINS}
     JOIN users
       ON conversations.homeowner_id = users.id
     WHERE conversations.professional_user_id = $1
@@ -400,6 +456,7 @@ async function getConversation({
 }
 
 module.exports = {
+  LAST_MESSAGE_PREVIEW_LENGTH,
   ensureConversation,
   ensureConversationWithClient,
   getConversation,

@@ -3,6 +3,10 @@
 const {
   parsePositiveInteger,
 } = require("./conversations");
+const {
+  advanceConversationParticipantReadStateWithClient,
+  ensureConversationParticipantStatesWithClient,
+} = require("./conversationParticipantStateService");
 
 const DEFAULT_MESSAGE_PAGE_SIZE = 50;
 const MAX_MESSAGE_PAGE_SIZE = 100;
@@ -225,6 +229,11 @@ async function createConversationMessage({
       );
     }
 
+    await ensureConversationParticipantStatesWithClient({
+      client,
+      conversationId: conversation.id,
+    });
+
     const messageResult = await client.query(
       `
       INSERT INTO messages
@@ -280,6 +289,14 @@ async function createConversationMessage({
         "The canonical message was not returned after insertion."
       );
     }
+
+    await advanceConversationParticipantReadStateWithClient({
+      client,
+      conversation,
+      participantUserId: senderUserId,
+      lastReadMessageId: message.id,
+      lastReadAt: message.created_at || null,
+    });
 
     const activityResult = await client.query(
       `

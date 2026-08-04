@@ -248,8 +248,14 @@ function serializeConversationSummaryForHomeowner(row = {}) {
       requires_attention: false,
     },
     last_activity: row.updated_at || row.created_at || null,
-    last_message_preview: null,
-    unread_count: 0,
+    last_message_preview:
+      typeof row.last_message_preview === "string"
+        ? row.last_message_preview
+        : null,
+    unread_count: Math.max(
+      0,
+      Number.parseInt(row.unread_count, 10) || 0
+    ),
     conversation_available: Boolean(conversationId),
     permissions: {
       canSendMessages:
@@ -300,8 +306,14 @@ function serializeConversationSummaryForProfessional(row = {}) {
       requires_attention: false,
     },
     last_activity: row.updated_at || row.created_at || null,
-    last_message_preview: null,
-    unread_count: 0,
+    last_message_preview:
+      typeof row.last_message_preview === "string"
+        ? row.last_message_preview
+        : null,
+    unread_count: Math.max(
+      0,
+      Number.parseInt(row.unread_count, 10) || 0
+    ),
     conversation_available:
       row.status === CONVERSATION_STATUSES.ACTIVE,
   };

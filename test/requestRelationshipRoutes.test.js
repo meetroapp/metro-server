@@ -753,6 +753,14 @@ function createRelationshipTransitionRoutePool({
         return { rows: conversationRows };
       }
 
+      if (
+        sql.includes(
+          "INSERT INTO conversation_participant_state"
+        )
+      ) {
+        return { rows: [], rowCount: 2 };
+      }
+
       throw new Error(`Unexpected query: ${sql}`);
     },
 

@@ -7,13 +7,19 @@ const test = require("node:test");
 
 const root = join(__dirname, "..");
 const migrationName = "202608010002_create_canonical_evaluations.sql";
+const participantStateMigrationName =
+  "202608030001_create_conversation_participant_state.sql";
 const sql = readFileSync(join(root, "migrations", migrationName), "utf8");
 
-test("canonical Evaluation migration is the next unique migration and remains additive", () => {
+test("canonical Evaluation migration remains unique, additive, and ordered before participant read state", () => {
   const migrations = readdirSync(join(root, "migrations"))
     .filter((name) => /^\d+.*\.sql$/.test(name))
     .sort();
-  assert.equal(migrations.at(-1), migrationName);
+  assert.ok(migrations.includes(participantStateMigrationName));
+  assert.ok(
+    migrations.indexOf(migrationName) <
+      migrations.indexOf(participantStateMigrationName)
+  );
   assert.equal(migrations.filter((name) => name.startsWith("202608010002_")).length, 1);
   assert.doesNotMatch(sql, /\b(?:DROP TABLE|TRUNCATE|DELETE FROM)\b/i);
   assert.doesNotMatch(sql, /\b(?:INSERT INTO|UPDATE|DELETE FROM)\s+(?:workflow_events|emergency_requests|request_relationships)\b/i);
