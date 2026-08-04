@@ -5,11 +5,14 @@ const test = require("node:test");
 
 const {
   archiveAlertWithClient,
+  countAlertsForRecipientWithClient,
   dismissAlertWithClient,
   expireAlertWithClient,
   findAnyAlertByRecipientWithClient,
   findAlertByRecipientWithClient,
   insertAlertWithClient,
+  listAlertsForRecipientWithClient,
+  markAlertsReadThroughCutoffWithClient,
   markAlertReadWithClient,
   resolveAlertsBySourceWithClient,
 } = require("../server/alerts/alertRepository");
@@ -297,4 +300,148 @@ test("alert repository propagates SQL failures without transaction ownership", a
     (caught) => caught === error
   );
   assert.equal(released, false);
+});
+
+test("alert repository lists only one recipient with static filters and descending cursor order", async () => {
+  let captured;
+  const client = {
+    async query(text, params) {
+      captured = { sql: normalizeSql(text), params };
+      return { rows: [row()] };
+    },
+  };
+
+  const rows = await listAlertsForRecipientWithClient({
+    client,
+    recipientUserId: 7,
+    category: "communication",
+    priority: "high",
+    lifecycle: "active",
+    unread: true,
+    cursor: {
+      availableAt: "2026-08-03T12:00:00.000Z",
+      id: 100,
+    },
+    limit: 26,
+  });
+
+  assert.equal(rows.length, 1);
+  assert.match(captured.sql, /WHERE recipient_user_id = \$1/);
+  assert.match(captured.sql, /lifecycle_state = \$2/);
+  assert.match(captured.sql, /available_at <= CURRENT_TIMESTAMP/);
+  assert.match(captured.sql, /\$5::boolean = TRUE AND read_at IS NULL/);
+  assert.match(captured.sql, /available_at < \$7::timestamp/);
+  assert.match(captured.sql, /available_at = \$7::timestamp AND id < \$8/);
+  assert.match(captured.sql, /ORDER BY available_at DESC, id DESC LIMIT \$9/);
+  assert.deepEqual(captured.params, [
+    7,
+    "active",
+    "communication",
+    "high",
+    true,
+    true,
+    "2026-08-03T12:00:00.000Z",
+    100,
+    26,
+  ]);
+});
+
+test("alert repository explicitly separates archived and non-archived listing", async () => {
+  let sql;
+  const client = {
+    async query(text) {
+      sql = normalizeSql(text);
+      return { rows: [] };
+    },
+  };
+
+  await listAlertsForRecipientWithClient({
+    client,
+    recipientUserId: 7,
+    lifecycle: "archived",
+    limit: 26,
+  });
+
+  assert.match(sql, /\$2::text = 'archived' AND archived_at IS NOT NULL/);
+  assert.match(sql, /\$2::text <> 'archived' AND archived_at IS NULL/);
+});
+
+test("alert repository counts active and unread alerts in one recipient-scoped aggregate", async () => {
+  let captured;
+  const client = {
+    async query(text, params) {
+      captured = { sql: normalizeSql(text), params };
+      return {
+        rows: [{ category: "communication", active_count: 2, unread_count: 1 }],
+      };
+    },
+  };
+
+  const rows = await countAlertsForRecipientWithClient({
+    client,
+    recipientUserId: 7,
+  });
+
+  assert.equal(rows.length, 1);
+  assert.deepEqual(captured.params, [7]);
+  assert.match(captured.sql, /WHERE recipient_user_id = \$1/);
+  assert.match(captured.sql, /lifecycle_state = 'active'/);
+  assert.match(captured.sql, /archived_at IS NULL/);
+  assert.match(captured.sql, /COUNT\(\*\) FILTER \(WHERE read_at IS NULL\)/);
+  assert.match(captured.sql, /GROUP BY category/);
+});
+
+test("alert repository read-all uses one race-safe cutoff update for active unread rows", async () => {
+  let captured;
+  const client = {
+    async query(text, params) {
+      captured = { sql: normalizeSql(text), params };
+      return {
+        rows: [{
+          cutoff_at: "2026-08-03T12:00:00.000Z",
+          marked_read_count: 3,
+        }],
+      };
+    },
+  };
+
+  const result = await markAlertsReadThroughCutoffWithClient({
+    client,
+    recipientUserId: 7,
+    category: "communication",
+  });
+
+  assert.equal(result.marked_read_count, 3);
+  assert.deepEqual(captured.params, [7, "communication"]);
+  assert.match(captured.sql, /SELECT statement_timestamp\(\) AS cutoff_at/);
+  assert.match(captured.sql, /UPDATE alerts SET read_at = cutoff\.cutoff_at/);
+  assert.match(captured.sql, /recipient_user_id = \$1/);
+  assert.match(captured.sql, /lifecycle_state = 'active'/);
+  assert.match(captured.sql, /read_at IS NULL/);
+  assert.match(captured.sql, /available_at <= cutoff\.cutoff_at/);
+  assert.match(captured.sql, /\$2::text IS NULL OR category = \$2/);
+  assert.doesNotMatch(captured.sql, /BEGIN|COMMIT|ROLLBACK|DELETE/);
+});
+
+test("alert list parameters cannot become SQL authority", async () => {
+  let captured;
+  const client = {
+    async query(text, params) {
+      captured = { sql: normalizeSql(text), params };
+      return { rows: [] };
+    },
+  };
+  const injected = "communication' OR TRUE --";
+
+  await listAlertsForRecipientWithClient({
+    client,
+    recipientUserId: 7,
+    category: injected,
+    priority: injected,
+    lifecycle: injected,
+    limit: 26,
+  });
+
+  assert.doesNotMatch(captured.sql, /OR TRUE --/);
+  assert.equal(captured.params.includes(injected), true);
 });

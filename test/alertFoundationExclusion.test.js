@@ -27,9 +27,25 @@ function listJsFilesRecursively(directory) {
     });
 }
 
-test("004B registers no public alert routes or frontend notification authority", () => {
+test("004C registers only the five approved recipient alert routes", () => {
   const index = read("index.js");
-  assert.doesNotMatch(index, /server\/alerts|\/alerts|GET \/alerts|POST \/alerts/i);
+  const routes = read("server/alerts/alerts.js");
+  assert.match(index, /require\("\.\/server\/alerts\/alerts"\)/);
+  assert.match(index, /registerAlertRoutes\(\{/);
+
+  const registrations = [...routes.matchAll(
+    /app\.(get|post)\("([^"\n]+)"/g
+  )].map((match) => [match[1], match[2]]);
+  assert.deepEqual(registrations, [
+    ["get", "/alerts"],
+    ["get", "/alerts/counts"],
+    ["post", "/alerts/read-all"],
+    ["post", "/alerts/:alertId/read"],
+    ["post", "/alerts/:alertId/dismiss"],
+  ]);
+  assert.doesNotMatch(routes, /app\.(?:post|put|patch|delete)\("\/alerts"/);
+  assert.doesNotMatch(routes, /\/resolve|\/expire|\/archive/);
+  assert.doesNotMatch(routes, /createAlert\(/);
 
   for (const relativePath of listJsFiles("server/alerts")) {
     const source = read(relativePath);

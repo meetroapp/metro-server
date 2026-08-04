@@ -4,14 +4,23 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const {
+  DEFAULT_ALERT_PAGE_SIZE,
+  MAX_ALERT_PAGE_SIZE,
   archiveAlert,
   createAlert,
+  decodeAlertCursor,
   dismissAlert,
+  encodeAlertCursor,
   expireAlert,
+  getAlertCountsForRecipient,
+  listAlertsForRecipient,
+  markAllAlertsRead,
   markAlertRead,
+  parseAlertPageSize,
   resolveAlertsBySource,
   serializeAlert,
   validateAlertInput,
+  validateAlertListQuery,
 } = require("../server/alerts/alertService");
 
 function normalizeSql(value) {
@@ -640,4 +649,443 @@ test("alert serialization exposes only the approved public shape", () => {
     isExpired: false,
     isArchived: false,
   });
+});
+
+test("alert API pagination constants and cursors are deterministic and fail closed", () => {
+  assert.equal(DEFAULT_ALERT_PAGE_SIZE, 25);
+  assert.equal(MAX_ALERT_PAGE_SIZE, 50);
+  assert.equal(parseAlertPageSize(undefined), 25);
+  assert.equal(parseAlertPageSize("1"), 1);
+  assert.equal(parseAlertPageSize("50"), 50);
+  for (const value of ["", "0", "01", "-1", "1.5", "51", "bad", 25]) {
+    assert.equal(parseAlertPageSize(value), null);
+  }
+
+  const cursor = encodeAlertCursor({
+    id: "100",
+    available_at: "2026-08-03T12:00:00.000Z",
+  });
+  assert.deepEqual(decodeAlertCursor(cursor), {
+    valid: true,
+    cursor: {
+      availableAt: "2026-08-03T12:00:00.000Z",
+      id: 100,
+    },
+  });
+  const decoded = decodeAlertCursor(cursor);
+  assert.equal(encodeAlertCursor({
+    id: decoded.cursor.id,
+    available_at: decoded.cursor.availableAt,
+  }), cursor);
+
+  for (const value of [
+    "",
+    "not+a+base64url+cursor",
+    "a".repeat(1025),
+    `${cursor}=`,
+    Buffer.from([0xff]).toString("base64url"),
+    Buffer.from(JSON.stringify({ id: 1 }), "utf8").toString("base64url"),
+    Buffer.from(JSON.stringify({
+      availableAt: "2026-08-03T12:00:00.000Z",
+    }), "utf8").toString("base64url"),
+    Buffer.from(JSON.stringify([]), "utf8").toString("base64url"),
+    Buffer.from(JSON.stringify({
+      id: 1,
+      availableAt: "invalid",
+    }), "utf8").toString("base64url"),
+    Buffer.from(JSON.stringify({
+      id: "1",
+      availableAt: "2026-08-03T12:00:00.000Z",
+    }), "utf8").toString("base64url"),
+    Buffer.from(JSON.stringify({
+      id: 0,
+      availableAt: "2026-08-03T12:00:00.000Z",
+    }), "utf8").toString("base64url"),
+    Buffer.from(JSON.stringify({
+      id: -1,
+      availableAt: "2026-08-03T12:00:00.000Z",
+    }), "utf8").toString("base64url"),
+    Buffer.from(JSON.stringify({
+      id: Number.MAX_SAFE_INTEGER + 1,
+      availableAt: "2026-08-03T12:00:00.000Z",
+    }), "utf8").toString("base64url"),
+    Buffer.from(JSON.stringify({
+      id: 1,
+      availableAt: "2026-08-03T12:00:00.000Z",
+      recipientUserId: 999,
+    }), "utf8").toString("base64url"),
+    Buffer.from(JSON.stringify({
+      id: 1,
+      availableAt: "2026-08-03T12:00:00.000Z' OR TRUE --",
+    }), "utf8").toString("base64url"),
+  ]) {
+    assert.deepEqual(decodeAlertCursor(value), {
+      valid: false,
+      cursor: null,
+    });
+  }
+});
+
+test("alert cursors reject every noncanonical JSON representation", () => {
+  const timestamp = "2026-08-04T00:00:00.000Z";
+  const encodeJson = (value) =>
+    Buffer.from(value, "utf8").toString("base64url");
+  const noncanonicalJson = [
+    ` {"availableAt":"${timestamp}","id":12}`,
+    `{"availableAt":"${timestamp}","id":12} `,
+    `{"availableAt": "${timestamp}","id":12}`,
+    `{"availableAt":"${timestamp}", "id":12}`,
+    `\n{\n  "availableAt": "${timestamp}",\n  "id": 12\n}`,
+    `{"availableAt":"${timestamp}","id":12}\n`,
+    `{"id":12,"availableAt":"${timestamp}"}`,
+    `{"availableAt":"${timestamp}","id":12,"id":12}`,
+    `{"availableAt":"${timestamp}","availableAt":"${timestamp}","id":12}`,
+    `{"availableAt":"${timestamp}","id":1,"id":12}`,
+    `{"availableAt":"${timestamp}","id":12,"id":13}`,
+    `{"availableAt":"2026-08-03T00:00:00.000Z","availableAt":"${timestamp}","id":12}`,
+    `{"availableAt":"${timestamp}","availableAt":"2026-08-05T00:00:00.000Z","id":12}`,
+    `{"availableAt":"${timestamp}","id":12.0}`,
+    `{"availableAt":"${timestamp}","id":1.2e1}`,
+    `{"availableAt":"${timestamp}","id":12e0}`,
+  ];
+
+  for (const json of noncanonicalJson) {
+    assert.deepEqual(decodeAlertCursor(encodeJson(json)), {
+      valid: false,
+      cursor: null,
+    });
+  }
+});
+
+test("noncanonical alert cursors use only the safe cursor error contract", () => {
+  const raw = ` {"availableAt":"2026-08-04T00:00:00.000Z","id":12}`;
+  const cursor = Buffer.from(raw, "utf8").toString("base64url");
+  const result = validateAlertListQuery({ cursor });
+
+  assert.deepEqual(result, {
+    ok: false,
+    status: 400,
+    code: "INVALID_ALERT_CURSOR",
+    message: "Alert cursor is invalid.",
+  });
+  assert.doesNotMatch(JSON.stringify(result), /availableAt|2026-08-04|raw|parser|SQL/i);
+});
+
+test("alert cursors reject timestamp forms that normalize to another representation", () => {
+  const encodeJson = (availableAt) => Buffer.from(JSON.stringify({
+    availableAt,
+    id: 12,
+  }), "utf8").toString("base64url");
+
+  for (const availableAt of [
+    "2026-08-03T20:00:00.000-04:00",
+    "2026-08-04T00:00:00Z",
+    "2026-08-04T00:00:00.0000Z",
+    "2026-08-04T00:00:00.000z",
+    "2026-08-04",
+    " 2026-08-04T00:00:00.000Z ",
+  ]) {
+    assert.deepEqual(decodeAlertCursor(encodeJson(availableAt)), {
+      valid: false,
+      cursor: null,
+    });
+  }
+});
+
+test("alert cursor decoding never executes object coercion or accessor hooks", () => {
+  let executed = false;
+  const custom = Object.create(null, {
+    toJSON: {
+      enumerable: true,
+      value() { executed = true; },
+    },
+    toString: {
+      enumerable: true,
+      value() { executed = true; },
+    },
+    valueOf: {
+      enumerable: true,
+      value() { executed = true; },
+    },
+    cursor: {
+      enumerable: true,
+      get() {
+        executed = true;
+        return "ignored";
+      },
+    },
+  });
+
+  assert.deepEqual(decodeAlertCursor(custom), {
+    valid: false,
+    cursor: null,
+  });
+  const proxied = new Proxy({}, {
+    get() {
+      executed = true;
+      return "ignored";
+    },
+    getPrototypeOf() {
+      executed = true;
+      return Object.prototype;
+    },
+  });
+  assert.deepEqual(decodeAlertCursor(proxied), {
+    valid: false,
+    cursor: null,
+  });
+  assert.equal(executed, false);
+});
+
+test("alert list service applies defaults and bounded descending pagination", async () => {
+  const calls = [];
+  const rows = Array.from({ length: 26 }, (_, index) => ({
+    ...BASE_ROW,
+    id: 200 - index,
+    available_at: `2026-08-03T12:${String(59 - index).padStart(2, "0")}:00.000Z`,
+  }));
+  const pool = {
+    async query(text, params) {
+      calls.push({ sql: normalizeSql(text), params });
+      return { rows };
+    },
+  };
+
+  const result = await listAlertsForRecipient({
+    pool,
+    recipientUserId: 7,
+    query: {},
+    logger: () => {},
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.alerts.length, 25);
+  assert.deepEqual(result.pagination, {
+    limit: 25,
+    hasMore: true,
+    nextCursor: result.pagination.nextCursor,
+  });
+  assert.deepEqual(decodeAlertCursor(result.pagination.nextCursor), {
+    valid: true,
+    cursor: {
+      availableAt: rows[24].available_at,
+      id: rows[24].id,
+    },
+  });
+  assert.deepEqual(calls[0].params, [
+    7,
+    "active",
+    null,
+    null,
+    null,
+    false,
+    null,
+    0,
+    26,
+  ]);
+});
+
+test("alert list service passes only allowlisted exact filters", async () => {
+  let params;
+  const cursor = encodeAlertCursor({
+    id: 100,
+    available_at: "2026-08-03T12:00:00.000Z",
+  });
+  const pool = {
+    async query(_text, values) {
+      params = values;
+      return { rows: [] };
+    },
+  };
+
+  const result = await listAlertsForRecipient({
+    pool,
+    recipientUserId: 7,
+    query: {
+      limit: "10",
+      cursor,
+      category: "communication",
+      priority: "high",
+      lifecycle: "dismissed",
+      unread: "false",
+    },
+    logger: () => {},
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(params, [
+    7,
+    "dismissed",
+    "communication",
+    "high",
+    false,
+    true,
+    "2026-08-03T12:00:00.000Z",
+    100,
+    11,
+  ]);
+});
+
+test("alert list rejects malformed and authority-bearing queries before SQL", async () => {
+  const invalidQueries = [
+    { recipientUserId: "9" },
+    { userId: "9" },
+    { sourceDomain: "communication" },
+    { limit: "0" },
+    { limit: "51" },
+    { limit: "1.5" },
+    { limit: String(Number.MAX_SAFE_INTEGER + 1) },
+    { category: "unknown" },
+    { priority: "urgent" },
+    { lifecycle: "unknown" },
+    { unread: "1" },
+    { unread: "yes" },
+    { unread: "" },
+    { unread: true },
+    { cursor: "invalid" },
+    { cursor: undefined },
+  ];
+
+  for (const query of invalidQueries) {
+    let calls = 0;
+    const result = await listAlertsForRecipient({
+      pool: { async query() { calls += 1; return { rows: [] }; } },
+      recipientUserId: 7,
+      query,
+      logger: () => {},
+    });
+    assert.equal(result.ok, false);
+    assert.equal(calls, 0);
+  }
+});
+
+test("alert count service normalizes one recipient-scoped aggregate", async () => {
+  let params;
+  const pool = {
+    async query(_text, values) {
+      params = values;
+      return {
+        rows: [
+          { category: "communication", active_count: "2", unread_count: "1" },
+          { category: "emergency", active_count: 3, unread_count: 2 },
+          { category: "invented", active_count: 999, unread_count: 999 },
+        ],
+      };
+    },
+  };
+
+  const result = await getAlertCountsForRecipient({
+    pool,
+    recipientUserId: 7,
+    query: {},
+    logger: () => {},
+  });
+
+  assert.deepEqual(params, [7]);
+  assert.deepEqual(result.counts, {
+    active: 5,
+    unread: 3,
+    byCategory: {
+      communication: { active: 2, unread: 1 },
+      emergency: { active: 3, unread: 2 },
+    },
+  });
+});
+
+test("alert counts reject every query parameter before SQL", async () => {
+  let calls = 0;
+  const result = await getAlertCountsForRecipient({
+    pool: { async query() { calls += 1; return { rows: [] }; } },
+    recipientUserId: 7,
+    query: { category: "communication" },
+    logger: () => {},
+  });
+  assert.equal(result.code, "INVALID_ALERT_QUERY");
+  assert.equal(calls, 0);
+});
+
+test("alert read-all returns a server cutoff and is idempotently count based", async () => {
+  const calls = [];
+  const pool = {
+    async query(text, params) {
+      calls.push({ sql: normalizeSql(text), params });
+      return {
+        rows: [{
+          cutoff_at: new Date("2026-08-03T12:00:00.000Z"),
+          marked_read_count: calls.length === 1 ? 3 : 0,
+        }],
+      };
+    },
+  };
+
+  const first = await markAllAlertsRead({
+    pool,
+    recipientUserId: 7,
+    query: {},
+    input: { category: "communication" },
+    logger: () => {},
+  });
+  const repeated = await markAllAlertsRead({
+    pool,
+    recipientUserId: 7,
+    query: {},
+    logger: () => {},
+  });
+
+  assert.deepEqual(first, {
+    ok: true,
+    status: 200,
+    code: "ALERTS_MARKED_READ",
+    markedReadCount: 3,
+    cutoffAt: "2026-08-03T12:00:00.000Z",
+  });
+  assert.equal(repeated.markedReadCount, 0);
+  assert.deepEqual(calls[0].params, [7, "communication"]);
+  assert.deepEqual(calls[1].params, [7, null]);
+});
+
+test("alert read-all rejects unknown body/query authority before SQL", async () => {
+  const inputs = [
+    { input: { recipientUserId: 9 }, query: {} },
+    { input: { lifecycle: "active" }, query: {} },
+    { input: { category: "unknown" }, query: {} },
+    { input: { category: undefined }, query: {} },
+    { input: {}, query: { cutoffAt: "2026-08-03" } },
+  ];
+
+  for (const value of inputs) {
+    let calls = 0;
+    const result = await markAllAlertsRead({
+      pool: { async query() { calls += 1; return { rows: [] }; } },
+      recipientUserId: 7,
+      ...value,
+      logger: () => {},
+    });
+    assert.equal(result.ok, false);
+    assert.equal(calls, 0);
+  }
+});
+
+test("alert API services normalize pool failures and preserve caller-owned errors", async () => {
+  const error = new Error("private payload and SQL detail");
+  const loggerEntries = [];
+  const poolResult = await listAlertsForRecipient({
+    pool: { async query() { throw error; } },
+    recipientUserId: 7,
+    query: {},
+    logger: (...args) => loggerEntries.push(args),
+  });
+  assert.equal(poolResult.code, "ALERTS_FETCH_FAILED");
+  assert.doesNotMatch(JSON.stringify({ poolResult, loggerEntries }), /private payload|SQL detail/);
+
+  await assert.rejects(
+    markAllAlertsRead({
+      client: { async query() { throw error; } },
+      recipientUserId: 7,
+      query: {},
+      input: {},
+      logger: () => {},
+    }),
+    (caught) => caught === error
+  );
 });

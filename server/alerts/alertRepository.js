@@ -173,6 +173,120 @@ async function findAnyAlertByRecipientWithClient({
   return result.rows[0] || null;
 }
 
+async function listAlertsForRecipientWithClient({
+  client,
+  recipientUserId,
+  category = null,
+  priority = null,
+  lifecycle = "active",
+  unread = null,
+  cursor = null,
+  limit,
+}) {
+  requireDatabasePool(client);
+  const result = await client.query(
+    `
+    SELECT ${ALERT_COLUMNS}
+    FROM alerts
+    WHERE recipient_user_id = $1
+      AND lifecycle_state = $2
+      AND available_at <= CURRENT_TIMESTAMP
+      AND (
+        ($2::text = 'archived' AND archived_at IS NOT NULL)
+        OR
+        ($2::text <> 'archived' AND archived_at IS NULL)
+      )
+      AND ($3::text IS NULL OR category = $3)
+      AND ($4::text IS NULL OR priority = $4)
+      AND (
+        $5::boolean IS NULL
+        OR ($5::boolean = TRUE AND read_at IS NULL)
+        OR ($5::boolean = FALSE AND read_at IS NOT NULL)
+      )
+      AND (
+        $6::boolean = FALSE
+        OR available_at < $7::timestamp
+        OR (available_at = $7::timestamp AND id < $8)
+      )
+    ORDER BY available_at DESC, id DESC
+    LIMIT $9
+    `,
+    [
+      recipientUserId,
+      lifecycle,
+      category,
+      priority,
+      unread,
+      Boolean(cursor),
+      cursor?.availableAt || null,
+      cursor?.id || 0,
+      limit,
+    ]
+  );
+  return result.rows;
+}
+
+async function countAlertsForRecipientWithClient({
+  client,
+  recipientUserId,
+}) {
+  requireDatabasePool(client);
+  const result = await client.query(
+    `
+    SELECT
+      category,
+      COUNT(*)::integer AS active_count,
+      COUNT(*) FILTER (WHERE read_at IS NULL)::integer AS unread_count
+    FROM alerts
+    WHERE recipient_user_id = $1
+      AND lifecycle_state = 'active'
+      AND archived_at IS NULL
+      AND available_at <= CURRENT_TIMESTAMP
+    GROUP BY category
+    ORDER BY category ASC
+    `,
+    [recipientUserId]
+  );
+  return result.rows;
+}
+
+async function markAlertsReadThroughCutoffWithClient({
+  client,
+  recipientUserId,
+  category = null,
+}) {
+  requireDatabasePool(client);
+  const result = await client.query(
+    `
+    WITH cutoff AS (
+      SELECT statement_timestamp() AS cutoff_at
+    ),
+    updated AS (
+      UPDATE alerts
+      SET
+        read_at = cutoff.cutoff_at,
+        updated_at = cutoff.cutoff_at
+      FROM cutoff
+      WHERE recipient_user_id = $1
+        AND lifecycle_state = 'active'
+        AND archived_at IS NULL
+        AND read_at IS NULL
+        AND available_at <= cutoff.cutoff_at
+        AND ($2::text IS NULL OR category = $2)
+      RETURNING 1 AS marked
+    )
+    SELECT
+      cutoff.cutoff_at,
+      COUNT(updated.marked)::integer AS marked_read_count
+    FROM cutoff
+    LEFT JOIN updated ON TRUE
+    GROUP BY cutoff.cutoff_at
+    `,
+    [recipientUserId, category]
+  );
+  return result.rows[0] || null;
+}
+
 async function markAlertReadWithClient({
   client,
   alertId,
@@ -334,6 +448,9 @@ module.exports = {
   findAnyAlertByRecipientWithClient,
   findAlertByRecipientWithClient,
   insertAlertWithClient,
+  listAlertsForRecipientWithClient,
+  countAlertsForRecipientWithClient,
+  markAlertsReadThroughCutoffWithClient,
   markAlertReadWithClient,
   resolveAlertsBySourceWithClient,
 };

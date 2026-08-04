@@ -3,6 +3,7 @@
 const {
   ALERT_CATEGORIES,
   ALERT_ERROR_CODES,
+  ALERT_LIFECYCLE_STATES,
   ALERT_LIMITS,
   ALERT_PRIORITIES,
   ALERT_SOURCE_DOMAINS,
@@ -24,17 +25,32 @@ const {
 const { normalizeSafePayload } = require("./alertPayload");
 const {
   archiveAlertWithClient,
+  countAlertsForRecipientWithClient,
   dismissAlertWithClient,
   expireAlertWithClient,
   findAnyAlertByRecipientWithClient,
   findAlertByRecipientWithClient,
   insertAlertWithClient,
+  listAlertsForRecipientWithClient,
+  markAlertsReadThroughCutoffWithClient,
   markAlertReadWithClient,
   resolveAlertsBySourceWithClient,
 } = require("./alertRepository");
 const {
   logSafeServerError,
 } = require("../errors/publicErrors");
+
+const DEFAULT_ALERT_PAGE_SIZE = 25;
+const MAX_ALERT_PAGE_SIZE = 50;
+const MAX_ALERT_CURSOR_LENGTH = 1024;
+const ALERT_LIST_QUERY_FIELDS = new Set([
+  "limit",
+  "cursor",
+  "category",
+  "priority",
+  "lifecycle",
+  "unread",
+]);
 
 function validateTimestamp(value, field) {
   if (value === null || value === undefined || value === "") {
@@ -58,6 +74,257 @@ function validateTimestamp(value, field) {
     };
   }
   return { value: date.toISOString() };
+}
+
+function readExactDataObject(value, allowedFields) {
+  const input = value === undefined ? {} : value;
+  if (!isPlainObject(input)) return null;
+
+  const descriptors = Object.getOwnPropertyDescriptors(input);
+  const keys = Reflect.ownKeys(descriptors);
+  if (
+    keys.some((key) =>
+      typeof key !== "string" ||
+      !allowedFields.has(key) ||
+      !descriptors[key]?.enumerable ||
+      !Object.hasOwn(descriptors[key], "value")
+    )
+  ) {
+    return null;
+  }
+
+  const output = Object.create(null);
+  for (const key of keys) {
+    output[key] = descriptors[key].value;
+  }
+  return output;
+}
+
+function invalidAlertQuery(
+  code = ALERT_ERROR_CODES.INVALID_QUERY,
+  message = "Alert query is invalid."
+) {
+  return alertFailure(code, message);
+}
+
+function parseAlertPageSize(value) {
+  if (value === undefined) return DEFAULT_ALERT_PAGE_SIZE;
+
+  if (
+    typeof value !== "string" ||
+    !/^[1-9]\d*$/.test(value)
+  ) {
+    return null;
+  }
+
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed <= MAX_ALERT_PAGE_SIZE
+    ? parsed
+    : null;
+}
+
+function serializeCanonicalAlertCursorPayload({ availableAt, id }) {
+  return JSON.stringify({ availableAt, id });
+}
+
+function encodeAlertCursor(row = {}) {
+  const id = typeof row.id === "number" || typeof row.id === "string"
+    ? parsePositiveSafeInteger(row.id)
+    : null;
+  const date = row.available_at instanceof Date
+    ? row.available_at
+    : new Date(row.available_at);
+
+  if (!id || Number.isNaN(date.getTime())) {
+    throw new TypeError("A valid alert cursor row is required.");
+  }
+
+  return Buffer.from(
+    serializeCanonicalAlertCursorPayload({
+      availableAt: date.toISOString(),
+      id,
+    }),
+    "utf8"
+  ).toString("base64url");
+}
+
+function decodeAlertCursor(value) {
+  if (value === undefined) {
+    return { valid: true, cursor: null };
+  }
+  if (
+    typeof value !== "string" ||
+    !value ||
+    value.length > MAX_ALERT_CURSOR_LENGTH ||
+    !/^[A-Za-z0-9_-]+$/.test(value)
+  ) {
+    return { valid: false, cursor: null };
+  }
+
+  try {
+    const bytes = Buffer.from(value, "base64url");
+    if (bytes.toString("base64url") !== value) {
+      return { valid: false, cursor: null };
+    }
+    const parsed = JSON.parse(bytes.toString("utf8"));
+    const cursor = readExactDataObject(
+      parsed,
+      new Set(["availableAt", "id"])
+    );
+    if (
+      !cursor ||
+      typeof cursor.availableAt !== "string" ||
+      typeof cursor.id !== "number" ||
+      !parsePositiveSafeInteger(cursor.id)
+    ) {
+      return { valid: false, cursor: null };
+    }
+
+    const date = new Date(cursor.availableAt);
+    if (
+      Number.isNaN(date.getTime()) ||
+      date.toISOString() !== cursor.availableAt
+    ) {
+      return { valid: false, cursor: null };
+    }
+
+    const canonicalJson = serializeCanonicalAlertCursorPayload({
+      availableAt: cursor.availableAt,
+      id: cursor.id,
+    });
+    if (bytes.toString("utf8") !== canonicalJson) {
+      return { valid: false, cursor: null };
+    }
+
+    return {
+      valid: true,
+      cursor: {
+        availableAt: cursor.availableAt,
+        id: cursor.id,
+      },
+    };
+  } catch {
+    return { valid: false, cursor: null };
+  }
+}
+
+function validateAlertListQuery(query) {
+  const parsed = readExactDataObject(query, ALERT_LIST_QUERY_FIELDS);
+  if (!parsed) return invalidAlertQuery();
+
+  const limit = parseAlertPageSize(parsed.limit);
+  if (!limit) {
+    return invalidAlertQuery(
+      ALERT_ERROR_CODES.INVALID_QUERY,
+      `Alert limit must be between 1 and ${MAX_ALERT_PAGE_SIZE}.`
+    );
+  }
+
+  const category = Object.hasOwn(parsed, "category")
+    ? assertAllowed(parsed.category, ALERT_CATEGORIES)
+    : null;
+  if (Object.hasOwn(parsed, "category") && !category) {
+    return invalidAlertQuery(
+      ALERT_ERROR_CODES.INVALID_CATEGORY,
+      "Alert category is invalid."
+    );
+  }
+
+  const priority = Object.hasOwn(parsed, "priority")
+    ? assertAllowed(parsed.priority, ALERT_PRIORITIES)
+    : null;
+  if (Object.hasOwn(parsed, "priority") && !priority) {
+    return invalidAlertQuery(
+      ALERT_ERROR_CODES.INVALID_PRIORITY,
+      "Alert priority is invalid."
+    );
+  }
+
+  const lifecycle = Object.hasOwn(parsed, "lifecycle")
+    ? assertAllowed(parsed.lifecycle, ALERT_LIFECYCLE_STATES)
+    : "active";
+  if (!lifecycle) {
+    return invalidAlertQuery(
+      ALERT_ERROR_CODES.INVALID_LIFECYCLE,
+      "Alert lifecycle is invalid."
+    );
+  }
+
+  let unread = null;
+  if (Object.hasOwn(parsed, "unread")) {
+    if (parsed.unread === "true") unread = true;
+    else if (parsed.unread === "false") unread = false;
+    else {
+      return invalidAlertQuery(
+        ALERT_ERROR_CODES.INVALID_UNREAD_FILTER,
+        "Alert unread filter is invalid."
+      );
+    }
+  }
+
+  const cursorSupplied = Object.hasOwn(parsed, "cursor");
+  const decodedCursor = cursorSupplied && parsed.cursor !== undefined
+    ? decodeAlertCursor(parsed.cursor)
+    : cursorSupplied
+      ? { valid: false, cursor: null }
+      : { valid: true, cursor: null };
+  if (!decodedCursor.valid) {
+    return invalidAlertQuery(
+      ALERT_ERROR_CODES.INVALID_CURSOR,
+      "Alert cursor is invalid."
+    );
+  }
+
+  return {
+    ok: true,
+    filters: {
+      category,
+      priority,
+      lifecycle,
+      unread,
+      cursor: decodedCursor.cursor,
+      limit,
+    },
+  };
+}
+
+function validateEmptyAlertQuery(query) {
+  return readExactDataObject(query, new Set())
+    ? { ok: true }
+    : invalidAlertQuery();
+}
+
+function validateAlertReadAllInput(input) {
+  const parsed = readExactDataObject(input, new Set(["category"]));
+  if (!parsed) {
+    return alertFailure(
+      ALERT_ERROR_CODES.INVALID_REQUEST,
+      "Alert read-all request is invalid."
+    );
+  }
+
+  const category = Object.hasOwn(parsed, "category")
+    ? assertAllowed(parsed.category, ALERT_CATEGORIES)
+    : null;
+  if (Object.hasOwn(parsed, "category") && !category) {
+    return alertFailure(
+      ALERT_ERROR_CODES.INVALID_CATEGORY,
+      "Alert category is invalid."
+    );
+  }
+
+  return { ok: true, category };
+}
+
+function normalizePublicTimestamp(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function normalizeAlertCount(value) {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
 }
 
 function validateAlertInput(input = {}) {
@@ -281,6 +548,194 @@ async function withAlertTransaction({ pool, client, operation }) {
     ) {
       ownedClient.release();
     }
+  }
+}
+
+async function listAlertsForRecipient({
+  pool,
+  client,
+  recipientUserId,
+  query,
+  logger = console.error,
+}) {
+  const parsedRecipientId = parsePositiveSafeInteger(recipientUserId);
+  if (!parsedRecipientId) {
+    return alertFailure(
+      ALERT_ERROR_CODES.INVALID_RECIPIENT,
+      "Alert recipient is invalid."
+    );
+  }
+
+  const validated = validateAlertListQuery(query);
+  if (!validated.ok) return validated;
+
+  const database = client || pool;
+  try {
+    requireDatabasePool(database);
+    const { filters } = validated;
+    const rows = await listAlertsForRecipientWithClient({
+      client: database,
+      recipientUserId: parsedRecipientId,
+      category: filters.category,
+      priority: filters.priority,
+      lifecycle: filters.lifecycle,
+      unread: filters.unread,
+      cursor: filters.cursor,
+      limit: filters.limit + 1,
+    });
+    if (!Array.isArray(rows)) {
+      throw new TypeError("Alert list rows are invalid.");
+    }
+
+    const hasMore = rows.length > filters.limit;
+    const pageRows = hasMore ? rows.slice(0, filters.limit) : rows;
+    return {
+      ok: true,
+      status: 200,
+      code: "ALERTS_RETRIEVED",
+      alerts: pageRows.map(serializeAlert),
+      pagination: {
+        limit: filters.limit,
+        hasMore,
+        nextCursor:
+          hasMore && pageRows.length > 0
+            ? encodeAlertCursor(pageRows.at(-1))
+            : null,
+      },
+    };
+  } catch (error) {
+    logSafeServerError(logger, {
+      event: "Alert operation failed",
+      operation: "list_alerts_for_recipient",
+      code: ALERT_ERROR_CODES.FETCH_FAILED,
+    }, error);
+    if (client) throw error;
+    return alertFailure(
+      ALERT_ERROR_CODES.FETCH_FAILED,
+      "Alerts could not be loaded.",
+      500
+    );
+  }
+}
+
+async function getAlertCountsForRecipient({
+  pool,
+  client,
+  recipientUserId,
+  query,
+  logger = console.error,
+}) {
+  const parsedRecipientId = parsePositiveSafeInteger(recipientUserId);
+  if (!parsedRecipientId) {
+    return alertFailure(
+      ALERT_ERROR_CODES.INVALID_RECIPIENT,
+      "Alert recipient is invalid."
+    );
+  }
+
+  const validatedQuery = validateEmptyAlertQuery(query);
+  if (!validatedQuery.ok) return validatedQuery;
+
+  const database = client || pool;
+  try {
+    requireDatabasePool(database);
+    const rows = await countAlertsForRecipientWithClient({
+      client: database,
+      recipientUserId: parsedRecipientId,
+    });
+    if (!Array.isArray(rows)) {
+      throw new TypeError("Alert count rows are invalid.");
+    }
+
+    let active = 0;
+    let unread = 0;
+    const byCategory = {};
+    for (const row of rows) {
+      if (!ALERT_CATEGORIES.includes(row?.category)) continue;
+      const categoryActive = normalizeAlertCount(row.active_count);
+      const categoryUnread = normalizeAlertCount(row.unread_count);
+      byCategory[row.category] = {
+        active: categoryActive,
+        unread: categoryUnread,
+      };
+      active += categoryActive;
+      unread += categoryUnread;
+    }
+
+    return {
+      ok: true,
+      status: 200,
+      code: "ALERT_COUNTS_RETRIEVED",
+      counts: { active, unread, byCategory },
+    };
+  } catch (error) {
+    logSafeServerError(logger, {
+      event: "Alert operation failed",
+      operation: "count_alerts_for_recipient",
+      code: ALERT_ERROR_CODES.COUNTS_FETCH_FAILED,
+    }, error);
+    if (client) throw error;
+    return alertFailure(
+      ALERT_ERROR_CODES.COUNTS_FETCH_FAILED,
+      "Alert counts could not be loaded.",
+      500
+    );
+  }
+}
+
+async function markAllAlertsRead({
+  pool,
+  client,
+  recipientUserId,
+  query,
+  input,
+  logger = console.error,
+}) {
+  const parsedRecipientId = parsePositiveSafeInteger(recipientUserId);
+  if (!parsedRecipientId) {
+    return alertFailure(
+      ALERT_ERROR_CODES.INVALID_RECIPIENT,
+      "Alert recipient is invalid."
+    );
+  }
+
+  const validatedQuery = validateEmptyAlertQuery(query);
+  if (!validatedQuery.ok) return validatedQuery;
+  const validatedInput = validateAlertReadAllInput(input);
+  if (!validatedInput.ok) return validatedInput;
+
+  const database = client || pool;
+  try {
+    requireDatabasePool(database);
+    const row = await markAlertsReadThroughCutoffWithClient({
+      client: database,
+      recipientUserId: parsedRecipientId,
+      category: validatedInput.category,
+    });
+    const cutoffAt = normalizePublicTimestamp(row?.cutoff_at);
+    if (!row || !cutoffAt) {
+      throw new TypeError("Alert read-all result is invalid.");
+    }
+
+    return {
+      ok: true,
+      status: 200,
+      code: "ALERTS_MARKED_READ",
+      markedReadCount: normalizeAlertCount(row.marked_read_count),
+      cutoffAt,
+    };
+  } catch (error) {
+    logSafeServerError(logger, {
+      event: "Alert operation failed",
+      operation: "mark_all_alerts_read",
+      code: ALERT_ERROR_CODES.READ_ALL_FAILED,
+    }, error);
+    if (client) throw error;
+    return alertFailure(
+      ALERT_ERROR_CODES.READ_ALL_FAILED,
+      "Alerts could not be marked read.",
+      500
+    );
   }
 }
 
@@ -719,12 +1174,22 @@ async function archiveAlert({
 }
 
 module.exports = {
+  DEFAULT_ALERT_PAGE_SIZE,
+  MAX_ALERT_PAGE_SIZE,
   archiveAlert,
   createAlert,
+  decodeAlertCursor,
   dismissAlert,
+  encodeAlertCursor,
   expireAlert,
+  getAlertCountsForRecipient,
+  listAlertsForRecipient,
+  markAllAlertsRead,
   markAlertRead,
+  parseAlertPageSize,
   resolveAlertsBySource,
   serializeAlert,
   validateAlertInput,
+  validateAlertListQuery,
+  validateAlertReadAllInput,
 };

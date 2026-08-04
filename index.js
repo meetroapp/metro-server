@@ -104,6 +104,10 @@ const {
   registerEvaluationRoutes,
 } = require("./server/authorization/evaluations");
 
+const {
+  registerAlertRoutes,
+} = require("./server/alerts/alerts");
+
 
 const JWT_SECRET = resolveJwtSecret(process.env);
 const BCRYPT_ROUNDS = 10;
@@ -752,6 +756,13 @@ registerEmergencyRequestRoutes({
 });
 
 registerEvaluationRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerAlertRoutes({
   app,
   authMiddleware,
   getPool,
