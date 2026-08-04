@@ -38,12 +38,19 @@ Current inventory:
 18. `202608010001_create_commercial_authority_foundation.sql`
 19. `202608010002_create_canonical_evaluations.sql`
 20. `202608030001_create_conversation_participant_state.sql`
+21. `202608030002_create_canonical_alerts.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
 
 This inventory records migration source files, not applied database state.
 Migration creation and governed migration execution remain separate operations.
+
+`202608030002_create_canonical_alerts.sql` creates the additive
+recipient-scoped `alerts` table for canonical backend alert persistence. It
+does not import legacy browser notifications, create runtime alert producers,
+or attach alerts to conversations, Emergency, workflow events, delivery
+providers, badges, or frontend notification surfaces.
 
 ## Migration Ledger and Transactions
 

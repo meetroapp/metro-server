@@ -1,0 +1,300 @@
+"use strict";
+
+const assert = require("node:assert/strict");
+const test = require("node:test");
+
+const {
+  archiveAlertWithClient,
+  dismissAlertWithClient,
+  expireAlertWithClient,
+  findAnyAlertByRecipientWithClient,
+  findAlertByRecipientWithClient,
+  insertAlertWithClient,
+  markAlertReadWithClient,
+  resolveAlertsBySourceWithClient,
+} = require("../server/alerts/alertRepository");
+
+function normalizeSql(value) {
+  return String(value).replace(/\s+/g, " ").trim();
+}
+
+function alertInput(overrides = {}) {
+  return {
+    recipientUserId: 7,
+    sourceDomain: "communication",
+    sourceEventType: "conversation.message.created",
+    sourceEntityType: "conversation",
+    sourceEntityId: "91",
+    sourceEventId: "message:205",
+    category: "communication",
+    priority: "normal",
+    titleKey: "alerts.communication.message.title",
+    messageKey: "alerts.communication.message.body",
+    safePayload: { count: 1 },
+    destination: {
+      type: "conversation",
+      payload: { conversationId: 91 },
+    },
+    dedupeKey: "communication:conversation:91:message:205",
+    availableAt: null,
+    expiresAt: null,
+    ...overrides,
+  };
+}
+
+function row(overrides = {}) {
+  return {
+    id: 100,
+    recipient_user_id: 7,
+    source_domain: "communication",
+    source_event_type: "conversation.message.created",
+    source_entity_type: "conversation",
+    source_entity_id: "91",
+    source_event_id: "message:205",
+    category: "communication",
+    priority: "normal",
+    title_key: "alerts.communication.message.title",
+    message_key: "alerts.communication.message.body",
+    safe_payload: { count: 1 },
+    destination_type: "conversation",
+    destination_payload: { conversationId: 91 },
+    dedupe_key: "communication:conversation:91:message:205",
+    lifecycle_state: "active",
+    available_at: "2026-08-03T12:00:00.000Z",
+    expires_at: null,
+    read_at: null,
+    dismissed_at: null,
+    resolved_at: null,
+    archived_at: null,
+    created_at: "2026-08-03T12:00:00.000Z",
+    updated_at: "2026-08-03T12:00:00.000Z",
+    ...overrides,
+  };
+}
+
+test("alert repository inserts canonical recipient-scoped columns as JSONB", async () => {
+  const calls = [];
+  const client = {
+    async query(text, params) {
+      calls.push({ sql: normalizeSql(text), params });
+      return { rows: [row()] };
+    },
+  };
+
+  const result = await insertAlertWithClient({
+    client,
+    alert: alertInput(),
+  });
+
+  assert.equal(result.created, true);
+  assert.equal(result.row.id, 100);
+  assert.match(calls[0].sql, /INSERT INTO alerts/);
+  assert.match(calls[0].sql, /\$11::jsonb/);
+  assert.match(calls[0].sql, /\$13::jsonb/);
+  assert.match(calls[0].sql, /ON CONFLICT DO NOTHING/);
+  assert.equal(calls[0].params[0], 7);
+  assert.equal(calls[0].params[13], "communication:conversation:91:message:205");
+});
+
+test("alert repository returns existing active alert on dedupe conflict", async () => {
+  const calls = [];
+  const existing = row({ id: 101 });
+  const client = {
+    async query(text, params) {
+      const sql = normalizeSql(text);
+      calls.push({ sql, params });
+      if (sql.startsWith("INSERT INTO alerts")) return { rows: [] };
+      return { rows: [existing] };
+    },
+  };
+
+  const result = await insertAlertWithClient({
+    client,
+    alert: alertInput(),
+  });
+
+  assert.equal(result.created, false);
+  assert.equal(result.row.id, 101);
+  assert.match(
+    calls[1].sql,
+    /recipient_user_id = \$1 AND dedupe_key = \$2/
+  );
+  assert.match(
+    calls[1].sql,
+    /lifecycle_state IN \('active', 'dismissed'\)/
+  );
+});
+
+test("alert repository keeps recipient lookup and mutations owner scoped", async () => {
+  const calls = [];
+  const client = {
+    async query(text, params) {
+      calls.push({ sql: normalizeSql(text), params });
+      return { rows: [row()] };
+    },
+  };
+
+  await findAlertByRecipientWithClient({
+    client,
+    alertId: 100,
+    recipientUserId: 7,
+  });
+  await markAlertReadWithClient({
+    client,
+    alertId: 100,
+    recipientUserId: 7,
+  });
+  await dismissAlertWithClient({
+    client,
+    alertId: 100,
+    recipientUserId: 7,
+  });
+
+  assert.match(calls[0].sql, /WHERE id = \$1 AND recipient_user_id = \$2/);
+  assert.match(calls[0].sql, /FOR UPDATE/);
+  assert.match(calls[1].sql, /WHERE id = \$1 AND recipient_user_id = \$2/);
+  assert.match(calls[1].sql, /read_at = COALESCE/);
+  assert.match(calls[2].sql, /priority <> 'critical'/);
+  assert.match(calls[2].sql, /lifecycle_state IN \('active', 'dismissed'\)/);
+});
+
+test("alert repository resolves only exact source-scoped active or dismissed alerts", async () => {
+  let captured;
+  const client = {
+    async query(text, params) {
+      captured = { sql: normalizeSql(text), params };
+      return { rows: [row({ lifecycle_state: "resolved" })] };
+    },
+  };
+
+  const rows = await resolveAlertsBySourceWithClient({
+    client,
+    sourceDomain: "communication",
+    sourceEntityType: "conversation",
+    sourceEntityId: "91",
+    sourceEventType: "conversation.message.created",
+    recipientUserId: 7,
+  });
+
+  assert.equal(rows.length, 1);
+  assert.match(captured.sql, /source_domain = \$1/);
+  assert.match(captured.sql, /source_entity_type = \$2/);
+  assert.match(captured.sql, /source_entity_id = \$3/);
+  assert.match(captured.sql, /\(\$4::text IS NULL OR source_event_type = \$4\)/);
+  assert.match(captured.sql, /\(\$5::integer IS NULL OR recipient_user_id = \$5\)/);
+  assert.doesNotMatch(captured.sql, /workflow_events/i);
+});
+
+test("alert repository does not own transactions or release caller clients", async () => {
+  const calls = [];
+  let released = false;
+  const client = {
+    async query(text) {
+      calls.push(normalizeSql(text));
+      return { rows: [row()] };
+    },
+    release() {
+      released = true;
+    },
+  };
+
+  await markAlertReadWithClient({
+    client,
+    alertId: 100,
+    recipientUserId: 7,
+  });
+
+  assert.equal(calls.some((sql) => ["BEGIN", "COMMIT", "ROLLBACK"].includes(sql)), false);
+  assert.equal(released, false);
+});
+
+test("alert dedupe fallback remains exact, active, and recipient independent", async () => {
+  const calls = [];
+  const client = {
+    async query(text, params) {
+      const sql = normalizeSql(text);
+      calls.push({ sql, params });
+      if (sql.startsWith("INSERT INTO alerts")) return { rows: [] };
+      return { rows: [row({ id: params[0] * 10, recipient_user_id: params[0] })] };
+    },
+  };
+
+  const first = await insertAlertWithClient({ client, alert: alertInput({ recipientUserId: 7 }) });
+  const second = await insertAlertWithClient({ client, alert: alertInput({ recipientUserId: 8 }) });
+
+  assert.equal(first.row.recipient_user_id, 7);
+  assert.equal(second.row.recipient_user_id, 8);
+  for (const lookup of calls.filter((call) => call.sql.startsWith("SELECT"))) {
+    assert.match(lookup.sql, /recipient_user_id = \$1 AND dedupe_key = \$2/);
+    assert.match(lookup.sql, /archived_at IS NULL/);
+    assert.match(lookup.sql, /resolved_at IS NULL/);
+    assert.match(lookup.sql, /lifecycle_state IN \('active', 'dismissed'\)/);
+  }
+});
+
+test("alert repository expires only due recipient-owned active obligations", async () => {
+  let captured;
+  const client = {
+    async query(text, params) {
+      captured = { sql: normalizeSql(text), params };
+      return { rows: [row({ lifecycle_state: "expired" })] };
+    },
+  };
+
+  const result = await expireAlertWithClient({
+    client,
+    alertId: 100,
+    recipientUserId: 7,
+    effectiveAt: "2026-08-04T00:00:00.000Z",
+  });
+
+  assert.equal(result.lifecycle_state, "expired");
+  assert.match(captured.sql, /WHERE id = \$1 AND recipient_user_id = \$2/);
+  assert.match(captured.sql, /lifecycle_state IN \('active', 'dismissed', 'expired'\)/);
+  assert.match(captured.sql, /expires_at <= COALESCE\(\$3::timestamp, CURRENT_TIMESTAMP\)/);
+  assert.doesNotMatch(captured.sql, /BEGIN|COMMIT|ROLLBACK/);
+});
+
+test("alert repository archives only recipient-owned terminal rows without deletion", async () => {
+  const calls = [];
+  const client = {
+    async query(text, params) {
+      calls.push({ sql: normalizeSql(text), params });
+      return { rows: [row({ lifecycle_state: "archived", archived_at: params[2] })] };
+    },
+  };
+
+  await findAnyAlertByRecipientWithClient({ client, alertId: 100, recipientUserId: 7 });
+  const result = await archiveAlertWithClient({
+    client,
+    alertId: 100,
+    recipientUserId: 7,
+    archivedAt: "2026-08-04T00:00:00.000Z",
+  });
+
+  assert.equal(result.lifecycle_state, "archived");
+  assert.match(calls[0].sql, /WHERE id = \$1 AND recipient_user_id = \$2/);
+  assert.doesNotMatch(calls[0].sql, /archived_at IS NULL/);
+  assert.match(calls[1].sql, /lifecycle_state IN \('resolved', 'expired', 'archived'\)/);
+  assert.match(calls[1].sql, /archived_at = COALESCE/);
+  assert.doesNotMatch(calls[1].sql, /DELETE/);
+});
+
+test("alert repository propagates SQL failures without transaction ownership", async () => {
+  let released = false;
+  const error = new Error("private sql detail");
+  const client = {
+    async query() {
+      throw error;
+    },
+    release() {
+      released = true;
+    },
+  };
+
+  await assert.rejects(
+    expireAlertWithClient({ client, alertId: 100, recipientUserId: 7 }),
+    (caught) => caught === error
+  );
+  assert.equal(released, false);
+});

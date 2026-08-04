@@ -7,6 +7,8 @@ const test = require("node:test");
 
 const migrationFilename =
   "202608030001_create_conversation_participant_state.sql";
+const canonicalAlertsMigrationFilename =
+  "202608030002_create_canonical_alerts.sql";
 const migrationPath = path.join(
   __dirname,
   "..",
@@ -112,7 +114,11 @@ test("participant-state migration remains governed-runner compatible and ordered
     .filter((filename) => /^\d{12}_[a-z0-9_]+\.sql$/.test(filename))
     .sort();
 
-  assert.equal(migrationFiles.at(-1), migrationFilename);
+  assert.ok(migrationFiles.includes(canonicalAlertsMigrationFilename));
+  assert.ok(
+    migrationFiles.indexOf(migrationFilename) <
+      migrationFiles.indexOf(canonicalAlertsMigrationFilename)
+  );
 
   const readme = fs.readFileSync(
     path.join(path.dirname(migrationPath), "README.md"),
