@@ -4,6 +4,7 @@ const express = require("express");
 const cors = require("cors");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
+const { types: { isProxy } } = require("node:util");
 const { Pool } = require("pg");
 const packageJson = require("./package.json");
 const { createAuthRateLimiter } = require("./server/security/authRateLimit");
@@ -2103,11 +2104,51 @@ app.post(
   async (req, res) => {
     res.setHeader("Cache-Control", "no-store");
 
+    const body = req.body;
+    const isPlainJsonBody =
+      body !== null &&
+      typeof body === "object" &&
+      !Array.isArray(body) &&
+      !isProxy(body) &&
+      Object.getPrototypeOf(body) === Object.prototype;
+    const bodyKeys = isPlainJsonBody
+      ? Reflect.ownKeys(body)
+      : [];
+    const boundaryDescriptor =
+      isPlainJsonBody && bodyKeys.length === 1
+        ? Object.getOwnPropertyDescriptor(
+            body,
+            "lastReadMessageId"
+          )
+        : null;
+    const lastReadMessageId =
+      boundaryDescriptor &&
+      Object.hasOwn(boundaryDescriptor, "value") &&
+      boundaryDescriptor.enumerable
+        ? boundaryDescriptor.value
+        : null;
+    if (
+      !isPlainJsonBody ||
+      bodyKeys.length !== 1 ||
+      bodyKeys[0] !== "lastReadMessageId" ||
+      typeof lastReadMessageId !== "number" ||
+      !Number.isSafeInteger(lastReadMessageId) ||
+      lastReadMessageId <= 0
+    ) {
+      return res.status(400).json({
+        success: false,
+        code: "INVALID_CONVERSATION_READ_REQUEST",
+        message:
+          "A valid last-read message ID is required.",
+      });
+    }
+
     try {
       const result = await markConversationRead({
         pool: getPool(req),
         conversationId: req.params.conversationId,
         participantUserId: req.user.id,
+        lastReadMessageId,
       });
 
       if (!result.ok) {
@@ -2122,6 +2163,8 @@ app.post(
         success: true,
         code: result.code,
         conversationId: result.conversationId,
+        acknowledgedMessageId:
+          result.acknowledgedMessageId,
         readState: result.readState,
       });
     } catch (error) {

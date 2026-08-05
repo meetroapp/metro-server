@@ -61,6 +61,7 @@ function response() {
 function createPool({
   conversationRows,
   latestMessageRows,
+  alertRows = [],
   failOn,
 } = {}) {
   const calls = [];
@@ -115,8 +116,8 @@ function createPool({
 
     if (
       sql.includes("FROM messages") &&
-      sql.includes("ORDER BY messages.id DESC") &&
-      !sql.includes("INSERT INTO")
+      sql.includes("messages.id = $1") &&
+      sql.includes("messages.conversation_id = $2")
     ) {
       return {
         rows:
@@ -124,6 +125,13 @@ function createPool({
             ? defaultLatestMessageRows
             : latestMessageRows,
       };
+    }
+
+    if (
+      sql.includes("FROM alerts") &&
+      sql.includes("LEFT JOIN messages AS source_message")
+    ) {
+      return { rows: alertRows };
     }
 
     if (
@@ -173,12 +181,15 @@ async function invoke({
   userId = 7,
   conversationId = "91",
   authenticated = true,
+  body = { lastReadMessageId: 205 },
+  omitBody = false,
   pool,
 } = {}) {
   app.locals.pool = pool;
   const req = {
     app,
     params: { conversationId },
+    body,
     headers: authenticated
       ? {
           authorization: `Bearer ${createToken({
@@ -190,6 +201,7 @@ async function invoke({
         }
       : {},
   };
+  if (omitBody) delete req.body;
   const res = response();
 
   try {
@@ -219,7 +231,7 @@ async function invoke({
   }
 }
 
-test("canonical participant marks the conversation read with a no-store response", async () => {
+test("canonical participant marks the exact visible message read with a no-store response", async () => {
   const fake = createPool();
   const result = await invoke({ pool: fake.pool });
 
@@ -229,11 +241,106 @@ test("canonical participant marks the conversation read with a no-store response
     success: true,
     code: "CONVERSATION_MARKED_READ",
     conversationId: 91,
+    acknowledgedMessageId: 205,
     readState: {
       lastReadMessageId: 205,
       lastReadAt: "2026-08-03T12:00:00.000Z",
     },
   });
+  const messageLookup = fake.calls.find(({ sql }) =>
+    sql.includes("FROM messages") &&
+    sql.includes("messages.id = $1")
+  );
+  assert.deepEqual(messageLookup.values, [205, 91]);
+  assert.doesNotMatch(messageLookup.sql, /ORDER BY messages\.id DESC/);
+});
+
+test("mark-read route requires one positive safe-integer boundary and no extra fields", async () => {
+  class ReadBoundary {
+    constructor() {
+      this.lastReadMessageId = 205;
+    }
+  }
+  const nullPrototypeBody = Object.create(null);
+  nullPrototypeBody.lastReadMessageId = 205;
+  const inheritedBoundary = Object.create({ lastReadMessageId: 205 });
+  const inheritedAuthority = Object.create({ participantId: 7 });
+  inheritedAuthority.lastReadMessageId = 205;
+  const accessorBody = {};
+  Object.defineProperty(accessorBody, "lastReadMessageId", {
+    enumerable: true,
+    get() {
+      assert.fail("Read-boundary accessor must not execute.");
+    },
+  });
+  const symbolAuthorityBody = { lastReadMessageId: 205 };
+  symbolAuthorityBody[Symbol("participantId")] = 7;
+  const proxyBody = new Proxy(
+    { lastReadMessageId: 205 },
+    {
+      ownKeys() {
+        assert.fail("Read-boundary proxy trap must not execute.");
+      },
+    }
+  );
+  const invalidBodies = [
+    null,
+    [],
+    "205",
+    new Date(),
+    new Map([["lastReadMessageId", 205]]),
+    new Set([205]),
+    new ReadBoundary(),
+    nullPrototypeBody,
+    inheritedBoundary,
+    inheritedAuthority,
+    accessorBody,
+    symbolAuthorityBody,
+    proxyBody,
+    {},
+    { lastReadMessageId: null },
+    { lastReadMessageId: 0 },
+    { lastReadMessageId: -1 },
+    { lastReadMessageId: 1.5 },
+    { lastReadMessageId: Number.MAX_SAFE_INTEGER + 1 },
+    { lastReadMessageId: "205" },
+    { lastReadMessageId: "message-205" },
+    { lastReadMessageId: {} },
+    { lastReadMessageId: [] },
+    { lastReadMessageId: 205, participantId: 7 },
+    { lastReadMessageId: 205, userId: 7 },
+    { lastReadMessageId: 205, recipientUserId: 7 },
+    { lastReadMessageId: 205, alertId: 1 },
+    { lastReadMessageId: 205, relationshipId: 1 },
+    { lastReadMessageId: 205, requestId: 1 },
+    { lastReadMessageId: 205, emergencyRequestId: 1 },
+    { lastReadMessageId: 205, workflowId: 1 },
+    { lastReadMessageId: 205, sourceEventId: 205 },
+    { lastReadMessageId: 205, arbitrary: true },
+  ];
+
+  const invalidRequests = [
+    { omitBody: true },
+    ...invalidBodies.map((body) => ({ body })),
+  ];
+  for (const request of invalidRequests) {
+    const fake = createPool();
+    const result = await invoke({ ...request, pool: fake.pool });
+    assert.equal(result.statusCode, 400);
+    assert.deepEqual(result.body, {
+      success: false,
+      code: "INVALID_CONVERSATION_READ_REQUEST",
+      message: "A valid last-read message ID is required.",
+    });
+    assert.equal(
+      fake.calls.some(({ sql }) =>
+        sql.includes("FROM conversations") ||
+        sql.includes("conversation_participant_state") ||
+        sql.includes("FROM alerts")
+      ),
+      false
+    );
+  }
 });
 test("mark-read route requires authentication before conversation access", async () => {
   const fake = createPool();
@@ -284,7 +391,24 @@ test("outsider receives the privacy-safe conversation not-found contract", async
   });
 });
 
-test("repeated route calls resolve communication attention without mutating messages or workflow", async () => {
+test("missing or cross-conversation message fails closed without state mutation", async () => {
+  const fake = createPool({ latestMessageRows: [] });
+  const result = await invoke({ pool: fake.pool });
+
+  assert.equal(result.statusCode, 404);
+  assert.deepEqual(result.body, {
+    success: false,
+    code: "CONVERSATION_MESSAGE_NOT_FOUND",
+    message: "The conversation message was not found.",
+  });
+  const sql = fake.calls.map(({ sql: value }) => value).join("\n");
+  assert.doesNotMatch(
+    sql,
+    /INSERT INTO conversation_participant_state|UPDATE alerts/
+  );
+});
+
+test("repeated route calls reconcile bounded communication attention without mutating messages or workflow", async () => {
   const fake = createPool();
 
   assert.equal((await invoke({ pool: fake.pool })).statusCode, 200);
@@ -296,26 +420,21 @@ test("repeated route calls resolve communication attention without mutating mess
     sql,
     /workflow_events|request_relationships|emergency_requests/i
   );
-  const alertResolutions = fake.calls.filter(({ sql: value }) =>
-    value.includes("UPDATE alerts") &&
-    value.includes("lifecycle_state = 'resolved'")
+  assert.doesNotMatch(sql, /ORDER BY messages\.id DESC/i);
+  const boundedAlertSelections = fake.calls.filter(({ sql: value }) =>
+    value.includes("LEFT JOIN messages AS source_message") &&
+    value.includes("FOR UPDATE OF alerts")
   );
-  assert.equal(alertResolutions.length, 2);
-  assert.ok(alertResolutions.every(({ values }) =>
-    JSON.stringify(values.slice(0, 5)) === JSON.stringify([
-      "communication",
-      "conversation",
-      "91",
-      "conversation.message_created",
-      7,
-    ])
+  assert.equal(boundedAlertSelections.length, 2);
+  assert.ok(boundedAlertSelections.every(({ values }) =>
+    JSON.stringify(values) === JSON.stringify(["91", 7])
   ));
 });
 
 test("mark-read state and alert-resolution failures use the normalized public contract", async () => {
   for (const failOn of [
     "INSERT INTO conversation_participant_state",
-    "UPDATE alerts",
+    "LEFT JOIN messages AS source_message",
   ]) {
     const fake = createPool({ failOn });
     const result = await invoke({ pool: fake.pool });

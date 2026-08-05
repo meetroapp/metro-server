@@ -55,12 +55,45 @@ function alertRow({
   };
 }
 
+function reconciliationRow({
+  id = 301,
+  lifecycle = "active",
+  sourceEventId = 201,
+  sourceConversationId = 91,
+  sourceReceiverId = 9,
+  sourceSenderId = 7,
+  messageType = "text",
+  messageText = "Hello",
+  dedupeKey =
+    "communication:conversation:91:recipient:9:after:0",
+  safePayload = { shortPreview: "Hello", unreadCount: 1 },
+} = {}) {
+  return {
+    id,
+    source_event_id: String(sourceEventId),
+    lifecycle_state: lifecycle,
+    dedupe_key: dedupeKey,
+    safe_payload: safePayload,
+    source_message_id: sourceEventId,
+    source_conversation_id: sourceConversationId,
+    source_sender_id: sourceSenderId,
+    source_receiver_id: sourceReceiverId,
+    source_message_type: messageType,
+    source_message_text: messageText,
+    source_message_created_at:
+      "2026-08-04T12:00:00.000Z",
+  };
+}
+
 function createClient({
   marker = null,
   participantStatePresent = true,
   unreadCount = 1,
   existingAlert = null,
   resolvedRows = [],
+  reconciliationAlerts = [],
+  dedupeConflictRows = [],
+  rebasedRows = null,
   failOn = null,
 } = {}) {
   const calls = [];
@@ -91,6 +124,19 @@ function createClient({
       }
       if (
         sql.includes("FROM alerts") &&
+        sql.includes("LEFT JOIN messages AS source_message")
+      ) {
+        return { rows: reconciliationAlerts };
+      }
+      if (
+        sql.includes("FROM alerts") &&
+        sql.includes("dedupe_key = $2") &&
+        sql.includes("FOR UPDATE")
+      ) {
+        return { rows: dedupeConflictRows };
+      }
+      if (
+        sql.includes("FROM alerts") &&
         sql.includes("dedupe_key = $2")
       ) {
         return { rows: [existingAlert].filter(Boolean) };
@@ -112,6 +158,21 @@ function createClient({
         sql.includes("lifecycle_state = 'resolved'")
       ) {
         return { rows: resolvedRows };
+      }
+      if (
+        sql.includes("UPDATE alerts") &&
+        sql.includes("dedupe_key = $3") &&
+        sql.includes("safe_payload = $4::jsonb")
+      ) {
+        return {
+          rows: rebasedRows || [{
+            id: reconciliationAlerts[0]?.id || 301,
+            lifecycle_state:
+              reconciliationAlerts[0]?.lifecycle_state || "active",
+            source_event_id:
+              reconciliationAlerts[0]?.source_event_id || "201",
+          }],
+        };
       }
       throw new Error(`Unexpected SQL: ${sql}`);
     },
@@ -239,7 +300,11 @@ test("first unread message creates one recipient-scoped communication alert", as
   assert.equal(result.created, true);
   const count = fake.calls.find(({ sql }) => sql.includes("COUNT(*)::bigint"));
   assert.deepEqual(count.params, [91, 9, null]);
-  assert.match(count.sql, /messages\.sender_id <> \$2/);
+  assert.match(count.sql, /messages\.receiver_id = \$2/);
+  assert.match(
+    count.sql,
+    /messages\.sender_id = CASE WHEN conversations\.homeowner_id = \$2 THEN conversations\.professional_user_id WHEN conversations\.professional_user_id = \$2 THEN conversations\.homeowner_id ELSE NULL END/
+  );
   assert.match(count.sql, /messages\.id > COALESCE\(\$3::integer, 0\)/);
   const insert = fake.calls.find(({ sql }) => sql.includes("INSERT INTO alerts"));
   assert.equal(insert.params[0], 9);
@@ -412,28 +477,75 @@ test("invalid unread count fails closed before alert persistence", async () => {
   assert.equal(fake.calls.some(({ sql }) => sql.includes("INSERT INTO alerts")), false);
 });
 
-test("conversation mark-read resolves only the participant communication obligation", async () => {
-  const fake = createClient({ resolvedRows: [alertRow()] });
+test("conversation mark-read resolves only represented messages through the canonical boundary", async () => {
+  const alerts = [
+    reconciliationRow({ id: 301, sourceEventId: 201 }),
+    reconciliationRow({ id: 302, sourceEventId: 203 }),
+  ];
+  const fake = createClient({
+    reconciliationAlerts: alerts,
+    resolvedRows: [{ id: 301 }, { id: 302 }],
+  });
   const result = await resolveCommunicationMessageAlerts({
     client: fake.client,
     conversationId: 91,
-    participantUserId: 9,
+    recipientUserId: 9,
+    senderUserId: 7,
+    lastReadMessageId: 203,
   });
-  assert.equal(result.count, 1);
+  assert.deepEqual(result, { count: 2, preservedCount: 0 });
+  const locked = fake.calls.find(({ sql }) =>
+    sql.includes("LEFT JOIN messages AS source_message")
+  );
+  assert.deepEqual(locked.params, ["91", 9]);
+  assert.match(locked.sql, /FOR UPDATE OF alerts/);
+  assert.match(locked.sql, /alerts\.recipient_user_id = \$2/);
+  assert.match(locked.sql, /alerts\.archived_at IS NULL/);
   const update = fake.calls.find(({ sql }) =>
     sql.includes("UPDATE alerts") && sql.includes("lifecycle_state = 'resolved'")
   );
   assert.ok(update);
-  assert.deepEqual(update.params.slice(0, 5), [
-    "communication",
-    "conversation",
-    "91",
-    "conversation.message_created",
-    9,
-  ]);
-  assert.match(update.sql, /recipient_user_id = \$5/);
+  assert.deepEqual(update.params, [[301, 302], 9, "91"]);
+  assert.match(update.sql, /id = ANY\(\$1::bigint\[\]\)/);
+  assert.match(update.sql, /recipient_user_id = \$2/);
   assert.match(update.sql, /lifecycle_state IN \('active', 'dismissed'\)/);
-  assert.doesNotMatch(update.sql, /conversation_participant_state|messages|workflow_events|emergency_requests/i);
+  assert.doesNotMatch(update.sql, /workflow_events|emergency_requests/i);
+});
+
+test("reconciliation accepts only the exact opposite participant in either direction", async () => {
+  const scenarios = [
+    {
+      recipientUserId: 9,
+      senderUserId: 7,
+      row: reconciliationRow({
+        sourceReceiverId: 9,
+        sourceSenderId: 7,
+      }),
+    },
+    {
+      recipientUserId: 7,
+      senderUserId: 9,
+      row: reconciliationRow({
+        sourceReceiverId: 7,
+        sourceSenderId: 9,
+      }),
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    const fake = createClient({
+      reconciliationAlerts: [scenario.row],
+      resolvedRows: [{ id: 301 }],
+    });
+    const result = await resolveCommunicationMessageAlerts({
+      client: fake.client,
+      conversationId: 91,
+      recipientUserId: scenario.recipientUserId,
+      senderUserId: scenario.senderUserId,
+      lastReadMessageId: 203,
+    });
+    assert.deepEqual(result, { count: 1, preservedCount: 0 });
+  }
 });
 
 test("communication resolution is idempotent and validates identity before SQL", async () => {
@@ -441,7 +553,9 @@ test("communication resolution is idempotent and validates identity before SQL",
   assert.equal((await resolveCommunicationMessageAlerts({
     client: fake.client,
     conversationId: 91,
-    participantUserId: 9,
+    recipientUserId: 9,
+    senderUserId: 7,
+    lastReadMessageId: 203,
   })).count, 0);
 
   const invalid = createClient();
@@ -449,11 +563,230 @@ test("communication resolution is idempotent and validates identity before SQL",
     resolveCommunicationMessageAlerts({
       client: invalid.client,
       conversationId: "emergency-91",
-      participantUserId: 9,
+      recipientUserId: 9,
+      senderUserId: 7,
+      lastReadMessageId: 203,
     }),
     /canonical communication identity/i
   );
   assert.equal(invalid.calls.length, 0);
+});
+
+test("newer active Attention is preserved, canonically recounted, and rebased", async () => {
+  const newer = reconciliationRow({
+    id: 304,
+    sourceEventId: 204,
+    messageText: "Newer canonical message",
+  });
+  const fake = createClient({
+    reconciliationAlerts: [newer],
+    unreadCount: 1,
+  });
+
+  const result = await resolveCommunicationMessageAlerts({
+    client: fake.client,
+    conversationId: 91,
+    recipientUserId: 9,
+    senderUserId: 7,
+    lastReadMessageId: 203,
+  });
+
+  assert.deepEqual(result, { count: 0, preservedCount: 1 });
+  const conflict = fake.calls.find(({ sql }) =>
+    sql.includes("dedupe_key = $2") && sql.includes("FOR UPDATE")
+  );
+  assert.deepEqual(conflict.params, [
+    9,
+    "communication:conversation:91:recipient:9:after:203",
+  ]);
+  const count = fake.calls.find(({ sql }) =>
+    sql.includes("COUNT(*)::bigint AS unread_count")
+  );
+  assert.deepEqual(count.params, [91, 9, 203]);
+  assert.match(count.sql, /messages\.receiver_id = \$2/);
+  assert.match(
+    count.sql,
+    /messages\.sender_id = CASE WHEN conversations\.homeowner_id = \$2 THEN conversations\.professional_user_id WHEN conversations\.professional_user_id = \$2 THEN conversations\.homeowner_id ELSE NULL END/
+  );
+  const rebase = fake.calls.find(({ sql }) =>
+    sql.includes("dedupe_key = $3") &&
+    sql.includes("safe_payload = $4::jsonb")
+  );
+  assert.deepEqual(rebase.params.slice(0, 3), [
+    304,
+    9,
+    "communication:conversation:91:recipient:9:after:203",
+  ]);
+  assert.deepEqual(JSON.parse(rebase.params[3]), {
+    shortPreview: "Newer canonical message",
+    unreadCount: 1,
+  });
+  assert.deepEqual(rebase.params.slice(4), ["91", "204"]);
+  assert.doesNotMatch(
+    rebase.sql,
+    /SET[\s\S]*lifecycle_state\s*=|dismissed_at\s*=/
+  );
+});
+
+test("newer dismissed Attention remains dismissed while its server window is rebased", async () => {
+  const newer = reconciliationRow({
+    id: 304,
+    lifecycle: "dismissed",
+    sourceEventId: 204,
+  });
+  const fake = createClient({ reconciliationAlerts: [newer] });
+
+  await resolveCommunicationMessageAlerts({
+    client: fake.client,
+    conversationId: 91,
+    recipientUserId: 9,
+    senderUserId: 7,
+    lastReadMessageId: 203,
+  });
+
+  const rebase = fake.calls.find(({ sql }) =>
+    sql.includes("safe_payload = $4::jsonb")
+  );
+  assert.ok(rebase);
+  assert.doesNotMatch(
+    rebase.sql,
+    /SET[\s\S]*lifecycle_state\s*=|dismissed_at\s*=/
+  );
+});
+
+test("an already canonical preserved Attention is a strict no-op", async () => {
+  const newer = reconciliationRow({
+    id: 304,
+    sourceEventId: 204,
+    messageText: "Newer canonical message",
+    dedupeKey:
+      "communication:conversation:91:recipient:9:after:203",
+    safePayload: {
+      shortPreview: "Newer canonical message",
+      unreadCount: 1,
+    },
+  });
+  const fake = createClient({
+    reconciliationAlerts: [newer],
+    unreadCount: 1,
+  });
+
+  const result = await resolveCommunicationMessageAlerts({
+    client: fake.client,
+    conversationId: 91,
+    recipientUserId: 9,
+    senderUserId: 7,
+    lastReadMessageId: 203,
+  });
+
+  assert.deepEqual(result, { count: 0, preservedCount: 1 });
+  assert.equal(
+    fake.calls.some(({ sql }) => sql.includes("UPDATE alerts")),
+    false
+  );
+});
+
+test("malformed and cross-conversation Alert source authority fails closed", async () => {
+  const malformedRows = [
+    {
+      ...reconciliationRow({ sourceEventId: 204 }),
+      source_event_id: "message-204",
+    },
+    reconciliationRow({
+      sourceEventId: 204,
+      sourceConversationId: 92,
+    }),
+    reconciliationRow({
+      sourceEventId: 204,
+      sourceReceiverId: 7,
+    }),
+    reconciliationRow({
+      sourceEventId: 204,
+      sourceSenderId: 9,
+    }),
+    reconciliationRow({
+      sourceEventId: 204,
+      sourceSenderId: 10,
+    }),
+  ];
+
+  for (const row of malformedRows) {
+    const fake = createClient({ reconciliationAlerts: [row] });
+    await assert.rejects(
+      resolveCommunicationMessageAlerts({
+        client: fake.client,
+        conversationId: 91,
+        recipientUserId: 9,
+        senderUserId: 7,
+        lastReadMessageId: 203,
+      }),
+      /alert source is invalid/i
+    );
+    assert.equal(
+      fake.calls.some(({ sql }) => sql.includes("UPDATE alerts")),
+      false
+    );
+  }
+});
+
+test("ambiguous newer Attention and rebasing conflicts fail closed", async () => {
+  const duplicate = createClient({
+    reconciliationAlerts: [
+      reconciliationRow({ id: 304, sourceEventId: 204 }),
+      reconciliationRow({ id: 305, sourceEventId: 205 }),
+    ],
+  });
+  await assert.rejects(
+    resolveCommunicationMessageAlerts({
+      client: duplicate.client,
+      conversationId: 91,
+      recipientUserId: 9,
+      senderUserId: 7,
+      lastReadMessageId: 203,
+    }),
+    /attention window is ambiguous/i
+  );
+
+  const conflict = createClient({
+    reconciliationAlerts: [
+      reconciliationRow({ id: 304, sourceEventId: 204 }),
+    ],
+    dedupeConflictRows: [{ id: 999 }],
+  });
+  await assert.rejects(
+    resolveCommunicationMessageAlerts({
+      client: conflict.client,
+      conversationId: 91,
+      recipientUserId: 9,
+      senderUserId: 7,
+      lastReadMessageId: 203,
+    }),
+    /attention window conflicts/i
+  );
+  assert.equal(
+    conflict.calls.some(({ sql }) =>
+      sql.includes("safe_payload = $4::jsonb")
+    ),
+    false
+  );
+});
+
+test("bounded communication resolution does not parse dedupe text as authority", () => {
+  const source = fs.readFileSync(
+    path.join(
+      __dirname,
+      "..",
+      "server/alerts/communicationAlertService.js"
+    ),
+    "utf8"
+  );
+  const resolver = source.slice(
+    source.indexOf("async function resolveCommunicationMessageAlerts")
+  );
+  assert.doesNotMatch(
+    resolver,
+    /split\(|match\(|exec\(|dedupe_key[^\n]*parse/i
+  );
 });
 
 test("communication alert failures propagate without client transaction ownership", async () => {

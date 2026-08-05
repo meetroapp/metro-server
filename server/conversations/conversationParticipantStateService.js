@@ -253,6 +253,23 @@ async function advanceConversationParticipantReadStateWithClient({
           THEN CURRENT_TIMESTAMP
         ELSE participant_state.updated_at
       END
+    WHERE
+      participant_state.participant_role IS DISTINCT FROM
+        EXCLUDED.participant_role
+      OR (
+        EXCLUDED.last_read_message_id IS NOT NULL
+        AND (
+          participant_state.last_read_message_id IS NULL
+          OR EXCLUDED.last_read_message_id >
+            participant_state.last_read_message_id
+        )
+      )
+      OR (
+        participant_state.last_read_message_id IS NULL
+        AND EXCLUDED.last_read_message_id IS NULL
+        AND participant_state.last_read_at IS NULL
+        AND EXCLUDED.last_read_at IS NOT NULL
+      )
     RETURNING
       conversation_id,
       user_id,
@@ -270,9 +287,28 @@ async function advanceConversationParticipantReadStateWithClient({
   );
 
   if (result.rows.length === 0) {
-    throw new Error(
-      "The canonical conversation read state could not be advanced."
+    const currentResult = await client.query(
+      `
+      SELECT
+        conversation_id,
+        user_id,
+        participant_role,
+        last_read_message_id,
+        last_read_at
+      FROM conversation_participant_state
+      WHERE conversation_id = $1
+        AND user_id = $2
+      LIMIT 1
+      FOR UPDATE
+      `,
+      [conversationId, participantUserId]
     );
+    if (currentResult.rows.length === 0) {
+      throw new Error(
+        "The canonical conversation read state could not be advanced."
+      );
+    }
+    return currentResult.rows[0];
   }
 
   return result.rows[0];
@@ -282,6 +318,7 @@ async function markConversationRead({
   pool,
   conversationId: rawConversationId,
   participantUserId: rawParticipantUserId,
+  lastReadMessageId: rawLastReadMessageId,
 }) {
   const conversationId = parsePositiveInteger(
     rawConversationId
@@ -289,6 +326,12 @@ async function markConversationRead({
   const participantUserId = parsePositiveInteger(
     rawParticipantUserId
   );
+  const lastReadMessageId =
+    typeof rawLastReadMessageId === "number" &&
+    Number.isSafeInteger(rawLastReadMessageId) &&
+    rawLastReadMessageId > 0
+      ? rawLastReadMessageId
+      : null;
 
   if (!conversationId) {
     return {
@@ -305,6 +348,15 @@ async function markConversationRead({
       status: 400,
       code: "INVALID_PARTICIPANT_USER_ID",
       message: "A valid participant user ID is required.",
+    };
+  }
+
+  if (!lastReadMessageId) {
+    return {
+      ok: false,
+      status: 400,
+      code: "INVALID_LAST_READ_MESSAGE_ID",
+      message: "A valid last-read message ID is required.",
     };
   }
 
@@ -348,33 +400,74 @@ async function markConversationRead({
     }
 
     const conversation = conversationResult.rows[0];
-    const latestMessageResult = await client.query(
+    const participantRole = resolveConversationParticipantRole(
+      conversation,
+      participantUserId
+    );
+    const oppositeParticipantUserId = parsePositiveInteger(
+      participantRole === CONVERSATION_PARTICIPANT_ROLES.HOMEOWNER
+        ? conversation.professional_user_id
+        : conversation.homeowner_id
+    );
+    if (
+      !participantRole ||
+      !oppositeParticipantUserId ||
+      oppositeParticipantUserId === participantUserId
+    ) {
+      throw new Error(
+        "Canonical conversation participant relationship is invalid."
+      );
+    }
+
+    const acknowledgedMessageResult = await client.query(
       `
       SELECT
         messages.id,
         messages.created_at
       FROM messages
-      WHERE messages.conversation_id = $1
-      ORDER BY messages.id DESC
+      WHERE messages.id = $1
+        AND messages.conversation_id = $2
       LIMIT 1
       `,
-      [conversation.id]
+      [lastReadMessageId, conversation.id]
     );
-    const latestMessage = latestMessageResult.rows[0] || null;
+    const acknowledgedMessage =
+      acknowledgedMessageResult.rows[0] || null;
+
+    if (!acknowledgedMessage) {
+      await client.query("ROLLBACK");
+      return {
+        ok: false,
+        status: 404,
+        code: "CONVERSATION_MESSAGE_NOT_FOUND",
+        message: "The conversation message was not found.",
+      };
+    }
 
     const readState =
       await advanceConversationParticipantReadStateWithClient({
         client,
         conversation,
         participantUserId,
-        lastReadMessageId: latestMessage?.id ?? null,
-        lastReadAt: latestMessage?.created_at ?? null,
+        lastReadMessageId: acknowledgedMessage.id,
+        lastReadAt: acknowledgedMessage.created_at,
       });
+
+    const authoritativeReadMessageId = parsePositiveInteger(
+      readState.last_read_message_id
+    );
+    if (!authoritativeReadMessageId) {
+      throw new Error(
+        "Canonical conversation read state is invalid."
+      );
+    }
 
     await resolveCommunicationMessageAlerts({
       client,
       conversationId: conversation.id,
-      participantUserId,
+      recipientUserId: participantUserId,
+      senderUserId: oppositeParticipantUserId,
+      lastReadMessageId: authoritativeReadMessageId,
     });
 
     await client.query("COMMIT");
@@ -384,6 +477,7 @@ async function markConversationRead({
       status: 200,
       code: "CONVERSATION_MARKED_READ",
       conversationId: conversation.id,
+      acknowledgedMessageId: lastReadMessageId,
       readState:
         serializeConversationReadState(readState),
     };
