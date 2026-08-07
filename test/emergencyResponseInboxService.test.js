@@ -6,6 +6,9 @@ const test = require("node:test");
 const {
   listHomeownerEmergencyResponses,
 } = require("../server/relationships/requestRelationshipService");
+const {
+  assertSafeTestDatabaseUrl,
+} = require("./helpers/databaseTargetSafety");
 
 function createPool(results = []) {
   const calls = [];
@@ -221,6 +224,10 @@ test("retrieval selects only governed business display and relationship state", 
     query,
     /professional_user_id|contractor_profiles\.user_id|email|phone|location_text|unit_number|access_notes|safety/i
   );
+  assert.doesNotMatch(
+    query,
+    /professional_responses|professional_response_id|ordinary_authority_source|response_status|response_current_version/i
+  );
 });
 
 test("retrieval is SELECT-only and references no transition or conversation creation helper", async () => {
@@ -270,3 +277,103 @@ test("database failures propagate unchanged for route normalization", async () =
     (error) => error === privateError
   );
 });
+
+test(
+  "production Emergency homeowner-response SQL executes against local PostgreSQL",
+  async () => {
+    const databaseUrl = process.env.DATABASE_URL;
+
+    assertSafeTestDatabaseUrl(databaseUrl, {
+      nodeEnv: process.env.NODE_ENV,
+    });
+
+    const { Pool } = require("pg");
+    const pool = new Pool({
+      connectionString: databaseUrl,
+      max: 1,
+      connectionTimeoutMillis: 3000,
+    });
+
+    const readCounts = async () => {
+      const result = await pool.query(`
+        SELECT
+          (SELECT COUNT(*) FROM professional_responses)::integer
+            AS professional_responses,
+          (SELECT COUNT(*) FROM request_selections)::integer
+            AS request_selections,
+          (SELECT COUNT(*) FROM conversations)::integer
+            AS conversations,
+          (SELECT COUNT(*) FROM messages)::integer AS messages,
+          (SELECT COUNT(*) FROM workflow_events)::integer
+            AS workflow_events
+      `);
+
+      return result.rows[0];
+    };
+
+    const readFixture = async () => {
+      const result = await pool.query(`
+        SELECT
+          emergency_requests.id AS emergency_request_id,
+          emergency_requests.homeowner_id,
+          emergency_requests.status AS emergency_status,
+          request_relationships.id AS relationship_id,
+          request_relationships.status AS relationship_status,
+          request_relationships.professional_response_id,
+          request_relationships.ordinary_authority_source
+        FROM emergency_requests
+        INNER JOIN request_relationships
+          ON request_relationships.emergency_request_id =
+            emergency_requests.id
+        WHERE request_relationships.post_id IS NULL
+        ORDER BY
+          emergency_requests.id ASC,
+          request_relationships.id ASC
+        LIMIT 1
+      `);
+
+      return result.rows[0];
+    };
+
+    try {
+      const fixtureBefore = await readFixture();
+      assert.ok(fixtureBefore, "an existing Emergency fixture is required");
+      assert.equal(fixtureBefore.professional_response_id, null);
+      assert.equal(fixtureBefore.ordinary_authority_source, null);
+
+      const countsBefore = await readCounts();
+      const result = await listHomeownerEmergencyResponses({
+        pool,
+        homeownerUserId: fixtureBefore.homeowner_id,
+        emergencyRequestId: fixtureBefore.emergency_request_id,
+      });
+
+      assert.equal(result.ok, true);
+      assert.equal(result.status, 200);
+      assert.equal(result.code, "EMERGENCY_RESPONSES_FOUND");
+      assert.equal(
+        result.emergencyRequest.status,
+        fixtureBefore.emergency_status
+      );
+
+      const response = result.responses.find(
+        (row) => String(row.id) === String(fixtureBefore.relationship_id)
+      );
+      assert.ok(response);
+      assert.equal(response.status, fixtureBefore.relationship_status);
+      assert.equal(
+        response.emergency_request_id,
+        fixtureBefore.emergency_request_id
+      );
+      assert.equal(Object.hasOwn(response, "professional_response_id"), false);
+      assert.equal(Object.hasOwn(response, "ordinary_authority_source"), false);
+      assert.equal(Object.hasOwn(response, "response_id"), false);
+      assert.equal(Object.hasOwn(response, "response_status"), false);
+
+      assert.deepEqual(await readFixture(), fixtureBefore);
+      assert.deepEqual(await readCounts(), countsBefore);
+    } finally {
+      await pool.end();
+    }
+  }
+);

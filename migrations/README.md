@@ -39,6 +39,8 @@ Current inventory:
 19. `202608010002_create_canonical_evaluations.sql`
 20. `202608030001_create_conversation_participant_state.sql`
 21. `202608030002_create_canonical_alerts.sql`
+22. `202608060001_create_professional_response_foundation.sql`
+23. `202608060002_create_request_selection_authority.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -51,6 +53,19 @@ recipient-scoped `alerts` table for canonical backend alert persistence. It
 does not import legacy browser notifications, create runtime alert producers,
 or attach alerts to conversations, Emergency, workflow events, delivery
 providers, badges, or frontend notification surfaces.
+
+`202608060001_create_professional_response_foundation.sql` creates the additive
+ordinary Professional Response aggregate, immutable versions, command
+idempotency, evidence, reconciliation control, and reciprocal pending
+relationship linkage. It does not backfill legacy relationships, create
+selection authority, or require a conversation. Migration creation and runtime
+implementation remain separate governed milestones.
+
+`202608060002_create_request_selection_authority.sql` creates the additive
+ordinary homeowner selection record, command idempotency, immutable evidence,
+sole-selection and sole-active-relationship constraints, and exact ordinary
+conversation provenance. It does not select a response, create a conversation,
+reconcile legacy records, or alter Emergency authority by itself.
 
 ## Migration Ledger and Transactions
 

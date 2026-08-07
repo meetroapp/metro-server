@@ -13,11 +13,13 @@ const {
   isValidPositiveInteger,
   parsePositiveInteger,
   serializeEmergencyResponseRelationship,
+  serializeCanonicalProfessionalResponse,
   serializeHomeownerEmergencyResponse,
   serializePendingRelationshipForHomeowner,
   serializeRelationshipForProfessional,
   validateEmergencyResponsePayload,
   validateProfessionalResponsePayload,
+  validateProfessionalResponseIdempotencyKey,
   validateRelationshipStatus,
 } = require("../server/relationships/requestRelationships");
 
@@ -90,6 +92,75 @@ test("professional introductions are bounded", () => {
 
   assert.equal(result.valid, true);
   assert.equal(result.value.introductionText.length, 2000);
+});
+
+test("professional response command rejects every client-owned authority field", () => {
+  for (const payload of [
+    null,
+    [],
+    "response",
+    { introduction_text: "I can help.", responseId: 91 },
+    { introduction_text: "I can help.", contractorId: 80 },
+    { introduction_text: "I can help.", status: "selected" },
+    { introduction_text: "I can help.", conversationId: 101 },
+  ]) {
+    const result = validateProfessionalResponsePayload(payload);
+    assert.equal(result.valid, false);
+  }
+});
+
+test("professional response idempotency keys are explicit and bounded", () => {
+  assert.deepEqual(
+    validateProfessionalResponseIdempotencyKey(
+      " professional-response:command-1 "
+    ),
+    {
+      valid: true,
+      value: "professional-response:command-1",
+    }
+  );
+
+  for (const value of [
+    undefined,
+    null,
+    "",
+    "contains spaces",
+    "a".repeat(201),
+  ]) {
+    const result = validateProfessionalResponseIdempotencyKey(value);
+    assert.equal(result.valid, false);
+    assert.equal(
+      result.code,
+      "INVALID_PROFESSIONAL_RESPONSE_IDEMPOTENCY_KEY"
+    );
+  }
+});
+
+test("canonical response serializer keeps response and relationship truth distinct", () => {
+  const projection = serializeCanonicalProfessionalResponse({
+    response_id: "901",
+    post_id: 41,
+    response_status: "submitted",
+    response_current_version: 1,
+    response_introduction_text: "I can help.",
+    response_submitted_at: "2026-08-06T12:00:00.000Z",
+    response_updated_at: "2026-08-06T12:00:00.000Z",
+    relationship_id: 501,
+    relationship_status: "pending",
+    ordinary_authority_source: "professional_response",
+    relationship_current_version: 1,
+    relationship_created_at: "2026-08-06T12:00:00.000Z",
+    business_name: "Trusted Repairs",
+    professional_category: "handyman",
+    business_image_url: "https://example.test/logo.jpg",
+  }, "created");
+
+  assert.equal(projection.response.status, "submitted");
+  assert.equal(projection.relationship.status, "pending");
+  assert.equal(projection.relationship.authority_source, "professional_response");
+  assert.equal(projection.resultClassification, "created");
+  assert.equal(Object.hasOwn(projection, "conversation"), false);
+  assert.equal(Object.hasOwn(projection.response, "content_fingerprint"), false);
 });
 
 test("Emergency response payload accepts only an absent or empty plain object", () => {
@@ -166,8 +237,13 @@ test("homeowner serializer exposes business response without private professiona
     professional_category: "handyman",
     introduction_text: "I can help.",
     status: "pending",
+    response_id: null,
+    response_status: null,
+    relationship_status: "pending",
+    authority_source: null,
     created_at: "2026-07-20T10:00:00.000Z",
     responded_at: "2026-07-20T10:00:00.000Z",
+    submitted_at: "2026-07-20T10:00:00.000Z",
   });
 
   assert.deepEqual(serialized, {
@@ -180,8 +256,13 @@ test("homeowner serializer exposes business response without private professiona
     professional_category: "handyman",
     introduction_text: "I can help.",
     status: "pending",
+    response_id: null,
+    response_status: null,
+    relationship_status: "pending",
+    authority_source: null,
     created_at: "2026-07-20T10:00:00.000Z",
     responded_at: "2026-07-20T10:00:00.000Z",
+    submitted_at: "2026-07-20T10:00:00.000Z",
   });
 
   assert.equal(Object.hasOwn(serialized, "homeowner_id"), false);
@@ -211,9 +292,58 @@ test("professional serializer exposes request-safe relationship state", () => {
 
   assert.equal(serialized.request_id, 41);
   assert.equal(serialized.status, "active");
-  assert.equal(serialized.conversation_available, true);
+  assert.equal(serialized.response_id, null);
+  assert.equal(serialized.response_status, null);
+  assert.equal(serialized.relationship_status, "active");
+  assert.equal(serialized.authority_source, null);
+  assert.equal(serialized.conversation_available, false);
   assert.equal(Object.hasOwn(serialized, "homeowner_id"), false);
   assert.equal(Object.hasOwn(serialized, "professional_user_id"), false);
+});
+
+test("canonical relationship serializers expose response truth without conversation authority", () => {
+  const row = {
+    id: 501,
+    post_id: 41,
+    contractor_id: 80,
+    professional_user_id: 9,
+    request_title: "Drywall Repair",
+    request_description: "Repair wall damage",
+    request_category: "drywall",
+    service_domain: "home_services",
+    service_specialty: "drywall_repair",
+    business_name: "Trusted Repairs",
+    professional_category: "handyman",
+    business_image_url: "https://example.test/logo.jpg",
+    introduction_text: "",
+    status: "pending",
+    professional_response_id: "901",
+    ordinary_authority_source: "professional_response",
+    relationship_current_version: 1,
+    response_id: "901",
+    response_status: "submitted",
+    response_current_version: 1,
+    response_introduction_text: "I can help.",
+    response_submitted_at: "2026-08-06T12:00:00.000Z",
+    created_at: "2026-08-06T12:00:00.000Z",
+    responded_at: "2026-08-06T12:00:00.000Z",
+  };
+
+  const homeowner = serializePendingRelationshipForHomeowner(row);
+  const professional = serializeRelationshipForProfessional(row);
+
+  for (const projection of [homeowner, professional]) {
+    assert.equal(projection.response_id, "901");
+    assert.equal(projection.response_status, "submitted");
+    assert.equal(projection.relationship_status, "pending");
+    assert.equal(projection.authority_source, "professional_response");
+    assert.equal(projection.introduction_text, "I can help.");
+  }
+  assert.equal(professional.conversation_available, false);
+  assert.equal(professional.conversation_id, null);
+  assert.equal(Object.hasOwn(homeowner, "conversation_id"), false);
+  assert.equal(Object.hasOwn(homeowner, "professional_user_id"), false);
+  assert.equal(Object.hasOwn(professional, "homeowner_id"), false);
 });
 
 test("Emergency response serializer exposes only the approved pending projection", () => {

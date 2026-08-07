@@ -32,14 +32,6 @@ function normalizeIdentifier(value = "") {
     .replace(/^_+|_+$/g, "");
 }
 
-function normalizePositiveInteger(value) {
-  const normalized = String(value ?? "").trim();
-  if (!/^[1-9]\d*$/.test(normalized)) return null;
-
-  const parsed = Number(normalized);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
-}
-
 function validateRequestPayload(body, { partial = false } = {}) {
   if (!isRecord(body)) {
     return { ok: false, status: 400, code: "INVALID_REQUEST", message: "Request details must be an object." };
@@ -189,8 +181,6 @@ function serializeOwnedRequest(row = {}, requestPhotos = []) {
 }
 
 function serializeProfessionalOpportunity(row = {}, requestPhotos = []) {
-  const conversationId = normalizePositiveInteger(row.conversation_id);
-
   return {
     id: row.id,
     request_id: row.id,
@@ -205,11 +195,19 @@ function serializeProfessionalOpportunity(row = {}, requestPhotos = []) {
     updated_at: row.updated_at,
     image_url: row.image_url ?? requestPhotos[0]?.secure_url ?? "",
     request_photos: requestPhotos,
-    conversation_id: conversationId,
-    conversation_available: Boolean(conversationId),
-    conversation_type: "request_opportunity",
     relationship_scope: "business",
     account_mode: "business",
+    has_responded: row.has_responded === true,
+    professional_response_id:
+      row.has_responded === true ? row.professional_response_id : null,
+    response_status:
+      row.has_responded === true ? row.response_status : null,
+    relationship_status:
+      row.has_responded === true ? row.relationship_status : null,
+    submitted_at:
+      row.has_responded === true ? row.submitted_at : null,
+    response_submission_available:
+      row.response_submission_available === true,
   };
 }
 

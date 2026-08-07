@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const {
-  materializeProfessionalOpportunities,
+  listProfessionalOpportunities,
 } = require("../server/requests/professionalOpportunityService");
 const {
   professionalCanSeeRequest,
@@ -12,6 +12,10 @@ const {
 
 function normalizeSql(sql) {
   return String(sql).replace(/\s+/g, " ").trim();
+}
+
+function clone(value) {
+  return JSON.parse(JSON.stringify(value));
 }
 
 function eligibleProfile(overrides = {}) {
@@ -48,333 +52,458 @@ function eligibleRequest(overrides = {}) {
 }
 
 function createOpportunityPool({
-  profile = eligibleProfile(),
+  profiles = [eligibleProfile()],
   requests = [eligibleRequest()],
   relationships = [],
   conversations = [],
-  failMaterialization = false,
+  participants = [],
+  responses = [],
+  selections = [],
+  history = [],
 } = {}) {
   const calls = [];
+  let connectCalls = 0;
   const state = {
-    relationships: new Map(
-      relationships.map((row) => [`${row.post_id}:${row.contractor_id}`, { ...row }])
-    ),
-    conversations: new Map(
-      conversations.map((row) => [row.relationship_id, { ...row }])
-    ),
-  };
-  let nextRelationshipId = 51;
-  let nextConversationId = 91;
-  let released = 0;
-
-  const client = {
-    async query(text, values = []) {
-      const sql = normalizeSql(text);
-      calls.push({ sql, values });
-
-      if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql)) {
-        return { rows: [] };
-      }
-
-      if (sql.includes("FROM contractor_profiles")) {
-        return {
-          rows: profile && Number(profile.user_id) === Number(values[0])
-            ? [{ ...profile }]
-            : [],
-        };
-      }
-
-      if (
-        sql.includes("INSERT INTO request_relationships") &&
-        sql.includes("INSERT INTO conversations")
-      ) {
-        if (failMaterialization) {
-          throw new Error("simulated conversation materialization failure");
-        }
-
-        const [professionalUserId, contractorId, requestIds] = values;
-        const rows = [];
-
-        for (const requestId of requestIds) {
-          const request = requests.find((item) => Number(item.id) === Number(requestId));
-          if (!request || request.status !== "open") continue;
-
-          const relationshipKey = `${request.id}:${contractorId}`;
-          let relationship = state.relationships.get(relationshipKey);
-
-          if (!relationship) {
-            relationship = {
-              id: nextRelationshipId++,
-              post_id: request.id,
-              homeowner_id: request.user_id,
-              contractor_id: contractorId,
-              professional_user_id: professionalUserId,
-              status: "active",
-            };
-            state.relationships.set(relationshipKey, relationship);
-          } else if (
-            Number(relationship.homeowner_id) === Number(request.user_id) &&
-            Number(relationship.professional_user_id) === Number(professionalUserId) &&
-            ["pending", "active"].includes(relationship.status)
-          ) {
-            relationship.status = "active";
-          }
-
-          if (
-            relationship.status !== "active" ||
-            Number(relationship.homeowner_id) !== Number(request.user_id) ||
-            Number(relationship.professional_user_id) !== Number(professionalUserId)
-          ) {
-            continue;
-          }
-
-          let conversation = state.conversations.get(relationship.id);
-          if (!conversation) {
-            conversation = {
-              id: nextConversationId++,
-              relationship_id: relationship.id,
-              homeowner_id: relationship.homeowner_id,
-              contractor_id: relationship.contractor_id,
-              professional_user_id: relationship.professional_user_id,
-              status: "active",
-            };
-            state.conversations.set(relationship.id, conversation);
-          }
-
-          rows.push({
-            post_id: relationship.post_id,
-            conversation_id: conversation.id,
-          });
-        }
-
-        return { rows };
-      }
-
-      if (sql.includes("FROM posts") && !sql.includes("ANY($2::integer[])")) {
-        return {
-          rows: requests
-            .filter((row) => row.status === "open" && Number(row.user_id) !== Number(values[0]))
-            .map((row) => ({ ...row })),
-        };
-      }
-
-      if (sql.includes("ANY($2::integer[])")) {
-        const ids = new Set(values[1].map(Number));
-        return {
-          rows: requests
-            .filter((row) =>
-              ids.has(Number(row.id)) &&
-              row.status === "open" &&
-              Number(row.user_id) !== Number(values[0])
-            )
-            .map((row) => ({ ...row })),
-        };
-      }
-
-      throw new Error(`Unexpected query: ${sql}`);
-    },
-
-    release() {
-      released += 1;
-    },
+    requests: clone(requests),
+    relationships: clone(relationships),
+    conversations: clone(conversations),
+    participants: clone(participants),
+    responses: clone(responses),
+    selections: clone(selections),
+    history: clone(history),
   };
 
   return {
+    calls,
+    state,
+    connectCalls: () => connectCalls,
     pool: {
       async connect() {
-        return client;
+        connectCalls += 1;
+        throw new Error("Opportunity reads must not open a transaction client.");
       },
-      async query() {
-        throw new Error("Pool query must not be used during materialization.");
+      async query(text, values = []) {
+        const sql = normalizeSql(text);
+        calls.push({ sql, values });
+
+        if (!/^SELECT\b/i.test(sql)) {
+          throw new Error(`Opportunity read attempted a non-SELECT query: ${sql}`);
+        }
+
+        if (sql.includes("FROM contractor_profiles")) {
+          return {
+            rows: profiles
+              .filter((row) => Number(row.user_id) === Number(values[0]))
+              .sort((left, right) => Number(left.id) - Number(right.id))
+              .slice(0, 2)
+              .map((row) => clone(row)),
+          };
+        }
+
+        if (sql.includes("FROM posts")) {
+          return {
+            rows: state.requests
+              .filter((row) =>
+                row.status === "open" &&
+                Number(row.user_id) !== Number(values[0]) &&
+                !state.selections.some(
+                  (selection) =>
+                    Number(selection.post_id) === Number(row.id) &&
+                    selection.ended_at == null
+                )
+              )
+              .sort((left, right) =>
+                String(right.created_at).localeCompare(String(left.created_at))
+              )
+              .map((row) => clone(row)),
+          };
+        }
+
+        if (sql.includes("FROM request_relationships")) {
+          const [requestIds, contractorId, professionalUserId] = values;
+          return {
+            rows: state.relationships
+              .filter((row) =>
+                requestIds.map(Number).includes(Number(row.post_id)) &&
+                row.emergency_request_id == null &&
+                Number(row.contractor_id) === Number(contractorId) &&
+                Number(row.professional_user_id) ===
+                  Number(professionalUserId)
+              )
+              .sort((left, right) =>
+                Number(left.id) - Number(right.id)
+              )
+              .map((relationship) => {
+                const response = state.responses.find(
+                  (row) =>
+                    String(row.id) ===
+                    String(relationship.professional_response_id) &&
+                    Number(row.request_relationship_id) ===
+                    Number(relationship.id)
+                );
+                return {
+                  post_id: relationship.post_id,
+                  relationship_id: relationship.id,
+                  relationship_response_id:
+                    relationship.professional_response_id,
+                  relationship_post_id: relationship.post_id,
+                  relationship_emergency_request_id:
+                    relationship.emergency_request_id,
+                  relationship_contractor_id:
+                    relationship.contractor_id,
+                  relationship_homeowner_id:
+                    relationship.homeowner_id,
+                  relationship_professional_user_id:
+                    relationship.professional_user_id,
+                  relationship_status: relationship.status,
+                  ordinary_authority_source:
+                    relationship.ordinary_authority_source,
+                  relationship_current_version:
+                    relationship.current_version,
+                  professional_response_id: response?.id || null,
+                  response_post_id: response?.post_id || null,
+                  response_homeowner_id: response?.homeowner_id || null,
+                  contractor_id: response?.contractor_id || null,
+                  professional_user_id:
+                    response?.professional_user_id || null,
+                  response_status: response?.status || null,
+                  response_current_version:
+                    response?.current_version || null,
+                  submitted_at: response?.submitted_at || null,
+                  conversation_exists: state.conversations.some(
+                    (conversation) =>
+                      Number(conversation.relationship_id) ===
+                      Number(relationship.id)
+                  ),
+                };
+              }),
+          };
+        }
+
+        throw new Error(`Unexpected query: ${sql}`);
       },
     },
-    calls,
-    requests,
-    state,
-    released: () => released,
   };
 }
 
-async function materialize(fake, professionalUserId = 9) {
-  return materializeProfessionalOpportunities({
+async function list(fake, professionalUserId = 9) {
+  return listProfessionalOpportunities({
     pool: fake.pool,
     professionalUserId,
     professionalCanSeeRequest,
   });
 }
 
-test("new eligible opportunity atomically materializes canonical identity", async () => {
+function assertSelectOnly(fake) {
+  assert.ok(fake.calls.length > 0);
+  for (const call of fake.calls) {
+    assert.match(call.sql, /^SELECT\b/i);
+    assert.doesNotMatch(
+      call.sql,
+      /\b(INSERT|UPDATE|DELETE|MERGE|CREATE|ALTER|DROP|TRUNCATE|CALL)\b/i
+    );
+    assert.doesNotMatch(call.sql, /\bON\s+CONFLICT\b/i);
+    assert.doesNotMatch(call.sql, /\bFOR\s+(UPDATE|SHARE)\b/i);
+  }
+  assert.equal(fake.calls.some((call) => /\bconversation_participants\b|\bworkflow_events\b/i.test(call.sql)), false);
+  assert.equal(fake.connectCalls(), 0);
+}
+
+test("first eligible opportunity read is SELECT-only and leaves all canonical state unchanged", async () => {
   const fake = createOpportunityPool();
-  const result = await materialize(fake);
+  const before = clone(fake.state);
+
+  const result = await list(fake);
 
   assert.equal(result.ok, true);
-  assert.equal(result.opportunities.length, 1);
-  assert.equal(result.opportunities[0].conversation_id, 91);
-  assert.equal(fake.state.relationships.size, 1);
-  assert.equal(fake.state.conversations.size, 1);
-  assert.equal([...fake.state.relationships.values()][0].status, "active");
-  assert.equal(fake.released(), 1);
-
-  const materialization = fake.calls.find((call) =>
-    call.sql.includes("INSERT INTO request_relationships")
-  );
-  assert.ok(materialization);
-  assert.match(
-    materialization.sql,
-    /ON CONFLICT \(post_id, contractor_id\) WHERE post_id IS NOT NULL DO UPDATE SET/
-  );
-  assert.match(materialization.sql, /ON CONFLICT \(relationship_id\)/);
-  assert.match(materialization.sql, /request_relationships\.professional_user_id = EXCLUDED\.professional_user_id/);
-  assert.match(materialization.sql, /conversations\.professional_user_id = EXCLUDED\.professional_user_id/);
-  assert.deepEqual(materialization.values, [9, 80, [41]]);
+  assert.deepEqual(result.opportunities.map((row) => row.id), [41]);
+  assert.equal(Object.hasOwn(result.opportunities[0], "conversation_id"), false);
+  assert.equal(result.opportunities[0].has_responded, false);
+  assert.equal(result.opportunities[0].response_submission_available, true);
+  assert.deepEqual(fake.state, before);
+  assertSelectOnly(fake);
 });
 
-test("repeated and concurrent refreshes resolve one relationship and conversation", async () => {
-  const fake = createOpportunityPool();
-  const first = await materialize(fake);
-  const second = await materialize(fake);
-  const [third, fourth] = await Promise.all([materialize(fake), materialize(fake)]);
-
-  assert.deepEqual(
-    [first, second, third, fourth].map((result) => result.opportunities[0].conversation_id),
-    [91, 91, 91, 91]
-  );
-  assert.equal(fake.state.relationships.size, 1);
-  assert.equal(fake.state.conversations.size, 1);
-});
-
-test("post-backed materialization preserves a separate Emergency relationship", async () => {
-  const emergencyRelationship = {
-    id: 61,
-    post_id: null,
-    emergency_request_id: 71,
-    homeowner_id: 7,
-    contractor_id: 80,
-    professional_user_id: 9,
-    status: "pending",
-  };
+test("active canonical selection removes the request without mutating opportunity state", async () => {
   const fake = createOpportunityPool({
-    relationships: [emergencyRelationship],
+    selections: [{ id: 701, post_id: 41, ended_at: null }],
   });
+  const before = clone(fake.state);
 
-  const result = await materialize(fake);
+  const result = await list(fake);
 
-  assert.equal(result.ok, true);
-  assert.equal(result.opportunities[0].conversation_id, 91);
-  assert.equal(fake.state.relationships.size, 2);
-  assert.deepEqual(
-    fake.state.relationships.get("null:80"),
-    emergencyRelationship
-  );
-  assert.equal(fake.state.relationships.get("41:80").post_id, 41);
-
-  const materialization = fake.calls.find((call) =>
-    call.sql.includes("INSERT INTO request_relationships")
-  );
-  assert.match(
-    materialization.sql,
-    /ON CONFLICT \(post_id, contractor_id\) WHERE post_id IS NOT NULL/
-  );
-  assert.doesNotMatch(
-    materialization.sql,
-    /ON CONFLICT \(emergency_request_id, contractor_id\)/
-  );
-});
-
-test("ineligible and unowned professionals receive no canonical records", async () => {
-  const ineligible = createOpportunityPool({
-    requests: [eligibleRequest({ location: "Miami, FL" })],
-  });
-  const ineligibleResult = await materialize(ineligible);
-
-  assert.equal(ineligibleResult.ok, true);
-  assert.deepEqual(ineligibleResult.opportunities, []);
-  assert.equal(ineligible.state.relationships.size, 0);
-  assert.equal(ineligible.state.conversations.size, 0);
-  assert.equal(
-    ineligible.calls.some((call) => call.sql.includes("INSERT INTO request_relationships")),
-    false
-  );
-
-  const unowned = createOpportunityPool();
-  const unownedResult = await materialize(unowned, 10);
-  assert.equal(unownedResult.ok, false);
-  assert.equal(unownedResult.status, 403);
-  assert.equal(unownedResult.code, "PROFESSIONAL_PROFILE_REQUIRED");
-  assert.equal(unowned.state.relationships.size, 0);
-  assert.equal(unowned.state.conversations.size, 0);
-});
-
-test("conflicting professional authority cannot reuse canonical identity", async () => {
-  const fake = createOpportunityPool({
-    relationships: [{
-      id: 61,
-      post_id: 41,
-      homeowner_id: 7,
-      contractor_id: 80,
-      professional_user_id: 10,
-      status: "active",
-    }],
-  });
-
-  const result = await materialize(fake, 9);
   assert.equal(result.ok, true);
   assert.deepEqual(result.opportunities, []);
-  assert.equal(fake.state.relationships.size, 1);
-  assert.equal(fake.state.conversations.size, 0);
+  assert.deepEqual(fake.state, before);
+  assertSelectOnly(fake);
+  assert.match(
+    fake.calls.find((call) => call.sql.includes("FROM posts")).sql,
+    /NOT EXISTS \( SELECT 1 FROM request_selections .* request_selections\.ended_at IS NULL \)/
+  );
 });
 
-test("editing a request into service area materializes once without resubmission", async () => {
+test("repeated and concurrent opportunity reads remain deterministic and state-neutral", async () => {
   const fake = createOpportunityPool({
-    requests: [eligibleRequest({ location: "Miami, FL" })],
+    requests: [
+      eligibleRequest({ id: 41, created_at: "2026-07-22T10:00:00.000Z" }),
+      eligibleRequest({ id: 42, created_at: "2026-07-23T10:00:00.000Z" }),
+    ],
   });
+  const before = clone(fake.state);
 
-  const beforeEdit = await materialize(fake);
-  assert.deepEqual(beforeEdit.opportunities, []);
+  const first = await list(fake);
+  const second = await list(fake);
+  const [third, fourth] = await Promise.all([list(fake), list(fake)]);
 
-  fake.requests[0].location = "Cape Coral, FL";
-  const afterEdit = await materialize(fake);
-  const afterRefresh = await materialize(fake);
-
-  assert.equal(afterEdit.opportunities[0].conversation_id, 91);
-  assert.equal(afterRefresh.opportunities[0].conversation_id, 91);
-  assert.equal(fake.state.relationships.size, 1);
-  assert.equal(fake.state.conversations.size, 1);
+  for (const result of [first, second, third, fourth]) {
+    assert.deepEqual(result.opportunities.map((row) => row.id), [42, 41]);
+  }
+  assert.deepEqual(fake.state, before);
+  assertSelectOnly(fake);
 });
 
-test("existing canonical records retain their original conversation identity", async () => {
+test("multiple professional businesses can read one eligible request without creating participation", async () => {
   const fake = createOpportunityPool({
-    relationships: [{
-      id: 61,
-      post_id: 41,
-      homeowner_id: 7,
-      contractor_id: 80,
-      professional_user_id: 9,
-      status: "active",
-    }],
+    profiles: [
+      eligibleProfile(),
+      eligibleProfile({ id: 81, user_id: 10 }),
+    ],
+  });
+  const before = clone(fake.state);
+
+  const firstProfessional = await list(fake, 9);
+  const secondProfessional = await list(fake, 10);
+
+  assert.deepEqual(firstProfessional.opportunities.map((row) => row.id), [41]);
+  assert.deepEqual(secondProfessional.opportunities.map((row) => row.id), [41]);
+  assert.deepEqual(fake.state, before);
+  assertSelectOnly(fake);
+});
+
+test("each viewer resolves only its owned business profile and eligibility projection", async () => {
+  const fake = createOpportunityPool({
+    profiles: [
+      eligibleProfile(),
+      eligibleProfile({
+        id: 81,
+        user_id: 10,
+        profile_details: {
+          service_area: "Miami",
+          service_specialties: ["plumbing"],
+        },
+      }),
+    ],
+    requests: [
+      eligibleRequest({ id: 41 }),
+      eligibleRequest({
+        id: 42,
+        user_id: 8,
+        category: "plumbing",
+        request_category: "plumbing",
+        service_specialty: "plumbing",
+        location: "Miami, FL 33101",
+      }),
+    ],
+  });
+  const before = clone(fake.state);
+
+  const paintingBusiness = await list(fake, 9);
+  const plumbingBusiness = await list(fake, 10);
+
+  assert.deepEqual(paintingBusiness.opportunities.map((row) => row.id), [41]);
+  assert.deepEqual(plumbingBusiness.opportunities.map((row) => row.id), [42]);
+  assert.deepEqual(fake.state, before);
+  assert.deepEqual(
+    fake.calls
+      .filter((call) => call.sql.includes("FROM contractor_profiles"))
+      .map((call) => call.values),
+    [[9], [10]]
+  );
+  assertSelectOnly(fake);
+});
+
+test("ineligible, self-owned, closed, and unowned-professional reads fail closed without writes", async () => {
+  const fake = createOpportunityPool({
+    requests: [
+      eligibleRequest({ id: 41, location: "Miami, FL" }),
+      eligibleRequest({ id: 42, user_id: 9 }),
+      eligibleRequest({ id: 43, status: "cancelled" }),
+      eligibleRequest({ id: 44, service_specialty: "plumbing" }),
+    ],
+  });
+  const before = clone(fake.state);
+
+  const ineligible = await list(fake, 9);
+  const unowned = await list(fake, 11);
+
+  assert.deepEqual(ineligible.opportunities, []);
+  assert.equal(unowned.ok, false);
+  assert.equal(unowned.status, 403);
+  assert.equal(unowned.code, "PROFESSIONAL_PROFILE_REQUIRED");
+  assert.deepEqual(fake.state, before);
+  assertSelectOnly(fake);
+});
+
+test("existing ordinary and Emergency authority records are read only and never modified", async () => {
+  const existingState = {
+    relationships: [
+      {
+        id: 61,
+        post_id: 41,
+        emergency_request_id: null,
+        homeowner_id: 7,
+        contractor_id: 80,
+        professional_user_id: 9,
+        status: "pending",
+        updated_at: "2026-07-20T10:00:00.000Z",
+      },
+      {
+        id: 62,
+        post_id: null,
+        emergency_request_id: 71,
+        homeowner_id: 7,
+        contractor_id: 80,
+        professional_user_id: 9,
+        status: "active",
+        updated_at: "2026-07-20T11:00:00.000Z",
+      },
+    ],
     conversations: [{
       id: 101,
       relationship_id: 61,
-      homeowner_id: 7,
-      contractor_id: 80,
-      professional_user_id: 9,
-      status: "active",
+      status: "closed",
+      updated_at: "2026-07-20T12:00:00.000Z",
     }],
-  });
+    participants: [{ conversation_id: 101, user_id: 9 }],
+    responses: [],
+    history: [{ id: 301, event_type: "request.created" }],
+  };
+  const fake = createOpportunityPool(existingState);
+  const before = clone(fake.state);
 
-  const result = await materialize(fake);
-  assert.equal(result.opportunities[0].conversation_id, 101);
-  assert.equal(fake.state.relationships.size, 1);
-  assert.equal(fake.state.conversations.size, 1);
+  const result = await list(fake);
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.opportunities.map((row) => row.id), [41]);
+  assert.equal(Object.hasOwn(result.opportunities[0], "conversation_id"), false);
+  assert.equal(result.opportunities[0].response_submission_available, false);
+  assert.deepEqual(fake.state, before);
+  assertSelectOnly(fake);
 });
 
-test("conversation materialization failure rolls back the transaction", async () => {
-  const fake = createOpportunityPool({ failMaterialization: true });
+test("canonical response state is projected only for the exact authenticated business", async () => {
+  const fake = createOpportunityPool({
+    relationships: [
+      {
+        id: 61,
+        post_id: 41,
+        emergency_request_id: null,
+        homeowner_id: 7,
+        contractor_id: 80,
+        professional_user_id: 9,
+        status: "pending",
+        professional_response_id: "201",
+        ordinary_authority_source: "professional_response",
+        current_version: 1,
+      },
+      {
+        id: 62,
+        post_id: 41,
+        emergency_request_id: null,
+        homeowner_id: 7,
+        contractor_id: 81,
+        professional_user_id: 10,
+        status: "pending",
+        professional_response_id: "202",
+        ordinary_authority_source: "professional_response",
+        current_version: 1,
+      },
+    ],
+    responses: [
+      {
+        id: "201",
+        request_relationship_id: 61,
+        post_id: 41,
+        homeowner_id: 7,
+        contractor_id: 80,
+        professional_user_id: 9,
+        status: "submitted",
+        current_version: 1,
+        submitted_at: "2026-08-06T12:00:00.000Z",
+      },
+      {
+        id: "202",
+        request_relationship_id: 62,
+        post_id: 41,
+        homeowner_id: 7,
+        contractor_id: 81,
+        professional_user_id: 10,
+        status: "submitted",
+        current_version: 1,
+        submitted_at: "2026-08-06T12:05:00.000Z",
+        introduction_text: "Private other response",
+      },
+    ],
+  });
 
-  await assert.rejects(materialize(fake), /materialization failure/);
-  assert.equal(fake.state.relationships.size, 0);
-  assert.equal(fake.state.conversations.size, 0);
-  assert.equal(fake.calls.some((call) => call.sql === "ROLLBACK"), true);
-  assert.equal(fake.calls.some((call) => call.sql === "COMMIT"), false);
-  assert.equal(fake.released(), 1);
+  const result = await list(fake, 9);
+  assert.equal(result.opportunities[0].has_responded, true);
+  assert.equal(result.opportunities[0].professional_response_id, "201");
+  assert.equal(result.opportunities[0].response_status, "submitted");
+  assert.equal(result.opportunities[0].relationship_status, "pending");
+  assert.equal(result.opportunities[0].response_submission_available, false);
+  assert.equal(Object.hasOwn(result.opportunities[0], "introduction_text"), false);
+
+  const stateQuery = fake.calls.find((call) =>
+    call.sql.includes("FROM request_relationships")
+  );
+  assert.deepEqual(stateQuery.values, [[41], 80, 9]);
+  assertSelectOnly(fake);
+});
+
+test("malformed, duplicate, and legacy participation fail closed without hiding the request", async (t) => {
+  const relationship = {
+    id: 61,
+    post_id: 41,
+    emergency_request_id: null,
+    contractor_id: 80,
+    professional_user_id: 9,
+    status: "pending",
+    professional_response_id: null,
+    ordinary_authority_source: null,
+    current_version: null,
+  };
+
+  for (const relationships of [
+    [relationship],
+    [relationship, { ...relationship, id: 62 }],
+    [{
+      ...relationship,
+      professional_response_id: "201",
+      ordinary_authority_source: "professional_response",
+      current_version: 1,
+    }],
+  ]) {
+    await t.test(`rows-${relationships.length}-${relationships[0].professional_response_id || "legacy"}`, async () => {
+      const fake = createOpportunityPool({ relationships, responses: [] });
+      const result = await list(fake);
+      assert.equal(result.opportunities.length, 1);
+      assert.equal(result.opportunities[0].has_responded, false);
+      assert.equal(result.opportunities[0].response_submission_available, false);
+      assertSelectOnly(fake);
+    });
+  }
+});
+
+test("multiple owned profiles fail closed rather than selecting one", async () => {
+  const fake = createOpportunityPool({
+    profiles: [eligibleProfile(), eligibleProfile({ id: 81 })],
+  });
+  const result = await list(fake);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 409);
+  assert.equal(result.code, "PROFESSIONAL_PROFILE_AMBIGUOUS");
+  assert.equal(fake.calls.some((call) => call.sql.includes("FROM posts")), false);
+  assertSelectOnly(fake);
 });

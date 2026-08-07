@@ -12,6 +12,9 @@ const RELATIONSHIP_STATUS_VALUES = Object.freeze(
   Object.values(RELATIONSHIP_STATUSES)
 );
 
+const PROFESSIONAL_RESPONSE_IDEMPOTENCY_KEY_PATTERN =
+  /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
+
 function cleanText(value, maxLength = 2000) {
   if (value === undefined || value === null) return "";
 
@@ -66,6 +69,26 @@ function validateEmergencyResponsePayload(payload) {
 }
 
 function validateProfessionalResponsePayload(payload = {}) {
+  if (!isPlainObject(payload)) {
+    return {
+      valid: false,
+      code: "INVALID_PROFESSIONAL_RESPONSE",
+      message: "Professional response details must be an object.",
+    };
+  }
+
+  if (
+    Object.keys(payload).some(
+      (field) => field !== "introduction_text"
+    )
+  ) {
+    return {
+      valid: false,
+      code: "UNSUPPORTED_PROFESSIONAL_RESPONSE_FIELDS",
+      message: "Professional response identity is managed by Meetro.",
+    };
+  }
+
   const introductionText = cleanText(payload.introduction_text, 2000);
 
   if (!introductionText) {
@@ -81,6 +104,53 @@ function validateProfessionalResponsePayload(payload = {}) {
     value: {
       introductionText,
     },
+  };
+}
+
+function validateProfessionalResponseIdempotencyKey(value) {
+  const idempotencyKey =
+    typeof value === "string" ? value.trim() : "";
+
+  if (!PROFESSIONAL_RESPONSE_IDEMPOTENCY_KEY_PATTERN.test(idempotencyKey)) {
+    return {
+      valid: false,
+      code: "INVALID_PROFESSIONAL_RESPONSE_IDEMPOTENCY_KEY",
+      message: "A valid idempotency key is required.",
+    };
+  }
+
+  return {
+    valid: true,
+    value: idempotencyKey,
+  };
+}
+
+function serializeCanonicalProfessionalResponse(row = {}, classification) {
+  return {
+    response: {
+      id: row.response_id,
+      request_id: row.post_id,
+      status: row.response_status,
+      current_version: row.response_current_version,
+      introduction_text: row.response_introduction_text,
+      submitted_at: row.response_submitted_at,
+      updated_at: row.response_updated_at,
+      business_profile: {
+        business_name: row.business_name || "",
+        category: row.professional_category || "",
+        image_url: row.business_image_url || "",
+      },
+    },
+    relationship: {
+      id: row.relationship_id,
+      request_id: row.post_id,
+      status: row.relationship_status,
+      authority_source: row.ordinary_authority_source,
+      current_version: row.relationship_current_version,
+      created_at: row.relationship_created_at,
+    },
+    resultClassification: classification,
+    created: classification === "created",
   };
 }
 
@@ -109,7 +179,32 @@ function canProfessionalWithdrawRelationship(relationship = {}, userId) {
   );
 }
 
+function hasCanonicalResponseLink(row = {}) {
+  const statusPairs = {
+    submitted: "pending",
+    selected: "active",
+    withdrawn: "closed",
+    declined: "closed",
+    not_selected: "closed",
+    expired: "closed",
+    cancelled: "closed",
+    closed: "closed",
+  };
+
+  return Boolean(
+    row.response_id &&
+      String(row.response_id) === String(row.professional_response_id) &&
+      row.ordinary_authority_source === "professional_response" &&
+      Number(row.response_current_version) > 0 &&
+      Number(row.response_current_version) ===
+        Number(row.relationship_current_version) &&
+      statusPairs[row.response_status] === row.status
+  );
+}
+
 function serializePendingRelationshipForHomeowner(row = {}) {
+  const canonicalResponse = hasCanonicalResponseLink(row);
+
   return {
     id: row.id,
     request_id: row.post_id,
@@ -118,15 +213,39 @@ function serializePendingRelationshipForHomeowner(row = {}) {
     business_name: row.business_name || "",
     business_image_url: row.business_image_url || "",
     professional_category: row.professional_category || "",
-    introduction_text: row.introduction_text || "",
+    introduction_text: canonicalResponse
+      ? row.response_introduction_text || ""
+      : row.introduction_text || "",
     status: row.status,
+    response_id: canonicalResponse ? row.response_id : null,
+    response_status: canonicalResponse ? row.response_status : null,
+    relationship_status: row.status,
+    authority_source: canonicalResponse
+      ? row.ordinary_authority_source
+      : null,
     created_at: row.created_at,
     responded_at: row.responded_at,
+    submitted_at: canonicalResponse
+      ? row.response_submitted_at
+      : row.responded_at,
   };
 }
 
 function serializeRelationshipForProfessional(row = {}) {
-  return {
+  const canonicalResponse = hasCanonicalResponseLink(row);
+  const selectedCanonical = Boolean(
+    canonicalResponse &&
+      row.response_status === "selected" &&
+      row.status === RELATIONSHIP_STATUSES.ACTIVE &&
+      row.request_selection_id &&
+      row.selection_ended_at == null &&
+      row.canonical_conversation_id &&
+      row.canonical_conversation_status === "active" &&
+      String(row.conversation_selection_id) ===
+        String(row.request_selection_id)
+  );
+
+  const value = {
     id: row.id,
     request_id: row.post_id,
     request_title: row.request_title || "",
@@ -134,16 +253,40 @@ function serializeRelationshipForProfessional(row = {}) {
     request_category: row.request_category || "",
     service_domain: row.service_domain || "",
     service_specialty: row.service_specialty || "",
-    introduction_text: row.introduction_text || "",
+    introduction_text: canonicalResponse
+      ? row.response_introduction_text || ""
+      : row.introduction_text || "",
     status: row.status,
+    response_id: canonicalResponse ? row.response_id : null,
+    response_status: canonicalResponse ? row.response_status : null,
+    relationship_status: row.status,
+    authority_source: canonicalResponse
+      ? row.ordinary_authority_source
+      : null,
     created_at: row.created_at,
     responded_at: row.responded_at,
     accepted_at: row.accepted_at,
     declined_at: row.declined_at,
     withdrawn_at: row.withdrawn_at,
     closed_at: row.closed_at,
-    conversation_available: row.status === RELATIONSHIP_STATUSES.ACTIVE,
+    selection_status: selectedCanonical
+      ? "selected"
+      : canonicalResponse && row.response_status === "not_selected"
+        ? "not_selected"
+        : null,
+    privacy_stage: selectedCanonical ? 3 : 2,
+    conversation_available: selectedCanonical,
+    conversation_id: selectedCanonical
+      ? row.canonical_conversation_id
+      : null,
   };
+
+  if (selectedCanonical) {
+    value.service_location = row.service_location || "";
+    value.unit_number = row.unit_number || "";
+  }
+
+  return value;
 }
 
 function serializeEmergencyResponseRelationship(row = {}) {
@@ -215,10 +358,12 @@ module.exports = {
   isValidPositiveInteger,
   parsePositiveInteger,
   serializeEmergencyResponseRelationship,
+  serializeCanonicalProfessionalResponse,
   serializeHomeownerEmergencyResponse,
   serializePendingRelationshipForHomeowner,
   serializeRelationshipForProfessional,
   validateEmergencyResponsePayload,
   validateProfessionalResponsePayload,
+  validateProfessionalResponseIdempotencyKey,
   validateRelationshipStatus,
 };

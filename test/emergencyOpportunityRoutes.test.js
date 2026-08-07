@@ -375,7 +375,7 @@ test("existing authenticated Emergency homeowner routes remain registered", () =
   }
 });
 
-test("Emergency retrieval remains separate from standard materializing opportunities", () => {
+test("Emergency retrieval remains separate from standard read-only opportunities", () => {
   const indexSource = readFileSync(
     require.resolve("../index.js"),
     "utf8"
@@ -395,10 +395,14 @@ test("Emergency retrieval remains separate from standard materializing opportuni
   );
   assert.match(
     standardSource,
-    /async function materializeProfessionalOpportunities/
+    /async function listProfessionalOpportunities/
+  );
+  assert.doesNotMatch(
+    standardSource,
+    /\b(INSERT|UPDATE|DELETE)\b/
   );
   assert.doesNotMatch(
     emergencySource,
-    /materializeProfessionalOpportunities|professionalOpportunityService/
+    /listProfessionalOpportunities|professionalOpportunityService/
   );
 });

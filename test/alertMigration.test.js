@@ -7,6 +7,8 @@ const test = require("node:test");
 
 const migrationFilename =
   "202608030002_create_canonical_alerts.sql";
+const professionalResponseMigrationFilename =
+  "202608060001_create_professional_response_foundation.sql";
 const migrationPath = path.join(
   __dirname,
   "..",
@@ -125,12 +127,16 @@ test("alerts migration remains additive and separate from producers", () => {
   );
 });
 
-test("alerts migration is latest and documented", () => {
+test("alerts migration precedes Professional Response authority and remains documented", () => {
   const migrationFiles = fs
     .readdirSync(path.dirname(migrationPath))
     .filter((filename) => /^\d{12}_[a-z0-9_]+\.sql$/.test(filename))
     .sort();
-  assert.equal(migrationFiles.at(-1), migrationFilename);
+  assert.ok(migrationFiles.includes(professionalResponseMigrationFilename));
+  assert.ok(
+    migrationFiles.indexOf(migrationFilename) <
+      migrationFiles.indexOf(professionalResponseMigrationFilename)
+  );
 
   const readme = fs.readFileSync(
     path.join(path.dirname(migrationPath), "README.md"),

@@ -3,325 +3,10 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const {
-  createProfessionalRequestRelationship,
-} = require("../server/relationships/requestRelationshipService");
-
 function normalizeSql(sql) {
   return String(sql).replace(/\s+/g, " ").trim();
 }
 
-function eligibleProfile(overrides = {}) {
-  return {
-    id: 80,
-    user_id: 9,
-    category: "handyman",
-    profile_details: {
-      city: "Cape Coral",
-      postal_code: "33990",
-      service_area: "Lee County",
-      service_specialties: ["drywall_repair"],
-    },
-    ...overrides,
-  };
-}
-
-function eligibleRequest(overrides = {}) {
-  return {
-    id: 41,
-    user_id: 7,
-    title: "Drywall Repair",
-    description: "Repair damaged drywall",
-    category: "drywall",
-    request_category: "drywall",
-    service_domain: "home_services",
-    service_specialty: "drywall_repair",
-    location: "Cape Coral, FL 33990",
-    status: "open",
-    created_at: "2026-07-20T10:00:00.000Z",
-    updated_at: "2026-07-20T10:00:00.000Z",
-    image_url: null,
-    request_photos: [],
-    ...overrides,
-  };
-}
-
-function createFakePool({
-  profileRows = [eligibleProfile()],
-  requestRows = [eligibleRequest()],
-  relationshipRows = [{
-    id: 51,
-    post_id: 41,
-    homeowner_id: 7,
-    contractor_id: 80,
-    professional_user_id: 9,
-    status: "pending",
-    introduction_text: "I can help.",
-    created: true,
-  }],
-  failOn,
-  useConnect = true,
-} = {}) {
-  const calls = [];
-  let released = false;
-
-  const client = {
-    async query(text, values = []) {
-      const sql = normalizeSql(text);
-      calls.push({ sql, values });
-
-      if (failOn && sql.includes(failOn)) {
-        throw new Error("simulated database failure");
-      }
-
-      if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql)) {
-        return { rows: [] };
-      }
-
-      if (sql.includes("FROM contractor_profiles")) {
-        return { rows: profileRows };
-      }
-
-      if (sql.includes("FROM posts")) {
-        return { rows: requestRows };
-      }
-
-      if (sql.includes("INSERT INTO request_relationships")) {
-        return { rows: relationshipRows };
-      }
-
-      throw new Error(`Unexpected query: ${sql}`);
-    },
-
-    release() {
-      released = true;
-    },
-  };
-
-  const pool = useConnect
-    ? {
-        async connect() {
-          return client;
-        },
-        async query() {
-          throw new Error("Pool query must not be used during transaction.");
-        },
-      }
-    : client;
-
-  return {
-    pool,
-    calls,
-    wasReleased() {
-      return released;
-    },
-  };
-}
-
-test("eligible professional creates one pending request relationship", async () => {
-  const fake = createFakePool();
-
-  const result = await createProfessionalRequestRelationship({
-    pool: fake.pool,
-    professionalUserId: 9,
-    postId: "41",
-    payload: {
-      introduction_text: "  I can help.  ",
-    },
-    professionalCanSeeRequest: () => true,
-  });
-
-  assert.equal(result.ok, true);
-  assert.equal(result.status, 201);
-  assert.equal(result.code, "REQUEST_RELATIONSHIP_CREATED");
-  assert.equal(result.created, true);
-  assert.equal(result.relationship.id, 51);
-
-  const insert = fake.calls.find((call) =>
-    call.sql.includes("INSERT INTO request_relationships")
-  );
-
-  assert.ok(insert);
-  assert.deepEqual(insert.values, [
-    41,
-    7,
-    80,
-    9,
-    "I can help.",
-  ]);
-  assert.match(
-    insert.sql,
-    /ON CONFLICT \(post_id, contractor_id\) WHERE post_id IS NOT NULL DO NOTHING/
-  );
-  assert.doesNotMatch(
-    insert.sql,
-    /ON CONFLICT \(emergency_request_id, contractor_id\)/
-  );
-
-  assert.equal(fake.wasReleased(), true);
-});
-
-test("repeated response returns the existing relationship idempotently", async () => {
-  const fake = createFakePool({
-    relationshipRows: [{
-      id: 51,
-      post_id: 41,
-      homeowner_id: 7,
-      contractor_id: 80,
-      professional_user_id: 9,
-      status: "pending",
-      introduction_text: "I can help.",
-      created: false,
-    }],
-  });
-
-  const result = await createProfessionalRequestRelationship({
-    pool: fake.pool,
-    professionalUserId: 9,
-    postId: 41,
-    payload: {
-      introduction_text: "A repeated click must not duplicate.",
-    },
-    professionalCanSeeRequest: () => true,
-  });
-
-  assert.equal(result.ok, true);
-  assert.equal(result.status, 200);
-  assert.equal(result.code, "REQUEST_RELATIONSHIP_EXISTS");
-  assert.equal(result.created, false);
-  assert.equal(result.relationship.id, 51);
-});
-
-test("invalid identifiers and missing introductions fail before database access", async () => {
-  const fake = createFakePool();
-
-  const invalidId = await createProfessionalRequestRelationship({
-    pool: fake.pool,
-    professionalUserId: 9,
-    postId: "41abc",
-    payload: {
-      introduction_text: "I can help.",
-    },
-    professionalCanSeeRequest: () => true,
-  });
-
-  assert.equal(invalidId.ok, false);
-  assert.equal(invalidId.status, 400);
-  assert.equal(invalidId.code, "INVALID_REQUEST_ID");
-
-  const missingIntroduction = await createProfessionalRequestRelationship({
-    pool: fake.pool,
-    professionalUserId: 9,
-    postId: 41,
-    payload: {},
-    professionalCanSeeRequest: () => true,
-  });
-
-  assert.equal(missingIntroduction.ok, false);
-  assert.equal(missingIntroduction.code, "INTRODUCTION_REQUIRED");
-  assert.equal(fake.calls.length, 0);
-});
-
-test("professional profile is required", async () => {
-  const fake = createFakePool({
-    profileRows: [],
-  });
-
-  const result = await createProfessionalRequestRelationship({
-    pool: fake.pool,
-    professionalUserId: 9,
-    postId: 41,
-    payload: {
-      introduction_text: "I can help.",
-    },
-    professionalCanSeeRequest: () => true,
-  });
-
-  assert.equal(result.ok, false);
-  assert.equal(result.status, 403);
-  assert.equal(result.code, "PROFESSIONAL_PROFILE_REQUIRED");
-
-  assert.ok(fake.calls.some((call) => call.sql === "ROLLBACK"));
-  assert.equal(
-    fake.calls.some((call) => call.sql.includes("FROM posts")),
-    false
-  );
-});
-
-test("same-owner, closed, or missing requests remain unavailable", async () => {
-  const fake = createFakePool({
-    requestRows: [],
-  });
-
-  const result = await createProfessionalRequestRelationship({
-    pool: fake.pool,
-    professionalUserId: 9,
-    postId: 41,
-    payload: {
-      introduction_text: "I can help.",
-    },
-    professionalCanSeeRequest: () => true,
-  });
-
-  assert.equal(result.ok, false);
-  assert.equal(result.status, 404);
-  assert.equal(result.code, "REQUEST_NOT_AVAILABLE");
-
-  const requestQuery = fake.calls.find((call) =>
-    call.sql.includes("FROM posts")
-  );
-
-  assert.ok(requestQuery);
-  assert.match(requestQuery.sql, /status = 'open'/);
-  assert.match(requestQuery.sql, /user_id <> \$2/);
-});
-
-test("server rechecks professional eligibility before relationship creation", async () => {
-  const fake = createFakePool();
-
-  const result = await createProfessionalRequestRelationship({
-    pool: fake.pool,
-    professionalUserId: 9,
-    postId: 41,
-    payload: {
-      introduction_text: "I can help.",
-    },
-    professionalCanSeeRequest: () => false,
-  });
-
-  assert.equal(result.ok, false);
-  assert.equal(result.status, 403);
-  assert.equal(result.code, "REQUEST_NOT_ELIGIBLE");
-
-  assert.equal(
-    fake.calls.some((call) =>
-      call.sql.includes("INSERT INTO request_relationships")
-    ),
-    false
-  );
-});
-
-test("transaction failures roll back and release the dedicated client", async () => {
-  const fake = createFakePool({
-    failOn: "INSERT INTO request_relationships",
-  });
-
-  await assert.rejects(
-    createProfessionalRequestRelationship({
-      pool: fake.pool,
-      professionalUserId: 9,
-      postId: 41,
-      payload: {
-        introduction_text: "I can help.",
-      },
-      professionalCanSeeRequest: () => true,
-    }),
-    /simulated database failure/
-  );
-
-  assert.ok(fake.calls.some((call) => call.sql === "ROLLBACK"));
-  assert.equal(fake.wasReleased(), true);
-});
 
 test("homeowner relationship inbox returns only homeowner-owned request relationships", async () => {
   const calls = [];
@@ -513,7 +198,7 @@ function createTransitionPool({
   };
 }
 
-test("homeowner can accept a pending owned relationship", async () => {
+test("legacy homeowner accept fails closed in favor of canonical response selection", async () => {
   const {
     acceptHomeownerRequestRelationship,
   } = require("../server/relationships/requestRelationshipService");
@@ -526,22 +211,15 @@ test("homeowner can accept a pending owned relationship", async () => {
     relationshipId: "51",
   });
 
-  assert.equal(result.ok, true);
-  assert.equal(result.status, 200);
-  assert.equal(result.code, "REQUEST_RELATIONSHIP_ACCEPTED");
-  assert.equal(result.relationship.status, "active");
-  assert.equal(result.conversation.id, 91);
-  assert.equal(result.conversation.relationship_id, 51);
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 409);
+  assert.equal(result.code, "CANONICAL_RESPONSE_SELECTION_REQUIRED");
 
   const conversationInsert = fake.calls.find((call) =>
     call.sql.includes("INSERT INTO conversations")
   );
 
-  assert.ok(conversationInsert);
-  assert.deepEqual(
-    conversationInsert.values,
-    [51, 7, 80, 9]
-  );
+  assert.equal(conversationInsert, undefined);
 
   const select = fake.calls.find((call) =>
     call.sql.includes("FROM request_relationships")
@@ -551,16 +229,16 @@ test("homeowner can accept a pending owned relationship", async () => {
   assert.deepEqual(select.values, [51, 7]);
   assert.match(select.sql, /request_relationships\.homeowner_id = \$2/);
   assert.match(select.sql, /posts\.user_id = \$2/);
+  assert.match(select.sql, /professional_response_id IS NULL/);
+  assert.match(select.sql, /ordinary_authority_source IS NULL/);
 
   const update = fake.calls.find((call) =>
     call.sql.startsWith("UPDATE request_relationships")
   );
 
-  assert.ok(update);
-  assert.match(update.sql, /status = \$1/);
-  assert.match(update.sql, /accepted_at = CURRENT_TIMESTAMP/);
-  assert.match(update.sql, /status = 'pending'/);
-  assert.deepEqual(update.values, ["active", 51, 7]);
+  assert.equal(update, undefined);
+  assert.equal(fake.calls.some((call) => call.sql === "ROLLBACK"), true);
+  assert.equal(fake.calls.some((call) => call.sql === "COMMIT"), false);
 
   assert.equal(fake.wasReleased(), true);
 });
@@ -606,6 +284,8 @@ test("homeowner can decline a pending owned relationship", async () => {
 
   assert.ok(update);
   assert.match(update.sql, /declined_at = CURRENT_TIMESTAMP/);
+  assert.match(update.sql, /professional_response_id IS NULL/);
+  assert.match(update.sql, /ordinary_authority_source IS NULL/);
   assert.deepEqual(update.values, ["declined", 51, 7]);
 });
 
@@ -691,7 +371,7 @@ test("invalid relationship identifiers fail before database access", async () =>
 
 test("relationship transition failures roll back and release the client", async () => {
   const {
-    acceptHomeownerRequestRelationship,
+    declineHomeownerRequestRelationship,
   } = require("../server/relationships/requestRelationshipService");
 
   const fake = createTransitionPool({
@@ -699,7 +379,7 @@ test("relationship transition failures roll back and release the client", async 
   });
 
   await assert.rejects(
-    acceptHomeownerRequestRelationship({
+    declineHomeownerRequestRelationship({
       pool: fake.pool,
       homeownerUserId: 7,
       relationshipId: 51,
@@ -815,6 +495,8 @@ test("professional can withdraw an owned pending relationship", async () => {
     select.sql,
     /contractor_profiles\.user_id = \$2/
   );
+  assert.match(select.sql, /professional_response_id IS NULL/);
+  assert.match(select.sql, /ordinary_authority_source IS NULL/);
 
   const update = fake.calls.find((call) =>
     call.sql.startsWith("UPDATE request_relationships")
@@ -823,6 +505,8 @@ test("professional can withdraw an owned pending relationship", async () => {
   assert.ok(update);
   assert.match(update.sql, /status = 'withdrawn'/);
   assert.match(update.sql, /withdrawn_at = CURRENT_TIMESTAMP/);
+  assert.match(update.sql, /professional_response_id IS NULL/);
+  assert.match(update.sql, /ordinary_authority_source IS NULL/);
   assert.deepEqual(update.values, [51, 9]);
 });
 
@@ -881,7 +565,7 @@ test("professional cannot withdraw an active or completed relationship", async (
 });
 
 
-test("acceptance rolls back when conversation persistence fails", async () => {
+test("legacy acceptance never reaches conversation persistence", async () => {
   const {
     acceptHomeownerRequestRelationship,
   } = require("../server/relationships/requestRelationshipService");
@@ -890,19 +574,21 @@ test("acceptance rolls back when conversation persistence fails", async () => {
     failOn: "INSERT INTO conversations",
   });
 
-  await assert.rejects(
-    acceptHomeownerRequestRelationship({
-      pool: fake.pool,
-      homeownerUserId: 7,
-      relationshipId: 51,
-    }),
-    /simulated transition failure/
-  );
+  const result = await acceptHomeownerRequestRelationship({
+    pool: fake.pool,
+    homeownerUserId: 7,
+    relationshipId: 51,
+  });
 
-  assert.ok(
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 409);
+  assert.equal(result.code, "CANONICAL_RESPONSE_SELECTION_REQUIRED");
+
+  assert.equal(
     fake.calls.some((call) =>
       call.sql.startsWith("UPDATE request_relationships")
-    )
+    ),
+    false
   );
 
   assert.ok(
@@ -917,7 +603,7 @@ test("acceptance rolls back when conversation persistence fails", async () => {
   assert.equal(fake.wasReleased(), true);
 });
 
-test("acceptance resolves an existing canonical conversation idempotently", async () => {
+test("legacy acceptance cannot adopt an existing conversation", async () => {
   const {
     acceptHomeownerRequestRelationship,
   } = require("../server/relationships/requestRelationshipService");
@@ -940,14 +626,14 @@ test("acceptance resolves an existing canonical conversation idempotently", asyn
     relationshipId: 51,
   });
 
-  assert.equal(result.ok, true);
-  assert.equal(result.conversation.id, 91);
-  assert.equal(result.conversation.created, false);
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 409);
+  assert.equal(result.code, "CANONICAL_RESPONSE_SELECTION_REQUIRED");
 
   assert.equal(
     fake.calls.filter((call) =>
       call.sql.includes("INSERT INTO conversations")
     ).length,
-    1
+    0
   );
 });

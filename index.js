@@ -57,7 +57,7 @@ const {
   validateRequestPayload,
 } = require("./server/requests/requestLifecycle");
 const {
-  materializeProfessionalOpportunities,
+  listProfessionalOpportunities,
 } = require("./server/requests/professionalOpportunityService");
 
 const {
@@ -90,12 +90,20 @@ const {
 
 const {
   acceptHomeownerRequestRelationship,
-  createProfessionalRequestRelationship,
   declineHomeownerRequestRelationship,
   listHomeownerRequestRelationships,
   listProfessionalRequestRelationships,
   withdrawProfessionalRequestRelationship,
 } = require("./server/relationships/requestRelationshipService");
+
+const {
+  submitProfessionalResponse,
+} = require("./server/relationships/professionalResponseService");
+
+const {
+  listHomeownerProfessionalResponses,
+  selectProfessionalResponse,
+} = require("./server/relationships/requestSelectionService");
 
 const {
   registerEmergencyRequestRoutes,
@@ -1679,7 +1687,7 @@ app.post("/posts/:id/cancel", authMiddleware, async (req, res) => {
 
 app.get("/professional-request-opportunities", authMiddleware, async (req, res) => {
   try {
-    const result = await materializeProfessionalOpportunities({
+    const result = await listProfessionalOpportunities({
       pool: getPool(req),
       professionalUserId: req.user.id,
       professionalCanSeeRequest,
@@ -2276,6 +2284,88 @@ app.get("/my-request-relationships", authMiddleware, async (req, res) => {
   }
 });
 
+app.get(
+  "/posts/:postId/professional-responses",
+  authMiddleware,
+  async (req, res) => {
+    try {
+      const result = await listHomeownerProfessionalResponses({
+        pool: getPool(req),
+        authenticatedActor: req.user,
+        postId: req.params.postId,
+      });
+
+      if (!result.ok) {
+        return res.status(result.status).json({
+          success: false,
+          code: result.code,
+          message: result.message,
+        });
+      }
+
+      return res.status(result.status).json({
+        success: true,
+        code: result.code,
+        request: result.request,
+        responses: result.responses,
+      });
+    } catch (error) {
+      return sendPublicDatabaseError({
+        res,
+        error,
+        operation: "fetch_homeowner_professional_responses",
+        code: "PROFESSIONAL_RESPONSES_FETCH_FAILED",
+        message: "Professional responses could not be loaded.",
+      });
+    }
+  }
+);
+
+app.post(
+  "/posts/:postId/professional-responses/:responseId/select",
+  authMiddleware,
+  async (req, res) => {
+    try {
+      const result = await selectProfessionalResponse({
+        pool: getPool(req),
+        authenticatedActor: req.user,
+        postId: req.params.postId,
+        responseId: req.params.responseId,
+        payload: req.body,
+        idempotencyKey: req.headers["idempotency-key"],
+      });
+
+      if (!result.ok) {
+        return res.status(result.status).json({
+          success: false,
+          code: result.code,
+          message: result.message,
+        });
+      }
+
+      return res.status(result.status).json({
+        success: true,
+        code: result.code,
+        selection: result.selection,
+        response: result.response,
+        relationship: result.relationship,
+        conversation: result.conversation,
+        privacy_stage: result.privacy_stage,
+        resultClassification: result.resultClassification,
+        replayed: result.replayed === true,
+      });
+    } catch (error) {
+      return sendPublicDatabaseError({
+        res,
+        error,
+        operation: "select_professional_response",
+        code: "REQUEST_SELECTION_FAILED",
+        message: "The professional could not be selected.",
+      });
+    }
+  }
+);
+
 
 app.post(
   "/request-relationships/:relationshipId/accept",
@@ -2373,11 +2463,12 @@ app.post(
   authMiddleware,
   async (req, res) => {
     try {
-      const result = await createProfessionalRequestRelationship({
+      const result = await submitProfessionalResponse({
         pool: getPool(req),
-        professionalUserId: req.user.id,
+        authenticatedActor: req.user,
         postId: req.params.postId,
         payload: req.body,
+        idempotencyKey: req.headers["idempotency-key"],
         professionalCanSeeRequest,
       });
 
@@ -2392,24 +2483,18 @@ app.post(
       return res.status(result.status).json({
         success: true,
         code: result.code,
-        relationship: {
-          id: result.relationship.id,
-          request_id: result.relationship.post_id,
-          contractor_id: result.relationship.contractor_id,
-          status: result.relationship.status,
-          introduction_text: result.relationship.introduction_text,
-          created_at: result.relationship.created_at,
-          responded_at: result.relationship.responded_at,
-          conversation_available: false,
-        },
+        response: result.response,
+        relationship: result.relationship,
+        resultClassification: result.resultClassification,
         created: result.created,
+        replayed: result.replayed === true,
       });
     } catch (error) {
       return sendPublicDatabaseError({
         res,
         error,
-        operation: "create_professional_request_relationship",
-        code: "REQUEST_RELATIONSHIP_CREATE_FAILED",
+        operation: "submit_professional_response",
+        code: "PROFESSIONAL_RESPONSE_CREATE_FAILED",
         message: "The professional response could not be created.",
       });
     }

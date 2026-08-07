@@ -11,6 +11,9 @@ const {
   app,
   createToken,
 } = require("../index");
+const {
+  createProfessionalResponseFake,
+} = require("./helpers/professionalResponseFake");
 
 function normalizeSql(sql) {
   return String(sql).replace(/\s+/g, " ").trim();
@@ -56,6 +59,7 @@ async function invoke({
   body = {
     introduction_text: "I can help with this project.",
   },
+  idempotencyKey = "professional-response:route-command",
   pool,
 } = {}) {
   const user = {
@@ -75,6 +79,7 @@ async function invoke({
     },
     headers: {
       authorization: `Bearer ${createToken(user)}`,
+      "idempotency-key": idempotencyKey,
     },
     user,
   };
@@ -114,116 +119,8 @@ async function invoke({
   }
 }
 
-function createFakePool({
-  profileRows = [{
-    id: 80,
-    user_id: 9,
-    category: "handyman",
-    profile_details: {
-      city: "Cape Coral",
-      postal_code: "33990",
-      service_area: "Lee County",
-      service_specialties: ["drywall_repair"],
-    },
-  }],
-
-  requestRows = [{
-    id: 41,
-    user_id: 7,
-    title: "Drywall Repair",
-    description: "Repair damaged drywall",
-    category: "drywall",
-    request_category: "drywall",
-    service_domain: "home_services",
-    service_specialty: "drywall_repair",
-    location: "Cape Coral, FL 33990",
-    status: "open",
-    created_at: "2026-07-20T10:00:00.000Z",
-    updated_at: "2026-07-20T10:00:00.000Z",
-    image_url: null,
-    request_photos: [],
-  }],
-
-  relationshipRows = [{
-    id: 51,
-    post_id: 41,
-    homeowner_id: 7,
-    contractor_id: 80,
-    professional_user_id: 9,
-    status: "pending",
-    introduction_text: "I can help with this project.",
-    created_at: "2026-07-20T12:00:00.000Z",
-    responded_at: "2026-07-20T12:00:00.000Z",
-    created: true,
-  }],
-} = {}) {
-  const calls = [];
-  let released = false;
-
-  const client = {
-    async query(text, values = []) {
-      const sql = normalizeSql(text);
-      calls.push({ sql, values });
-
-      if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql)) {
-        return { rows: [] };
-      }
-
-      if (
-        sql.includes("SELECT id, email, role, token_version") &&
-        sql.includes("FROM users")
-      ) {
-        return {
-          rows: [{
-            id: values[0],
-            email: `user${values[0]}@example.test`,
-            role: "user",
-            token_version: 0,
-          }],
-        };
-      }
-
-      if (sql.includes("FROM contractor_profiles")) {
-        return { rows: profileRows };
-      }
-
-      if (sql.includes("FROM posts")) {
-        return { rows: requestRows };
-      }
-
-      if (sql.includes("INSERT INTO request_relationships")) {
-        return { rows: relationshipRows };
-      }
-
-      throw new Error(`Unexpected query: ${sql}`);
-    },
-
-    release() {
-      released = true;
-    },
-  };
-
-  return {
-    calls,
-
-    pool: {
-      async connect() {
-        return client;
-      },
-
-      async query(text, values = []) {
-        return client.query(text, values);
-      },
-    },
-
-    wasReleased() {
-      return released;
-    },
-  };
-}
-
-test("professional response route creates a pending relationship", async () => {
-  const fake = createFakePool();
+test("professional response route returns the canonical response and pending relationship", async () => {
+  const fake = createProfessionalResponseFake();
 
   const result = await invoke({
     pool: fake.pool,
@@ -231,74 +128,51 @@ test("professional response route creates a pending relationship", async () => {
 
   assert.equal(result.statusCode, 201);
 
-  assert.deepEqual(result.body, {
-    success: true,
-    code: "REQUEST_RELATIONSHIP_CREATED",
-    relationship: {
-      id: 51,
-      request_id: 41,
-      contractor_id: 80,
-      status: "pending",
-      introduction_text:
-        "I can help with this project.",
-      created_at: "2026-07-20T12:00:00.000Z",
-      responded_at: "2026-07-20T12:00:00.000Z",
-      conversation_available: false,
-    },
-    created: true,
-  });
+  assert.equal(result.body.success, true);
+  assert.equal(result.body.code, "PROFESSIONAL_RESPONSE_CREATED");
+  assert.equal(result.body.response.status, "submitted");
+  assert.equal(result.body.relationship.status, "pending");
+  assert.equal(
+    result.body.relationship.authority_source,
+    "professional_response"
+  );
+  assert.equal(result.body.resultClassification, "created");
+  assert.equal(result.body.created, true);
+  assert.equal(result.body.replayed, false);
 
   assert.equal(
-    Object.hasOwn(result.body.relationship, "homeowner_id"),
+    Object.hasOwn(result.body.response, "homeowner_id"),
     false
   );
 
   assert.equal(
     Object.hasOwn(
-      result.body.relationship,
+      result.body.response,
       "professional_user_id"
     ),
     false
   );
 
-  assert.equal(fake.wasReleased(), true);
+  assert.equal(Object.hasOwn(result.body, "conversation"), false);
+  assert.equal(Object.hasOwn(result.body.relationship, "conversation_id"), false);
 });
 
-test("repeated professional response returns existing relationship", async () => {
-  const fake = createFakePool({
-    relationshipRows: [{
-      id: 51,
-      post_id: 41,
-      homeowner_id: 7,
-      contractor_id: 80,
-      professional_user_id: 9,
-      status: "pending",
-      introduction_text: "Original introduction",
-      created_at: "2026-07-20T12:00:00.000Z",
-      responded_at: "2026-07-20T12:00:00.000Z",
-      created: false,
-    }],
-  });
+test("repeated route command replays the exact canonical aggregate", async () => {
+  const fake = createProfessionalResponseFake();
+  const first = await invoke({ pool: fake.pool });
 
-  const result = await invoke({
-    pool: fake.pool,
-    body: {
-      introduction_text:
-        "Repeated click must not create another relationship.",
-    },
-  });
+  const result = await invoke({ pool: fake.pool });
 
   assert.equal(result.statusCode, 200);
-  assert.equal(
-    result.body.code,
-    "REQUEST_RELATIONSHIP_EXISTS"
-  );
-  assert.equal(result.body.created, false);
-  assert.equal(result.body.relationship.id, 51);
+  assert.equal(result.body.code, "PROFESSIONAL_RESPONSE_REPLAYED");
+  assert.equal(result.body.replayed, true);
+  assert.equal(result.body.response.id, first.body.response.id);
+  assert.equal(fake.state.responses.length, 1);
+  assert.equal(fake.state.evidence.length, 1);
 });
 
 test("invalid request ID is rejected before relationship queries", async () => {
-  const fake = createFakePool();
+  const fake = createProfessionalResponseFake();
 
   const result = await invoke({
     pool: fake.pool,
@@ -318,7 +192,7 @@ test("invalid request ID is rejected before relationship queries", async () => {
 });
 
 test("missing introduction is rejected", async () => {
-  const fake = createFakePool();
+  const fake = createProfessionalResponseFake();
 
   const result = await invoke({
     pool: fake.pool,
@@ -338,9 +212,7 @@ test("missing introduction is rejected", async () => {
 });
 
 test("professional profile is required", async () => {
-  const fake = createFakePool({
-    profileRows: [],
-  });
+  const fake = createProfessionalResponseFake({ profiles: [] });
 
   const result = await invoke({
     pool: fake.pool,
@@ -360,13 +232,12 @@ test("professional profile is required", async () => {
   );
 });
 
-test("same-owner, closed, or unavailable request fails closed", async () => {
-  const fake = createFakePool({
-    requestRows: [],
-  });
+test("missing request fails closed", async () => {
+  const fake = createProfessionalResponseFake();
 
   const result = await invoke({
     pool: fake.pool,
+    postId: "999",
   });
 
   assert.equal(result.statusCode, 404);
@@ -377,35 +248,27 @@ test("same-owner, closed, or unavailable request fails closed", async () => {
   );
 
   assert.ok(requestQuery);
-  assert.match(requestQuery.sql, /status = 'open'/);
-  assert.match(requestQuery.sql, /user_id <> \$2/);
+  assert.match(requestQuery.sql, /WHERE id = \$1/);
+  assert.match(requestQuery.sql, /FOR UPDATE/);
 });
 
-test("ineligible professional cannot create a relationship", async () => {
-  const fake = createFakePool({
-    profileRows: [{
-      id: 80,
-      user_id: 9,
-      category: "plumbing",
-      profile_details: {
-        city: "Miami",
-        postal_code: "33101",
-        service_area: "Miami",
-        service_specialties: ["plumbing_repair"],
-      },
-    }],
-  });
+test("missing idempotency key is rejected before transaction writes", async () => {
+  const fake = createProfessionalResponseFake();
 
   const result = await invoke({
     pool: fake.pool,
+    idempotencyKey: "",
   });
 
-  assert.equal(result.statusCode, 403);
-  assert.equal(result.body.code, "REQUEST_NOT_ELIGIBLE");
+  assert.equal(result.statusCode, 400);
+  assert.equal(
+    result.body.code,
+    "INVALID_PROFESSIONAL_RESPONSE_IDEMPOTENCY_KEY"
+  );
 
   assert.equal(
     fake.calls.some((call) =>
-      call.sql.includes("INSERT INTO request_relationships")
+      call.sql === "BEGIN"
     ),
     false
   );
@@ -536,8 +399,13 @@ test("homeowner relationship inbox returns privacy-safe professional responses",
       professional_category: "handyman",
       introduction_text: "I can help.",
       status: "pending",
+      response_id: null,
+      response_status: null,
+      relationship_status: "pending",
+      authority_source: null,
       created_at: "2026-07-20T12:00:00.000Z",
       responded_at: "2026-07-20T12:00:00.000Z",
+      submitted_at: "2026-07-20T12:00:00.000Z",
     }],
   });
 
@@ -804,7 +672,7 @@ function createRelationshipTransitionRoutePool({
   };
 }
 
-test("homeowner accept route activates the owned pending relationship", async () => {
+test("legacy homeowner accept route requires canonical response selection", async () => {
   const fake = createRelationshipTransitionRoutePool();
 
   const result = await invokeHomeownerRelationshipTransition({
@@ -814,56 +682,13 @@ test("homeowner accept route activates the owned pending relationship", async ()
     pool: fake.pool,
   });
 
-  assert.equal(result.statusCode, 200);
+  assert.equal(result.statusCode, 409);
 
   assert.deepEqual(result.body, {
-    success: true,
-    code: "REQUEST_RELATIONSHIP_ACCEPTED",
-    relationship: {
-      id: 51,
-      request_id: 41,
-      contractor_id: 80,
-      status: "active",
-      accepted_at: "2026-07-20T13:00:00.000Z",
-      conversation_available: true,
-    },
-    conversation: {
-      id: 91,
-      relationship_id: 51,
-      status: "active",
-    },
+    success: false,
+    code: "CANONICAL_RESPONSE_SELECTION_REQUIRED",
+    message: "Select the exact canonical Professional Response instead.",
   });
-
-  assert.equal(
-    Object.hasOwn(result.body.relationship, "homeowner_id"),
-    false
-  );
-
-  assert.equal(
-    Object.hasOwn(
-      result.body.relationship,
-      "professional_user_id"
-    ),
-    false
-  );
-
-  assert.equal(
-    Object.hasOwn(result.body.conversation, "homeowner_id"),
-    false
-  );
-
-  assert.equal(
-    Object.hasOwn(
-      result.body.conversation,
-      "professional_user_id"
-    ),
-    false
-  );
-
-  assert.equal(
-    Object.hasOwn(result.body.conversation, "contractor_id"),
-    false
-  );
 
   assert.equal(fake.wasReleased(), true);
 });
@@ -1101,7 +926,7 @@ test("professional relationship inbox returns owned privacy-safe request state",
   assert.equal(relationship.id, 51);
   assert.equal(relationship.request_id, 41);
   assert.equal(relationship.status, "active");
-  assert.equal(relationship.conversation_available, true);
+  assert.equal(relationship.conversation_available, false);
 
   assert.equal(
     Object.hasOwn(relationship, "homeowner_id"),
@@ -1284,7 +1109,7 @@ test("active relationship cannot be withdrawn", async () => {
 });
 
 
-test("accept route fails safely when canonical conversation persistence fails", async () => {
+test("legacy accept route never attempts canonical conversation persistence", async () => {
   const fake = createRelationshipTransitionRoutePool({
     failOn: "INSERT INTO conversations",
   });
@@ -1296,11 +1121,12 @@ test("accept route fails safely when canonical conversation persistence fails", 
     pool: fake.pool,
   });
 
-  assert.equal(result.statusCode, 500);
+  assert.equal(result.statusCode, 409);
 
   assert.deepEqual(result.body, {
-    error: "REQUEST_RELATIONSHIP_ACCEPT_FAILED",
-    message: "The professional response could not be accepted.",
+    success: false,
+    code: "CANONICAL_RESPONSE_SELECTION_REQUIRED",
+    message: "Select the exact canonical Professional Response instead.",
   });
 
   assert.equal(
@@ -1314,4 +1140,8 @@ test("accept route fails safely when canonical conversation persistence fails", 
   );
 
   assert.equal(fake.wasReleased(), true);
+  assert.equal(
+    fake.calls.some((call) => call.sql.includes("INSERT INTO conversations")),
+    false
+  );
 });

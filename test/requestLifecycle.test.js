@@ -62,7 +62,6 @@ function createOpportunityRoutePool({
     },
   }],
   candidateRows = [row()],
-  identityRows = [{ post_id: 41, conversation_id: 91 }],
 } = {}) {
   const calls = [];
   const pool = {
@@ -70,26 +69,26 @@ function createOpportunityRoutePool({
       const sql = String(text).replace(/\s+/g, " ").trim();
       calls.push({ sql, values });
 
-      if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql)) {
-        return { rows: [] };
-      }
       if (sql.includes("FROM users WHERE id = $1")) {
         return { rows: [{ id: values[0], email: "pro@example.test", role: "painting", token_version: 0 }] };
       }
       if (sql.includes("FROM contractor_profiles")) {
-        return { rows: profileRows };
-      }
-      if (sql.includes("INSERT INTO request_relationships")) {
-        return { rows: identityRows };
-      }
-      if (sql.includes("ANY($2::integer[])")) {
-        const ids = new Set(values[1].map(Number));
         return {
-          rows: candidateRows.filter((request) => ids.has(Number(request.id))),
+          rows: profileRows.filter((profile) =>
+            Number(profile.user_id) === Number(values[0])
+          ),
         };
       }
       if (sql.includes("FROM posts")) {
-        return { rows: candidateRows };
+        return {
+          rows: candidateRows.filter((request) =>
+            request.status === "open" &&
+            Number(request.user_id) !== Number(values[0])
+          ),
+        };
+      }
+      if (sql.includes("FROM request_relationships")) {
+        return { rows: [] };
       }
 
       throw new Error(`Unexpected query: ${sql}`);
@@ -275,37 +274,55 @@ test("professional eligibility matches detailed door and window service capabili
   );
 });
 
-test("professional projection excludes owner and private location/access fields", () => {
+test("professional projection excludes private and pre-selection authority fields", () => {
   const projected = serializeProfessionalOpportunity(row(), []);
-  for (const key of ["user_id", "location", "unit_number", "access_notes"]) {
+  for (const key of [
+    "user_id",
+    "location",
+    "unit_number",
+    "access_notes",
+    "conversation_id",
+    "conversation_available",
+    "conversation_type",
+    "relationship_id",
+    "professional_user_id",
+    "contractor_id",
+  ]) {
     assert.equal(Object.hasOwn(projected, key), false);
   }
   assert.equal(projected.request_id, 41);
   assert.equal(projected.status, "open");
-  assert.equal(projected.conversation_id, null);
-  assert.equal(projected.conversation_available, false);
-  assert.equal(Object.hasOwn(projected, "relationship_id"), false);
-  assert.equal(Object.hasOwn(projected, "professional_user_id"), false);
-  assert.equal(Object.hasOwn(projected, "contractor_id"), false);
+  assert.equal(projected.has_responded, false);
+  assert.equal(projected.professional_response_id, null);
+  assert.equal(projected.response_status, null);
+  assert.equal(projected.relationship_status, null);
+  assert.equal(projected.submitted_at, null);
+  assert.equal(projected.response_submission_available, false);
   assert.equal(Object.hasOwn(projected, "quote_request_id"), false);
 });
 
-test("professional projection exposes only valid canonical conversation identity", () => {
+test("professional projection ignores relationship and conversation-shaped source fields", () => {
   const projected = serializeProfessionalOpportunity(
-    row({ conversation_id: 91 }),
+    row({
+      conversation_id: 91,
+      conversation_available: true,
+      conversation_type: "canonical_conversation",
+      relationship_id: 51,
+      contractor_id: 80,
+      professional_user_id: 9,
+    }),
     []
   );
 
-  assert.equal(projected.conversation_id, 91);
-  assert.equal(projected.conversation_available, true);
-
-  for (const malformed of [undefined, null, "", 0, -1, 1.5, "1.5", "nope", Number.MAX_SAFE_INTEGER + 1]) {
-    const invalid = serializeProfessionalOpportunity(
-      row({ conversation_id: malformed }),
-      []
-    );
-    assert.equal(invalid.conversation_id, null);
-    assert.equal(invalid.conversation_available, false);
+  for (const key of [
+    "conversation_id",
+    "conversation_available",
+    "conversation_type",
+    "relationship_id",
+    "contractor_id",
+    "professional_user_id",
+  ]) {
+    assert.equal(Object.hasOwn(projected, key), false);
   }
 });
 
@@ -375,17 +392,13 @@ test("cancel is owner scoped, retained, and idempotent", async () => {
   assert.match(calls.at(-1).sql, /cancelled_at = COALESCE/);
 });
 
-test("professional endpoint returns participant-scoped canonical identity without changing eligibility", async () => {
+test("professional endpoint returns only eligible privacy-filtered opportunities with SELECT queries", async () => {
   const fake = createOpportunityRoutePool({
     candidateRows: [
       row({ id: 41, user_id: 7 }),
       row({ id: 42, user_id: 8, location: "Miami, FL" }),
       row({ id: 43, user_id: 8, service_specialty: "plumbing" }),
       row({ id: 44, user_id: 8 }),
-    ],
-    identityRows: [
-      { post_id: 41, conversation_id: 91 },
-      { post_id: 44, conversation_id: 92 },
     ],
   });
   const result = await invoke("get", "/professional-request-opportunities", {
@@ -395,37 +408,56 @@ test("professional endpoint returns participant-scoped canonical identity withou
   });
   assert.equal(result.statusCode, 200);
   assert.deepEqual(result.body.opportunities.map((item) => item.id), [41, 44]);
-  assert.equal(result.body.opportunities[0].conversation_id, 91);
-  assert.equal(result.body.opportunities[0].conversation_available, true);
-  assert.equal(result.body.opportunities[0].conversation_type, "request_opportunity");
-  assert.equal(result.body.opportunities[1].conversation_id, 92);
-  assert.equal(result.body.opportunities[1].conversation_available, true);
-  assert.equal(Object.hasOwn(result.body.opportunities[0], "location"), false);
-  assert.equal(Object.hasOwn(result.body.opportunities[0], "user_id"), false);
-  assert.equal(Object.hasOwn(result.body.opportunities[0], "relationship_id"), false);
-  assert.equal(Object.hasOwn(result.body.opportunities[0], "professional_user_id"), false);
-  assert.equal(Object.hasOwn(result.body.opportunities[0], "contractor_id"), false);
-  assert.equal(Object.hasOwn(result.body.opportunities[0], "quote_request_id"), false);
-  const materialization = fake.calls.find((call) =>
-    call.sql.includes("INSERT INTO request_relationships")
-  );
-  assert.ok(materialization);
-  assert.deepEqual(materialization.values, [9, 80, [41, 44]]);
-  assert.match(
-    materialization.sql,
-    /ON CONFLICT \(post_id, contractor_id\) WHERE post_id IS NOT NULL DO UPDATE SET/
-  );
-  assert.doesNotMatch(materialization.sql, /quote_requests/);
+  for (const opportunity of result.body.opportunities) {
+    for (const key of [
+      "location",
+      "unit_number",
+      "access_notes",
+      "entry_code",
+      "email",
+      "phone",
+      "customer_email",
+      "customer_phone",
+      "user_id",
+      "relationship_id",
+      "professional_user_id",
+      "contractor_id",
+      "conversation_id",
+      "conversation_available",
+      "conversation_type",
+      "participants",
+      "messages",
+      "quote_request_id",
+    ]) {
+      assert.equal(Object.hasOwn(opportunity, key), false);
+    }
+  }
+  assert.ok(fake.calls.length > 0);
+  for (const call of fake.calls) {
+    assert.match(call.sql, /^SELECT\b/i);
+    assert.doesNotMatch(
+      call.sql,
+      /\b(INSERT|UPDATE|DELETE|MERGE|CREATE|ALTER|DROP|TRUNCATE|CALL)\b/i
+    );
+    assert.doesNotMatch(call.sql, /\bFOR\s+(UPDATE|SHARE)\b/i);
+  }
   assert.equal(
-    fake.calls.filter((call) =>
-      call.sql.includes("INSERT INTO request_relationships")
-    ).length,
-    1
+    fake.calls.some((call) =>
+      /\bconversation_participants\b|\bworkflow_events\b/i.test(call.sql)
+    ),
+    false
   );
 });
 
-test("closed or archived canonical conversations remain discoverable by identity", async () => {
-  const fake = createOpportunityRoutePool();
+test("opportunity endpoint does not project source-injected conversation authority", async () => {
+  const fake = createOpportunityRoutePool({
+    candidateRows: [row({
+      conversation_id: 91,
+      conversation_available: true,
+      conversation_type: "canonical_conversation",
+      relationship_id: 51,
+    })],
+  });
 
   const result = await invoke("get", "/professional-request-opportunities", {
     userId: 9,
@@ -434,13 +466,19 @@ test("closed or archived canonical conversations remain discoverable by identity
   });
 
   assert.equal(result.statusCode, 200);
-  assert.equal(result.body.opportunities[0].conversation_id, 91);
-  assert.equal(result.body.opportunities[0].conversation_available, true);
-  const materialization = fake.calls.find((call) =>
-    call.sql.includes("INSERT INTO conversations")
+  assert.equal(result.body.opportunities.length, 1);
+  assert.equal(
+    Object.hasOwn(result.body.opportunities[0], "conversation_id"),
+    false
   );
-  assert.doesNotMatch(materialization.sql, /conversations\.status\s*=/);
-  assert.doesNotMatch(materialization.sql, /archived_at\s+IS\s+NULL/);
+  assert.equal(
+    Object.hasOwn(result.body.opportunities[0], "conversation_available"),
+    false
+  );
+  assert.equal(
+    Object.hasOwn(result.body.opportunities[0], "relationship_id"),
+    false
+  );
 });
 
 test("professional opportunity endpoint requires an owned business profile", async () => {
