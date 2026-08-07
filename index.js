@@ -59,6 +59,9 @@ const {
 const {
   listProfessionalOpportunities,
 } = require("./server/requests/professionalOpportunityService");
+const {
+  createJobRequest,
+} = require("./server/requests/jobRequestCreateService");
 
 const {
   serializeConversationDetail,
@@ -117,6 +120,10 @@ const {
   registerAlertRoutes,
 } = require("./server/alerts/alerts");
 
+const {
+  registerIntelligenceRoutes,
+} = require("./server/intelligence/intelligenceRoutes");
+
 
 const JWT_SECRET = resolveJwtSecret(process.env);
 const BCRYPT_ROUNDS = 10;
@@ -162,7 +169,7 @@ function createCorsOptions(env = process.env) {
 
   return {
     methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Authorization", "Content-Type"],
+    allowedHeaders: ["Authorization", "Content-Type", "Idempotency-Key"],
     origin(origin, callback) {
       if (!origin) {
         return callback(null, allowRequestsWithoutOrigin);
@@ -776,6 +783,12 @@ registerAlertRoutes({
   authMiddleware,
   getPool,
   sendPublicDatabaseError,
+});
+
+registerIntelligenceRoutes({
+  app,
+  authMiddleware,
+  getPool,
 });
 
 app.get("/health", (req, res) => {
@@ -1418,70 +1431,45 @@ app.post(
 );
 
 app.post("/posts", authMiddleware, async (req, res) => {
-  let normalizedRequestPhotos = [];
   try {
     if (rejectUnsupportedMedia(req, res, ["image_url"])) return;
-    const validation = validateRequestPayload(req.body);
-    if (!validation.ok) {
-      return res.status(validation.status).json({
+    const result = await createJobRequest({
+      pool: getPool(req),
+      authenticatedActor: req.user,
+      payload: req.body,
+      idempotencyKey: req.headers["idempotency-key"],
+    });
+
+    if (!result.ok) {
+      if (result.cleanupPhotos?.length > 0) {
+        const mediaService =
+          req.app?.locals?.cloudinaryMedia || createCloudinaryMedia({ env: process.env });
+        for (const media of result.cleanupPhotos) {
+          await safelyDeleteRequestPhoto(mediaService, media.public_id, req.user.id);
+        }
+      }
+      return res.status(result.status).json({
         success: false,
-        code: validation.code,
-        message: validation.message,
+        code: result.code,
+        message: result.message,
       });
     }
-    const { request_photos } = req.body;
-    const request = validation.request;
-    normalizedRequestPhotos = normalizeRequestPhotoCollection(request_photos || [], {
-      userId: req.user.id,
-    });
-    const imageUrl = normalizedRequestPhotos[0]?.secure_url || null;
 
-    const result = await getPool(req).query(
-      `
-      INSERT INTO posts
-      (user_id, title, description, category, request_category, service_domain,
-       service_specialty, location, unit_number, access_notes, status, image_url,
-       request_photos, updated_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'open', $11, $12::jsonb, CURRENT_TIMESTAMP)
-      RETURNING *
-      `,
-      [
-        req.user.id,
-        request.title,
-        request.description,
-        request.category,
-        request.request_category,
-        request.service_domain,
-        request.service_specialty,
-        request.location,
-        request.unit_number,
-        request.access_notes,
-        imageUrl,
-        JSON.stringify(normalizedRequestPhotos),
-      ]
-    );
-
-    res.json({
-      message: "Post created",
-      post: toSafePostRow(result.rows[0]),
+    return res.status(result.status).json({
+      success: true,
+      code: result.code,
+      post: result.post,
     });
   } catch (err) {
     if (err instanceof MediaValidationError) {
       return sendMediaError(res, err);
     }
-    if (normalizedRequestPhotos.length > 0) {
-      const mediaService =
-        req.app?.locals?.cloudinaryMedia || createCloudinaryMedia({ env: process.env });
-      for (const media of normalizedRequestPhotos) {
-        await safelyDeleteRequestPhoto(mediaService, media.public_id, req.user.id);
-      }
-    }
     return sendPublicDatabaseError({
       res,
       error: err,
-      operation: "create_post",
-      code: "POST_CREATE_FAILED",
-      message: "The post could not be created.",
+      operation: "create_job_request",
+      code: "JOB_REQUEST_CREATE_FAILED",
+      message: "The Job Request could not be created.",
     });
   }
 });

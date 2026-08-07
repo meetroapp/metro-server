@@ -24,14 +24,13 @@ function section(startPattern, endPattern) {
   return migrationSql.slice(start, end);
 }
 
-test("selection migration is the unique latest governed migration and is documented", () => {
+test("selection migration is unique, ordered after responses, and documented", () => {
   const directory = path.dirname(migrationPath);
   const migrations = fs
     .readdirSync(directory)
     .filter((filename) => /^\d{12}_[a-z0-9_]+\.sql$/.test(filename))
     .sort();
 
-  assert.equal(migrations.at(-1), migrationFilename);
   assert.equal(
     migrations.filter((filename) =>
       filename.startsWith("202608060002_")

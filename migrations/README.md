@@ -41,6 +41,8 @@ Current inventory:
 21. `202608030002_create_canonical_alerts.sql`
 22. `202608060001_create_professional_response_foundation.sql`
 23. `202608060002_create_request_selection_authority.sql`
+24. `202608070001_create_job_request_create_command_idempotency.sql`
+25. `202608070002_create_intelligence_operation_idempotency.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -66,6 +68,18 @@ ordinary homeowner selection record, command idempotency, immutable evidence,
 sole-selection and sole-active-relationship constraints, and exact ordinary
 conversation provenance. It does not select a response, create a conversation,
 reconcile legacy records, or alter Emergency authority by itself.
+
+`202608070001_create_job_request_create_command_idempotency.sql` creates the
+additive ordinary Job Request create-command idempotency table. It does not add
+Job Request content columns, backfill historical posts, create relationships,
+create conversations, or alter Professional Response, selection, Emergency,
+Quote, Invoice, Evaluation, or workflow authority.
+
+`202608070002_create_intelligence_operation_idempotency.sql` creates additive,
+generic execution identity and bounded replay state for governed Intelligence
+operations. It stores no raw operation input, creates no product operation, and
+does not alter provider, credit, membership, Job Request, Relationship,
+Conversation, or commercial authority.
 
 ## Migration Ledger and Transactions
 

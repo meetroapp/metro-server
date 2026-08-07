@@ -1,0 +1,577 @@
+"use strict";
+
+const assert = require("node:assert/strict");
+const { readFileSync } = require("node:fs");
+const { join } = require("node:path");
+const test = require("node:test");
+
+process.env.NODE_ENV = "test";
+process.env.JWT_SECRET = "explicit-test-jwt-secret-job-request-create";
+process.env.CLOUDINARY_CLOUD_NAME = "demo";
+process.env.CLOUDINARY_API_KEY = "key";
+process.env.CLOUDINARY_API_SECRET = "secret";
+process.env.CLOUDINARY_UPLOAD_FOLDER = "meetro-test";
+
+const { MediaValidationError } = require("../server/media/cloudinary");
+const { app, createToken } = require("../index");
+const {
+  COMMAND_NAME,
+  COMMAND_SCOPE,
+  createJobRequest,
+  createJobRequestFingerprint,
+  validateJobRequestIdempotencyKey,
+} = require("../server/requests/jobRequestCreateService");
+const { professionalCanSeeRequest } = require("../server/requests/requestLifecycle");
+
+const HOMEOWNER_ID = 7;
+const OTHER_HOMEOWNER_ID = 8;
+const PROFESSIONAL_ID = 9;
+
+function validPayload(overrides = {}) {
+  return {
+    title: "Interior painting",
+    description: "Paint the living room walls.",
+    category: "painting",
+    request_category: "painting",
+    service_domain: "home_services",
+    service_specialty: "painting",
+    location: "Cape Coral, FL 33904",
+    unit_number: "",
+    access_notes: "Call on arrival",
+    request_photos: [],
+    post_type: "quote_request",
+    status: "open",
+    direct_request: false,
+    direct_request_source: "",
+    direct_professional_name: "",
+    direct_conversation_id: "",
+    ...overrides,
+  };
+}
+
+function validPhoto(publicId = "meetro-test/users/7/request-photos/photo-a") {
+  return {
+    purpose: "request-photo",
+    media: {
+      secure_url: `https://res.cloudinary.com/demo/image/upload/v123/${publicId}.jpg`,
+      public_id: publicId,
+      resource_type: "image",
+      format: "jpg",
+      bytes: 1234,
+      width: 800,
+      height: 600,
+      version: 123,
+    },
+  };
+}
+
+function rowFromPostValues(id, values, requestPhotos) {
+  return {
+    id,
+    user_id: values[0],
+    title: values[1],
+    description: values[2],
+    category: values[3],
+    request_category: values[4],
+    service_domain: values[5],
+    service_specialty: values[6],
+    location: values[7],
+    unit_number: values[8],
+    access_notes: values[9],
+    status: "open",
+    image_url: values[10],
+    request_photos: requestPhotos,
+    created_at: `2026-08-07T12:00:0${id}.000Z`,
+    updated_at: `2026-08-07T12:00:0${id}.000Z`,
+    cancelled_at: null,
+  };
+}
+
+function createPool({
+  users = new Map([
+    [HOMEOWNER_ID, { id: HOMEOWNER_ID, role: "homeowner", account_type: "homeowner" }],
+    [OTHER_HOMEOWNER_ID, { id: OTHER_HOMEOWNER_ID, role: "homeowner", account_type: "homeowner" }],
+    [PROFESSIONAL_ID, { id: PROFESSIONAL_ID, role: "painting", account_type: "professional" }],
+  ]),
+  failAt,
+} = {}) {
+  const state = {
+    posts: [],
+    idempotency: [],
+    relationships: [],
+    responses: [],
+    selections: [],
+    conversations: [],
+    messages: [],
+    quotes: [],
+    invoices: [],
+    evaluations: [],
+  };
+  const calls = [];
+  let transactionSnapshot = null;
+
+  const pool = {
+    async query(text, values = []) {
+      const sql = String(text).replace(/\s+/g, " ").trim();
+      calls.push({ sql, values });
+
+      if (sql === "BEGIN") {
+        transactionSnapshot = JSON.parse(JSON.stringify(state));
+        return { rows: [] };
+      }
+      if (sql === "COMMIT") {
+        transactionSnapshot = null;
+        return { rows: [] };
+      }
+      if (sql === "ROLLBACK") {
+        if (transactionSnapshot) {
+          for (const key of Object.keys(state)) {
+            state[key] = transactionSnapshot[key];
+          }
+        }
+        transactionSnapshot = null;
+        return { rows: [] };
+      }
+
+      if (sql.includes("SELECT id, email, role, token_version FROM users")) {
+        const user = users.get(Number(values[0]));
+        return {
+          rows: user
+            ? [{
+                id: user.id,
+                email: `user${user.id}@example.test`,
+                role: user.role,
+                token_version: 0,
+              }]
+            : [],
+        };
+      }
+
+      if (sql.includes("job_request_create:homeowner_authority")) {
+        const user = users.get(Number(values[0]));
+        return { rows: user ? [user] : [] };
+      }
+
+      if (sql.includes("job_request_create:idempotency_reserve")) {
+        const [id, actorUserId, commandName, commandScope, key, fingerprint] = values;
+        const existing = state.idempotency.find((row) =>
+          Number(row.actor_user_id) === Number(actorUserId) &&
+          row.command_name === commandName &&
+          row.command_scope === commandScope &&
+          row.idempotency_key === key
+        );
+        if (existing) return { rows: [] };
+        const row = {
+          id,
+          actor_user_id: actorUserId,
+          command_name: commandName,
+          command_scope: commandScope,
+          idempotency_key: key,
+          request_fingerprint: fingerprint,
+          post_id: null,
+          result_classification: null,
+          result_reference: null,
+          completed_at: null,
+        };
+        state.idempotency.push(row);
+        return { rows: [row] };
+      }
+
+      if (sql.includes("job_request_create:idempotency_existing")) {
+        const [actorUserId, commandName, commandScope, key] = values;
+        return {
+          rows: state.idempotency.filter((row) =>
+            Number(row.actor_user_id) === Number(actorUserId) &&
+            row.command_name === commandName &&
+            row.command_scope === commandScope &&
+            row.idempotency_key === key
+          ).slice(0, 1),
+        };
+      }
+
+      if (sql.includes("job_request_create:insert_post") || sql.includes("INSERT INTO posts")) {
+        if (failAt === "insert_post") throw new Error("private insert failure");
+        const id = state.posts.length + 1;
+        const requestPhotos = JSON.parse(values[11] || "[]");
+        const row = rowFromPostValues(id, values, requestPhotos);
+        state.posts.push(row);
+        return { rows: [row] };
+      }
+
+      if (sql.includes("job_request_create:idempotency_complete")) {
+        if (failAt === "idempotency_complete") {
+          throw new Error("private idempotency failure");
+        }
+        const [id, postId, classification, reference] = values;
+        const row = state.idempotency.find((item) => item.id === id);
+        if (!row || row.completed_at) return { rows: [] };
+        row.post_id = postId;
+        row.result_classification = classification;
+        row.result_reference = JSON.parse(reference);
+        row.completed_at = "2026-08-07T12:00:30.000Z";
+        return { rows: [row] };
+      }
+
+      if (sql.includes("job_request_create:owned_post")) {
+        return {
+          rows: state.posts.filter((row) =>
+            Number(row.id) === Number(values[0]) &&
+            Number(row.user_id) === Number(values[1])
+          ).slice(0, 1),
+        };
+      }
+
+      throw new Error(`Unexpected query: ${sql}`);
+    },
+  };
+
+  return { calls, pool, state };
+}
+
+function submit(fixture, overrides = {}) {
+  return createJobRequest({
+    pool: fixture.pool,
+    authenticatedActor: { id: HOMEOWNER_ID },
+    payload: validPayload(),
+    idempotencyKey: "11111111-1111-4111-8111-111111111111",
+    ...overrides,
+  });
+}
+
+function getHandlers(method, path) {
+  const layer = app.router.stack.find(
+    (item) => item.route?.path === path && item.route.methods[method]
+  );
+  assert.ok(layer, `Route not found: ${method.toUpperCase()} ${path}`);
+  return layer.route.stack.map((item) => item.handle);
+}
+
+function response() {
+  return {
+    statusCode: 200,
+    body: null,
+    finished: false,
+    status(code) { this.statusCode = code; return this; },
+    json(body) { this.body = body; this.finished = true; return this; },
+  };
+}
+
+async function invokePost({ fixture, body = validPayload(), headers = {} } = {}) {
+  app.locals.pool = fixture.pool;
+  const req = {
+    app,
+    body,
+    params: {},
+    headers: {
+      authorization: `Bearer ${createToken({
+        id: HOMEOWNER_ID,
+        email: "owner@example.test",
+        role: "homeowner",
+        token_version: 0,
+      })}`,
+      ...headers,
+    },
+  };
+  const res = response();
+  try {
+    for (const handler of getHandlers("post", "/posts")) {
+      if (res.finished) break;
+      if (handler.length < 3) await handler(req, res);
+      else await new Promise((resolve, reject) => {
+        const next = (error) => error ? reject(error) : resolve();
+        Promise.resolve(handler(req, res, next)).then(() => res.finished && resolve(), reject);
+      });
+    }
+    return res;
+  } finally {
+    delete app.locals.pool;
+  }
+}
+
+test("migration defines durable job request create command idempotency", () => {
+  const sql = readFileSync(
+    join(__dirname, "../migrations/202608070001_create_job_request_create_command_idempotency.sql"),
+    "utf8"
+  );
+
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS job_request_create_command_idempotency/i);
+  assert.match(sql, /\bid UUID PRIMARY KEY\b/i);
+  assert.match(sql, /actor_user_id INTEGER NOT NULL[\s\S]*REFERENCES users\(id\)[\s\S]*ON DELETE RESTRICT/i);
+  assert.match(sql, /post_id INTEGER[\s\S]*REFERENCES posts\(id\)[\s\S]*ON DELETE RESTRICT/i);
+  assert.match(sql, /command_name TEXT NOT NULL DEFAULT 'job_request\.create'/i);
+  assert.match(sql, /command_scope TEXT NOT NULL DEFAULT 'ordinary'/i);
+  assert.match(sql, /request_fingerprint TEXT NOT NULL[\s\S]*request_fingerprint ~ '\^\[0-9a-f\]\{64\}\$'/i);
+  assert.match(sql, /UNIQUE \([\s\S]*actor_user_id,[\s\S]*command_name,[\s\S]*command_scope,[\s\S]*idempotency_key[\s\S]*\)/i);
+  assert.match(sql, /job_request_create_command_completion_check/i);
+  assert.match(sql, /job_request_create_command_result_idx/i);
+});
+
+test("idempotency keys are required UUIDs", () => {
+  assert.equal(validateJobRequestIdempotencyKey(null).code, "JOB_REQUEST_IDEMPOTENCY_KEY_REQUIRED");
+  assert.equal(validateJobRequestIdempotencyKey("").code, "JOB_REQUEST_IDEMPOTENCY_KEY_REQUIRED");
+  assert.equal(validateJobRequestIdempotencyKey("not-a-uuid").code, "JOB_REQUEST_IDEMPOTENCY_KEY_INVALID");
+  assert.equal(
+    validateJobRequestIdempotencyKey("11111111-1111-4111-8111-111111111111").value,
+    "11111111-1111-4111-8111-111111111111"
+  );
+});
+
+test("fingerprints are stable, canonical-content sensitive, and photo-order sensitive", () => {
+  const first = createJobRequestFingerprint({
+    request: validPayload(),
+    requestPhotos: [
+      { public_id: "a", resource_type: "image", format: "jpg", bytes: 1, width: 2, height: 3, version: 4, display_order: 0 },
+      { public_id: "b", resource_type: "image", format: "jpg", bytes: 1, width: 2, height: 3, version: 4, display_order: 1 },
+    ],
+  });
+  const same = createJobRequestFingerprint({
+    request: { ...validPayload(), title: " Interior painting " },
+    requestPhotos: [
+      { public_id: "a", resource_type: "image", format: "jpg", bytes: 1, width: 2, height: 3, version: 4, display_order: 0 },
+      { public_id: "b", resource_type: "image", format: "jpg", bytes: 1, width: 2, height: 3, version: 4, display_order: 1 },
+    ],
+  });
+  const changedContent = createJobRequestFingerprint({
+    request: validPayload({ title: "Kitchen painting" }),
+    requestPhotos: [],
+  });
+  const changedOrder = createJobRequestFingerprint({
+    request: validPayload(),
+    requestPhotos: [
+      { public_id: "b", resource_type: "image", format: "jpg", bytes: 1, width: 2, height: 3, version: 4, display_order: 0 },
+      { public_id: "a", resource_type: "image", format: "jpg", bytes: 1, width: 2, height: 3, version: 4, display_order: 1 },
+    ],
+  });
+
+  assert.match(first, /^[0-9a-f]{64}$/);
+  assert.equal(first, same);
+  assert.notEqual(first, changedContent);
+  assert.notEqual(first, changedOrder);
+});
+
+test("first keyed create atomically creates one post and command identity", async () => {
+  const fixture = createPool();
+  const result = await submit(fixture);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, 201);
+  assert.equal(result.code, "JOB_REQUEST_CREATED");
+  assert.equal(result.post.id, 1);
+  assert.equal(result.post.status, "open");
+  assert.equal(result.post.service_domain, "home_services");
+  assert.equal(result.post.service_specialty, "painting");
+  assert.equal(fixture.state.posts.length, 1);
+  assert.equal(fixture.state.idempotency.length, 1);
+  assert.equal(fixture.state.idempotency[0].post_id, 1);
+  assert.equal(fixture.state.idempotency[0].completed_at !== null, true);
+});
+
+test("same actor key and canonical payload replays the first post", async () => {
+  const fixture = createPool();
+  const first = await submit(fixture);
+  const replay = await submit(fixture);
+
+  assert.equal(replay.ok, true);
+  assert.equal(replay.status, 200);
+  assert.equal(replay.code, "JOB_REQUEST_REPLAYED");
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.post.id, first.post.id);
+  assert.equal(fixture.state.posts.length, 1);
+  assert.equal(fixture.state.idempotency.length, 1);
+});
+
+test("same actor key with changed payload conflicts without another post", async () => {
+  const fixture = createPool();
+  await submit(fixture);
+  const conflict = await submit(fixture, {
+    payload: validPayload({ description: "Paint two rooms instead." }),
+  });
+
+  assert.equal(conflict.ok, false);
+  assert.equal(conflict.status, 409);
+  assert.equal(conflict.code, "JOB_REQUEST_IDEMPOTENCY_CONFLICT");
+  assert.equal(fixture.state.posts.length, 1);
+  assert.equal(fixture.state.idempotency.length, 1);
+});
+
+test("different key and actor scoping allow deliberate separate commands", async () => {
+  const fixture = createPool();
+  await submit(fixture);
+  const secondKey = await submit(fixture, {
+    idempotencyKey: "22222222-2222-4222-8222-222222222222",
+  });
+  const otherActor = await submit(fixture, {
+    authenticatedActor: { id: OTHER_HOMEOWNER_ID },
+    idempotencyKey: "11111111-1111-4111-8111-111111111111",
+  });
+
+  assert.equal(secondKey.status, 201);
+  assert.equal(otherActor.status, 201);
+  assert.equal(fixture.state.posts.length, 3);
+  assert.equal(fixture.state.idempotency.length, 3);
+});
+
+test("homeowner authority is server-side and rejects professional-only identity", async () => {
+  const fixture = createPool();
+  const unauthenticated = await createJobRequest({
+    pool: fixture.pool,
+    authenticatedActor: {},
+    payload: validPayload(),
+    idempotencyKey: "11111111-1111-4111-8111-111111111111",
+  });
+  const forbidden = await submit(fixture, {
+    authenticatedActor: {
+      id: PROFESSIONAL_ID,
+      role: "homeowner",
+      account_type: "homeowner",
+    },
+  });
+
+  assert.equal(unauthenticated.status, 401);
+  assert.equal(unauthenticated.code, "AUTHENTICATION_REQUIRED");
+  assert.equal(forbidden.status, 403);
+  assert.equal(forbidden.code, "HOMEOWNER_AUTHORITY_REQUIRED");
+  assert.equal(fixture.state.posts.length, 0);
+});
+
+test("validation and direct-request defense fail before command reservation", async () => {
+  const fixture = createPool();
+  const missingTitle = await submit(fixture, {
+    payload: validPayload({ title: "" }),
+  });
+  const unsupportedService = await submit(fixture, {
+    payload: validPayload({ service_specialty: "seo" }),
+  });
+  const direct = await submit(fixture, {
+    payload: validPayload({ direct_request: true }),
+  });
+
+  assert.equal(missingTitle.code, "INVALID_REQUEST_FIELD");
+  assert.equal(unsupportedService.code, "REQUEST_MATCHING_REQUIRED");
+  assert.equal(direct.code, "DIRECT_REQUEST_UNAVAILABLE");
+  assert.equal(fixture.state.posts.length, 0);
+  assert.equal(fixture.state.idempotency.length, 0);
+});
+
+test("governed media is persisted and ordered media changes conflict on replay", async () => {
+  const fixture = createPool();
+  const first = await submit(fixture, {
+    payload: validPayload({
+      request_photos: [
+        validPhoto("meetro-test/users/7/request-photos/photo-a"),
+        validPhoto("meetro-test/users/7/request-photos/photo-b"),
+      ],
+    }),
+  });
+  const replay = await submit(fixture, {
+    payload: validPayload({
+      request_photos: [
+        validPhoto("meetro-test/users/7/request-photos/photo-a"),
+        validPhoto("meetro-test/users/7/request-photos/photo-b"),
+      ],
+    }),
+  });
+  const conflict = await submit(fixture, {
+    payload: validPayload({
+      request_photos: [
+        validPhoto("meetro-test/users/7/request-photos/photo-b"),
+        validPhoto("meetro-test/users/7/request-photos/photo-a"),
+      ],
+    }),
+  });
+
+  assert.equal(first.status, 201);
+  assert.equal(replay.status, 200);
+  assert.equal(replay.post.request_photos.length, 2);
+  assert.equal(conflict.status, 409);
+  assert.equal(fixture.state.posts.length, 1);
+});
+
+test("invalid media fails before canonical create", async () => {
+  const fixture = createPool();
+  await assert.rejects(
+    submit(fixture, {
+      payload: validPayload({
+        request_photos: [
+          validPhoto("meetro-test/users/999/request-photos/not-owned"),
+        ],
+      }),
+    }),
+    (error) =>
+      error instanceof MediaValidationError &&
+      error.code === "MEDIA_ASSET_OWNERSHIP_INVALID"
+  );
+  assert.equal(fixture.state.posts.length, 0);
+  assert.equal(fixture.state.idempotency.length, 0);
+});
+
+test("persistence failures do not complete idempotency or mutate other authorities", async () => {
+  const fixture = createPool({ failAt: "insert_post" });
+  const result = await submit(fixture);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 500);
+  assert.equal(result.code, "JOB_REQUEST_CREATE_FAILED");
+  assert.deepEqual(fixture.state.posts, []);
+  assert.equal(fixture.state.idempotency.length, 0);
+
+  for (const collection of [
+    "relationships",
+    "responses",
+    "selections",
+    "conversations",
+    "messages",
+    "quotes",
+    "invoices",
+    "evaluations",
+  ]) {
+    assert.deepEqual(fixture.state[collection], []);
+  }
+});
+
+test("created request remains compatible with professional discovery matching rules", async () => {
+  const fixture = createPool();
+  const result = await submit(fixture);
+  const profile = {
+    category: "painting",
+    profile_details: {
+      service_area: "Cape Coral",
+      service_specialties: ["painting"],
+    },
+  };
+
+  assert.equal(professionalCanSeeRequest(profile, {
+    ...fixture.state.posts[0],
+    user_id: result.post.id + 100,
+  }), true);
+});
+
+test("command constants stay fixed to ordinary creation scope", () => {
+  assert.equal(COMMAND_NAME, "job_request.create");
+  assert.equal(COMMAND_SCOPE, "ordinary");
+});
+
+test("POST /posts routes all ordinary create traffic through governed idempotency", async () => {
+  const keyedFixture = createPool();
+  const keyed = await invokePost({
+    fixture: keyedFixture,
+    headers: {
+      "idempotency-key": "33333333-3333-4333-8333-333333333333",
+    },
+  });
+
+  assert.equal(keyed.statusCode, 201);
+  assert.equal(keyed.body.success, true);
+  assert.equal(keyed.body.code, "JOB_REQUEST_CREATED");
+  assert.equal(keyed.body.post.id, 1);
+  assert.equal(keyedFixture.state.idempotency.length, 1);
+
+  const unkeyedFixture = createPool();
+  const unkeyed = await invokePost({ fixture: unkeyedFixture });
+
+  assert.equal(unkeyed.statusCode, 400);
+  assert.equal(unkeyed.body.success, false);
+  assert.equal(unkeyed.body.code, "JOB_REQUEST_IDEMPOTENCY_KEY_REQUIRED");
+  assert.equal(unkeyedFixture.state.posts.length, 0);
+  assert.equal(unkeyedFixture.state.idempotency.length, 0);
+});

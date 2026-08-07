@@ -90,10 +90,12 @@ function createMediaService() {
 
 function createPool({ failInsert = false } = {}) {
   const calls = [];
+  const idempotency = [];
   const user = {
     id: 7,
     email: "owner@example.test",
-    role: "user",
+    role: "homeowner",
+    account_type: "homeowner",
     token_version: 0,
   };
   return {
@@ -105,7 +107,36 @@ function createPool({ failInsert = false } = {}) {
       if (sql === "SELECT id, email, role, token_version FROM users WHERE id = $1") {
         return { rows: Number(values[0]) === user.id ? [user] : [] };
       }
-      if (sql.startsWith("INSERT INTO posts")) {
+      if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql)) {
+        return { rows: [] };
+      }
+      if (sql.includes("job_request_create:homeowner_authority")) {
+        return { rows: Number(values[0]) === user.id ? [user] : [] };
+      }
+      if (sql.includes("job_request_create:idempotency_reserve")) {
+        const [id, actorUserId, commandName, commandScope, key, fingerprint] = values;
+        const row = {
+          id,
+          actor_user_id: actorUserId,
+          command_name: commandName,
+          command_scope: commandScope,
+          idempotency_key: key,
+          request_fingerprint: fingerprint,
+          post_id: null,
+          completed_at: null,
+        };
+        idempotency.push(row);
+        return { rows: [row] };
+      }
+      if (sql.includes("job_request_create:idempotency_complete")) {
+        const row = idempotency.find((item) => item.id === values[0]);
+        row.post_id = values[1];
+        row.result_classification = values[2];
+        row.result_reference = JSON.parse(values[3]);
+        row.completed_at = "2026-08-07T12:00:00.000Z";
+        return { rows: [row] };
+      }
+      if (sql.includes("job_request_create:insert_post") || sql.startsWith("INSERT INTO posts")) {
         if (failInsert) throw new Error("database unavailable test detail");
         return {
           rows: [{
@@ -228,7 +259,7 @@ function createResponse() {
   };
 }
 
-async function invoke(method, path, { pool = createPool(), body, mediaService = createMediaService(), token, params = {} } = {}) {
+async function invoke(method, path, { pool = createPool(), body, mediaService = createMediaService(), token, params = {}, headers = {} } = {}) {
   app.locals.pool = pool;
   app.locals.cloudinaryMedia = mediaService;
   const req = {
@@ -237,6 +268,7 @@ async function invoke(method, path, { pool = createPool(), body, mediaService = 
     params,
     headers: {
       authorization: token || `Bearer ${createToken(pool.user)}`,
+      ...headers,
     },
     user: pool.user,
   };
@@ -315,23 +347,25 @@ test("request-photo signatures use the authenticated homeowner folder", async ()
 
 test("owned request photos persist in order and derive compatibility image URL", async () => {
   const { res, pool } = await invoke("post", "/posts", {
+    headers: { "idempotency-key": "11111111-1111-4111-8111-111111111111" },
     body: requestBody({
       request_photos: [payload(1), payload(2)],
     }),
   });
 
-  assert.equal(res.statusCode, 200);
+  assert.equal(res.statusCode, 201);
   assert.equal(res.body.post.image_url, media(1).secure_url);
   assert.deepEqual(
     res.body.post.request_photos.map((item) => item.display_order),
     [0, 1]
   );
-  const insert = pool.calls.find((call) => call.sql.startsWith("INSERT INTO posts"));
+  const insert = pool.calls.find((call) => call.sql.includes("job_request_create:insert_post"));
   assert.equal(JSON.parse(insert.values[11])[1].public_id, media(2).public_id);
 });
 
 test("foreign request photos and arbitrary URLs are rejected before persistence", async () => {
   const foreign = await invoke("post", "/posts", {
+    headers: { "idempotency-key": "22222222-2222-4222-8222-222222222222" },
     body: requestBody({
       request_photos: [payload(1, {
         public_id: "meetro/production/users/8/request-photos/photo-1",
@@ -342,6 +376,7 @@ test("foreign request photos and arbitrary URLs are rejected before persistence"
   assert.equal(foreign.pool.calls.some((call) => call.sql.startsWith("INSERT INTO posts")), false);
 
   const arbitrary = await invoke("post", "/posts", {
+    headers: { "idempotency-key": "33333333-3333-4333-8333-333333333333" },
     body: requestBody({
       image_url: "https://example.test/unsafe.jpg",
     }),
@@ -355,6 +390,7 @@ test("post persistence failure cleans uploaded request photos", async () => {
   const { res } = await invoke("post", "/posts", {
     pool: createPool({ failInsert: true }),
     mediaService,
+    headers: { "idempotency-key": "44444444-4444-4444-8444-444444444444" },
     body: requestBody({
       request_photos: [payload(1), payload(2)],
     }),

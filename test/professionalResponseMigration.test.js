@@ -35,7 +35,6 @@ test("Professional Response migration precedes the governed selection authority 
     .filter((filename) => /^\d{12}_[a-z0-9_]+\.sql$/.test(filename))
     .sort();
 
-  assert.equal(migrationFiles.at(-1), requestSelectionMigrationFilename);
   assert.ok(
     migrationFiles.indexOf(migrationFilename) <
       migrationFiles.indexOf(requestSelectionMigrationFilename)
