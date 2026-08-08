@@ -8,6 +8,8 @@ const {
 } = require("../server/requests/professionalOpportunityService");
 const {
   professionalCanSeeRequest,
+  serializeProfessionalOpportunity,
+  serializeProfessionalOpportunityPhoto,
 } = require("../server/requests/requestLifecycle");
 
 function normalizeSql(sql) {
@@ -41,7 +43,17 @@ function eligibleRequest(overrides = {}) {
     request_category: "painting",
     service_domain: "home_services",
     service_specialty: "painting",
-    location: "Cape Coral, FL 33904",
+    location: "123 Synthetic Palm Ave, Cape Coral, FL 33904",
+    location_intake_mode: "exact_on_file",
+    location_normalization_status: "normalized",
+    service_address_line1: "123 Synthetic Palm Ave",
+    service_city: "Cape Coral",
+    service_region: "FL",
+    service_postal_code: "33904",
+    service_country_code: "US",
+    discovery_area_label: "Cape Coral, FL",
+    unit_number: "Unit 201",
+    access_notes: "Gate code 1234",
     status: "open",
     created_at: "2026-07-22T10:00:00.000Z",
     updated_at: "2026-07-22T10:00:00.000Z",
@@ -105,6 +117,7 @@ function createOpportunityPool({
             rows: state.requests
               .filter((row) =>
                 row.status === "open" &&
+                row.location_normalization_status === "normalized" &&
                 Number(row.user_id) !== Number(values[0]) &&
                 !state.selections.some(
                   (selection) =>
@@ -209,6 +222,119 @@ function assertSelectOnly(fake) {
   assert.equal(fake.connectCalls(), 0);
 }
 
+test("professional photo projection removes ownership and storage metadata", () => {
+  const photo = {
+    id: "meetro/production/users/7/request-photos/photo-1",
+    purpose: "request-photo",
+    public_id: "meetro/production/users/7/request-photos/photo-1",
+    secure_url:
+      "https://res.cloudinary.com/test-cloud/image/upload/v1/meetro/production/users/7/request-photos/photo-1.jpg",
+    resource_type: "image",
+    format: "jpg",
+    bytes: 12345,
+    width: 1200,
+    height: 900,
+    version: 1,
+    display_order: 0,
+    uploaded_at: "2026-08-07T10:00:00.000Z",
+    created_by_user_id: 7,
+    lifecycle_state: "attached",
+  };
+
+  const projected = serializeProfessionalOpportunityPhoto(photo);
+
+  assert.deepEqual(Object.keys(projected).sort(), [
+    "display_order",
+    "format",
+    "height",
+    "resource_type",
+    "secure_url",
+    "width",
+  ]);
+
+  assert.equal(Object.hasOwn(projected, "id"), false);
+  assert.equal(Object.hasOwn(projected, "purpose"), false);
+  assert.equal(Object.hasOwn(projected, "public_id"), false);
+  assert.equal(Object.hasOwn(projected, "bytes"), false);
+  assert.equal(Object.hasOwn(projected, "version"), false);
+  assert.equal(Object.hasOwn(projected, "uploaded_at"), false);
+  assert.equal(Object.hasOwn(projected, "created_by_user_id"), false);
+  assert.equal(Object.hasOwn(projected, "lifecycle_state"), false);
+});
+
+test("professional opportunity recursively excludes private photo metadata", () => {
+  const photo = {
+    id: "meetro/production/users/7/request-photos/photo-1",
+    purpose: "request-photo",
+    public_id: "meetro/production/users/7/request-photos/photo-1",
+    secure_url:
+      "https://res.cloudinary.com/test-cloud/image/upload/v1/meetro/production/users/7/request-photos/photo-1.jpg",
+    resource_type: "image",
+    format: "jpg",
+    bytes: 12345,
+    width: 1200,
+    height: 900,
+    version: 1,
+    display_order: 0,
+    uploaded_at: "2026-08-07T10:00:00.000Z",
+    created_by_user_id: 7,
+    lifecycle_state: "attached",
+  };
+
+  const serialized = serializeProfessionalOpportunity(
+    {
+      ...eligibleRequest(),
+      image_url: photo.secure_url,
+    },
+    [photo]
+  );
+
+  assert.equal(serialized.request_photos.length, 1);
+  assert.equal(serialized.image_url, photo.secure_url);
+
+  const first = serialized.request_photos[0];
+
+  assert.equal(Object.hasOwn(first, "public_id"), false);
+  assert.equal(Object.hasOwn(first, "created_by_user_id"), false);
+  assert.equal(Object.hasOwn(first, "uploaded_at"), false);
+  assert.equal(Object.hasOwn(first, "lifecycle_state"), false);
+  assert.equal(Object.hasOwn(first, "bytes"), false);
+  assert.equal(Object.hasOwn(first, "version"), false);
+
+  const json = JSON.stringify(serialized);
+
+  assert.equal(json.includes('"created_by_user_id"'), false);
+  assert.equal(json.includes('"public_id"'), false);
+  assert.equal(json.includes('"lifecycle_state"'), false);
+});
+
+test("professional opportunity serialization exposes generalized service area without protected location", () => {
+  const request = eligibleRequest();
+
+  const serialized = serializeProfessionalOpportunity(request, []);
+
+  assert.equal(serialized.service_area, "Cape Coral, FL");
+
+  assert.equal(Object.hasOwn(serialized, "location"), false);
+  assert.equal(Object.hasOwn(serialized, "location_intake_mode"), false);
+  assert.equal(Object.hasOwn(serialized, "location_normalization_status"), false);
+  assert.equal(Object.hasOwn(serialized, "service_address_line1"), false);
+  assert.equal(Object.hasOwn(serialized, "service_city"), false);
+  assert.equal(Object.hasOwn(serialized, "service_region"), false);
+  assert.equal(Object.hasOwn(serialized, "service_postal_code"), false);
+  assert.equal(Object.hasOwn(serialized, "service_country_code"), false);
+  assert.equal(Object.hasOwn(serialized, "discovery_area_label"), false);
+  assert.equal(Object.hasOwn(serialized, "unit_number"), false);
+  assert.equal(Object.hasOwn(serialized, "access_notes"), false);
+
+  const serializedJson = JSON.stringify(serialized);
+
+  assert.equal(serializedJson.includes("123 Synthetic Palm Ave"), false);
+  assert.equal(serializedJson.includes("33904"), false);
+  assert.equal(serializedJson.includes("Unit 201"), false);
+  assert.equal(serializedJson.includes("Gate code 1234"), false);
+});
+
 test("first eligible opportunity read is SELECT-only and leaves all canonical state unchanged", async () => {
   const fake = createOpportunityPool();
   const before = clone(fake.state);
@@ -221,6 +347,41 @@ test("first eligible opportunity read is SELECT-only and leaves all canonical st
   assert.equal(result.opportunities[0].has_responded, false);
   assert.equal(result.opportunities[0].response_submission_available, true);
   assert.deepEqual(fake.state, before);
+  assertSelectOnly(fake);
+});
+
+test("legacy unclassified requests are withheld from professional discovery without parsing free-form location", async () => {
+  const fake = createOpportunityPool({
+    requests: [
+      eligibleRequest({
+        id: 45,
+        location: "999 Private Legacy St, Cape Coral, FL 33904",
+        location_intake_mode: null,
+        location_normalization_status: "legacy_unclassified",
+        service_address_line1: null,
+        service_city: null,
+        service_region: null,
+        service_postal_code: null,
+        service_country_code: null,
+        discovery_area_label: null,
+        unit_number: "Unit 9",
+        access_notes: "Gate code 9876",
+      }),
+    ],
+  });
+
+  const result = await list(fake);
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.opportunities, []);
+
+  const postsQuery = fake.calls.find((call) => call.sql.includes("FROM posts"));
+  assert.ok(postsQuery);
+  assert.match(
+    postsQuery.sql,
+    /posts\.location_normalization_status = 'normalized'/
+  );
+
   assertSelectOnly(fake);
 });
 
@@ -301,7 +462,13 @@ test("each viewer resolves only its owned business profile and eligibility proje
         category: "plumbing",
         request_category: "plumbing",
         service_specialty: "plumbing",
-        location: "Miami, FL 33101",
+        location: "456 Synthetic Bay Ave, Miami, FL 33101",
+        service_address_line1: "456 Synthetic Bay Ave",
+        service_city: "Miami",
+        service_region: "FL",
+        service_postal_code: "33101",
+        service_country_code: "US",
+        discovery_area_label: "Miami, FL",
       }),
     ],
   });
@@ -325,7 +492,15 @@ test("each viewer resolves only its owned business profile and eligibility proje
 test("ineligible, self-owned, closed, and unowned-professional reads fail closed without writes", async () => {
   const fake = createOpportunityPool({
     requests: [
-      eligibleRequest({ id: 41, location: "Miami, FL" }),
+      eligibleRequest({
+        id: 41,
+        location: "456 Synthetic Bay Ave, Miami, FL 33101",
+        service_address_line1: "456 Synthetic Bay Ave",
+        service_city: "Miami",
+        service_region: "FL",
+        service_postal_code: "33101",
+        discovery_area_label: "Miami, FL",
+      }),
       eligibleRequest({ id: 42, user_id: 9 }),
       eligibleRequest({ id: 43, status: "cancelled" }),
       eligibleRequest({ id: 44, service_specialty: "plumbing" }),

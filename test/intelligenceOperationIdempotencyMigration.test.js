@@ -17,7 +17,11 @@ test("Intelligence idempotency migration is additive, ordered, and inventoried",
     .filter((filename) => filename.endsWith(".sql"))
     .sort();
 
-  assert.equal(migrations.at(-1), migrationName);
+  assert.ok(migrations.includes(migrationName));
+  assert.ok(
+    migrations.indexOf("202608070001_create_job_request_create_command_idempotency.sql") <
+      migrations.indexOf(migrationName)
+  );
   assert.equal(
     migrations.filter((filename) => filename.startsWith("202608070002_")).length,
     1

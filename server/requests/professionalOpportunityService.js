@@ -16,6 +16,16 @@ const OPPORTUNITY_COLUMNS = `
   posts.service_domain,
   posts.service_specialty,
   posts.location,
+  posts.location_intake_mode,
+  posts.location_normalization_status,
+  posts.service_address_line1,
+  posts.service_city,
+  posts.service_region,
+  posts.service_postal_code,
+  posts.service_country_code,
+  posts.discovery_area_label,
+  posts.unit_number,
+  posts.access_notes,
   posts.status,
   posts.created_at,
   posts.updated_at,
@@ -129,6 +139,7 @@ async function listProfessionalOpportunities({
     FROM posts
     WHERE posts.status = 'open'
       AND posts.user_id <> $1
+      AND posts.location_normalization_status = 'normalized'
       AND NOT EXISTS (
         SELECT 1
         FROM request_selections

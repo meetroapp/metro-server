@@ -62,6 +62,9 @@ const {
 const {
   createJobRequest,
 } = require("./server/requests/jobRequestCreateService");
+const {
+  LOCATION_NORMALIZATION_STATUS,
+} = require("./server/requests/serviceLocation");
 
 const {
   serializeConversationDetail,
@@ -527,6 +530,12 @@ function toSafePostRow(row = {}) {
   return serializeOwnedRequest(row, requestPhotos);
 }
 
+function setPrivateNoStore(res) {
+  if (typeof res?.setHeader === "function") {
+    res.setHeader("Cache-Control", "private, no-store");
+  }
+}
+
 function getRequestPhotoPublicId(photo = {}) {
   return String(photo?.public_id || "").trim();
 }
@@ -565,7 +574,10 @@ function buildUserPostsQuery(userId) {
   return {
     text: `
       SELECT id, title, description, location, category, request_category,
-             service_domain, service_specialty, unit_number, access_notes, status,
+             service_domain, service_specialty, location_intake_mode,
+             location_normalization_status, service_address_line1, service_city,
+             service_region, service_postal_code, service_country_code,
+             discovery_area_label, unit_number, access_notes, status,
              created_at, updated_at, cancelled_at, mage_url, image_url, request_photos
       FROM posts
       WHERE user_id = $1
@@ -579,7 +591,10 @@ function buildUserPostByIdQuery(postId, userId) {
   return {
     text: `
       SELECT id, title, description, location, category, request_category,
-             service_domain, service_specialty, unit_number, access_notes, status,
+             service_domain, service_specialty, location_intake_mode,
+             location_normalization_status, service_address_line1, service_city,
+             service_region, service_postal_code, service_country_code,
+             discovery_area_label, unit_number, access_notes, status,
              created_at, updated_at, cancelled_at, mage_url, image_url, request_photos
       FROM posts
       WHERE id = $1 AND user_id = $2
@@ -1431,6 +1446,7 @@ app.post(
 );
 
 app.post("/posts", authMiddleware, async (req, res) => {
+  setPrivateNoStore(res);
   try {
     if (rejectUnsupportedMedia(req, res, ["image_url"])) return;
     const result = await createJobRequest({
@@ -1475,6 +1491,7 @@ app.post("/posts", authMiddleware, async (req, res) => {
 });
 
 app.get("/posts", authMiddleware, async (req, res) => {
+  setPrivateNoStore(res);
   try {
     const query = buildUserPostsQuery(req.user.id);
     const result = await getPool(req).query(query.text, query.values);
@@ -1490,6 +1507,7 @@ app.get("/posts", authMiddleware, async (req, res) => {
 });
 
 app.get("/posts/:id", authMiddleware, async (req, res) => {
+  setPrivateNoStore(res);
   try {
     const query = buildUserPostByIdQuery(req.params.id, req.user.id);
     const result = await getPool(req).query(query.text, query.values);
@@ -1511,6 +1529,7 @@ app.get("/posts/:id", authMiddleware, async (req, res) => {
 });
 
 app.put("/posts/:id", authMiddleware, async (req, res) => {
+  setPrivateNoStore(res);
   let transactionStarted = false;
   try {
     const validation = validateRequestPayload(req.body, { partial: true });
@@ -1531,7 +1550,10 @@ app.put("/posts/:id", authMiddleware, async (req, res) => {
     const existing = await pool.query(
       `
       SELECT id, title, description, location, category, request_category,
-             service_domain, service_specialty, unit_number, access_notes, status,
+             service_domain, service_specialty, location_intake_mode,
+             location_normalization_status, service_address_line1, service_city,
+             service_region, service_postal_code, service_country_code,
+             discovery_area_label, unit_number, access_notes, status,
              created_at, updated_at, cancelled_at, mage_url, image_url, request_photos
       FROM posts
       WHERE id = $1 AND user_id = $2 AND status = 'open'
@@ -1547,6 +1569,23 @@ app.put("/posts/:id", authMiddleware, async (req, res) => {
         success: false,
         code: "REQUEST_NOT_FOUND",
         message: "Request was not found or cannot be edited.",
+      });
+    }
+
+    const existingLocationStatus =
+      existing.rows[0].location_normalization_status ||
+      LOCATION_NORMALIZATION_STATUS.LEGACY_UNCLASSIFIED;
+    if (
+      request.has_legacy_location_update &&
+      existingLocationStatus !==
+        LOCATION_NORMALIZATION_STATUS.LEGACY_UNCLASSIFIED
+    ) {
+      await pool.query("ROLLBACK");
+      transactionStarted = false;
+      return res.status(400).json({
+        success: false,
+        code: "STRUCTURED_SERVICE_LOCATION_REQUIRED",
+        message: "Normalized requests require structured service location.",
       });
     }
 
@@ -1570,8 +1609,18 @@ app.put("/posts/:id", authMiddleware, async (req, res) => {
           location = CASE WHEN $5::boolean THEN $6 ELSE location END,
           request_photos = CASE WHEN $7::boolean THEN $8::jsonb ELSE request_photos END,
           image_url = CASE WHEN $7::boolean THEN $9 ELSE image_url END,
+          location_intake_mode = CASE WHEN $10::boolean THEN $11 ELSE location_intake_mode END,
+          location_normalization_status = CASE WHEN $10::boolean THEN $12 ELSE location_normalization_status END,
+          service_address_line1 = CASE WHEN $10::boolean THEN $13 ELSE service_address_line1 END,
+          service_city = CASE WHEN $10::boolean THEN $14 ELSE service_city END,
+          service_region = CASE WHEN $10::boolean THEN $15 ELSE service_region END,
+          service_postal_code = CASE WHEN $10::boolean THEN $16 ELSE service_postal_code END,
+          service_country_code = CASE WHEN $10::boolean THEN $17 ELSE service_country_code END,
+          discovery_area_label = CASE WHEN $10::boolean THEN $18 ELSE discovery_area_label END,
+          unit_number = CASE WHEN $10::boolean THEN $19 ELSE unit_number END,
+          access_notes = CASE WHEN $20::boolean THEN $21 ELSE access_notes END,
           updated_at = CURRENT_TIMESTAMP
-      WHERE id = $10 AND user_id = $11 AND status = 'open'
+      WHERE id = $22 AND user_id = $23 AND status = 'open'
       RETURNING *
       `,
       [
@@ -1579,11 +1628,23 @@ app.put("/posts/:id", authMiddleware, async (req, res) => {
         request.title,
         req.body.description !== undefined,
         request.description,
-        req.body.location !== undefined,
+        request.has_service_location_update || request.has_legacy_location_update,
         request.location,
         replacesRequestPhotos,
         JSON.stringify(normalizedRequestPhotos),
         compatibilityImageUrl,
+        request.has_service_location_update,
+        request.location_intake_mode,
+        request.location_normalization_status,
+        request.service_address_line1,
+        request.service_city,
+        request.service_region,
+        request.service_postal_code,
+        request.service_country_code,
+        request.discovery_area_label,
+        request.unit_number,
+        request.has_access_notes_update,
+        request.access_notes,
         req.params.id,
         req.user.id,
       ]
@@ -1638,6 +1699,7 @@ app.put("/posts/:id", authMiddleware, async (req, res) => {
 });
 
 app.post("/posts/:id/cancel", authMiddleware, async (req, res) => {
+  setPrivateNoStore(res);
   try {
     const result = await getPool(req).query(
       `
@@ -1696,6 +1758,7 @@ app.get("/professional-request-opportunities", authMiddleware, async (req, res) 
         )
       );
 
+    res.setHeader("Cache-Control", "private, no-store");
     return res.json({ success: true, opportunities });
   } catch (error) {
     return sendPublicDatabaseError({

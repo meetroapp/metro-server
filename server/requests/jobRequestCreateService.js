@@ -72,7 +72,15 @@ function createJobRequestFingerprint({ request, requestPhotos = [] } = {}) {
     request_category: normalizeString(request?.request_category),
     service_domain: normalizeString(request?.service_domain),
     service_specialty: normalizeString(request?.service_specialty),
-    location: normalizeString(request?.location),
+    location_intake_mode: normalizeString(request?.location_intake_mode),
+    location_normalization_status: normalizeString(
+      request?.location_normalization_status
+    ),
+    service_address_line1: normalizeString(request?.service_address_line1),
+    service_city: normalizeString(request?.service_city),
+    service_region: normalizeString(request?.service_region),
+    service_postal_code: normalizeString(request?.service_postal_code),
+    service_country_code: normalizeString(request?.service_country_code),
     unit_number: normalizeString(request?.unit_number),
     access_notes: normalizeString(request?.access_notes),
     request_photos: requestPhotos.map(canonicalPhotoFingerprint),
@@ -275,8 +283,13 @@ async function insertPost({ client, actorUserId, request, requestPhotos }) {
     INSERT INTO posts
     (user_id, title, description, category, request_category, service_domain,
      service_specialty, location, unit_number, access_notes, status, image_url,
-     request_photos, updated_at)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'open', $11, $12::jsonb, CURRENT_TIMESTAMP)
+     request_photos, location_intake_mode, location_normalization_status,
+     service_address_line1, service_city, service_region, service_postal_code,
+     service_country_code, discovery_area_label, updated_at)
+    VALUES (
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'open', $11, $12::jsonb,
+      $13, $14, $15, $16, $17, $18, $19, $20, CURRENT_TIMESTAMP
+    )
     RETURNING *
     `,
     [
@@ -292,6 +305,14 @@ async function insertPost({ client, actorUserId, request, requestPhotos }) {
       request.access_notes,
       imageUrl,
       JSON.stringify(requestPhotos),
+      request.location_intake_mode,
+      request.location_normalization_status,
+      request.service_address_line1,
+      request.service_city,
+      request.service_region,
+      request.service_postal_code,
+      request.service_country_code,
+      request.discovery_area_label,
     ]
   );
 

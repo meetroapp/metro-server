@@ -1,10 +1,11 @@
 "use strict";
 
 const {
-  professionalCanSeeRequest,
-} = require("../requests/requestLifecycle");
-const {
   getProfessionalServiceDomain,
+  getRequestServiceDomain,
+  isProfessionalServiceEligibleForRequest,
+  normalizeProfessionalServiceId,
+  normalizeRequestServiceId,
 } = require("../requests/serviceCompatibility");
 
 const DISTRIBUTABLE_STATUS = "ready_for_distribution";
@@ -105,14 +106,57 @@ function professionalCanSeeEmergencyOpportunity(
     return false;
   }
 
-  return professionalCanSeeRequest(profile, {
-    category: row.category,
-    request_category: row.service_specialty,
-    service_domain: row.service_domain,
-    service_specialty: row.service_specialty,
-    location: row.location_text,
-    status: "open",
-  });
+  const specialties = Array.isArray(details.service_specialties)
+    ? details.service_specialties
+        .map(normalizeProfessionalServiceId)
+        .filter(Boolean)
+    : [];
+
+  const professionalCategories =
+    specialties.length > 0
+      ? specialties
+      : [normalizeProfessionalServiceId(profile.category)].filter(Boolean);
+
+  const requestSpecialty = normalizeRequestServiceId(row.service_specialty);
+  const requestDomain = String(row.service_domain || "").trim().toLowerCase();
+  const canonicalRequestDomain = getRequestServiceDomain(requestSpecialty);
+
+  const professionalDomains = new Set(
+    professionalCategories
+      .map(getProfessionalServiceDomain)
+      .filter(Boolean)
+  );
+
+  const specialtyMatched = professionalCategories.some((category) =>
+    isProfessionalServiceEligibleForRequest(category, requestSpecialty)
+  );
+
+  const serviceAreas = [
+    details.service_area,
+    details.city,
+    details.postal_code,
+  ]
+    .flatMap((value) => String(value || "").split(/[,;|]+/))
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+
+  const emergencyLocation = String(row.location_text || "")
+    .trim()
+    .toLowerCase();
+
+  const areaMatched = Boolean(
+    emergencyLocation &&
+    serviceAreas.length > 0 &&
+    serviceAreas.some((area) => emergencyLocation.includes(area))
+  );
+
+  return Boolean(
+    canonicalRequestDomain &&
+    requestDomain === canonicalRequestDomain &&
+    professionalDomains.has(requestDomain) &&
+    specialtyMatched &&
+    areaMatched
+  );
 }
 
 async function listProfessionalEmergencyOpportunities({

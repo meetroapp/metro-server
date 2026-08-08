@@ -60,6 +60,12 @@ function requestBody(overrides = {}) {
     service_domain: "home_services",
     service_specialty: "handyman",
     location: "Cape Coral",
+    location_intake_mode: "exact_on_file",
+    service_address_line1: "123 Palm Ave",
+    service_city: "Cape Coral",
+    service_region: "FL",
+    service_postal_code: "33904",
+    service_country_code: "US",
     ...overrides,
   };
 }
@@ -154,6 +160,14 @@ function createPool({ failInsert = false } = {}) {
             status: "open",
             image_url: values[10],
             request_photos: JSON.parse(values[11]),
+            location_intake_mode: values[12],
+            location_normalization_status: values[13],
+            service_address_line1: values[14],
+            service_city: values[15],
+            service_region: values[16],
+            service_postal_code: values[17],
+            service_country_code: values[18],
+            discovery_area_label: values[19],
             created_at: "2026-07-19T18:00:00.000Z",
             updated_at: "2026-07-19T18:00:00.000Z",
           }],
@@ -254,8 +268,10 @@ function createResponse() {
     statusCode: 200,
     body: null,
     finished: false,
+    headers: new Map(),
     status(code) { this.statusCode = code; return this; },
     json(body) { this.body = body; this.finished = true; return this; },
+    setHeader(name, value) { this.headers.set(String(name).toLowerCase(), value); },
   };
 }
 

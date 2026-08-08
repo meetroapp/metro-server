@@ -43,6 +43,7 @@ Current inventory:
 23. `202608060002_create_request_selection_authority.sql`
 24. `202608070001_create_job_request_create_command_idempotency.sql`
 25. `202608070002_create_intelligence_operation_idempotency.sql`
+26. `202608070003_add_job_request_service_location.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -80,6 +81,12 @@ generic execution identity and bounded replay state for governed Intelligence
 operations. It stores no raw operation input, creates no product operation, and
 does not alter provider, credit, membership, Job Request, Relationship,
 Conversation, or commercial authority.
+
+`202608070003_add_job_request_service_location.sql` adds the private structured
+service-location foundation to ordinary Job Requests. Existing free-form
+locations remain untouched and are classified as `legacy_unclassified`; the
+migration does not parse legacy addresses, alter professional disclosure,
+create selection authority, or add geospatial data.
 
 ## Migration Ledger and Transactions
 

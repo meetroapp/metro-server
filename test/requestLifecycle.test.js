@@ -11,6 +11,7 @@ process.env.JWT_SECRET = "explicit-test-jwt-secret-request-lifecycle";
 const { app, createToken } = require("../index");
 const {
   professionalCanSeeRequest,
+  serializeOwnedRequest,
   serializeProfessionalOpportunity,
   validateRequestPayload,
 } = require("../server/requests/requestLifecycle");
@@ -24,6 +25,12 @@ function validRequest(overrides = {}) {
     service_domain: "home_services",
     service_specialty: "painting",
     location: "Cape Coral, FL 33904",
+    location_intake_mode: "exact_on_file",
+    service_address_line1: "123 Palm Ave",
+    service_city: "Cape Coral",
+    service_region: "FL",
+    service_postal_code: "33904",
+    service_country_code: "US",
     unit_number: "",
     access_notes: "Call on arrival",
     request_photos: [],
@@ -42,6 +49,8 @@ function row(overrides = {}) {
     id: 41,
     user_id: 7,
     ...validRequest(),
+    location_normalization_status: "normalized",
+    discovery_area_label: "Cape Coral, FL",
     status: "open",
     created_at: "2026-07-20T10:00:00.000Z",
     updated_at: "2026-07-20T10:00:00.000Z",
@@ -111,8 +120,10 @@ function response() {
     statusCode: 200,
     body: null,
     finished: false,
+    headers: new Map(),
     status(code) { this.statusCode = code; return this; },
     json(body) { this.body = body; this.finished = true; return this; },
+    setHeader(name, value) { this.headers.set(String(name).toLowerCase(), value); },
   };
 }
 
@@ -174,6 +185,51 @@ test("request validation rejects unknown, unsupported, and domain-forged service
   assert.equal(normalized.request.service_specialty, "painting");
 });
 
+test("request validation derives canonical owner location and ignores compatibility input authority", () => {
+  const exact = validateRequestPayload(validRequest({
+    location: "Contradictory client display value",
+  }));
+  assert.equal(exact.ok, true);
+  assert.equal(exact.request.location, "123 Palm Ave, Cape Coral, FL 33904");
+  assert.equal(exact.request.discovery_area_label, "Cape Coral, FL");
+  assert.equal(exact.request.location_normalization_status, "normalized");
+
+  const later = validateRequestPayload(validRequest({
+    location_intake_mode: "address_after_selection",
+    service_address_line1: null,
+    unit_number: "",
+  }));
+  assert.equal(later.ok, true);
+  assert.equal(later.request.location, "Cape Coral, FL 33904");
+  assert.equal(later.request.service_address_line1, null);
+});
+
+test("owner serializer exposes normalized fields and labels legacy rows without parsing", () => {
+  const normalized = serializeOwnedRequest(row({
+    location_normalization_status: "normalized",
+    discovery_area_label: "Cape Coral, FL",
+  }));
+  assert.equal(normalized.service_address_line1, "123 Palm Ave");
+  assert.equal(normalized.service_postal_code, "33904");
+  assert.equal(normalized.discovery_area_label, "Cape Coral, FL");
+
+  const legacy = serializeOwnedRequest({
+    ...row(),
+    location: "Unparsed historical location",
+    location_intake_mode: undefined,
+    location_normalization_status: undefined,
+    service_address_line1: undefined,
+    service_city: undefined,
+    service_region: undefined,
+    service_postal_code: undefined,
+    service_country_code: undefined,
+  });
+  assert.equal(legacy.location, "Unparsed historical location");
+  assert.equal(legacy.location_normalization_status, "legacy_unclassified");
+  assert.equal(legacy.location_intake_mode, null);
+  assert.equal(legacy.service_address_line1, null);
+});
+
 test("professional eligibility is fail closed on domain, specialty, status, and service area", () => {
   const profile = {
     category: "painting",
@@ -186,7 +242,21 @@ test("professional eligibility is fail closed on domain, specialty, status, and 
   assert.equal(professionalCanSeeRequest(profile, row({ status: "cancelled" })), false);
   assert.equal(professionalCanSeeRequest(profile, row({ status: "closed" })), false);
   assert.equal(professionalCanSeeRequest(profile, row({ status: "withdrawn" })), false);
-  assert.equal(professionalCanSeeRequest(profile, row({ location: "Miami, FL" })), false);
+  assert.equal(
+  professionalCanSeeRequest(
+    profile,
+    row({
+      location: "456 Synthetic Bay Ave, Miami, FL 33101",
+      service_address_line1: "456 Synthetic Bay Ave",
+      service_city: "Miami",
+      service_region: "FL",
+      service_postal_code: "33101",
+      service_country_code: "US",
+      discovery_area_label: "Miami, FL",
+    })
+  ),
+  false
+);
   assert.equal(professionalCanSeeRequest(profile, row({ service_domain: "healthcare" })), false);
   assert.equal(professionalCanSeeRequest(profile, row({ service_specialty: "plumbing" })), false);
   assert.equal(professionalCanSeeRequest(profile, row({ service_specialty: "unknown" })), false);
@@ -267,10 +337,19 @@ test("professional eligibility matches detailed door and window service capabili
   );
   assert.equal(
     professionalCanSeeRequest(
-      profile,
-      row({ service_specialty: "door_repair", location: "Miami, FL" })
-    ),
-    false
+  profile,
+  row({
+    service_specialty: "door_repair",
+    location: "456 Synthetic Bay Ave, Miami, FL 33101",
+    service_address_line1: "456 Synthetic Bay Ave",
+    service_city: "Miami",
+    service_region: "FL",
+    service_postal_code: "33101",
+    service_country_code: "US",
+    discovery_area_label: "Miami, FL",
+  })
+),
+false
   );
 });
 
@@ -343,8 +422,20 @@ test("owner-only edit persists canonical response and cross-user edit is not dis
       }
       if (sql.startsWith("UPDATE posts")) {
         return {
-          rows: Number(values[10]) === 7
-            ? [row({ title: values[1], description: values[3], location: values[5] })]
+          rows: Number(values[22]) === 7
+            ? [row({
+                title: values[1],
+                description: values[3],
+                location: values[5],
+                location_intake_mode: values[10],
+                location_normalization_status: values[11],
+                service_address_line1: values[12],
+                service_city: values[13],
+                service_region: values[14],
+                service_postal_code: values[15],
+                service_country_code: values[16],
+                discovery_area_label: values[17],
+              })]
             : [],
         };
       }
@@ -353,20 +444,70 @@ test("owner-only edit persists canonical response and cross-user edit is not dis
   };
   const updated = await invoke("put", "/posts/:id", {
     pool,
-    body: { title: "Updated title", description: "Updated details", location: "Cape Coral, FL" },
+    body: {
+      title: "Updated title",
+      description: "Updated details",
+      location_intake_mode: "exact_on_file",
+      service_address_line1: "125 Palm Ave",
+      service_city: "Cape Coral",
+      service_region: "FL",
+      service_postal_code: "33904",
+      service_country_code: "US",
+      unit_number: "",
+      access_notes: "Call first",
+    },
   });
   assert.equal(updated.statusCode, 200);
   assert.equal(updated.body.code, "REQUEST_UPDATED");
   assert.match(calls.find((call) => call.sql.includes("FOR UPDATE")).sql, /FOR UPDATE/);
-  assert.match(calls.find((call) => call.sql.startsWith("UPDATE posts")).sql, /WHERE id = \$10 AND user_id = \$11 AND status = 'open'/);
+  assert.match(calls.find((call) => call.sql.startsWith("UPDATE posts")).sql, /WHERE id = \$22 AND user_id = \$23 AND status = 'open'/);
 
   const denied = await invoke("put", "/posts/:id", {
     userId: 8,
     pool,
-    body: { title: "Unauthorized", description: "", location: "Cape Coral" },
+    body: {
+      title: "Unauthorized",
+      location_intake_mode: "exact_on_file",
+      service_address_line1: "125 Palm Ave",
+      service_city: "Cape Coral",
+      service_region: "FL",
+      service_postal_code: "33904",
+      service_country_code: "US",
+      unit_number: "",
+      access_notes: "",
+    },
   });
   assert.equal(denied.statusCode, 404);
   assert.equal(denied.body.code, "REQUEST_NOT_FOUND");
+});
+
+test("owner list and detail reads return structured location with private no-store headers", async () => {
+  const pool = {
+    async query(text, values = []) {
+      const sql = String(text).replace(/\s+/g, " ").trim();
+      if (sql.includes("FROM users WHERE id = $1")) {
+        return { rows: [{ id: values[0], email: "owner@example.test", role: "user", token_version: 0 }] };
+      }
+      if (sql.includes("FROM posts")) {
+        return { rows: [row({
+          location: "123 Palm Ave, Cape Coral, FL 33904",
+          location_normalization_status: "normalized",
+          discovery_area_label: "Cape Coral, FL",
+        })] };
+      }
+      throw new Error(`Unexpected query: ${sql}`);
+    },
+  };
+
+  const list = await invoke("get", "/posts", { pool, params: {} });
+  const detail = await invoke("get", "/posts/:id", { pool });
+
+  assert.equal(list.statusCode, 200);
+  assert.equal(detail.statusCode, 200);
+  assert.equal(list.headers.get("cache-control"), "private, no-store");
+  assert.equal(detail.headers.get("cache-control"), "private, no-store");
+  assert.equal(list.body.posts[0].service_city, "Cape Coral");
+  assert.equal(detail.body.post.service_postal_code, "33904");
 });
 
 test("cancel is owner scoped, retained, and idempotent", async () => {
@@ -396,7 +537,17 @@ test("professional endpoint returns only eligible privacy-filtered opportunities
   const fake = createOpportunityRoutePool({
     candidateRows: [
       row({ id: 41, user_id: 7 }),
-      row({ id: 42, user_id: 8, location: "Miami, FL" }),
+      row({
+  id: 42,
+  user_id: 8,
+  location: "456 Synthetic Bay Ave, Miami, FL 33101",
+  service_address_line1: "456 Synthetic Bay Ave",
+  service_city: "Miami",
+  service_region: "FL",
+  service_postal_code: "33101",
+  service_country_code: "US",
+  discovery_area_label: "Miami, FL",
+}),
       row({ id: 43, user_id: 8, service_specialty: "plumbing" }),
       row({ id: 44, user_id: 8 }),
     ],
@@ -407,6 +558,10 @@ test("professional endpoint returns only eligible privacy-filtered opportunities
     params: {},
   });
   assert.equal(result.statusCode, 200);
+  assert.equal(
+    result.headers.get("cache-control"),
+    "private, no-store"
+  );
   assert.deepEqual(result.body.opportunities.map((item) => item.id), [41, 44]);
   for (const opportunity of result.body.opportunities) {
     for (const key of [

@@ -36,6 +36,12 @@ function validPayload(overrides = {}) {
     service_domain: "home_services",
     service_specialty: "painting",
     location: "Cape Coral, FL 33904",
+    location_intake_mode: "exact_on_file",
+    service_address_line1: "123 Palm Ave",
+    service_city: "Cape Coral",
+    service_region: "FL",
+    service_postal_code: "33904",
+    service_country_code: "US",
     unit_number: "",
     access_notes: "Call on arrival",
     request_photos: [],
@@ -81,6 +87,14 @@ function rowFromPostValues(id, values, requestPhotos) {
     status: "open",
     image_url: values[10],
     request_photos: requestPhotos,
+    location_intake_mode: values[12],
+    location_normalization_status: values[13],
+    service_address_line1: values[14],
+    service_city: values[15],
+    service_region: values[16],
+    service_postal_code: values[17],
+    service_country_code: values[18],
+    discovery_area_label: values[19],
     created_at: `2026-08-07T12:00:0${id}.000Z`,
     updated_at: `2026-08-07T12:00:0${id}.000Z`,
     cancelled_at: null,
@@ -251,8 +265,10 @@ function response() {
     statusCode: 200,
     body: null,
     finished: false,
+    headers: new Map(),
     status(code) { this.statusCode = code; return this; },
     json(body) { this.body = body; this.finished = true; return this; },
+    setHeader(name, value) { this.headers.set(String(name).toLowerCase(), value); },
   };
 }
 
@@ -335,6 +351,22 @@ test("fingerprints are stable, canonical-content sensitive, and photo-order sens
     request: validPayload({ title: "Kitchen painting" }),
     requestPhotos: [],
   });
+  const changedStreet = createJobRequestFingerprint({
+    request: validPayload({ service_address_line1: "125 Palm Ave" }),
+    requestPhotos: [],
+  });
+  const changedPostal = createJobRequestFingerprint({
+    request: validPayload({ service_postal_code: "33905" }),
+    requestPhotos: [],
+  });
+  const changedMode = createJobRequestFingerprint({
+    request: validPayload({
+      location_intake_mode: "address_after_selection",
+      service_address_line1: null,
+      unit_number: "",
+    }),
+    requestPhotos: [],
+  });
   const changedOrder = createJobRequestFingerprint({
     request: validPayload(),
     requestPhotos: [
@@ -346,6 +378,9 @@ test("fingerprints are stable, canonical-content sensitive, and photo-order sens
   assert.match(first, /^[0-9a-f]{64}$/);
   assert.equal(first, same);
   assert.notEqual(first, changedContent);
+  assert.notEqual(first, changedStreet);
+  assert.notEqual(first, changedPostal);
+  assert.notEqual(first, changedMode);
   assert.notEqual(first, changedOrder);
 });
 
@@ -360,6 +395,14 @@ test("first keyed create atomically creates one post and command identity", asyn
   assert.equal(result.post.status, "open");
   assert.equal(result.post.service_domain, "home_services");
   assert.equal(result.post.service_specialty, "painting");
+  assert.equal(result.post.location_intake_mode, "exact_on_file");
+  assert.equal(result.post.location_normalization_status, "normalized");
+  assert.equal(result.post.service_address_line1, "123 Palm Ave");
+  assert.equal(result.post.service_city, "Cape Coral");
+  assert.equal(result.post.service_region, "FL");
+  assert.equal(result.post.service_postal_code, "33904");
+  assert.equal(result.post.service_country_code, "US");
+  assert.equal(result.post.discovery_area_label, "Cape Coral, FL");
   assert.equal(fixture.state.posts.length, 1);
   assert.equal(fixture.state.idempotency.length, 1);
   assert.equal(fixture.state.idempotency[0].post_id, 1);
@@ -392,6 +435,70 @@ test("same actor key with changed payload conflicts without another post", async
   assert.equal(conflict.code, "JOB_REQUEST_IDEMPOTENCY_CONFLICT");
   assert.equal(fixture.state.posts.length, 1);
   assert.equal(fixture.state.idempotency.length, 1);
+});
+
+test("same actor key conflicts when canonical structured location changes", async () => {
+  for (const payload of [
+    validPayload({ service_address_line1: "125 Palm Ave" }),
+    validPayload({ service_postal_code: "33905" }),
+    validPayload({
+      location_intake_mode: "address_after_selection",
+      service_address_line1: null,
+      unit_number: "",
+    }),
+  ]) {
+    const fixture = createPool();
+    await submit(fixture);
+    const conflict = await submit(fixture, { payload });
+    assert.equal(conflict.code, "JOB_REQUEST_IDEMPOTENCY_CONFLICT");
+    assert.equal(fixture.state.posts.length, 1);
+  }
+});
+
+test("address-after-selection creates generalized owner truth without exact address", async () => {
+  const fixture = createPool();
+  const result = await submit(fixture, {
+    payload: validPayload({
+      location_intake_mode: "address_after_selection",
+      service_address_line1: null,
+      unit_number: "",
+    }),
+  });
+
+  assert.equal(result.status, 201);
+  assert.equal(result.post.location, "Cape Coral, FL 33904");
+  assert.equal(result.post.location_intake_mode, "address_after_selection");
+  assert.equal(result.post.service_address_line1, null);
+  assert.equal(result.post.unit_number, "");
+  assert.equal(result.post.discovery_area_label, "Cape Coral, FL");
+});
+
+test("structured create validation enforces exact and address-later location shapes", async () => {
+  const cases = [
+    [validPayload({ service_address_line1: "" }), "SERVICE_ADDRESS_REQUIRED"],
+    [validPayload({ service_city: "" }), "SERVICE_LOCALITY_REQUIRED"],
+    [validPayload({ service_region: "" }), "SERVICE_LOCALITY_REQUIRED"],
+    [validPayload({ service_postal_code: "" }), "SERVICE_LOCALITY_REQUIRED"],
+    [validPayload({ service_country_code: "USA" }), "SERVICE_COUNTRY_CODE_INVALID"],
+    [validPayload({ location_intake_mode: "later" }), "SERVICE_LOCATION_MODE_INVALID"],
+    [validPayload({
+      location_intake_mode: "address_after_selection",
+      service_address_line1: "123 Palm Ave",
+      unit_number: "",
+    }), "SERVICE_ADDRESS_NOT_ALLOWED"],
+    [validPayload({
+      location_intake_mode: "address_after_selection",
+      service_address_line1: null,
+      unit_number: "2B",
+    }), "SERVICE_ADDRESS_NOT_ALLOWED"],
+  ];
+
+  for (const [payload, code] of cases) {
+    const fixture = createPool();
+    const result = await submit(fixture, { payload });
+    assert.equal(result.code, code);
+    assert.equal(fixture.state.posts.length, 0);
+  }
 });
 
 test("different key and actor scoping allow deliberate separate commands", async () => {
@@ -564,6 +671,7 @@ test("POST /posts routes all ordinary create traffic through governed idempotenc
   assert.equal(keyed.body.success, true);
   assert.equal(keyed.body.code, "JOB_REQUEST_CREATED");
   assert.equal(keyed.body.post.id, 1);
+  assert.equal(keyed.headers.get("cache-control"), "private, no-store");
   assert.equal(keyedFixture.state.idempotency.length, 1);
 
   const unkeyedFixture = createPool();
