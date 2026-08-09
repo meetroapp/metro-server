@@ -8,6 +8,9 @@ const {
 const {
   ensureConversationParticipantStatesWithClient,
 } = require("../conversations/conversationParticipantStateService");
+const {
+  bootstrapLifecycleJob,
+} = require("../workflow/jobFoundationService");
 
 const COMMAND_NAME = "request_selection.select";
 const IMPLEMENTATION_MILESTONE_ID =
@@ -747,6 +750,7 @@ async function selectProfessionalResponse({
   payload = {},
   idempotencyKey: rawIdempotencyKey,
   failureInjector,
+  lifecycleJobBootstrap = bootstrapLifecycleJob,
 }) {
   const actorUserId = normalizeActorId(authenticatedActor);
   const postId = parsePositiveInteger(rawPostId);
@@ -803,7 +807,8 @@ async function selectProfessionalResponse({
     const requestResult = await client.query(
       `
       /* request_selection:request_lock */
-      SELECT id, user_id, title, status, location, unit_number
+      SELECT id, user_id, title, status, location, unit_number,
+             lifecycle_contract_version
       FROM posts
       WHERE id = $1
         AND user_id = $2
@@ -1153,6 +1158,15 @@ async function selectProfessionalResponse({
     });
     await invokeFailure(failureInjector, "participant_creation");
 
+    const lifecycleJob = await lifecycleJobBootstrap({
+      client,
+      request,
+      selection: selectionInsert.rows[0],
+      relationship,
+      professionalUserId: response.professional_user_id,
+    });
+    await invokeFailure(failureInjector, "lifecycle_job_bootstrap");
+
     const correlationId = randomUUID();
     await client.query(
       `
@@ -1294,6 +1308,7 @@ async function selectProfessionalResponse({
       status: 201,
       code: "REQUEST_SELECTION_CREATED",
       ...serializeSelectionResult(resultRow),
+      lifecycleJob: lifecycleJob.created ? lifecycleJob.job : null,
     };
   } catch (error) {
     if (transactionStarted) {

@@ -95,6 +95,7 @@ function rowFromPostValues(id, values, requestPhotos) {
     service_postal_code: values[17],
     service_country_code: values[18],
     discovery_area_label: values[19],
+    lifecycle_contract_version: Number(values[20] || 1),
     created_at: `2026-08-07T12:00:0${id}.000Z`,
     updated_at: `2026-08-07T12:00:0${id}.000Z`,
     cancelled_at: null,
@@ -120,6 +121,7 @@ function createPool({
     quotes: [],
     invoices: [],
     evaluations: [],
+    reportedConcerns: [],
   };
   const calls = [];
   let transactionSnapshot = null;
@@ -209,6 +211,28 @@ function createPool({
         const requestPhotos = JSON.parse(values[11] || "[]");
         const row = rowFromPostValues(id, values, requestPhotos);
         state.posts.push(row);
+        return { rows: [row] };
+      }
+
+      if (sql.includes("reported_concern:create")) {
+        if (failAt === "reported_concern") {
+          throw new Error("private concern failure");
+        }
+        const [id, postId, reporterUserId, originalText, sourceEvidenceId, sequence, integrityHash] = values;
+        const row = {
+          id,
+          job_request_id: postId,
+          reporter_user_id: reporterUserId,
+          original_text: originalText,
+          source_evidence_id: sourceEvidenceId,
+          sequence,
+          integrity_algorithm: "sha256",
+          integrity_hash: integrityHash,
+          integrity_version: 1,
+          reported_at: "2026-08-09T12:00:00.000Z",
+          created_at: "2026-08-09T12:00:00.000Z",
+        };
+        state.reportedConcerns.push(row);
         return { rows: [row] };
       }
 
@@ -407,6 +431,64 @@ test("first keyed create atomically creates one post and command identity", asyn
   assert.equal(fixture.state.idempotency.length, 1);
   assert.equal(fixture.state.idempotency[0].post_id, 1);
   assert.equal(fixture.state.idempotency[0].completed_at !== null, true);
+  assert.equal(result.post.lifecycle_contract_version, 1);
+  assert.deepEqual(fixture.state.reportedConcerns, []);
+});
+
+test("server-gated v2 creation atomically preserves confirmed Reported Concern truth", async () => {
+  const fixture = createPool();
+  const result = await submit(fixture, {
+    env: {
+      JOB_LIFECYCLE_V2_ENABLED: "true",
+      JOB_LIFECYCLE_V2_READINESS: "MC-JOB-LIFECYCLE-004B",
+      CLOUDINARY_CLOUD_NAME: "demo",
+      CLOUDINARY_API_KEY: "key",
+      CLOUDINARY_API_SECRET: "secret",
+      CLOUDINARY_UPLOAD_FOLDER: "meetro-test",
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.post.lifecycle_contract_version, 2);
+  assert.equal(result.reportedConcern.originalText, "Paint the living room walls.");
+  assert.equal(result.reportedConcern.sequence, 1);
+  assert.match(result.reportedConcern.integrity.hash, /^[0-9a-f]{64}$/);
+  assert.equal(fixture.state.posts.length, 1);
+  assert.equal(fixture.state.reportedConcerns.length, 1);
+  assert.deepEqual(fixture.state.relationships, []);
+  assert.deepEqual(fixture.state.selections, []);
+});
+
+test("v2 gate rejects incomplete readiness and browser-declared versions", async () => {
+  const fixture = createPool();
+  const rejected = await submit(fixture, {
+    env: { JOB_LIFECYCLE_V2_ENABLED: "true" },
+  });
+  const browserDeclared = await submit(fixture, {
+    payload: validPayload({ lifecycle_contract_version: 2 }),
+  });
+
+  assert.equal(rejected.status, 503);
+  assert.equal(rejected.code, "LIFECYCLE_V2_ACTIVATION_REJECTED");
+  assert.equal(browserDeclared.code, "UNSUPPORTED_REQUEST_FIELDS");
+  assert.deepEqual(fixture.state.posts, []);
+  assert.deepEqual(fixture.state.reportedConcerns, []);
+});
+
+test("v2 concern persistence failure rolls back request and command identity", async () => {
+  const fixture = createPool({ failAt: "reported_concern" });
+  const result = await submit(fixture, {
+    env: {
+      JOB_LIFECYCLE_V2_ENABLED: "true",
+      JOB_LIFECYCLE_V2_READINESS: "MC-JOB-LIFECYCLE-004B",
+    },
+  });
+
+  assert.equal(result.status, 500);
+  assert.equal(result.code, "JOB_REQUEST_CREATE_FAILED");
+  assert.deepEqual(fixture.state.posts, []);
+  assert.deepEqual(fixture.state.reportedConcerns, []);
+  assert.deepEqual(fixture.state.idempotency, []);
 });
 
 test("same actor key and canonical payload replays the first post", async () => {

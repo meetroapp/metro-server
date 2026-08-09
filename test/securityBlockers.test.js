@@ -78,6 +78,7 @@ test("single post query rejects cross-user access by requiring owner scope", () 
 test("safe post serialization removes owner identity fields", () => {
   const post = toSafePostRow({
     id: 201,
+    lifecycle_contract_version: 1,
     user_id: 999,
     title: "Private request",
     description: "Needs help",
@@ -108,6 +109,7 @@ test("safe post serialization removes owner identity fields", () => {
 
   assert.deepEqual(post, {
     id: 201,
+    lifecycle_contract_version: 1,
     title: "Private request",
     description: "Needs help",
     location: "Fort Myers",

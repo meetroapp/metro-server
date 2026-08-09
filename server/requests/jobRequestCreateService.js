@@ -4,6 +4,8 @@ const crypto = require("node:crypto");
 
 const { normalizeRequestPhotoCollection, parseStoredRequestPhotos } = require("../media/requestPhoto");
 const { serializeOwnedRequest, validateRequestPayload } = require("./requestLifecycle");
+const { resolveLifecycleContractVersion } = require("./lifecycleContract");
+const { createReportedConcern } = require("./reportedConcernService");
 
 const COMMAND_NAME = "job_request.create";
 const COMMAND_SCOPE = "ordinary";
@@ -64,8 +66,13 @@ function canonicalPhotoFingerprint(photo = {}) {
   };
 }
 
-function createJobRequestFingerprint({ request, requestPhotos = [] } = {}) {
+function createJobRequestFingerprint({
+  request,
+  requestPhotos = [],
+  lifecycleContractVersion = 1,
+} = {}) {
   const canonical = {
+    lifecycle_contract_version: Number(lifecycleContractVersion),
     title: normalizeString(request?.title),
     description: normalizeString(request?.description),
     category: normalizeString(request?.category),
@@ -275,7 +282,13 @@ async function completeIdempotency({ client, reservationId, post }) {
   return completed.rows[0];
 }
 
-async function insertPost({ client, actorUserId, request, requestPhotos }) {
+async function insertPost({
+  client,
+  actorUserId,
+  request,
+  requestPhotos,
+  lifecycleContractVersion,
+}) {
   const imageUrl = requestPhotos[0]?.secure_url || null;
   const result = await client.query(
     `
@@ -285,10 +298,11 @@ async function insertPost({ client, actorUserId, request, requestPhotos }) {
      service_specialty, location, unit_number, access_notes, status, image_url,
      request_photos, location_intake_mode, location_normalization_status,
      service_address_line1, service_city, service_region, service_postal_code,
-     service_country_code, discovery_area_label, updated_at)
+     service_country_code, discovery_area_label, lifecycle_contract_version,
+     updated_at)
     VALUES (
       $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'open', $11, $12::jsonb,
-      $13, $14, $15, $16, $17, $18, $19, $20, CURRENT_TIMESTAMP
+      $13, $14, $15, $16, $17, $18, $19, $20, $21, CURRENT_TIMESTAMP
     )
     RETURNING *
     `,
@@ -313,6 +327,7 @@ async function insertPost({ client, actorUserId, request, requestPhotos }) {
       request.service_postal_code,
       request.service_country_code,
       request.discovery_area_label,
+      lifecycleContractVersion,
     ]
   );
 
@@ -350,6 +365,28 @@ async function createJobRequest({
     );
   }
 
+  const lifecycleActivation = resolveLifecycleContractVersion(env);
+  if (!lifecycleActivation.ok) {
+    console.warn("Lifecycle-v2 activation rejected", {
+      code: lifecycleActivation.code,
+    });
+    return failure(
+      lifecycleActivation.status,
+      lifecycleActivation.code,
+      lifecycleActivation.message
+    );
+  }
+  if (
+    lifecycleActivation.version === 2 &&
+    !String(requestValidation.request.description || "").trim()
+  ) {
+    return failure(
+      400,
+      "REPORTED_CONCERN_REQUIRED",
+      "Request details are required for lifecycle-v2 creation."
+    );
+  }
+
   let normalizedRequestPhotos = [];
   try {
     normalizedRequestPhotos = normalizeRequestPhotoCollection(
@@ -367,6 +404,7 @@ async function createJobRequest({
   const requestFingerprint = createJobRequestFingerprint({
     request,
     requestPhotos: normalizedRequestPhotos,
+    lifecycleContractVersion: lifecycleActivation.version,
   });
 
   requirePool(pool);
@@ -435,7 +473,18 @@ async function createJobRequest({
       actorUserId,
       request,
       requestPhotos: normalizedRequestPhotos,
+      lifecycleContractVersion: lifecycleActivation.version,
     });
+
+    let reportedConcern = null;
+    if (lifecycleActivation.version === 2) {
+      reportedConcern = await createReportedConcern({
+        client,
+        post,
+        actorUserId,
+        sourceEvidenceId: idempotency.reservation.id,
+      });
+    }
 
     await completeIdempotency({
       client,
@@ -451,6 +500,7 @@ async function createJobRequest({
       status: 201,
       code: "JOB_REQUEST_CREATED",
       post: serializePost(post),
+      reportedConcern,
     };
   } catch (error) {
     if (transactionStarted) {

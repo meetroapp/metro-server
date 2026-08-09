@@ -126,6 +126,9 @@ const {
 const {
   registerIntelligenceRoutes,
 } = require("./server/intelligence/intelligenceRoutes");
+const {
+  registerLifecycleRoutes,
+} = require("./server/requests/lifecycleRoutes");
 
 
 const JWT_SECRET = resolveJwtSecret(process.env);
@@ -578,7 +581,8 @@ function buildUserPostsQuery(userId) {
              location_normalization_status, service_address_line1, service_city,
              service_region, service_postal_code, service_country_code,
              discovery_area_label, unit_number, access_notes, status,
-             created_at, updated_at, cancelled_at, mage_url, image_url, request_photos
+             lifecycle_contract_version, created_at, updated_at, cancelled_at,
+             mage_url, image_url, request_photos
       FROM posts
       WHERE user_id = $1
       ORDER BY posts.created_at DESC
@@ -595,7 +599,8 @@ function buildUserPostByIdQuery(postId, userId) {
              location_normalization_status, service_address_line1, service_city,
              service_region, service_postal_code, service_country_code,
              discovery_area_label, unit_number, access_notes, status,
-             created_at, updated_at, cancelled_at, mage_url, image_url, request_photos
+             lifecycle_contract_version, created_at, updated_at, cancelled_at,
+             mage_url, image_url, request_photos
       FROM posts
       WHERE id = $1 AND user_id = $2
       `,
@@ -804,6 +809,13 @@ registerIntelligenceRoutes({
   app,
   authMiddleware,
   getPool,
+});
+
+registerLifecycleRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
 });
 
 app.get("/health", (req, res) => {
@@ -1475,6 +1487,7 @@ app.post("/posts", authMiddleware, async (req, res) => {
       success: true,
       code: result.code,
       post: result.post,
+      reportedConcern: result.reportedConcern || null,
     });
   } catch (err) {
     if (err instanceof MediaValidationError) {
@@ -2404,6 +2417,7 @@ app.post(
         privacy_stage: result.privacy_stage,
         resultClassification: result.resultClassification,
         replayed: result.replayed === true,
+        lifecycleJob: result.lifecycleJob || null,
       });
     } catch (error) {
       return sendPublicDatabaseError({

@@ -99,6 +99,58 @@ test("selection atomically creates one canonical selection and exact conversatio
   );
 });
 
+test("lifecycle-v2 selection bootstraps one Job from the canonical selection", async () => {
+  const fake = createRequestSelectionFake({
+    request: {
+      id: 41,
+      user_id: 7,
+      title: "Dishwasher issue",
+      status: "open",
+      lifecycle_contract_version: 2,
+    },
+  });
+  const bootstrapCalls = [];
+  const result = await select(fake, {
+    lifecycleJobBootstrap: async (input) => {
+      bootstrapCalls.push(input);
+      return {
+        created: true,
+        job: { id: "11111111-1111-4111-8111-111111111111" },
+      };
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(bootstrapCalls.length, 1);
+  assert.equal(bootstrapCalls[0].request.lifecycle_contract_version, 2);
+  assert.equal(String(bootstrapCalls[0].selection.id), String(result.selection.id));
+  assert.equal(bootstrapCalls[0].relationship.id, result.relationship.id);
+  assert.equal(result.lifecycleJob.id, "11111111-1111-4111-8111-111111111111");
+});
+
+test("lifecycle Job bootstrap failure rolls back selection, relationship, and conversation", async () => {
+  const fake = createRequestSelectionFake({
+    request: {
+      id: 41,
+      user_id: 7,
+      title: "Dishwasher issue",
+      status: "open",
+      lifecycle_contract_version: 2,
+    },
+  });
+  const before = JSON.stringify(fake.state);
+
+  await assert.rejects(
+    select(fake, {
+      lifecycleJobBootstrap: async () => {
+        throw new Error("synthetic lifecycle bootstrap failure");
+      },
+    }),
+    /synthetic lifecycle bootstrap failure/
+  );
+  assert.equal(JSON.stringify(fake.state), before);
+});
+
 test("selection closes every competing submitted response without a conversation", async () => {
   const fake = createRequestSelectionFake();
   await select(fake);

@@ -44,6 +44,8 @@ Current inventory:
 24. `202608070001_create_job_request_create_command_idempotency.sql`
 25. `202608070002_create_intelligence_operation_idempotency.sql`
 26. `202608070003_add_job_request_service_location.sql`
+27. `202608090001_create_job_lifecycle_concern_foundation.sql`
+28. `202608090002_create_job_participant_authority_foundation.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -87,6 +89,17 @@ service-location foundation to ordinary Job Requests. Existing free-form
 locations remain untouched and are classified as `legacy_unclassified`; the
 migration does not parse legacy addresses, alter professional disclosure,
 create selection authority, or add geospatial data.
+
+`202608090001_create_job_lifecycle_concern_foundation.sql` defaults every
+existing and ungated request to lifecycle v1, adds selection-sourced Job
+identity for explicitly activated v2 requests, and preserves fresh confirmed
+Reported Concern text as append-only customer truth. It performs no legacy
+concern backfill and creates no Evaluation, Workstream, Quote, or approval.
+
+`202608090002_create_job_participant_authority_foundation.sql` separates
+authenticated relationship participants, temporal role history, and explicit
+scoped authority grants. Slice 001 registers only concern read/clarification
+and participant-read capabilities; role names grant no commercial authority.
 
 ## Migration Ledger and Transactions
 

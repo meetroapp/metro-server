@@ -225,6 +225,7 @@ function professionalCanSeeRequest(profile = {}, request = {}) {
 function serializeOwnedRequest(row = {}, requestPhotos = []) {
   return {
     id: row.id,
+    lifecycle_contract_version: Number(row.lifecycle_contract_version || 1),
     title: row.title,
     description: row.description,
     category: row.category,
