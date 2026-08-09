@@ -44,6 +44,7 @@ Current inventory:
 24. `202608070001_create_job_request_create_command_idempotency.sql`
 25. `202608070002_create_intelligence_operation_idempotency.sql`
 26. `202608070003_add_job_request_service_location.sql`
+27. `202608090001_create_legacy_orphan_message_archive.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -87,6 +88,14 @@ service-location foundation to ordinary Job Requests. Existing free-form
 locations remain untouched and are classified as `legacy_unclassified`; the
 migration does not parse legacy addresses, alter professional disclosure,
 create selection authority, or add geospatial data.
+
+`202608090001_create_legacy_orphan_message_archive.sql` creates immutable,
+non-authoritative historical evidence storage for exact legacy message records
+approved through `MC-PRODUCTION-RECONCILIATION-001`. It does not select source
+rows, move or delete messages, infer thread identity, or grant Conversation,
+Relationship, Quote, Workflow, or commercial authority. Only the separately
+governed production reconciliation runner may archive and remove reviewed rows
+after backup, fingerprint, target, and schema preconditions pass.
 
 ## Migration Ledger and Transactions
 
