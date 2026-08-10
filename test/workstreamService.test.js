@@ -57,9 +57,21 @@ test("Slice 003 exposes exactly eleven bounded operational capabilities", () => 
   }
   assert.equal(
     PROFESSIONAL_BOOTSTRAP_CAPABILITIES.some((capability) =>
-      /job\.complete|quote|recommendation|scheduling|procurement/.test(capability)
+      /job\.complete|quote|scheduling|procurement/.test(capability)
     ),
     false
+  );
+  assert.deepEqual(
+    PROFESSIONAL_BOOTSTRAP_CAPABILITIES.filter((capability) =>
+      capability.startsWith("recommendation.") ||
+      capability === "customer_constraint.record"
+    ).sort(),
+    [
+      "customer_constraint.record",
+      "recommendation.create",
+      "recommendation.read",
+      "recommendation.transition",
+    ]
   );
 });
 

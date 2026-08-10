@@ -376,14 +376,14 @@ test(
     const pool = new Pool({ connectionString: cleanDatabaseUrl, max: 2 });
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 30);
+      assert.equal(migrations.length, 31);
       const applied = await runMigrationCollection(
         pool,
         migrations,
         targetMetadata(cleanDatabaseUrl)
       );
       assert.equal(applied.success, true);
-      assert.equal(applied.applied.length, 30);
+      assert.equal(applied.applied.length, 31);
       const replay = await runMigrationCollection(
         pool,
         migrations,
@@ -391,7 +391,7 @@ test(
       );
       assert.equal(replay.success, true);
       assert.equal(replay.applied.length, 0);
-      assert.equal(replay.skipped.length, 30);
+      assert.equal(replay.skipped.length, 31);
     } finally {
       await pool.end();
     }
@@ -971,7 +971,7 @@ test(
         targetMetadata(runtimeDatabaseUrl)
       );
       assert.equal(migrations.success, true);
-      assert.equal(migrations.applied.length, 30);
+      assert.equal(migrations.applied.length, 31);
 
       const identities = await createIdentities(pool, suffix);
       const outsider = await pool.query(
@@ -1589,8 +1589,8 @@ test(
             WHERE job_id = $5 AND state = 'COMPLETED')::integer
             AS completed_workstreams,
           (SELECT count(*) FROM quote_requests)::integer AS quotes,
-          to_regclass('public.canonical_recommendations') IS NULL
-            AS no_recommendations,
+          (SELECT count(*) FROM canonical_recommendations)::integer
+            AS recommendations,
           (SELECT posts.status FROM jobs
             INNER JOIN posts ON posts.id = jobs.job_request_id
             WHERE jobs.id = $5) AS request_status,
@@ -1622,10 +1622,10 @@ test(
         resolution_events: 0,
         completed_workstreams: 0,
         quotes: 0,
-        no_recommendations: true,
+        recommendations: 0,
         request_status: "open",
         relationship_status: "active",
-        ledger: 30,
+        ledger: 31,
       });
     } finally {
       await pool.end();
@@ -1659,7 +1659,7 @@ test(
         targetMetadata(completionDatabaseUrl)
       );
       assert.equal(migrations.success, true);
-      assert.equal(migrations.applied.length, 30);
+      assert.equal(migrations.applied.length, 31);
 
       const identities = await createIdentities(pool, suffix);
       const fixture = await createLifecycleFixture(
@@ -2280,8 +2280,8 @@ test(
           (SELECT count(*) FROM canonical_finding_resolution_events
             WHERE job_id = $1)::integer AS resolution_events,
           (SELECT count(*) FROM quote_requests)::integer AS quotes,
-          to_regclass('public.canonical_recommendations') IS NULL
-            AS no_recommendations,
+          (SELECT count(*) FROM canonical_recommendations)::integer
+            AS recommendations,
           (SELECT count(*) FROM schema_migrations)::integer AS ledger
         `,
         [
@@ -2305,8 +2305,8 @@ test(
         completed_workstream_versions: 2,
         resolution_events: 4,
         quotes: 0,
-        no_recommendations: true,
-        ledger: 30,
+        recommendations: 0,
+        ledger: 31,
       });
       const disposalHistory = await pool.query(
         `

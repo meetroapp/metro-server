@@ -118,6 +118,9 @@ const {
 const {
   registerEvaluationRoutes,
 } = require("./server/authorization/evaluations");
+const {
+  registerRecommendationRoutes,
+} = require("./server/authorization/recommendations");
 
 const {
   registerAlertRoutes,
@@ -795,6 +798,13 @@ registerEmergencyRequestRoutes({
 });
 
 registerEvaluationRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerRecommendationRoutes({
   app,
   authMiddleware,
   getPool,

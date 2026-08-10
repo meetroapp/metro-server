@@ -26,6 +26,10 @@ const PROFESSIONAL_BOOTSTRAP_CAPABILITIES = Object.freeze([
   "finding.resolve",
   "work_obligation.transition",
   "workstream.complete",
+  "recommendation.create",
+  "recommendation.read",
+  "recommendation.transition",
+  "customer_constraint.record",
 ]);
 
 async function bootstrapLifecycleJob({
