@@ -30,7 +30,9 @@ test(
     const client = await pool.connect();
     const allMigrations = getMigrationFiles();
     const priorMigrations = allMigrations.filter(
-      (migration) => !migrationNames.has(migration.filename)
+      (migration) =>
+        migration.filename <
+        "202608090001_create_job_lifecycle_concern_foundation.sql"
     );
     const sliceMigrations = allMigrations.filter(
       (migration) => migrationNames.has(migration.filename)

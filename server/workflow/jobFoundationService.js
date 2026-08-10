@@ -11,6 +11,11 @@ const BOOTSTRAP_CAPABILITIES = Object.freeze([
   "reported_concern.clarify",
   "participant.read",
 ]);
+const PROFESSIONAL_BOOTSTRAP_CAPABILITIES = Object.freeze([
+  "evaluation.perform",
+  "finding.submit",
+  "finding.confirm",
+]);
 
 async function bootstrapLifecycleJob({
   client,
@@ -119,11 +124,27 @@ async function bootstrapLifecycleJob({
     ]
   );
 
-  for (const participantId of [
-    homeownerParticipantId,
-    professionalParticipantId,
+  const professionalCapabilityResult = await client.query(
+    `
+    /* job_foundation:professional_capabilities */
+    SELECT capability
+    FROM lifecycle_capabilities
+    WHERE capability = ANY($1::text[])
+    ORDER BY capability ASC
+    `,
+    [[...PROFESSIONAL_BOOTSTRAP_CAPABILITIES]]
+  );
+  const registeredProfessionalCapabilities =
+    professionalCapabilityResult.rows.map((row) => row.capability);
+
+  for (const [participantId, capabilities] of [
+    [homeownerParticipantId, BOOTSTRAP_CAPABILITIES],
+    [professionalParticipantId, [
+      ...BOOTSTRAP_CAPABILITIES,
+      ...registeredProfessionalCapabilities,
+    ]],
   ]) {
-    for (const capability of BOOTSTRAP_CAPABILITIES) {
+    for (const capability of capabilities) {
       await client.query(
         `
         /* job_foundation:insert_grant */
@@ -158,6 +179,7 @@ async function bootstrapLifecycleJob({
     relationshipId: Number(relationship.id),
     selectionId: String(selection.id),
     participantCount: 2,
+    professionalCapabilityCount: registeredProfessionalCapabilities.length,
   });
 
   return {
@@ -169,5 +191,6 @@ async function bootstrapLifecycleJob({
 
 module.exports = {
   BOOTSTRAP_CAPABILITIES,
+  PROFESSIONAL_BOOTSTRAP_CAPABILITIES,
   bootstrapLifecycleJob,
 };

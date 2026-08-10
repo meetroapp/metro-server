@@ -25,8 +25,16 @@ function route(method, path) {
   return app.router.stack.find((layer) => layer.route?.path === path && layer.route.methods[method]);
 }
 
-test("only the five canonical authenticated Evaluation routes are registered", () => {
+test("only the thirteen bounded authenticated Evaluation and Finding routes are registered", () => {
   const expected = [
+    ["post", "/jobs/:jobId/evaluations"],
+    ["get", "/jobs/:jobId/evaluations"],
+    ["post", "/evaluations/:evaluationId/findings"],
+    ["get", "/evaluations/:evaluationId/findings"],
+    ["get", "/findings/:findingId"],
+    ["post", "/findings/:findingId/concern-links"],
+    ["post", "/findings/:findingId/evidence-references"],
+    ["post", "/findings/:findingId/confirm"],
     ["post", "/evaluations"],
     ["get", "/evaluations/:evaluationId"],
     ["patch", "/evaluations/:evaluationId"],
@@ -117,6 +125,6 @@ test("registration requires authentication middleware and does not create public
     sendPublicDatabaseError: () => {},
     service: {},
   });
-  assert.equal(routes.length, 5);
+  assert.equal(routes.length, 13);
   assert.ok(routes.every((item) => item.handlers[0] === auth));
 });

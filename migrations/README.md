@@ -46,6 +46,7 @@ Current inventory:
 26. `202608070003_add_job_request_service_location.sql`
 27. `202608090001_create_job_lifecycle_concern_foundation.sql`
 28. `202608090002_create_job_participant_authority_foundation.sql`
+29. `202608090003_create_ordinary_evaluation_finding_foundation.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -100,6 +101,14 @@ concern backfill and creates no Evaluation, Workstream, Quote, or approval.
 authenticated relationship participants, temporal role history, and explicit
 scoped authority grants. Slice 001 registers only concern read/clarification
 and participant-read capabilities; role names grant no commercial authority.
+
+`202608090003_create_ordinary_evaluation_finding_foundation.sql` reuses the
+canonical Evaluation aggregate and version history for ordinary lifecycle-v2
+Jobs. It adds explicit Job subjects, stable Finding identities with append-only
+versions, restrictive Reported Concern links, and typed evidence references.
+It does not convert Emergency Evaluation JSON, fabricate Evaluation or Finding
+history, activate runtime authority, or add Workstream/Recommendation schema.
+Workstream linkage is deferred until a canonical Workstream identity exists.
 
 ## Migration Ledger and Transactions
 

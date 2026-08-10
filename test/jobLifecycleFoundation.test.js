@@ -5,6 +5,7 @@ const test = require("node:test");
 
 const {
   BOOTSTRAP_CAPABILITIES,
+  PROFESSIONAL_BOOTSTRAP_CAPABILITIES,
   bootstrapLifecycleJob,
 } = require("../server/workflow/jobFoundationService");
 const {
@@ -20,7 +21,10 @@ function tag(sql) {
   return String(sql).match(/(?:job_foundation|lifecycle_authority):([a-z_]+)/)?.[1] || "";
 }
 
-function createBootstrapClient({ concernExists = true } = {}) {
+function createBootstrapClient({
+  concernExists = true,
+  professionalCapabilities = [...PROFESSIONAL_BOOTSTRAP_CAPABILITIES],
+} = {}) {
   const state = {
     jobs: [],
     participants: [],
@@ -64,6 +68,11 @@ function createBootstrapClient({ concernExists = true } = {}) {
         );
         return { rows: [] };
       }
+      if (operation === "professional_capabilities") {
+        return {
+          rows: professionalCapabilities.map((capability) => ({ capability })),
+        };
+      }
       if (operation === "insert_grant") {
         state.grants.push({
           id: values[0],
@@ -105,10 +114,25 @@ test("canonical selection bootstraps one Job, two known participants, roles, and
     "CUSTOMER_REPRESENTATIVE",
     "PRIMARY_PROFESSIONAL",
   ]);
-  assert.equal(client.state.grants.length, 6);
+  assert.equal(client.state.grants.length, 9);
   assert.deepEqual(
     [...new Set(client.state.grants.map((row) => row.capability))].sort(),
-    [...BOOTSTRAP_CAPABILITIES].sort()
+    [...BOOTSTRAP_CAPABILITIES, ...PROFESSIONAL_BOOTSTRAP_CAPABILITIES].sort()
+  );
+  assert.deepEqual(
+    client.state.grants
+      .filter((row) => row.grantee_participant_id === client.state.participants[1].id)
+      .map((row) => row.capability)
+      .filter((capability) => PROFESSIONAL_BOOTSTRAP_CAPABILITIES.includes(capability)),
+    ["evaluation.perform", "finding.submit", "finding.confirm"]
+  );
+  assert.equal(
+    client.state.grants.some(
+      (row) =>
+        row.grantee_participant_id === client.state.participants[0].id &&
+        PROFESSIONAL_BOOTSTRAP_CAPABILITIES.includes(row.capability)
+    ),
+    false
   );
   assert.equal(
     client.state.grants.some((row) => /quote|approve|payment|procurement/.test(row.capability)),
@@ -130,6 +154,18 @@ test("legacy selection creates no Job and v2 fails closed without concern truth"
     /requires preserved Reported Concern truth/
   );
   assert.deepEqual(missingConcernClient.state.jobs, []);
+});
+
+test("bootstrap does not fabricate an Evaluation grant before its capability migration", async () => {
+  const client = createBootstrapClient({ professionalCapabilities: [] });
+  await bootstrapLifecycleJob(bootstrapInput(client));
+  assert.equal(client.state.grants.length, 6);
+  assert.equal(
+    client.state.grants.some((row) =>
+      PROFESSIONAL_BOOTSTRAP_CAPABILITIES.includes(row.capability)
+    ),
+    false
+  );
 });
 
 function createAuthorityClient({
