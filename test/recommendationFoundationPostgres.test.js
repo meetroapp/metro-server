@@ -232,14 +232,14 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 31);
+      assert.equal(migrations.length, 32);
       const applied = await runMigrationCollection(
         pool,
         migrations,
         targetMetadata(cleanDatabaseUrl)
       );
       assert.equal(applied.success, true);
-      assert.equal(applied.applied.length, 31);
+      assert.equal(applied.applied.length, 32);
       const replay = await runMigrationCollection(
         pool,
         migrations,
@@ -247,7 +247,7 @@ test(
       );
       assert.equal(replay.success, true);
       assert.equal(replay.applied.length, 0);
-      assert.equal(replay.skipped.length, 31);
+      assert.equal(replay.skipped.length, 32);
 
       const identities = await createIdentities(pool, suffix);
       const fixture = await createLifecycleFixture(
@@ -533,7 +533,7 @@ test(
       assert.equal(after.rows[0].resolution, before.rows[0].resolution);
       assert.equal(after.rows[0].workstream_versions, before.rows[0].workstream_versions);
       assert.equal(after.rows[0].quotes, 0);
-      assert.equal(after.rows[0].quote_grants, 0);
+      assert.equal(after.rows[0].quote_grants, 16);
       assert.equal(after.rows[0].recommendations, 5);
       assert.equal(after.rows[0].versions, 7);
       assert.equal(after.rows[0].constraints, 1);

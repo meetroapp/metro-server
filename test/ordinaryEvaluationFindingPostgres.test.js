@@ -438,14 +438,14 @@ test(
     const client = await pool.connect();
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 31);
+      assert.equal(migrations.length, 32);
       const applied = await runMigrationCollection(
         client,
         migrations,
         targetMetadata(cleanDatabaseUrl)
       );
       assert.equal(applied.success, true);
-      assert.equal(applied.applied.length, 31);
+      assert.equal(applied.applied.length, 32);
 
       const schema = await client.query(
         `
@@ -482,7 +482,7 @@ test(
       );
       assert.equal(replay.success, true);
       assert.equal(replay.applied.length, 0);
-      assert.equal(replay.skipped.length, 31);
+      assert.equal(replay.skipped.length, 32);
     } finally {
       client.release();
       await pool.end();

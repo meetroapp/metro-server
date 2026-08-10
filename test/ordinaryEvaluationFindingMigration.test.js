@@ -24,15 +24,19 @@ test("Slice 002 migration remains the unique additive migration after Slice 001"
     .filter((name) => /^\d+.*\.sql$/.test(name))
     .sort();
 
-  assert.equal(migrations.length, 31);
-  assert.equal(migrations.at(-3), migrationName);
+  assert.equal(migrations.length, 32);
+  assert.equal(migrations.at(-4), migrationName);
   assert.equal(
-    migrations.at(-2),
+    migrations.at(-3),
     "202608100001_create_workstream_activity_foundation.sql"
   );
   assert.equal(
-    migrations.at(-1),
+    migrations.at(-2),
     "202608100002_create_recommendation_hierarchy_foundation.sql"
+  );
+  assert.equal(
+    migrations.at(-1),
+    "202608100003_create_canonical_quote_scope_foundation.sql"
   );
   assert.equal(
     migrations.filter((name) => name.startsWith("202608090003_")).length,

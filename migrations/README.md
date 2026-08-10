@@ -49,6 +49,7 @@ Current inventory:
 29. `202608090003_create_ordinary_evaluation_finding_foundation.sql`
 30. `202608100001_create_workstream_activity_foundation.sql`
 31. `202608100002_create_recommendation_hierarchy_foundation.sql`
+32. `202608100003_create_canonical_quote_scope_foundation.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -134,6 +135,19 @@ disposition history. It preserves legacy Evaluation recommendation JSON and
 registers only bounded Job-scoped Recommendation capabilities. It creates no
 Recommendation business rows, Quote, pricing, procurement, scheduling, Job
 completion, Finding-resolution, or Workstream-state authority.
+
+`202608100003_create_canonical_quote_scope_foundation.sql` adds canonical Draft
+Quote identity, immutable Quote versions and scope snapshots, exact lifecycle
+source references, server-owned integer-minor-unit totals, and eight bounded
+professional/customer capabilities. It permits governed Draft preparation,
+the explicit DRAFT-to-ISSUED transition, an append-only terminal customer
+decision against the exact issued version, and explicit empty derived Drafts
+with parent Quote lineage. Exact grant/evidence/idempotency links preserve the
+issued commercial snapshot; approval or decline never changes its status,
+scope, amount, source, or integrity hash. It creates no Quote rows,
+retroactive grants, procurement, scheduling, invoicing, or payment authority.
+Legacy `quote_requests` and browser Quote Builder state remain unchanged and
+non-canonical.
 
 ## Migration Ledger and Transactions
 

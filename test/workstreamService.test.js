@@ -57,9 +57,15 @@ test("Slice 003 exposes exactly eleven bounded operational capabilities", () => 
   }
   assert.equal(
     PROFESSIONAL_BOOTSTRAP_CAPABILITIES.some((capability) =>
-      /job\.complete|quote|scheduling|procurement/.test(capability)
+      /job\.complete|quote\.(?:approve|decline)|scheduling|procurement/.test(capability)
     ),
     false
+  );
+  assert.deepEqual(
+    PROFESSIONAL_BOOTSTRAP_CAPABILITIES.filter((capability) =>
+      capability.startsWith("quote.")
+    ).sort(),
+    ["quote.create", "quote.issue", "quote.read", "quote.revise", "quote.scope.manage"]
   );
   assert.deepEqual(
     PROFESSIONAL_BOOTSTRAP_CAPABILITIES.filter((capability) =>

@@ -376,14 +376,14 @@ test(
     const pool = new Pool({ connectionString: cleanDatabaseUrl, max: 2 });
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 31);
+      assert.equal(migrations.length, 32);
       const applied = await runMigrationCollection(
         pool,
         migrations,
         targetMetadata(cleanDatabaseUrl)
       );
       assert.equal(applied.success, true);
-      assert.equal(applied.applied.length, 31);
+      assert.equal(applied.applied.length, 32);
       const replay = await runMigrationCollection(
         pool,
         migrations,
@@ -391,7 +391,7 @@ test(
       );
       assert.equal(replay.success, true);
       assert.equal(replay.applied.length, 0);
-      assert.equal(replay.skipped.length, 31);
+      assert.equal(replay.skipped.length, 32);
     } finally {
       await pool.end();
     }
@@ -971,7 +971,7 @@ test(
         targetMetadata(runtimeDatabaseUrl)
       );
       assert.equal(migrations.success, true);
-      assert.equal(migrations.applied.length, 31);
+      assert.equal(migrations.applied.length, 32);
 
       const identities = await createIdentities(pool, suffix);
       const outsider = await pool.query(
@@ -1625,7 +1625,7 @@ test(
         recommendations: 0,
         request_status: "open",
         relationship_status: "active",
-        ledger: 31,
+        ledger: 32,
       });
     } finally {
       await pool.end();
@@ -1659,7 +1659,7 @@ test(
         targetMetadata(completionDatabaseUrl)
       );
       assert.equal(migrations.success, true);
-      assert.equal(migrations.applied.length, 31);
+      assert.equal(migrations.applied.length, 32);
 
       const identities = await createIdentities(pool, suffix);
       const fixture = await createLifecycleFixture(
@@ -2306,7 +2306,7 @@ test(
         resolution_events: 4,
         quotes: 0,
         recommendations: 0,
-        ledger: 31,
+        ledger: 32,
       });
       const disposalHistory = await pool.query(
         `

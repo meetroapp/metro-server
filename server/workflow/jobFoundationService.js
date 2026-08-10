@@ -11,6 +11,11 @@ const BOOTSTRAP_CAPABILITIES = Object.freeze([
   "reported_concern.clarify",
   "participant.read",
 ]);
+const CUSTOMER_BOOTSTRAP_CAPABILITIES = Object.freeze([
+  "quote.read_customer",
+  "quote.approve",
+  "quote.decline",
+]);
 const PROFESSIONAL_BOOTSTRAP_CAPABILITIES = Object.freeze([
   "evaluation.perform",
   "finding.submit",
@@ -30,6 +35,11 @@ const PROFESSIONAL_BOOTSTRAP_CAPABILITIES = Object.freeze([
   "recommendation.read",
   "recommendation.transition",
   "customer_constraint.record",
+  "quote.create",
+  "quote.read",
+  "quote.scope.manage",
+  "quote.issue",
+  "quote.revise",
 ]);
 
 async function bootstrapLifecycleJob({
@@ -139,6 +149,16 @@ async function bootstrapLifecycleJob({
     ]
   );
 
+  const customerCapabilityResult = await client.query(
+    `
+    /* job_foundation:customer_capabilities */
+    SELECT capability
+    FROM lifecycle_capabilities
+    WHERE capability = ANY($1::text[])
+    ORDER BY capability ASC
+    `,
+    [[...CUSTOMER_BOOTSTRAP_CAPABILITIES]]
+  );
   const professionalCapabilityResult = await client.query(
     `
     /* job_foundation:professional_capabilities */
@@ -151,9 +171,14 @@ async function bootstrapLifecycleJob({
   );
   const registeredProfessionalCapabilities =
     professionalCapabilityResult.rows.map((row) => row.capability);
+  const registeredCustomerCapabilities =
+    customerCapabilityResult.rows.map((row) => row.capability);
 
   for (const [participantId, capabilities] of [
-    [homeownerParticipantId, BOOTSTRAP_CAPABILITIES],
+    [homeownerParticipantId, [
+      ...BOOTSTRAP_CAPABILITIES,
+      ...registeredCustomerCapabilities,
+    ]],
     [professionalParticipantId, [
       ...BOOTSTRAP_CAPABILITIES,
       ...registeredProfessionalCapabilities,
@@ -194,6 +219,7 @@ async function bootstrapLifecycleJob({
     relationshipId: Number(relationship.id),
     selectionId: String(selection.id),
     participantCount: 2,
+    customerCapabilityCount: registeredCustomerCapabilities.length,
     professionalCapabilityCount: registeredProfessionalCapabilities.length,
   });
 
@@ -206,6 +232,7 @@ async function bootstrapLifecycleJob({
 
 module.exports = {
   BOOTSTRAP_CAPABILITIES,
+  CUSTOMER_BOOTSTRAP_CAPABILITIES,
   PROFESSIONAL_BOOTSTRAP_CAPABILITIES,
   bootstrapLifecycleJob,
 };
