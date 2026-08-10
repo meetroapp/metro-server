@@ -19,13 +19,17 @@ const routesSource = readFileSync(
   "utf8"
 );
 
-test("Slice 002 migration is the unique additive migration after Slice 001", () => {
+test("Slice 002 migration remains the unique additive migration after Slice 001", () => {
   const migrations = readdirSync(join(root, "migrations"))
     .filter((name) => /^\d+.*\.sql$/.test(name))
     .sort();
 
-  assert.equal(migrations.length, 29);
-  assert.equal(migrations.at(-1), migrationName);
+  assert.equal(migrations.length, 30);
+  assert.equal(migrations.at(-2), migrationName);
+  assert.equal(
+    migrations.at(-1),
+    "202608100001_create_workstream_activity_foundation.sql"
+  );
   assert.equal(
     migrations.filter((name) => name.startsWith("202608090003_")).length,
     1
@@ -137,5 +141,5 @@ test("new lifecycle records are append-only and future domains remain deferred",
   assert.match(routesSource, /\/evaluations\/:evaluationId\/findings/i);
   assert.match(routesSource, /\/findings\/:findingId\/confirm/i);
   assert.match(migrationReadme, new RegExp(migrationName));
-  assert.match(migrationReadme, /Workstream linkage is deferred/i);
+  assert.match(migrationReadme, /Workstream linkage is implemented separately/i);
 });

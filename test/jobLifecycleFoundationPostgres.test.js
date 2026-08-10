@@ -240,7 +240,7 @@ test(
         concerns: 1,
         participants: 2,
         roles: 2,
-        grants: 9,
+        grants: 20,
         quote_grants: 0,
       });
     } finally {

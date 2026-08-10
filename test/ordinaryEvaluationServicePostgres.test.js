@@ -273,7 +273,7 @@ test(
         targetMetadata()
       );
       assert.equal(migrated.success, true, JSON.stringify(migrated));
-      assert.equal(migrated.applied.length, 29);
+      assert.equal(migrated.applied.length, 30);
 
       const identities = await createIdentities(pool, suffix);
       const legacy = await pool.query(
@@ -311,7 +311,7 @@ test(
       assert.deepEqual(bootstrap.rows[0], {
         participants: 2,
         roles: 2,
-        grants: 9,
+        grants: 20,
         professional_evaluation_grants: 1,
         homeowner_evaluation_grants: 0,
       });
@@ -579,7 +579,7 @@ test(
         [created.evaluation.id]
       );
       assert.deepEqual(preservation.rows[0], {
-        ledger: 29,
+        ledger: 30,
         ordinary_versions: 3,
         findings: 0,
         concern_links: 0,

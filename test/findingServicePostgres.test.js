@@ -278,7 +278,7 @@ test(
         targetMetadata()
       );
       assert.equal(migrations.success, true, JSON.stringify(migrations));
-      assert.equal(migrations.applied.length, 29);
+      assert.equal(migrations.applied.length, 30);
       const identities = await createIdentities(pool, suffix);
       const fixture = await createLifecycleFixture(
         pool,
@@ -680,7 +680,7 @@ test(
       const ledger = await pool.query(
         "SELECT count(*)::integer AS count FROM schema_migrations"
       );
-      assert.equal(ledger.rows[0].count, 29);
+      assert.equal(ledger.rows[0].count, 30);
 
       const logText = JSON.stringify(events);
       assert.match(logText, /FINDING_SUBMITTED/);

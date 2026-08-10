@@ -15,6 +15,17 @@ const PROFESSIONAL_BOOTSTRAP_CAPABILITIES = Object.freeze([
   "evaluation.perform",
   "finding.submit",
   "finding.confirm",
+  "workstream.create",
+  "workstream.read",
+  "finding.assign_workstream",
+  "work_activity.create",
+  "work_activity.progress",
+  "work_activity.read",
+  "work_obligation.create",
+  "work_obligation.read",
+  "finding.resolve",
+  "work_obligation.transition",
+  "workstream.complete",
 ]);
 
 async function bootstrapLifecycleJob({

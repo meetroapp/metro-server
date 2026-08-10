@@ -114,7 +114,7 @@ test("canonical selection bootstraps one Job, two known participants, roles, and
     "CUSTOMER_REPRESENTATIVE",
     "PRIMARY_PROFESSIONAL",
   ]);
-  assert.equal(client.state.grants.length, 9);
+  assert.equal(client.state.grants.length, 20);
   assert.deepEqual(
     [...new Set(client.state.grants.map((row) => row.capability))].sort(),
     [...BOOTSTRAP_CAPABILITIES, ...PROFESSIONAL_BOOTSTRAP_CAPABILITIES].sort()
@@ -124,7 +124,7 @@ test("canonical selection bootstraps one Job, two known participants, roles, and
       .filter((row) => row.grantee_participant_id === client.state.participants[1].id)
       .map((row) => row.capability)
       .filter((capability) => PROFESSIONAL_BOOTSTRAP_CAPABILITIES.includes(capability)),
-    ["evaluation.perform", "finding.submit", "finding.confirm"]
+    [...PROFESSIONAL_BOOTSTRAP_CAPABILITIES]
   );
   assert.equal(
     client.state.grants.some(

@@ -129,6 +129,9 @@ const {
 const {
   registerLifecycleRoutes,
 } = require("./server/requests/lifecycleRoutes");
+const {
+  registerWorkstreamRoutes,
+} = require("./server/workflow/workstreams");
 
 
 const JWT_SECRET = resolveJwtSecret(process.env);
@@ -812,6 +815,13 @@ registerIntelligenceRoutes({
 });
 
 registerLifecycleRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerWorkstreamRoutes({
   app,
   authMiddleware,
   getPool,

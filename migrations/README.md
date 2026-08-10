@@ -47,6 +47,7 @@ Current inventory:
 27. `202608090001_create_job_lifecycle_concern_foundation.sql`
 28. `202608090002_create_job_participant_authority_foundation.sql`
 29. `202608090003_create_ordinary_evaluation_finding_foundation.sql`
+30. `202608100001_create_workstream_activity_foundation.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -108,7 +109,22 @@ Jobs. It adds explicit Job subjects, stable Finding identities with append-only
 versions, restrictive Reported Concern links, and typed evidence references.
 It does not convert Emergency Evaluation JSON, fabricate Evaluation or Finding
 history, activate runtime authority, or add Workstream/Recommendation schema.
-Workstream linkage is deferred until a canonical Workstream identity exists.
+Workstream linkage is implemented separately by the additive Slice 003 schema.
+
+`202608100001_create_workstream_activity_foundation.sql` adds stable canonical
+Workstream, Work Activity, and obligation identities with append-only versions.
+It adds one-per-Finding same-Job Workstream assignment and append-only Finding
+resolution evidence tied to the exact immutable Finding version/state. Temporary
+activity, obligation, Workstream, Finding-resolution, and overall Job states
+remain structurally independent. It registers only the bounded Slice 003 runtime
+capabilities and durable workflow command-idempotency contract; it creates no
+business rows. Resolution and completion remain explicit Job-scoped commands;
+the migration adds no Job completion, Quote, Recommendation, specialist
+lifecycle, or automatic state transition.
+An explicitly governed DEFERRED Finding or DEFERRED/EXCLUDED obligation is
+nonblocking for accepted-scope eligibility, but it does not assert technical
+resolution and never completes a Workstream automatically; completion remains
+a separate explicit command.
 
 ## Migration Ledger and Transactions
 
