@@ -84,6 +84,8 @@ async function orchestrateIntelligenceOperation({
   const providerRequest = cloneBoundedJson(providerRequestCandidate, {
     maxBytes: 65536,
     maxStringLength: 12000,
+    maxKeys: 1800,
+    maxArrayLength: 250,
   });
 
   const providerResult = await invokeIntelligenceProvider({
@@ -110,6 +112,8 @@ async function orchestrateIntelligenceOperation({
   const result = cloneBoundedJson(parsedResult, {
     maxBytes: 65536,
     maxStringLength: 12000,
+    maxKeys: 1800,
+    maxArrayLength: 250,
   });
 
   logMetadata(logger, "info", "intelligence.orchestration.completed", {

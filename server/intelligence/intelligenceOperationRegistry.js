@@ -7,6 +7,9 @@ const {
 const {
   jobRequestInterpretOperationDefinition,
 } = require("./operations/jobRequestInterpret");
+const {
+  quoteComposeOperationDefinition,
+} = require("./operations/quoteCompose");
 
 function validateOperationDefinition(definition) {
   const operation = normalizeOperation(definition?.operation);
@@ -18,6 +21,7 @@ function validateOperationDefinition(definition) {
     ? [...new Set(definition.engineIds.map((id) => String(id).trim().toLowerCase()))]
     : [];
   const providerName = String(definition?.providerName || "default").trim().toLowerCase();
+  const roleAuthorization = definition?.roleAuthorization || "registry";
   const errors = [];
 
   if (!operation) errors.push("invalid_operation");
@@ -29,6 +33,9 @@ function validateOperationDefinition(definition) {
     errors.push("invalid_engine_ids");
   }
   if (!/^[a-z][a-z0-9_-]*$/.test(providerName)) errors.push("invalid_provider_name");
+  if (!["registry", "context_builder"].includes(roleAuthorization)) {
+    errors.push("invalid_role_authorization");
+  }
   if (typeof definition?.buildContext !== "function") errors.push("missing_context_builder");
   if (typeof definition?.buildProviderRequest !== "function") {
     errors.push("missing_provider_request_builder");
@@ -46,6 +53,7 @@ function validateOperationDefinition(definition) {
           supportedRoles: Object.freeze(supportedRoles),
           engineIds: Object.freeze(engineIds),
           providerName,
+          roleAuthorization,
           buildContext: definition.buildContext,
           buildProviderRequest: definition.buildProviderRequest,
           parseResult: definition.parseResult,
@@ -73,9 +81,13 @@ function createIntelligenceOperationRegistry(definitions = []) {
       return operations.get(normalizeOperation(operation)) || null;
     },
     list() {
-      return [...operations.values()].map(({ buildContext, buildProviderRequest, parseResult, ...metadata }) => ({
-        ...metadata,
-      }));
+      return [...operations.values()].map(({
+        buildContext,
+        buildProviderRequest,
+        parseResult,
+        roleAuthorization,
+        ...metadata
+      }) => ({ ...metadata }));
     },
   });
 }
@@ -83,6 +95,7 @@ function createIntelligenceOperationRegistry(definitions = []) {
 const canonicalIntelligenceOperationRegistry =
   createIntelligenceOperationRegistry([
     jobRequestInterpretOperationDefinition,
+    quoteComposeOperationDefinition,
   ]);
 
 module.exports = {

@@ -11,11 +11,16 @@ Every registered operation must provide an explicit server-owned context
 builder, provider-request builder, and result parser. There is no generic
 fallback that forwards arbitrary caller input to a provider.
 
-The production operation and engine registries are intentionally empty at this
-foundation milestone. Product operations, including `job_request.interpret`,
-must be registered through a separately governed change. Tests inject the
-neutral `test.echo` operation and fake provider; no test operation is exported
-by the production registry.
+The production registry contains only separately governed product operations.
+`job_request.interpret` prepares a homeowner-controlled draft, while
+`quote.compose` reads authorized canonical Job truth and returns an explicitly
+non-canonical proposal for professional review. Tests use deterministic fake
+providers; no test operation is exported by the production registry.
+
+`quote.compose` cannot invoke Quote, customer-decision, payment, scheduling, or
+lifecycle mutation commands. Professional feedback is advisory evidence, and
+confirmed composition output must still pass through the existing canonical
+`quote.draft.create` and `quote.scope.add` commands.
 
 Usage finalization remains optional. When no adapter is configured, completed
 operations truthfully persist and return `not_configured` / `stub` usage state.

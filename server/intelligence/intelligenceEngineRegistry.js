@@ -3,6 +3,9 @@
 const {
   jobRequestInterpretEngines,
 } = require("./operations/jobRequestInterpret");
+const {
+  quoteComposeEngines,
+} = require("./operations/quoteCompose");
 
 function createIntelligenceEngineRegistry(engines = []) {
   const registry = new Map();
@@ -26,7 +29,7 @@ function createIntelligenceEngineRegistry(engines = []) {
 }
 
 const canonicalIntelligenceEngineRegistry = createIntelligenceEngineRegistry(
-  jobRequestInterpretEngines
+  [...jobRequestInterpretEngines, ...quoteComposeEngines]
 );
 
 module.exports = {

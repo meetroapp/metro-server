@@ -90,20 +90,32 @@ function createFixture({ providerComplete, parseResult, buildContext } = {}) {
   };
 }
 
-test("production registry ships only the bounded Job Request interpretation operation", () => {
-  assert.deepEqual(canonicalIntelligenceOperationRegistry.list(), [{
-    operation: "job_request.interpret",
-    capability: "job_request.interpret",
-    supportedRoles: ["homeowner"],
-    engineIds: ["job_request_capability", "job_request_validation"],
-    providerName: "job_request",
-  }]);
+test("production registry ships only the governed Job Request and Quote advisory operations", () => {
+  assert.deepEqual(canonicalIntelligenceOperationRegistry.list(), [
+    {
+      operation: "job_request.interpret",
+      capability: "job_request.interpret",
+      supportedRoles: ["homeowner"],
+      engineIds: ["job_request_capability", "job_request_validation"],
+      providerName: "job_request",
+    },
+    {
+      operation: "quote.compose",
+      capability: "quote.compose",
+      supportedRoles: ["professional"],
+      engineIds: ["quote_composition_advisory", "quote_composition_authority_boundary"],
+      providerName: "quote_composition",
+    },
+  ]);
   assert.deepEqual(canonicalIntelligenceEngineRegistry.list(), [
     "job_request_capability",
     "job_request_validation",
+    "quote_composition_advisory",
+    "quote_composition_authority_boundary",
   ]);
   assert.equal(canonicalIntelligenceOperationRegistry.get("test.echo"), null);
   assert.ok(canonicalIntelligenceOperationRegistry.get("job_request.interpret"));
+  assert.ok(canonicalIntelligenceOperationRegistry.get("quote.compose"));
 });
 
 test("operation registration requires explicit server-owned provider packaging", () => {

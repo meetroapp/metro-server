@@ -26,9 +26,15 @@ function gatewayResponse(ok, status, code, message) {
 
 function normalizeActor(authenticatedActor) {
   const id = authenticatedActor?.id;
-  const role = typeof authenticatedActor?.role === "string"
+  const accountType = typeof authenticatedActor?.accountType === "string"
+    ? authenticatedActor.accountType.trim().toLowerCase()
+    : "";
+  const rawRole = typeof authenticatedActor?.role === "string"
     ? authenticatedActor.role.trim().toLowerCase()
     : "";
+  const role = ["homeowner", "professional"].includes(accountType)
+    ? accountType
+    : rawRole;
   if (!Number.isInteger(id) || id <= 0 || !/^[a-z][a-z0-9_]*$/.test(role)) {
     return null;
   }
@@ -87,7 +93,10 @@ async function executeIntelligenceGateway({
   }
   if (
     definition.capability !== request.capability ||
-    !definition.supportedRoles.includes(actor.role)
+    (
+      definition.roleAuthorization !== "context_builder" &&
+      !definition.supportedRoles.includes(actor.role)
+    )
   ) {
     return gatewayResponse(
       false,
@@ -109,8 +118,21 @@ async function executeIntelligenceGateway({
 
   let semanticInput;
   try {
-    semanticInput = prepareOperationSemanticInput({ definition, request });
+    semanticInput = await prepareOperationSemanticInput({
+      definition,
+      request,
+      runtimeContext: { pool, authenticatedActor: actor },
+    });
   } catch (error) {
+    const governedFailure = {
+      intelligence_job_unavailable: [404, "INTELLIGENCE_JOB_UNAVAILABLE", "The Job is unavailable."],
+      intelligence_lifecycle_v2_required: [409, "INTELLIGENCE_LIFECYCLE_V2_REQUIRED", "A lifecycle-v2 Job is required."],
+      intelligence_quote_authority_required: [403, "INTELLIGENCE_QUOTE_AUTHORITY_REQUIRED", "Professional Quote authority is required."],
+      intelligence_quote_draft_unavailable: [404, "INTELLIGENCE_QUOTE_DRAFT_UNAVAILABLE", "The requested Draft Quote is unavailable."],
+    }[error?.code];
+    if (governedFailure) {
+      return gatewayResponse(false, governedFailure[0], governedFailure[1], governedFailure[2]);
+    }
     if (
       error?.code !== "intelligence_context_invalid" &&
       error?.code !== "intelligence_context_prohibited"

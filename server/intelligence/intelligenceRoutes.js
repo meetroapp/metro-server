@@ -3,8 +3,11 @@
 const {
   executeIntelligenceGateway,
 } = require("./intelligenceGateway");
+const quoteCompositionReviewService = require("./quoteCompositionReviewService");
 
 const INTELLIGENCE_COMPANION_ROUTE = "/api/companion/ask";
+const QUOTE_COMPOSITION_FEEDBACK_ROUTE =
+  "/api/intelligence/quote-compositions/:proposalId/feedback";
 
 function setIntelligenceNoStore(_req, res, next) {
   res.setHeader("Cache-Control", "no-store");
@@ -53,6 +56,7 @@ function registerIntelligenceRoutes({
   app,
   authMiddleware,
   getPool,
+  reviewService = quoteCompositionReviewService,
   ...dependencies
 }) {
   if (!app || typeof app.post !== "function" || typeof authMiddleware !== "function") {
@@ -64,10 +68,39 @@ function registerIntelligenceRoutes({
     authMiddleware,
     createIntelligenceGatewayHandler({ getPool, ...dependencies })
   );
+  app.post(
+    QUOTE_COMPOSITION_FEEDBACK_ROUTE,
+    setIntelligenceNoStore,
+    authMiddleware,
+    async (req, res) => {
+      try {
+        const result = await reviewService.recordQuoteCompositionFeedback({
+          pool: getPool(req),
+          authenticatedActor: req.user,
+          proposalId: req.params.proposalId,
+          elementId: req.body?.elementId,
+          action: req.body?.action,
+          editedValue: req.body?.editedValue,
+          reasonCategory: req.body?.reasonCategory,
+          idempotencyKey: req.headers?.["idempotency-key"],
+          logger: dependencies.logger,
+        });
+        const { ok, status, ...payload } = result;
+        return res.status(status).json({ success: ok, ...payload });
+      } catch {
+        return res.status(500).json({
+          success: false,
+          code: "QUOTE_COMPOSITION_FEEDBACK_FAILED",
+          message: "The Quote Composition feedback could not be recorded.",
+        });
+      }
+    }
+  );
 }
 
 module.exports = {
   INTELLIGENCE_COMPANION_ROUTE,
+  QUOTE_COMPOSITION_FEEDBACK_ROUTE,
   createIntelligenceGatewayHandler,
   registerIntelligenceRoutes,
   setIntelligenceNoStore,

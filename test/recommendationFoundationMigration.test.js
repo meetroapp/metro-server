@@ -14,10 +14,11 @@ test("Slice 004 is one additive migration after Workstream foundation", () => {
   const migrations = readdirSync(join(root, "migrations"))
     .filter((name) => /^\d+.*\.sql$/.test(name))
     .sort();
-  assert.equal(migrations.length, 32);
-  assert.equal(migrations.at(-3), "202608100001_create_workstream_activity_foundation.sql");
-  assert.equal(migrations.at(-2), migrationName);
-  assert.equal(migrations.at(-1), "202608100003_create_canonical_quote_scope_foundation.sql");
+  assert.equal(migrations.length, 33);
+  assert.equal(migrations.at(-4), "202608100001_create_workstream_activity_foundation.sql");
+  assert.equal(migrations.at(-3), migrationName);
+  assert.equal(migrations.at(-2), "202608100003_create_canonical_quote_scope_foundation.sql");
+  assert.equal(migrations.at(-1), "202608100004_create_quote_composition_feedback.sql");
   assert.doesNotMatch(sql, /\b(?:DROP TABLE|TRUNCATE|DELETE FROM)\b/i);
   assert.doesNotMatch(
     sql,

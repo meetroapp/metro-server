@@ -50,6 +50,7 @@ Current inventory:
 30. `202608100001_create_workstream_activity_foundation.sql`
 31. `202608100002_create_recommendation_hierarchy_foundation.sql`
 32. `202608100003_create_canonical_quote_scope_foundation.sql`
+33. `202608100004_create_quote_composition_feedback.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -148,6 +149,12 @@ scope, amount, source, or integrity hash. It creates no Quote rows,
 retroactive grants, procurement, scheduling, invoicing, or payment authority.
 Legacy `quote_requests` and browser Quote Builder state remain unchanged and
 non-canonical.
+
+`202608100004_create_quote_composition_feedback.sql` adds append-only
+professional Accept/Edit/Reject evidence for non-canonical AI Quote Composition
+Proposals already persisted by the governed Intelligence operation ledger. It
+creates no proposal, Quote, issue, customer decision, payment, scheduling,
+Finding-resolution, Workstream-completion, or Job-completion authority.
 
 ## Migration Ledger and Transactions
 

@@ -117,10 +117,10 @@ function fixture({ complete } = {}) {
   };
 }
 
-test("canonical registration declares one bounded homeowner operation and fixed engines", () => {
+test("canonical registration retains the bounded homeowner operation and fixed engines", () => {
   const operations = canonicalIntelligenceOperationRegistry.list();
-  assert.equal(operations.length, 1);
-  assert.deepEqual(operations[0], {
+  assert.equal(operations.length, 2);
+  assert.deepEqual(operations.find(({ operation }) => operation === "job_request.interpret"), {
     operation: "job_request.interpret",
     capability: "job_request.interpret",
     supportedRoles: ["homeowner"],
