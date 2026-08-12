@@ -70,7 +70,11 @@ function createPool({ currentProject = null, failWrite = false } = {}) {
           ? { rows: [{ id: 91 }] }
           : { rows: [] };
       }
-      if (sql.includes("SELECT contractor_projects.*") && sql.includes("JOIN contractor_profiles")) {
+      if (
+        sql.includes("FROM contractor_projects") &&
+        sql.includes("JOIN contractor_profiles") &&
+        sql.includes("FOR UPDATE OF contractor_projects")
+      ) {
         return currentProject && Number(values[1]) === 7
           ? { rows: [currentProject] }
           : { rows: [] };
@@ -154,6 +158,10 @@ test("portfolio creation stores canonical ordered metadata and compatibility URL
   assert.equal(result.image_url, media(2).secure_url);
   assert.deepEqual(result.image_urls, [media(2).secure_url, media(1).secure_url]);
   assert.deepEqual(result.portfolio_media.map((item) => item.display_order), [0, 1]);
+  assert.doesNotMatch(
+    pool.calls.map((call) => call.sql).join("\n"),
+    /RETURNING \*|SELECT contractor_projects\.\*/
+  );
 });
 
 test("portfolio update preserves order and deletes removed assets only after commit", async () => {
@@ -249,21 +257,60 @@ test("cross-user project updates fail before mutation", async () => {
 });
 
 test("public portfolio serialization exposes URLs while owner serialization restores metadata", () => {
+  const governedMedia = {
+    ...normalizeBusinessPortfolioMedia(payload(1), {
+      env: TEST_ENV,
+      contractorProfileId: 91,
+    }),
+    future_media_internal: "must-not-leak",
+  };
   const row = {
     id: 501,
+    contractor_id: 91,
+    title: "Kitchen refresh",
+    description: "Cabinet and tile work",
     image_url: media(1).secure_url,
     image_urls: [
-      normalizeBusinessPortfolioMedia(payload(1), { env: TEST_ENV, contractorProfileId: 91 }),
+      governedMedia,
       "https://legacy.example.test/project.jpg",
     ],
+    created_at: "2026-07-19T18:00:00.000Z",
+    future_publication_state: "private-future-value",
+    privacy_confirmed_by_user_id: 7,
   };
   const publicProject = serializePublicPortfolioProject(row);
-  assert.deepEqual(publicProject.image_urls, [
-    media(1).secure_url,
-    "https://legacy.example.test/project.jpg",
-  ]);
-  assert.doesNotMatch(JSON.stringify(publicProject), /public_id/);
+  assert.deepEqual(publicProject, {
+    id: 501,
+    contractor_id: 91,
+    title: "Kitchen refresh",
+    description: "Cabinet and tile work",
+    image_url: media(1).secure_url,
+    image_urls: [
+      media(1).secure_url,
+      "https://legacy.example.test/project.jpg",
+    ],
+    created_at: "2026-07-19T18:00:00.000Z",
+  });
+  assert.doesNotMatch(
+    JSON.stringify(publicProject),
+    /public_id|future_publication_state|privacy_confirmed_by_user_id|future_media_internal/
+  );
+
   const ownedProject = serializeOwnedPortfolioProject(row);
+  assert.deepEqual(Object.keys(ownedProject), [
+    "id",
+    "contractor_id",
+    "title",
+    "description",
+    "image_url",
+    "image_urls",
+    "created_at",
+    "portfolio_media",
+  ]);
   assert.equal(ownedProject.portfolio_media[0].public_id, media(1).public_id);
   assert.equal(ownedProject.portfolio_media[1].lifecycle_state, "legacy");
+  assert.doesNotMatch(
+    JSON.stringify(ownedProject),
+    /future_publication_state|privacy_confirmed_by_user_id|future_media_internal/
+  );
 });

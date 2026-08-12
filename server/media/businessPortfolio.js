@@ -176,9 +176,42 @@ function serializePublicPortfolioProject(row = {}) {
     .map(getPortfolioMediaUrl)
     .filter(Boolean);
   return {
-    ...row,
+    id: row.id,
+    contractor_id: row.contractor_id,
+    title: row.title,
+    description: row.description,
     image_url: urls[0] || row.image_url || "",
     image_urls: urls,
+    created_at: row.created_at,
+  };
+}
+
+function serializeOwnedPortfolioMedia(item, index) {
+  if (typeof item === "string") {
+    return {
+      legacy_url: item,
+      secure_url: item,
+      display_order: index,
+      lifecycle_state: "legacy",
+    };
+  }
+
+  const source = item && typeof item === "object" && !Array.isArray(item)
+    ? item
+    : {};
+  return {
+    purpose: source.purpose,
+    public_id: source.public_id,
+    secure_url: source.secure_url,
+    resource_type: source.resource_type,
+    format: source.format,
+    bytes: source.bytes,
+    width: source.width,
+    height: source.height,
+    version: source.version,
+    uploaded_at: source.uploaded_at,
+    display_order: index,
+    lifecycle_state: source.lifecycle_state,
   };
 }
 
@@ -186,17 +219,7 @@ function serializeOwnedPortfolioProject(row = {}) {
   const stored = parseStoredPortfolioMedia(row.image_urls);
   return {
     ...serializePublicPortfolioProject(row),
-    portfolio_media: stored.map((item, index) => {
-      if (typeof item === "string") {
-        return {
-          legacy_url: item,
-          secure_url: item,
-          display_order: index,
-          lifecycle_state: "legacy",
-        };
-      }
-      return { ...item, display_order: index };
-    }),
+    portfolio_media: stored.map(serializeOwnedPortfolioMedia),
   };
 }
 
@@ -244,7 +267,9 @@ async function persistPortfolioProject({
     if (projectId) {
       const current = await client.query(
         `
-        SELECT contractor_projects.*
+        SELECT contractor_projects.id,
+               contractor_projects.contractor_id,
+               contractor_projects.image_urls
         FROM contractor_projects
         JOIN contractor_profiles
           ON contractor_profiles.id = contractor_projects.contractor_id
@@ -296,7 +321,13 @@ async function persistPortfolioProject({
             image_url = $3,
             image_urls = $4::jsonb
         WHERE id = $5 AND contractor_id = $6
-        RETURNING *
+        RETURNING id,
+                  contractor_id,
+                  title,
+                  description,
+                  image_url,
+                  image_urls,
+                  created_at
         `,
         [title, description, imageUrl, JSON.stringify(normalized), projectId, ownerProfileId]
       );
@@ -306,7 +337,13 @@ async function persistPortfolioProject({
         INSERT INTO contractor_projects
           (contractor_id, title, description, image_url, image_urls)
         VALUES ($1, $2, $3, $4, $5::jsonb)
-        RETURNING *
+        RETURNING id,
+                  contractor_id,
+                  title,
+                  description,
+                  image_url,
+                  image_urls,
+                  created_at
         `,
         [ownerProfileId, title, description, imageUrl, JSON.stringify(normalized)]
       );

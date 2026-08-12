@@ -50,6 +50,7 @@ const {
   serializeOwnedPortfolioProject,
   serializePublicPortfolioProject,
 } = require("./server/media/businessPortfolio");
+const { serializePublicReview } = require("./server/reviews/publicReview");
 const {
   professionalCanSeeRequest,
   serializeOwnedRequest,
@@ -647,7 +648,13 @@ function buildOwnedContractorProjectUpdateQuery({
           WHERE contractor_profiles.id = contractor_projects.contractor_id
             AND contractor_profiles.user_id = $6
         )
-      RETURNING *
+      RETURNING id,
+                contractor_id,
+                title,
+                description,
+                image_url,
+                image_urls,
+                created_at
       `,
     values: [
       title,
@@ -676,7 +683,13 @@ function buildOwnedContractorProjectCreateQuery({
       FROM contractor_profiles
       WHERE contractor_profiles.id = $1
         AND contractor_profiles.user_id = $6
-      RETURNING *
+      RETURNING id,
+                contractor_id,
+                title,
+                description,
+                image_url,
+                image_urls,
+                created_at
       `,
     values: [
       contractorId,
@@ -2764,9 +2777,12 @@ app.get("/reviews/:contractorId", async (req, res) => {
 
     const reviewsResult = await getPool(req).query(
       `
-      SELECT reviews.*, users.email AS reviewer_email
+      SELECT reviews.id,
+             reviews.contractor_id,
+             reviews.rating,
+             reviews.review_text,
+             reviews.created_at
       FROM reviews
-      JOIN users ON reviews.reviewer_id = users.id
       WHERE contractor_id = $1
       ORDER BY created_at DESC
       `,
@@ -2783,7 +2799,7 @@ app.get("/reviews/:contractorId", async (req, res) => {
     );
 
     res.json({
-      reviews: reviewsResult.rows,
+      reviews: reviewsResult.rows.map(serializePublicReview),
       stats: ratingResult.rows[0],
     });
   } catch (err) {
@@ -2813,7 +2829,13 @@ app.get("/my-contractor-projects", authMiddleware, async (req, res) => {
   try {
     const result = await getPool(req).query(
       `
-      SELECT contractor_projects.*
+      SELECT contractor_projects.id,
+             contractor_projects.contractor_id,
+             contractor_projects.title,
+             contractor_projects.description,
+             contractor_projects.image_url,
+             contractor_projects.image_urls,
+             contractor_projects.created_at
       FROM contractor_projects
       JOIN contractor_profiles
         ON contractor_profiles.id = contractor_projects.contractor_id
@@ -2844,7 +2866,13 @@ app.get("/contractor-projects/:contractorId", async (req, res) => {
 
     const result = await getPool(req).query(
       `
-      SELECT *
+      SELECT id,
+             contractor_id,
+             title,
+             description,
+             image_url,
+             image_urls,
+             created_at
       FROM contractor_projects
       WHERE contractor_id = $1
       ORDER BY created_at DESC

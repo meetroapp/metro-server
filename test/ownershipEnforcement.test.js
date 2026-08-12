@@ -104,8 +104,15 @@ function createFakePool({ quoteRows = [], projectRows = [] } = {}) {
       }
 
       if (
-        normalized.includes("SELECT contractor_projects.*") &&
+        normalized.includes("FROM contractor_projects") &&
         normalized.includes("JOIN contractor_profiles")
+      ) {
+        return { rows: projectRows };
+      }
+
+      if (
+        normalized.includes("FROM contractor_projects") &&
+        normalized.includes("WHERE contractor_id = $1")
       ) {
         return { rows: projectRows };
       }
@@ -315,6 +322,58 @@ test("Account B cannot update Account A contractor project", async () => {
     call.text.includes("JOIN contractor_profiles") &&
     call.text.includes("contractor_profiles.user_id = $2")
   ));
+});
+
+test("owner and public portfolio reads preserve authorization and explicit DTOs", async () => {
+  const projectRows = [{
+    id: 7001,
+    contractor_id: 10,
+    title: "Safe project",
+    description: "Safe description",
+    image_url: "https://legacy.example.test/project.jpg",
+    image_urls: ["https://legacy.example.test/project.jpg"],
+    created_at: "2026-07-19T18:00:00.000Z",
+    future_internal_state: "must-not-leak",
+  }];
+  const ownerPool = createFakePool({ projectRows });
+  const ownerResult = await invokeRoute("get", "/my-contractor-projects", {
+    pool: ownerPool,
+    token: tokenFor(2),
+  });
+
+  assert.equal(ownerResult.status, 200);
+  assert.equal(ownerResult.json.code, "BUSINESS_PORTFOLIO_LOADED");
+  assert.equal(ownerResult.json.projects[0].portfolio_media[0].lifecycle_state, "legacy");
+  assert.doesNotMatch(JSON.stringify(ownerResult.json), /future_internal_state/);
+  assert.ok(ownerPool.calls.some((call) =>
+    call.text.includes("JOIN contractor_profiles") &&
+    call.text.includes("contractor_profiles.user_id = $1")
+  ));
+  assert.equal(
+    ownerPool.calls.some((call) => /contractor_projects\.\*|SELECT \*/.test(call.text)),
+    false
+  );
+
+  const publicPool = createFakePool({ projectRows });
+  const publicResult = await invokeRoute("get", "/contractor-projects/:contractorId", {
+    pool: publicPool,
+    params: { contractorId: 10 },
+  });
+
+  assert.equal(publicResult.status, 200);
+  assert.deepEqual(publicResult.json.projects[0], {
+    id: 7001,
+    contractor_id: 10,
+    title: "Safe project",
+    description: "Safe description",
+    image_url: "https://legacy.example.test/project.jpg",
+    image_urls: ["https://legacy.example.test/project.jpg"],
+    created_at: "2026-07-19T18:00:00.000Z",
+  });
+  assert.equal(
+    publicPool.calls.some((call) => /SELECT \*/.test(call.text)),
+    false
+  );
 });
 
 test("contractor project create and update queries require contractor profile ownership", () => {

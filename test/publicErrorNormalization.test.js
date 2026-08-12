@@ -150,22 +150,44 @@ test("product-route failures expose only the route public contract", async () =>
 
 test("successful product responses remain backward compatible", async () => {
   let queryCount = 0;
+  const queries = [];
   const response = await invokeHandler("get", "/reviews/:contractorId", {
     params: { contractorId: "44" },
     pool: {
-      async query() {
+      async query(text) {
         queryCount += 1;
+        queries.push(String(text).replace(/\s+/g, " ").trim());
         return queryCount === 1
-          ? { rows: [{ id: 1, review_text: "Careful work" }] }
+          ? { rows: [{
+              id: 1,
+              contractor_id: 44,
+              reviewer_id: 700,
+              reviewer_email: "private-reviewer@example.test",
+              rating: 5,
+              review_text: "Careful work",
+              created_at: "2026-07-19T18:00:00.000Z",
+              future_private_reviewer_field: "must-not-leak",
+            }] }
           : { rows: [{ average_rating: "5.0", total_reviews: "1" }] };
       },
     },
   });
   assert.equal(response.statusCode, 200);
   assert.deepEqual(response.body, {
-    reviews: [{ id: 1, review_text: "Careful work" }],
+    reviews: [{
+      id: 1,
+      contractor_id: 44,
+      rating: 5,
+      review_text: "Careful work",
+      created_at: "2026-07-19T18:00:00.000Z",
+    }],
     stats: { average_rating: "5.0", total_reviews: "1" },
   });
+  assert.doesNotMatch(
+    JSON.stringify(response.body),
+    /reviewer_id|reviewer_email|private-reviewer|future_private_reviewer_field/
+  );
+  assert.doesNotMatch(queries[0], /reviews\.\*|reviewer_id|reviewer_email|JOIN users/i);
 });
 
 test("safe logging excludes credentials, headers, tokens, private payloads, and raw errors", () => {
