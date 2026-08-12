@@ -8,6 +8,12 @@ const {
 const {
   hasActiveLifecycleGrant,
 } = require("../authorization/lifecycleAuthorityService");
+const {
+  REQUEST_MODIFICATION_MODES,
+  loadRequestModificationContext,
+  resolveRequestModificationMode,
+  serializeRequestModificationAuthority,
+} = require("./requestModificationService");
 
 const CLARIFICATION_SEMANTICS = Object.freeze([
   "CLARIFIES",
@@ -136,29 +142,22 @@ async function createReportedConcern({
 }
 
 async function loadRequestContext(client, postId, actorUserId, { lock = false } = {}) {
-  const result = await client.query(
-    `
-    /* reported_concern:request_context */
-    SELECT
-      posts.id AS post_id,
-      posts.user_id AS homeowner_user_id,
-      posts.lifecycle_contract_version,
-      jobs.id AS job_id,
-      jobs.source_request_relationship_id,
-      relationship_participants.id AS actor_participant_id
-    FROM posts
-    LEFT JOIN jobs
-      ON jobs.job_request_id = posts.id
-    LEFT JOIN relationship_participants
-      ON relationship_participants.job_id = jobs.id
-      AND relationship_participants.user_id = $2
-    WHERE posts.id = $1
-    LIMIT 1
-    ${lock ? "FOR UPDATE OF posts" : ""}
-    `,
-    [postId, actorUserId]
+  const context = await loadRequestModificationContext(
+    client,
+    postId,
+    actorUserId,
+    { lock }
   );
-  return result.rows[0] || null;
+  return context
+    ? {
+        ...context,
+        id: context.id || context.post_id,
+        post_id: context.id || context.post_id,
+        user_id: context.user_id || context.homeowner_user_id,
+        homeowner_user_id: context.user_id || context.homeowner_user_id,
+        status: context.status || "open",
+      }
+    : null;
 }
 
 async function canReadContext(client, context, actorUserId, capability, concernId = null) {
@@ -341,6 +340,10 @@ async function listRequestLifecycle({
         : null,
       reportedConcerns: concerns,
       participants,
+      modificationAuthority: serializeRequestModificationAuthority(
+        context,
+        actorUserId
+      ),
     },
   };
 }
@@ -400,6 +403,18 @@ async function appendConcernClarification({
       await client.query("ROLLBACK");
       transactionStarted = false;
       return failure(409, "LIFECYCLE_V2_REQUIRED", "Reported Concern clarification is not available for this request.");
+    }
+    if (
+      resolveRequestModificationMode(context) ===
+      REQUEST_MODIFICATION_MODES.READ_ONLY
+    ) {
+      await client.query("ROLLBACK");
+      transactionStarted = false;
+      return failure(
+        409,
+        "REQUEST_READ_ONLY",
+        "The request is read-only."
+      );
     }
 
     const concernResult = await client.query(

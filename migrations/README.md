@@ -51,6 +51,7 @@ Current inventory:
 31. `202608100002_create_recommendation_hierarchy_foundation.sql`
 32. `202608100003_create_canonical_quote_scope_foundation.sql`
 33. `202608100004_create_quote_composition_feedback.sql`
+34. `202608110001_create_request_modification_authority_foundation.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -155,6 +156,12 @@ professional Accept/Edit/Reject evidence for non-canonical AI Quote Composition
 Proposals already persisted by the governed Intelligence operation ledger. It
 creates no proposal, Quote, issue, customer decision, payment, scheduling,
 Finding-resolution, Workstream-completion, or Job-completion authority.
+
+`202608110001_create_request_modification_authority_foundation.sql` adds an
+optimistic modification version to ordinary requests and an append-only,
+request/concern/Job-scoped photo attachment evidence ledger. It creates no
+Agreement Revision, Change Order, Supplemental Quote, production migration,
+or automatic lifecycle transition authority.
 
 ## Migration Ledger and Transactions
 

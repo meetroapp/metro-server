@@ -22,7 +22,7 @@ function operation(sql) {
   return String(sql).match(/reported_concern:([a-z_]+)/)?.[1] || "";
 }
 
-function createConcernClient({ owner = true, version = 2 } = {}) {
+function createConcernClient({ owner = true, version = 2, status = "open" } = {}) {
   const state = {
     concern: {
       id: CONCERN_ID,
@@ -61,6 +61,7 @@ function createConcernClient({ owner = true, version = 2 } = {}) {
           rows: [{
             post_id: 41,
             homeowner_user_id: owner ? 7 : 8,
+            status,
             lifecycle_contract_version: version,
             job_id: owner ? null : "22222222-2222-4222-8222-222222222222",
             source_request_relationship_id: owner ? null : 501,
@@ -161,6 +162,11 @@ test("Test A preserves original concern while clarification appends separately",
   assert.equal(lifecycle.lifecycle.reportedConcerns[0].originalText, "dishwasher issue");
   assert.equal(lifecycle.lifecycle.reportedConcerns[0].clarifications.length, 1);
   assert.equal(lifecycle.lifecycle.reportedConcerns[0].id, CONCERN_ID);
+  assert.equal(lifecycle.lifecycle.modificationAuthority.mode, "EDITABLE");
+  assert.equal(
+    lifecycle.lifecycle.modificationAuthority.actions.editRequest,
+    true
+  );
 });
 
 test("legacy requests remain valid and cannot invoke v2 clarification", async () => {
@@ -207,6 +213,21 @@ test("nonparticipant cannot read or clarify a request lifecycle", async () => {
   assert.deepEqual(client.state.clarifications, []);
 });
 
+test("cancelled requests reject new clarification evidence", async () => {
+  const client = createConcernClient({ status: "cancelled" });
+  const result = await appendConcernClarification({
+    pool: client,
+    authenticatedActor: { id: 7 },
+    postId: 41,
+    concernId: CONCERN_ID,
+    payload: { semantics: "CLARIFIES", text: "Too late" },
+    idempotencyKey: "cancelled-clarification",
+  });
+
+  assert.equal(result.code, "REQUEST_READ_ONLY");
+  assert.deepEqual(client.state.clarifications, []);
+});
+
 test("clarification validation is strict and concern integrity is deterministic", () => {
   assert.equal(validateClarificationPayload({ semantics: "clarifies", text: "Detail" }).ok, true);
   assert.equal(validateClarificationPayload({ semantics: "REWRITES", text: "Detail" }).code, "INVALID_CLARIFICATION_SEMANTICS");
@@ -221,13 +242,17 @@ test("clarification validation is strict and concern integrity is deterministic"
   assert.notEqual(createConcernIntegrityHash(input), createConcernIntegrityHash({ ...input, originalText: "changed" }));
 });
 
-test("description edits do not update or synthesize Reported Concern history", () => {
-  const source = readFileSync(join(__dirname, "../index.js"), "utf8");
-  const updateStart = source.indexOf('app.put("/posts/:id"');
-  const updateEnd = source.indexOf('app.post("/posts/:id/cancel"', updateStart);
-  const updateRoute = source.slice(updateStart, updateEnd);
-  assert.match(updateRoute, /UPDATE posts[\s\S]*description = CASE/);
-  assert.doesNotMatch(updateRoute, /UPDATE reported_concerns|INSERT INTO concern_clarifications/i);
+test("pre-reliance description edits append concern supersession history", () => {
+  const source = readFileSync(
+    join(__dirname, "../server/requests/requestModificationService.js"),
+    "utf8"
+  );
+  assert.match(source, /UPDATE posts[\s\S]*description = CASE/);
+  assert.match(
+    source,
+    /INSERT INTO concern_clarifications[\s\S]*SUPERSEDES_INTERPRETATION/
+  );
+  assert.doesNotMatch(source, /UPDATE reported_concerns/i);
 });
 
 test("only bounded lifecycle read and clarification routes are registered", () => {
@@ -240,5 +265,6 @@ test("only bounded lifecycle read and clarification routes are registered", () =
   );
   assert.equal(lifecycle.some((route) => route.path === "/posts/:postId/lifecycle" && route.methods.get), true);
   assert.equal(lifecycle.some((route) => route.path.includes("clarifications") && route.methods.post), true);
+  assert.equal(lifecycle.some((route) => route.path.includes("/photos") && route.methods.post), true);
   assert.equal(lifecycle.some((route) => route.methods.put || route.methods.patch || route.methods.delete), false);
 });
