@@ -10,13 +10,17 @@ const filename =
   "202608110001_create_request_modification_authority_foundation.sql";
 const sql = readFileSync(join(root, "migrations", filename), "utf8");
 
-test("request modification migration is last, additive, and inventoried", () => {
+test("request modification migration precedes Portfolio authority and remains additive", () => {
   const migrations = readdirSync(join(root, "migrations"))
     .filter((item) => item.endsWith(".sql"))
     .sort();
   const readme = readFileSync(join(root, "migrations", "README.md"), "utf8");
 
-  assert.equal(migrations.at(-1), filename);
+  assert.equal(migrations.at(-2), filename);
+  assert.equal(
+    migrations.at(-1),
+    "202608120001_create_business_portfolio_authority_foundation.sql"
+  );
   assert.match(readme, new RegExp(filename.replaceAll(".", "\\.")));
   assert.doesNotMatch(sql, /\b(?:TRUNCATE|DELETE\s+FROM|DROP\s+TABLE)\b/i);
 });

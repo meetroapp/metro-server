@@ -52,6 +52,7 @@ Current inventory:
 32. `202608100003_create_canonical_quote_scope_foundation.sql`
 33. `202608100004_create_quote_composition_feedback.sql`
 34. `202608110001_create_request_modification_authority_foundation.sql`
+35. `202608120001_create_business_portfolio_authority_foundation.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -162,6 +163,13 @@ optimistic modification version to ordinary requests and an append-only,
 request/concern/Job-scoped photo attachment evidence ledger. It creates no
 Agreement Revision, Change Order, Supplemental Quote, production migration,
 or automatic lifecycle transition authority.
+
+`202608120001_create_business_portfolio_authority_foundation.sql` adds nullable
+legacy-preserving publication authority, deterministic per-contractor display
+order, future-insert Draft defaults, server-owned feature/privacy/version
+foundations, and an append-only publication-transition ledger. It does not
+classify existing projects, publish Portfolio content, create lifecycle HTTP
+commands, change governed media, or create frontend authority.
 
 ## Migration Ledger and Transactions
 
