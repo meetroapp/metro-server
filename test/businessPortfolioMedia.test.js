@@ -306,6 +306,17 @@ test("public portfolio serialization exposes URLs while owner serialization rest
     "image_urls",
     "created_at",
     "portfolio_media",
+    "publication_state",
+    "migration_review_required",
+    "display_order",
+    "is_featured",
+    "privacy_confirmation",
+    "published_at",
+    "archived_at",
+    "featured_at",
+    "updated_at",
+    "version",
+    "actions",
   ]);
   assert.equal(ownedProject.portfolio_media[0].public_id, media(1).public_id);
   assert.equal(ownedProject.portfolio_media[1].lifecycle_state, "legacy");

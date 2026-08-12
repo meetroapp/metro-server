@@ -10,6 +10,10 @@ const {
 } = require("./cloudinary");
 const { sendMediaError } = require("./uploadSignature");
 const { rejectUnsupportedMedia } = require("./mediaReferencePolicy");
+const {
+  serializeOwnedPortfolioProject,
+  serializePublicPortfolioProject,
+} = require("../portfolio/businessPortfolioContract");
 
 const BUSINESS_PORTFOLIO_PURPOSE = "business-portfolio";
 const BUSINESS_PORTFOLIO_MAX_COUNT = 12;
@@ -169,58 +173,6 @@ function normalizePortfolioCollection(payload, {
     seen.add(normalized.public_id);
     return normalized;
   });
-}
-
-function serializePublicPortfolioProject(row = {}) {
-  const urls = parseStoredPortfolioMedia(row.image_urls)
-    .map(getPortfolioMediaUrl)
-    .filter(Boolean);
-  return {
-    id: row.id,
-    contractor_id: row.contractor_id,
-    title: row.title,
-    description: row.description,
-    image_url: urls[0] || row.image_url || "",
-    image_urls: urls,
-    created_at: row.created_at,
-  };
-}
-
-function serializeOwnedPortfolioMedia(item, index) {
-  if (typeof item === "string") {
-    return {
-      legacy_url: item,
-      secure_url: item,
-      display_order: index,
-      lifecycle_state: "legacy",
-    };
-  }
-
-  const source = item && typeof item === "object" && !Array.isArray(item)
-    ? item
-    : {};
-  return {
-    purpose: source.purpose,
-    public_id: source.public_id,
-    secure_url: source.secure_url,
-    resource_type: source.resource_type,
-    format: source.format,
-    bytes: source.bytes,
-    width: source.width,
-    height: source.height,
-    version: source.version,
-    uploaded_at: source.uploaded_at,
-    display_order: index,
-    lifecycle_state: source.lifecycle_state,
-  };
-}
-
-function serializeOwnedPortfolioProject(row = {}) {
-  const stored = parseStoredPortfolioMedia(row.image_urls);
-  return {
-    ...serializePublicPortfolioProject(row),
-    portfolio_media: stored.map(serializeOwnedPortfolioMedia),
-  };
 }
 
 async function safelyDeletePortfolioMedia(mediaService, publicId, contractorProfileId, code) {

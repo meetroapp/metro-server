@@ -309,7 +309,8 @@ test("Account B cannot update Account A contractor project", async () => {
     body: {
       title: "Unauthorized update",
       description: "This should be rejected.",
-      image_urls: [],
+      portfolio_media: [],
+      expected_version: 1,
     },
   });
 
@@ -349,6 +350,10 @@ test("owner and public portfolio reads preserve authorization and explicit DTOs"
     call.text.includes("JOIN contractor_profiles") &&
     call.text.includes("contractor_profiles.user_id = $1")
   ));
+  assert.ok(ownerPool.calls.some((call) =>
+    call.text.includes("ORDER BY contractor_projects.display_order ASC NULLS LAST") &&
+    call.text.includes("contractor_projects.id ASC")
+  ));
   assert.equal(
     ownerPool.calls.some((call) => /contractor_projects\.\*|SELECT \*/.test(call.text)),
     false
@@ -374,6 +379,10 @@ test("owner and public portfolio reads preserve authorization and explicit DTOs"
     publicPool.calls.some((call) => /SELECT \*/.test(call.text)),
     false
   );
+  assert.ok(publicPool.calls.some((call) =>
+    call.text.includes("publication_state = 'PUBLISHED'") &&
+    call.text.includes("ORDER BY display_order ASC NULLS LAST, id ASC")
+  ));
 });
 
 test("contractor project create and update queries require contractor profile ownership", () => {

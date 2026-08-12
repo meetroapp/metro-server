@@ -46,10 +46,10 @@ const { createPersonalProfileImageHandler } = require("./server/profile/personal
 const { createBusinessProfileLogoHandler } = require("./server/profile/businessProfileLogo");
 const {
   createPortfolioCleanupHandler,
-  createPortfolioProjectHandler,
-  serializeOwnedPortfolioProject,
-  serializePublicPortfolioProject,
 } = require("./server/media/businessPortfolio");
+const {
+  registerBusinessPortfolioRoutes,
+} = require("./server/portfolio/businessPortfolioRoutes");
 const { serializePublicReview } = require("./server/reviews/publicReview");
 const {
   professionalCanSeeRequest,
@@ -2813,85 +2813,11 @@ app.get("/reviews/:contractorId", async (req, res) => {
   }
 });
 
-app.post(
-  "/contractor-projects",
+registerBusinessPortfolioRoutes({
+  app,
   authMiddleware,
-  createPortfolioProjectHandler({ getPool })
-);
-
-app.put(
-  "/contractor-projects/:id",
-  authMiddleware,
-  createPortfolioProjectHandler({ getPool, update: true })
-);
-
-app.get("/my-contractor-projects", authMiddleware, async (req, res) => {
-  try {
-    const result = await getPool(req).query(
-      `
-      SELECT contractor_projects.id,
-             contractor_projects.contractor_id,
-             contractor_projects.title,
-             contractor_projects.description,
-             contractor_projects.image_url,
-             contractor_projects.image_urls,
-             contractor_projects.created_at
-      FROM contractor_projects
-      JOIN contractor_profiles
-        ON contractor_profiles.id = contractor_projects.contractor_id
-      WHERE contractor_profiles.user_id = $1
-      ORDER BY contractor_projects.created_at DESC
-      `,
-      [req.user.id]
-    );
-    return res.json({
-      success: true,
-      code: "BUSINESS_PORTFOLIO_LOADED",
-      projects: result.rows.map(serializeOwnedPortfolioProject),
-    });
-  } catch (error) {
-    return sendPublicDatabaseError({
-      res,
-      error,
-      operation: "fetch_owned_contractor_projects",
-      code: "CONTRACTOR_PROJECTS_FETCH_FAILED",
-      message: "Projects could not be loaded.",
-    });
-  }
-});
-
-app.get("/contractor-projects/:contractorId", async (req, res) => {
-  try {
-    const contractorId = req.params.contractorId;
-
-    const result = await getPool(req).query(
-      `
-      SELECT id,
-             contractor_id,
-             title,
-             description,
-             image_url,
-             image_urls,
-             created_at
-      FROM contractor_projects
-      WHERE contractor_id = $1
-      ORDER BY created_at DESC
-      `,
-      [contractorId]
-    );
-
-    res.json({
-      projects: result.rows.map(serializePublicPortfolioProject),
-    });
-  } catch (err) {
-    return sendPublicDatabaseError({
-      res,
-      error: err,
-      operation: "fetch_contractor_projects",
-      code: "CONTRACTOR_PROJECTS_FETCH_FAILED",
-      message: "Projects could not be loaded.",
-    });
-  }
+  getPool,
+  sendPublicDatabaseError,
 });
 
 app.use((err, req, res, next) => {

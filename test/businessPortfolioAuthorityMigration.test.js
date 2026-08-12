@@ -121,11 +121,11 @@ test("lifecycle, privacy, actor, and version constraints are explicit", () => {
   );
   assert.match(
     migrationSql,
-    /publication_state = 'ARCHIVED'[\s\S]*archived_at >= published_at/i
+    /publication_state = 'ARCHIVED'[\s\S]*published_at IS NULL OR archived_at >= published_at/i
   );
   assert.match(
     migrationSql,
-    /publication_state NOT IN \('PUBLISHED', 'ARCHIVED'\)[\s\S]*privacy_confirmed_at <= published_at/i
+    /publication_state IN \('PUBLISHED', 'ARCHIVED'\)[\s\S]*privacy_confirmation_version IS NOT NULL[\s\S]*privacy_confirmed_by_user_id IS NOT NULL/i
   );
 });
 
@@ -164,7 +164,7 @@ test("publication audit is owner-scoped, transition-constrained, and append-only
   );
 });
 
-test("B-1 serializers cannot leak Portfolio authority columns", () => {
+test("B-1 public and B-3 owner serializers remain explicit allowlists", () => {
   const databaseRow = {
     id: 501,
     contractor_id: 91,
@@ -185,6 +185,7 @@ test("B-1 serializers cannot leak Portfolio authority columns", () => {
     featured_at: "2026-08-12T00:02:00.000Z",
     updated_at: "2026-08-12T00:02:00.000Z",
     version: 3,
+    future_sentinel_column: "must-not-leak",
   };
 
   const publicProject = serializePublicPortfolioProject(databaseRow);
@@ -208,21 +209,33 @@ test("B-1 serializers cannot leak Portfolio authority columns", () => {
     "image_urls",
     "created_at",
     "portfolio_media",
-  ]);
-  for (const privateField of [
     "publication_state",
+    "migration_review_required",
     "display_order",
     "is_featured",
-    "privacy_confirmation_version",
-    "privacy_content_digest",
-    "privacy_confirmed_by_user_id",
+    "privacy_confirmation",
     "published_at",
     "archived_at",
     "featured_at",
     "updated_at",
     "version",
+    "actions",
+  ]);
+  for (const privateField of [
+    "future_sentinel_column",
+    "privacy_content_digest",
+    "publication_state",
+    "privacy_confirmation_version",
+    "privacy_confirmed_by_user_id",
   ]) {
     assert.equal(Object.hasOwn(publicProject, privateField), false);
+  }
+  for (const privateField of [
+    "future_sentinel_column",
+    "privacy_confirmation_version",
+    "privacy_content_digest",
+    "privacy_confirmed_by_user_id",
+  ]) {
     assert.equal(Object.hasOwn(ownerProject, privateField), false);
   }
 });

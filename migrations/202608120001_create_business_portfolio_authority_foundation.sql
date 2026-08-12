@@ -134,9 +134,8 @@ BEGIN
         OR
         (
           publication_state = 'ARCHIVED'
-          AND published_at IS NOT NULL
           AND archived_at IS NOT NULL
-          AND archived_at >= published_at
+          AND (published_at IS NULL OR archived_at >= published_at)
         )
       );
   END IF;
@@ -150,13 +149,19 @@ BEGIN
     ALTER TABLE contractor_projects
       ADD CONSTRAINT contractor_projects_published_privacy_check
       CHECK (
-        publication_state NOT IN ('PUBLISHED', 'ARCHIVED')
+        publication_state IS NULL
+        OR publication_state = 'DRAFT'
         OR (
-          privacy_confirmation_version IS NOT NULL
+          publication_state = 'ARCHIVED'
+          AND published_at IS NULL
+        )
+        OR (
+          publication_state IN ('PUBLISHED', 'ARCHIVED')
+          AND published_at IS NOT NULL
+          AND privacy_confirmation_version IS NOT NULL
           AND privacy_content_digest IS NOT NULL
           AND privacy_confirmed_at IS NOT NULL
           AND privacy_confirmed_by_user_id IS NOT NULL
-          AND privacy_confirmed_at <= published_at
         )
       );
   END IF;
@@ -248,7 +253,10 @@ CREATE TABLE IF NOT EXISTS contractor_project_publication_events (
   CONSTRAINT contractor_project_publication_event_transition_check
     CHECK (
       (from_state IS NULL AND to_state = 'DRAFT')
+      OR (from_state IS NULL AND to_state = 'ARCHIVED')
       OR (from_state = 'DRAFT' AND to_state = 'PUBLISHED')
+      OR (from_state = 'DRAFT' AND to_state = 'ARCHIVED')
+      OR (from_state = 'PUBLISHED' AND to_state = 'PUBLISHED')
       OR (from_state = 'PUBLISHED' AND to_state = 'ARCHIVED')
     ),
 
@@ -257,12 +265,19 @@ CREATE TABLE IF NOT EXISTS contractor_project_publication_events (
       (
         privacy_confirmation_version IS NULL
         AND privacy_content_digest IS NULL
-        AND to_state = 'DRAFT'
+        AND (
+          to_state = 'DRAFT'
+          OR (to_state = 'ARCHIVED' AND from_state IS DISTINCT FROM 'PUBLISHED')
+        )
       )
       OR
       (
         char_length(btrim(privacy_confirmation_version)) BETWEEN 1 AND 100
         AND privacy_content_digest ~ '^[0-9a-f]{64}$'
+        AND (
+          to_state = 'PUBLISHED'
+          OR (from_state = 'PUBLISHED' AND to_state = 'ARCHIVED')
+        )
       )
     ),
 
