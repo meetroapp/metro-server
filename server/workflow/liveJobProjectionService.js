@@ -35,7 +35,7 @@ const STAGE_DEFINITIONS = Object.freeze({
   QUOTE_DRAFT: "Proposal in progress",
   WAITING_FOR_CUSTOMER_DECISION: "Waiting for customer decision",
   QUOTE_DECLINED: "Proposal declined",
-  QUOTE_APPROVED: "Proposal approved",
+  QUOTE_APPROVED: "Work approved",
   WORK_READY: "Work ready",
   WORK_IN_PROGRESS: "Work in progress",
   WORK_BLOCKED: "Work needs attention",
@@ -132,6 +132,7 @@ const DERIVATION_PRECEDENCE = Object.freeze([
   "ACTIVE_WORK",
   "READY_WORK",
   "TERMINAL_WORKSTREAMS",
+  "APPROVED_WORK_SCHEDULING",
   "DRAFT_QUOTE",
   "ISSUED_QUOTE_DECISION",
   "DECLINED_QUOTE",
@@ -179,6 +180,10 @@ function definition(code, definitions) {
 
 function nextAction(code) {
   return { code, ...NEXT_ACTION_DEFINITIONS[code] };
+}
+
+function projectedNextAction(code, override = null) {
+  return override ? { code, ...override } : nextAction(code);
 }
 
 function availableAction(code) {
@@ -258,14 +263,24 @@ function baseAvailableActions(state, capabilities, stage) {
   return [...new Set(actions)].map(availableAction);
 }
 
-function result({ stage, responsibility, blocker = null, action, reasons, state, derivedAt }) {
+function result({
+  stage,
+  stageLabel = null,
+  responsibility,
+  blocker = null,
+  action,
+  actionProjection = null,
+  reasons,
+  state,
+  derivedAt,
+}) {
   const capabilities = normalizedCapabilities(state.capabilities);
   return {
     contractVersion: LIVE_JOB_CONTRACT_VERSION,
-    stage: definition(stage, STAGE_DEFINITIONS),
+    stage: stageLabel ? { code: stage, label: stageLabel } : definition(stage, STAGE_DEFINITIONS),
     responsibility: definition(responsibility, RESPONSIBILITY_DEFINITIONS),
     blocker: definition(blocker, BLOCKER_DEFINITIONS),
-    nextAction: nextAction(action),
+    nextAction: projectedNextAction(action, actionProjection),
     availableActions: baseAvailableActions(state, capabilities, stage),
     reasonCodes: reasons,
     freshness: {
@@ -296,6 +311,9 @@ function deriveCanonicalLiveJob(state = {}, { derivedAt = new Date().toISOString
   const findings = Array.isArray(state.findings) ? state.findings : [];
   const recommendations = Array.isArray(state.recommendations) ? state.recommendations : [];
   const quotes = Array.isArray(state.quotes) ? state.quotes : [];
+  const approvedWorkScheduling = Array.isArray(state.approvedWorkScheduling)
+    ? state.approvedWorkScheduling
+    : [];
   const scopedState = {
     ...state,
     workstreams,
@@ -304,6 +322,7 @@ function deriveCanonicalLiveJob(state = {}, { derivedAt = new Date().toISOString
     findings,
     recommendations,
     quotes,
+    approvedWorkScheduling,
   };
 
   const blockedWorkstream = workstreams.some((workstream) => workstream.state === "BLOCKED");
@@ -371,6 +390,61 @@ function deriveCanonicalLiveJob(state = {}, { derivedAt = new Date().toISOString
     });
   }
 
+  const approvedQuote = quotes.find(
+    (quote) => quote.status === "ISSUED" && quote.customer_decision === "APPROVED"
+  );
+  const approvedWorkSchedule = approvedWorkScheduling.find(
+    (item) =>
+      ["AVAILABLE", "ACTIVE"].includes(item.authorityState) &&
+      quotes.some(
+        (quote) =>
+          quote.id === item.quoteId &&
+          quote.status === "ISSUED" &&
+          quote.customer_decision === "APPROVED"
+      )
+  );
+  const schedulableApprovedQuote = approvedWorkSchedule
+    ? quotes.find((quote) => quote.id === approvedWorkSchedule.quoteId)
+    : null;
+  if (
+    schedulableApprovedQuote &&
+    approvedWorkSchedule
+  ) {
+    const scheduled = approvedWorkSchedule.visitState === "SCHEDULED";
+    return result({
+      stage: scheduled ? "WORK_READY" : "QUOTE_APPROVED",
+      stageLabel: scheduled
+        ? "Approved work scheduled"
+        : "Work approved — ready to schedule",
+      responsibility: "PROFESSIONAL",
+      action: "REVIEW_ACTIVE_WORK",
+      actionProjection: scheduled
+        ? {
+            label: "Review scheduled work",
+            description: "Review the approved work visit and prepare for the scheduled time.",
+          }
+        : {
+            label: "Schedule approved work",
+            description: "Use the approved scope to plan a work visit.",
+          },
+      reasons: [
+        scheduled
+          ? "APPROVED_WORK_VISIT_SCHEDULED"
+          : "APPROVED_WORK_VISIT_AUTHORITY_AVAILABLE",
+        ...(quotes.some(
+          (quote) =>
+            quote.status === "DRAFT" &&
+            quote.lineage_type === "SUPPLEMENTAL_QUOTE" &&
+            quote.parent_quote_id === schedulableApprovedQuote.id
+        )
+          ? ["SUPPLEMENTAL_DRAFT_REMAINS_SECONDARY"]
+          : []),
+      ],
+      state: scopedState,
+      derivedAt,
+    });
+  }
+
   const draftQuote = quotes.find((quote) => quote.status === "DRAFT");
   if (draftQuote) {
     return result({
@@ -414,9 +488,6 @@ function deriveCanonicalLiveJob(state = {}, { derivedAt = new Date().toISOString
     });
   }
 
-  const approvedQuote = quotes.find(
-    (quote) => quote.status === "ISSUED" && quote.customer_decision === "APPROVED"
-  );
   if (approvedQuote) {
     return result({
       stage: "QUOTE_APPROVED",
@@ -590,7 +661,16 @@ async function loadAuthorizedJob(pool, jobId, actorUserId) {
 
 async function loadCanonicalState(pool, context) {
   const jobId = context.job_id;
-  const [evaluation, findings, recommendations, quotes, workstreams, activities, obligations] =
+  const [
+    evaluation,
+    findings,
+    recommendations,
+    quotes,
+    workstreams,
+    activities,
+    obligations,
+    approvedWorkScheduling,
+  ] =
     await Promise.all([
       pool.query(
         `/* live_job:evaluation */
@@ -646,6 +726,7 @@ async function loadCanonicalState(pool, context) {
       pool.query(
         `/* live_job:quotes */
          SELECT canonical_quotes.id, canonical_quotes.created_at,
+           canonical_quotes.parent_quote_id, canonical_quotes.lineage_type,
            canonical_quote_versions.version, canonical_quote_versions.status,
            canonical_quote_versions.scope_item_count,
            decisions.decision AS customer_decision,
@@ -720,6 +801,92 @@ async function loadCanonicalState(pool, context) {
            canonical_workstream_obligations.id`,
         [jobId]
       ),
+      pool.query(
+        `/* live_job:approved_work_scheduling */
+         SELECT canonical_quotes.id AS quote_id,
+           decisions.id AS approved_quote_decision_id,
+           activations.id AS activation_id,
+           COALESCE(active_grants.grant_count, 0)::integer AS active_grant_count,
+           latest_visit.state AS visit_state
+         FROM canonical_quotes
+         INNER JOIN canonical_quote_customer_decisions decisions
+           ON decisions.quote_id = canonical_quotes.id
+           AND decisions.job_id = canonical_quotes.job_id
+           AND decisions.decision = 'APPROVED'
+         INNER JOIN request_relationships relationships
+           ON relationships.id = canonical_quotes.relationship_id
+           AND relationships.status = 'active'
+         INNER JOIN relationship_participants customer
+           ON customer.job_id = canonical_quotes.job_id
+           AND customer.request_relationship_id = canonical_quotes.relationship_id
+           AND customer.user_id = relationships.homeowner_id
+         INNER JOIN participant_role_assignments customer_roles
+           ON customer_roles.participant_id = customer.id
+           AND customer_roles.job_id = canonical_quotes.job_id
+           AND customer_roles.role = 'CUSTOMER_REPRESENTATIVE'
+           AND customer_roles.valid_from <= CURRENT_TIMESTAMP
+           AND (customer_roles.valid_until IS NULL OR customer_roles.valid_until > CURRENT_TIMESTAMP)
+         LEFT JOIN participant_role_revocations customer_role_revocations
+           ON customer_role_revocations.role_assignment_id = customer_roles.id
+         LEFT JOIN canonical_approved_work_visit_authority_activations activations
+           ON activations.approved_quote_decision_id = decisions.id
+           AND activations.job_id = canonical_quotes.job_id
+         LEFT JOIN LATERAL (
+           SELECT count(DISTINCT (grants.grantee_participant_id, grants.capability)) AS grant_count
+           FROM lifecycle_authority_grants grants
+           LEFT JOIN lifecycle_authority_grant_revocations revocations
+             ON revocations.authority_grant_id = grants.id
+           WHERE grants.job_id = canonical_quotes.job_id
+             AND grants.scope_type = 'approved_work'
+             AND grants.scope_approved_quote_decision_id = decisions.id
+             AND grants.scope_approved_quote_decision = 'APPROVED'
+             AND (
+               (
+                 grants.grantee_participant_id = $3
+                 AND grants.capability = ANY($2::text[])
+               )
+               OR
+               (
+                 grants.grantee_participant_id = customer.id
+                 AND grants.capability = ANY($4::text[])
+               )
+             )
+             AND grants.valid_from <= CURRENT_TIMESTAMP
+             AND (grants.valid_until IS NULL OR grants.valid_until > CURRENT_TIMESTAMP)
+             AND revocations.id IS NULL
+         ) AS active_grants ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT versions.state
+           FROM canonical_visits visits
+           INNER JOIN LATERAL (
+             SELECT state
+             FROM canonical_visit_versions
+             WHERE visit_id = visits.id AND job_id = visits.job_id
+             ORDER BY version DESC LIMIT 1
+           ) AS versions ON TRUE
+           WHERE visits.job_id = canonical_quotes.job_id
+             AND visits.purpose = 'APPROVED_WORK'
+             AND visits.approved_quote_decision_id = decisions.id
+           ORDER BY visits.created_at DESC, visits.id DESC
+           LIMIT 1
+         ) AS latest_visit ON TRUE
+         WHERE canonical_quotes.job_id = $1
+           AND canonical_quotes.status = 'ISSUED'
+           AND customer_role_revocations.id IS NULL
+         ORDER BY canonical_quotes.updated_at DESC, canonical_quotes.id DESC`,
+        [
+          jobId,
+          [
+            "visit.read",
+            "visit.propose",
+            "visit.reschedule",
+            "visit.cancel",
+            "visit.complete",
+          ],
+          context.actor_participant_id,
+          ["visit.read", "visit.confirm", "visit.change_request"],
+        ]
+      ),
     ]);
 
   return {
@@ -733,6 +900,25 @@ async function loadCanonicalState(pool, context) {
     workstreams: workstreams.rows,
     activities: activities.rows,
     obligations: obligations.rows,
+    approvedWorkScheduling: quotes.rows
+      .filter((quote) => quote.customer_decision === "APPROVED")
+      .map((quote) => {
+        const authority = approvedWorkScheduling.rows.find(
+          (row) => row.quote_id === quote.id && row.approved_quote_decision_id === quote.customer_decision_id
+        );
+        if (!authority || !context.active_capabilities.includes("quote.read")) return null;
+        return {
+          quoteId: quote.id,
+          approvedQuoteDecisionId: quote.customer_decision_id,
+          authorityState: authority.activation_id
+            ? Number(authority.active_grant_count) === 8
+              ? "ACTIVE"
+              : "UNAVAILABLE"
+            : "AVAILABLE",
+          visitState: authority.visit_state || null,
+        };
+      })
+      .filter(Boolean),
   };
 }
 

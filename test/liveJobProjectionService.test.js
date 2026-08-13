@@ -11,6 +11,7 @@ const {
   LIVE_JOB_CONTRACT_VERSION,
   deriveCanonicalLiveJob,
   getCanonicalLiveJob,
+  loadCanonicalState,
 } = require("../server/workflow/liveJobProjectionService");
 
 const DERIVED_AT = "2026-08-12T12:00:00.000Z";
@@ -52,6 +53,16 @@ function state(overrides = {}) {
 
 function derive(overrides = {}) {
   return deriveCanonicalLiveJob(state(overrides), { derivedAt: DERIVED_AT });
+}
+
+function approvedWorkScheduling(overrides = {}) {
+  return [{
+    quoteId: "approved-parent",
+    approvedQuoteDecisionId: "approved-decision",
+    authorityState: "AVAILABLE",
+    visitState: null,
+    ...overrides,
+  }];
 }
 
 function assertProjection(projection, expected) {
@@ -160,7 +171,93 @@ test("draft Quote is a professional review step", () => {
   });
 });
 
-test("a derived Draft remains the next commercial step over an approved parent Quote", () => {
+test("an approved parent with scheduling authority outranks a supplemental Draft", () => {
+  const projection = derive({
+    quotes: [
+      {
+        id: "supplemental",
+        parent_quote_id: "approved-parent",
+        lineage_type: "SUPPLEMENTAL_QUOTE",
+        version: 1,
+        status: "DRAFT",
+        scope_item_count: 1,
+      },
+      { id: "approved-parent", version: 4, status: "ISSUED", customer_decision: "APPROVED", scope_item_count: 2 },
+    ],
+    approvedWorkScheduling: approvedWorkScheduling(),
+  });
+  assert.equal(projection.stage.code, "QUOTE_APPROVED");
+  assert.equal(projection.stage.label, "Work approved — ready to schedule");
+  assert.equal(projection.nextAction.label, "Schedule approved work");
+  assert.deepEqual(projection.reasonCodes, [
+    "APPROVED_WORK_VISIT_AUTHORITY_AVAILABLE",
+    "SUPPLEMENTAL_DRAFT_REMAINS_SECONDARY",
+  ]);
+  assert.equal(projection.availableActions.some((action) => /SCHEDULE|VISIT/.test(action.code)), false);
+});
+
+test("approved Quote with available authority projects executable work without a supplemental Draft", () => {
+  const projection = derive({
+    quotes: [{
+      id: "approved-parent",
+      version: 4,
+      status: "ISSUED",
+      customer_decision: "APPROVED",
+      scope_item_count: 2,
+    }],
+    approvedWorkScheduling: approvedWorkScheduling(),
+  });
+  assert.equal(projection.stage.code, "QUOTE_APPROVED");
+  assert.equal(projection.stage.label, "Work approved — ready to schedule");
+  assert.equal(projection.nextAction.label, "Schedule approved work");
+});
+
+test("scheduled approved work remains primary over a supplemental Draft", () => {
+  const projection = derive({
+    quotes: [
+      {
+        id: "supplemental",
+        parent_quote_id: "approved-parent",
+        lineage_type: "SUPPLEMENTAL_QUOTE",
+        version: 1,
+        status: "DRAFT",
+        scope_item_count: 1,
+      },
+      { id: "approved-parent", version: 4, status: "ISSUED", customer_decision: "APPROVED", scope_item_count: 2 },
+    ],
+    approvedWorkScheduling: approvedWorkScheduling({
+      authorityState: "ACTIVE",
+      visitState: "SCHEDULED",
+    }),
+  });
+  assert.equal(projection.stage.code, "WORK_READY");
+  assert.equal(projection.stage.label, "Approved work scheduled");
+  assert.equal(projection.nextAction.label, "Review scheduled work");
+  assert.deepEqual(projection.reasonCodes, [
+    "APPROVED_WORK_VISIT_SCHEDULED",
+    "SUPPLEMENTAL_DRAFT_REMAINS_SECONDARY",
+  ]);
+});
+
+test("a supplemental Draft cannot regress active or completed approved work", () => {
+  const quotes = [
+    { id: "supplemental", version: 1, status: "DRAFT", scope_item_count: 1 },
+    { id: "approved-parent", version: 4, status: "ISSUED", customer_decision: "APPROVED", scope_item_count: 2 },
+  ];
+  const active = derive({
+    quotes,
+    workstreams: [{ id: "workstream", version: 2, state: "ACTIVE" }],
+  });
+  assert.equal(active.stage.code, "WORK_IN_PROGRESS");
+
+  const completed = derive({
+    quotes,
+    workstreams: [{ id: "workstream", version: 3, state: "COMPLETED" }],
+  });
+  assert.equal(completed.stage.code, "WORKSTREAMS_COMPLETE_PENDING_JOB_COMPLETION");
+});
+
+test("approved Quote without canonical scheduling authority never fabricates scheduling", () => {
   const projection = derive({
     quotes: [
       { id: "supplemental", version: 1, status: "DRAFT", scope_item_count: 1 },
@@ -169,6 +266,7 @@ test("a derived Draft remains the next commercial step over an approved parent Q
   });
   assert.equal(projection.stage.code, "QUOTE_DRAFT");
   assert.equal(projection.nextAction.code, "REVIEW_DRAFT_QUOTE");
+  assert.equal(projection.availableActions.some((action) => /SCHEDULE|VISIT/.test(action.code)), false);
 });
 
 test("issued Quote without decision waits on the customer", () => {
@@ -270,6 +368,7 @@ test("projection vocabulary and precedence are code-owned and exclude deferred d
     "ACTIVE_WORK",
     "READY_WORK",
     "TERMINAL_WORKSTREAMS",
+    "APPROVED_WORK_SCHEDULING",
     "DRAFT_QUOTE",
     "ISSUED_QUOTE_DECISION",
     "DECLINED_QUOTE",
@@ -346,8 +445,52 @@ test("authorized lifecycle-v2 professional receives the read-only canonical proj
   assert.equal(result.code, "LIVE_JOB_STATE_LOADED");
   assert.equal(result.liveJob.stage.code, "EVALUATION_NEEDED");
   assert.equal(result.liveJob.requestId, 41);
-  assert.equal(queries.filter((sql) => sql.includes("live_job:")).length, 8);
+  assert.equal(queries.filter((sql) => sql.includes("live_job:")).length, 9);
   assert.equal(queries.some((sql) => /\bINSERT\b|\bUPDATE\b|\bDELETE\b/.test(sql)), false);
+});
+
+test("canonical state projects exact approved-work authority without changing Quote truth", async () => {
+  const approvedQuote = {
+    id: "approved-parent",
+    version: 4,
+    status: "ISSUED",
+    customer_decision: "APPROVED",
+    customer_decision_id: "approved-decision",
+    scope_item_count: 2,
+  };
+  const pool = {
+    async query(sql) {
+      const source = String(sql);
+      if (source.includes("live_job:quotes")) return { rows: [approvedQuote] };
+      if (source.includes("live_job:approved_work_scheduling")) {
+        return {
+          rows: [{
+            quote_id: approvedQuote.id,
+            approved_quote_decision_id: approvedQuote.customer_decision_id,
+            activation_id: null,
+            active_grant_count: 0,
+            visit_state: null,
+          }],
+        };
+      }
+      if (source.includes("live_job:")) return { rows: [] };
+      throw new Error(`Unexpected query: ${source}`);
+    },
+  };
+  const canonical = await loadCanonicalState(pool, {
+    job_id: "11111111-1111-4111-8111-111111111111",
+    relationship_id: 72,
+    actor_participant_id: "22222222-2222-4222-8222-222222222222",
+    active_capabilities: BASE_CAPABILITIES,
+  });
+  assert.equal(canonical.quotes[0].status, "ISSUED");
+  assert.equal(canonical.quotes[0].customer_decision, "APPROVED");
+  assert.deepEqual(canonical.approvedWorkScheduling, [{
+    quoteId: "approved-parent",
+    approvedQuoteDecisionId: "approved-decision",
+    authorityState: "AVAILABLE",
+    visitState: null,
+  }]);
 });
 
 test("missing lifecycle read grants produce 403 without loading child records", async () => {
@@ -441,5 +584,9 @@ test("authorized context excludes cancelled requests and contains no mutation st
     "utf8"
   );
   assert.match(source, /posts\.cancelled_at IS NULL/);
+  assert.match(source, /scope_type = 'approved_work'/);
+  assert.match(source, /scope_approved_quote_decision_id = decisions\.id/);
+  assert.match(source, /customer\.user_id = relationships\.homeowner_id/);
+  assert.match(source, /visits\.purpose = 'APPROVED_WORK'/);
   assert.doesNotMatch(source, /\b(?:INSERT INTO|UPDATE|DELETE FROM)\b/i);
 });
