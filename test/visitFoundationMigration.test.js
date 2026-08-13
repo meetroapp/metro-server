@@ -13,14 +13,16 @@ const migrationName =
 const sql = readFileSync(join(root, "migrations", migrationName), "utf8");
 const readme = readFileSync(join(root, "migrations", "README.md"), "utf8");
 
-test("MC-PL-002A is the sole latest additive migration", () => {
+test("MC-PL-002A remains the sole Visit persistence-foundation migration", () => {
   const migrations = getMigrationFiles();
   const filenames = migrations.map(({ filename }) => filename);
 
-  assert.equal(filenames.length, 36);
-  assert.equal(filenames.at(-2),
-    "202608120001_create_business_portfolio_authority_foundation.sql");
-  assert.equal(filenames.at(-1), migrationName);
+  assert.equal(filenames.length, 37);
+  assert.equal(filenames.at(-2), migrationName);
+  assert.equal(
+    filenames.at(-1),
+    "202608130002_activate_evaluation_visit_authority.sql"
+  );
   assert.equal(
     filenames.filter((filename) => filename.startsWith("202608130001_")).length,
     1

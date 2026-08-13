@@ -86,14 +86,14 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 36);
+      assert.equal(migrations.length, 37);
       const migrated = await runMigrationCollection(
         pool,
         migrations,
         targetMetadata()
       );
       assert.equal(migrated.success, true);
-      assert.equal(migrated.applied.length, 36);
+      assert.equal(migrated.applied.length, 37);
 
       const identities = await createVisitTestIdentities(pool, suffix);
       const firstJob = await createVisitLifecycleFixture(

@@ -16,18 +16,18 @@ test("Slice 003 migration is the unique additive migration after Slice 002", () 
     .filter((name) => /^\d+.*\.sql$/.test(name))
     .sort();
 
-  assert.equal(migrations.length, 36);
-  assert.equal(migrations.at(-7), migrationName);
+  assert.equal(migrations.length, 37);
+  assert.equal(migrations.at(-8), migrationName);
   assert.equal(
-    migrations.at(-6),
+    migrations.at(-7),
     "202608100002_create_recommendation_hierarchy_foundation.sql"
   );
   assert.equal(
-    migrations.at(-5),
+    migrations.at(-6),
     "202608100003_create_canonical_quote_scope_foundation.sql"
   );
   assert.equal(
-    migrations.at(-4),
+    migrations.at(-5),
     "202608100004_create_quote_composition_feedback.sql"
   );
   assert.equal(

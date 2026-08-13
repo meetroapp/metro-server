@@ -54,6 +54,7 @@ Current inventory:
 34. `202608110001_create_request_modification_authority_foundation.sql`
 35. `202608120001_create_business_portfolio_authority_foundation.sql`
 36. `202608130001_create_canonical_visit_persistence_foundation.sql`
+37. `202608130002_activate_evaluation_visit_authority.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -179,6 +180,11 @@ same-Job Evaluation and Workstream links, and bounded Visit capability
 definitions. It creates no Visit business rows, grants no capability, infers no
 historical schedule, exposes no route, and does not transition Evaluation,
 Quote, Workstream, Activity, Job, Invoice, or completion authority.
+
+`202608130002_activate_evaluation_visit_authority.sql` adds an Evaluation-only
+lifecycle grant scope and immutable activation evidence. It creates no grants,
+activations, Visits, or adjacent-domain business rows. Explicit professional
+activation remains required for the exact same-Job Evaluation subject.
 
 ## Migration Ledger and Transactions
 
