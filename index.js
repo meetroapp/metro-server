@@ -137,6 +137,9 @@ const {
 const {
   registerWorkstreamRoutes,
 } = require("./server/workflow/workstreams");
+const {
+  registerLiveJobRoutes,
+} = require("./server/workflow/liveJobs");
 
 
 const JWT_SECRET = resolveJwtSecret(process.env);
@@ -828,6 +831,13 @@ registerRequestModificationRoutes({
 });
 
 registerWorkstreamRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerLiveJobRoutes({
   app,
   authMiddleware,
   getPool,
