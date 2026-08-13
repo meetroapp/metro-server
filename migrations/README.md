@@ -55,6 +55,7 @@ Current inventory:
 35. `202608120001_create_business_portfolio_authority_foundation.sql`
 36. `202608130001_create_canonical_visit_persistence_foundation.sql`
 37. `202608130002_activate_evaluation_visit_authority.sql`
+38. `202608130003_activate_approved_work_visit_authority.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -185,6 +186,12 @@ Quote, Workstream, Activity, Job, Invoice, or completion authority.
 lifecycle grant scope and immutable activation evidence. It creates no grants,
 activations, Visits, or adjacent-domain business rows. Explicit professional
 activation remains required for the exact same-Job Evaluation subject.
+
+`202608130003_activate_approved_work_visit_authority.sql` adds an exact
+approved-Quote-decision lifecycle grant scope and immutable Approved Work Visit
+activation evidence. It creates no grants, activations, Visits, or adjacent
+business rows. Quote approval remains scope authority; explicit professional
+activation governs only the timing and attendance capability.
 
 ## Migration Ledger and Transactions
 

@@ -16,8 +16,8 @@ const sql = readFileSync(
 
 test("MC-PL-002C adds only the governed Evaluation Visit activation migration", () => {
   const migrations = getMigrationFiles();
-  assert.equal(migrations.length, 37);
-  assert.equal(migrations.at(-1).filename, migrationName);
+  assert.equal(migrations.length, 38);
+  assert.equal(migrations.at(-2).filename, migrationName);
   assert.doesNotMatch(sql, /^\s*(?:BEGIN|COMMIT|ROLLBACK)\s*;/im);
   assert.doesNotMatch(sql, /\b(?:DROP\s+(?:TABLE|COLUMN)|TRUNCATE|DELETE\s+FROM)\b/i);
 });

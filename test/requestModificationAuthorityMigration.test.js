@@ -16,9 +16,9 @@ test("request modification migration precedes Portfolio authority and remains ad
     .sort();
   const readme = readFileSync(join(root, "migrations", "README.md"), "utf8");
 
-  assert.equal(migrations.at(-4), filename);
+  assert.equal(migrations.at(-5), filename);
   assert.equal(
-    migrations.at(-3),
+    migrations.at(-4),
     "202608120001_create_business_portfolio_authority_foundation.sql"
   );
   assert.match(readme, new RegExp(filename.replaceAll(".", "\\.")));

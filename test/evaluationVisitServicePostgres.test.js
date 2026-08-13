@@ -112,10 +112,10 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 37);
+      assert.equal(migrations.length, 38);
       const migrated = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(migrated.success, true);
-      assert.equal(migrated.applied.length, 37);
+      assert.equal(migrated.applied.length, 38);
 
       const identities = await createVisitTestIdentities(pool, suffix);
       const firstJob = await createVisitLifecycleFixture(
@@ -589,8 +589,12 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-      const before002c = migrations.slice(0, -1);
-      const activationMigration = migrations.at(-1);
+      const activationIndex = migrations.findIndex(
+        ({ filename }) =>
+          filename === "202608130002_activate_evaluation_visit_authority.sql"
+      );
+      const before002c = migrations.slice(0, activationIndex);
+      const activationMigration = migrations[activationIndex];
       assert.equal(before002c.length, 36);
       assert.equal(
         activationMigration.filename,
