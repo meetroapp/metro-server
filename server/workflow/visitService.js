@@ -313,6 +313,8 @@ async function loadJobContext(client, jobId, actorUserId, { lock = false } = {})
       relationships.professional_user_id AS selected_professional_user_id,
       participants.id AS actor_participant_id,
       participants.user_id AS actor_user_id,
+      evaluation_subjects.evaluation_id AS canonical_evaluation_id,
+      evaluation_subject_status.status AS canonical_evaluation_status,
       EXISTS (
         SELECT 1
         FROM participant_role_assignments roles
@@ -347,12 +349,30 @@ async function loadJobContext(client, jobId, actorUserId, { lock = false } = {})
           AND grants.scope_type = 'job'
           AND grants.scope_job_id = jobs.id
           AND grants.scope_concern_id IS NULL
+          AND grants.scope_evaluation_id IS NULL
           AND grants.capability = ANY($3::text[])
           AND grants.valid_from <= CURRENT_TIMESTAMP
           AND (grants.valid_until IS NULL OR grants.valid_until > CURRENT_TIMESTAMP)
           AND revocations.id IS NULL
         ORDER BY grants.capability
-      ) AS active_visit_capabilities
+      ) AS active_job_visit_capabilities,
+      ARRAY(
+        SELECT grants.capability
+        FROM lifecycle_authority_grants grants
+        LEFT JOIN lifecycle_authority_grant_revocations revocations
+          ON revocations.authority_grant_id = grants.id
+        WHERE grants.grantee_participant_id = participants.id
+          AND grants.job_id = jobs.id
+          AND grants.scope_type = 'evaluation'
+          AND grants.scope_job_id = jobs.id
+          AND grants.scope_concern_id IS NULL
+          AND grants.scope_evaluation_id = evaluation_subjects.evaluation_id
+          AND grants.capability = ANY($3::text[])
+          AND grants.valid_from <= CURRENT_TIMESTAMP
+          AND (grants.valid_until IS NULL OR grants.valid_until > CURRENT_TIMESTAMP)
+          AND revocations.id IS NULL
+        ORDER BY grants.capability
+      ) AS active_evaluation_visit_capabilities
     FROM jobs
     INNER JOIN posts
       ON posts.id = jobs.job_request_id
@@ -367,6 +387,10 @@ async function loadJobContext(client, jobId, actorUserId, { lock = false } = {})
       ON participants.job_id = jobs.id
       AND participants.request_relationship_id = relationships.id
       AND participants.user_id = $2
+    LEFT JOIN canonical_evaluation_job_subjects evaluation_subjects
+      ON evaluation_subjects.job_id = jobs.id
+    LEFT JOIN canonical_evaluations evaluation_subject_status
+      ON evaluation_subject_status.id = evaluation_subjects.evaluation_id
     WHERE jobs.id = $1
       AND jobs.lifecycle_contract_version = 2
     LIMIT 1
@@ -394,11 +418,10 @@ function actorRole(context) {
   return null;
 }
 
-async function requireAuthority({
+async function requireActorRole({
   client,
   actorUserId,
   jobId,
-  capability,
   requiredRole,
   logger,
   lock = false,
@@ -415,26 +438,6 @@ async function requireAuthority({
       code: "VISIT_ROLE_AUTHORITY_DENIED",
       actorUserId,
       jobId,
-      capability,
-    });
-    return {
-      error: failure(403, "VISIT_AUTHORITY_REQUIRED", "Visit authority is required."),
-    };
-  }
-  const granted = await hasActiveLifecycleGrant({
-    client,
-    participantId: context.actor_participant_id,
-    capability,
-    jobId,
-    logger,
-  });
-  if (!granted) {
-    logger.warn("Visit capability authority denied", {
-      code: "VISIT_CAPABILITY_AUTHORITY_DENIED",
-      actorUserId,
-      participantId: context.actor_participant_id,
-      jobId,
-      capability,
     });
     return {
       error: failure(403, "VISIT_AUTHORITY_REQUIRED", "Visit authority is required."),
@@ -443,13 +446,67 @@ async function requireAuthority({
   return { context, role };
 }
 
-function activeCapabilities(context) {
-  return new Set(context?.active_visit_capabilities || []);
+async function requireAuthority({
+  client,
+  actorUserId,
+  jobId,
+  capability,
+  requiredRole,
+  logger,
+  lock = false,
+  evaluationId = null,
+}) {
+  const authorized = await requireActorRole({
+    client,
+    actorUserId,
+    jobId,
+    requiredRole,
+    logger,
+    lock,
+  });
+  if (authorized.error) return authorized;
+  const granted = await hasActiveLifecycleGrant({
+    client,
+    participantId: authorized.context.actor_participant_id,
+    capability,
+    jobId,
+    evaluationId,
+    logger,
+  });
+  if (!granted) {
+    logger.warn("Visit capability authority denied", {
+      code: "VISIT_CAPABILITY_AUTHORITY_DENIED",
+      actorUserId,
+      participantId: authorized.context.actor_participant_id,
+      jobId,
+      capability,
+    });
+    return {
+      error: failure(403, "VISIT_AUTHORITY_REQUIRED", "Visit authority is required."),
+    };
+  }
+  return authorized;
+}
+
+function activeCapabilities(context, row = null) {
+  const capabilities = new Set(
+    context?.active_job_visit_capabilities || context?.active_visit_capabilities || []
+  );
+  if (
+    row?.purpose === "EVALUATION" &&
+    row.evaluation_id &&
+    row.evaluation_id === context?.canonical_evaluation_id
+  ) {
+    for (const capability of context.active_evaluation_visit_capabilities || []) {
+      capabilities.add(capability);
+    }
+  }
+  return capabilities;
 }
 
 function visitActions(context, row, now = new Date()) {
   const role = actorRole(context);
-  const capabilities = activeCapabilities(context);
+  const capabilities = activeCapabilities(context, row);
   const state = row.state;
   return {
     canConfirm:
@@ -756,6 +813,149 @@ async function authorizeRead(client, validated) {
       };
 }
 
+function validateEvaluationReadRequest(input = {}) {
+  const inputError = validateInput(
+    input,
+    new Set([
+      "pool",
+      "authenticatedActor",
+      "jobId",
+      "evaluationId",
+      "visitId",
+      "logger",
+      "clock",
+    ])
+  );
+  if (inputError) return { error: inputError };
+  const actor = validateAuthenticatedActor(input.authenticatedActor);
+  if (actor.error) return { error: actor.error };
+  const jobId = normalizedUuid(input.jobId);
+  const evaluationId = normalizedUuid(input.evaluationId);
+  if (!jobId || !evaluationId) {
+    return {
+      error: failure(
+        400,
+        "INVALID_EVALUATION_VISIT_SUBJECT",
+        "A valid Job and Evaluation are required."
+      ),
+    };
+  }
+  if (!input.pool || typeof input.pool.query !== "function") {
+    throw new TypeError("A database pool or client is required.");
+  }
+  return {
+    actorId: actor.id,
+    jobId,
+    evaluationId,
+    logger: safeLogger(input.logger),
+  };
+}
+
+async function authorizeEvaluationRead(client, validated) {
+  const authorized = await requireAuthority({
+    client,
+    actorUserId: validated.actorId,
+    jobId: validated.jobId,
+    capability: VISIT_CAPABILITIES.READ,
+    requiredRole: "EITHER",
+    logger: validated.logger,
+    evaluationId: validated.evaluationId,
+  });
+  if (
+    authorized.error ||
+    authorized.context.canonical_evaluation_id !== validated.evaluationId
+  ) {
+    return {
+      error: authorized.error || failure(
+        404,
+        "VISIT_UNAVAILABLE",
+        "The Visit authority is unavailable."
+      ),
+    };
+  }
+  return {
+    actorId: validated.actorId,
+    jobId: validated.jobId,
+    evaluationId: validated.evaluationId,
+    context: authorized.context,
+    role: authorized.role,
+    logger: validated.logger,
+  };
+}
+
+async function listEvaluationVisits(input = {}) {
+  const validated = validateEvaluationReadRequest(input);
+  if (validated.error) return validated.error;
+  return runReadTransaction(input.pool, async (client) => {
+    const authorized = await authorizeEvaluationRead(client, validated);
+    if (authorized.error) return authorized.error;
+    const result = await client.query(
+      `SELECT visits.id
+       FROM canonical_visits visits
+       INNER JOIN canonical_visit_evaluation_links evaluation_links
+         ON evaluation_links.visit_id = visits.id
+         AND evaluation_links.job_id = visits.job_id
+       WHERE visits.job_id = $1
+         AND visits.purpose = 'EVALUATION'
+         AND evaluation_links.evaluation_id = $2
+       ORDER BY visits.created_at ASC, visits.id ASC`,
+      [authorized.jobId, authorized.evaluationId]
+    );
+    const rows = [];
+    for (const item of result.rows) {
+      const row = await loadVisit(client, authorized.jobId, item.id);
+      if (row) rows.push(row);
+    }
+    const now = currentInstant(input.clock);
+    return {
+      ok: true,
+      success: true,
+      status: 200,
+      code: "EVALUATION_VISITS_FOUND",
+      visits: rows.map((row) => visitProjection(row, authorized.context, now)),
+      actions: {
+        canProposeEvaluationVisit:
+          authorized.role === "PROFESSIONAL" &&
+          authorized.context.canonical_evaluation_status === "draft" &&
+          activeCapabilities(authorized.context, {
+            purpose: "EVALUATION",
+            evaluation_id: authorized.evaluationId,
+          }).has(VISIT_CAPABILITIES.PROPOSE),
+      },
+    };
+  });
+}
+
+async function getEvaluationVisit(input = {}) {
+  const validated = validateEvaluationReadRequest(input);
+  if (validated.error) return validated.error;
+  const visitId = normalizedUuid(input.visitId);
+  if (!visitId) {
+    return failure(400, "INVALID_VISIT_ID", "A valid Visit ID is required.");
+  }
+  return runReadTransaction(input.pool, async (client) => {
+    const authorized = await authorizeEvaluationRead(client, validated);
+    if (authorized.error) return authorized.error;
+    const row = await loadVisit(client, authorized.jobId, visitId);
+    if (
+      !row ||
+      row.purpose !== "EVALUATION" ||
+      row.evaluation_id !== authorized.evaluationId
+    ) {
+      return failure(404, "VISIT_UNAVAILABLE", "The Visit is unavailable.");
+    }
+    const history = await loadVisitHistory(client, authorized.jobId, visitId);
+    return commandResult(
+      "EVALUATION_VISIT_FOUND",
+      200,
+      {
+        ...visitProjection(row, authorized.context, currentInstant(input.clock)),
+        history,
+      }
+    );
+  });
+}
+
 async function listVisits(input = {}) {
   const validated = validateReadRequest(input);
   if (validated.error) return validated.error;
@@ -855,9 +1055,12 @@ async function validateProposedSubjects({
 }) {
   if (evaluationId) {
     const evaluation = await client.query(
-      `SELECT evaluation_id
-       FROM canonical_evaluation_job_subjects
-       WHERE evaluation_id = $1 AND job_id = $2
+      `SELECT subjects.evaluation_id
+       FROM canonical_evaluation_job_subjects subjects
+       INNER JOIN canonical_evaluations evaluations
+         ON evaluations.id = subjects.evaluation_id
+         AND evaluations.status = 'draft'
+       WHERE subjects.evaluation_id = $1 AND subjects.job_id = $2
        LIMIT 1`,
       [evaluationId, jobId]
     );
@@ -883,7 +1086,9 @@ async function validateProposedSubjects({
     if (workstreams.rows.length !== workstreamIds.length) return false;
   }
   return (
-    (purpose === "EVALUATION" && approvedQuoteDecisionId === null) ||
+    (purpose === "EVALUATION" &&
+      evaluationId !== null &&
+      approvedQuoteDecisionId === null) ||
     (purpose === "APPROVED_WORK" &&
       evaluationId === null &&
       approvedQuoteDecisionId !== null) ||
@@ -920,6 +1125,7 @@ async function proposeVisit(input = {}) {
     !jobId ||
     !purpose ||
     !schedule ||
+    (purpose === "EVALUATION" && !evaluationId) ||
     (input.evaluationId != null && !evaluationId) ||
     (input.approvedQuoteDecisionId != null && !approvedQuoteDecisionId) ||
     workstreamIds === null
@@ -944,6 +1150,7 @@ async function proposeVisit(input = {}) {
       requiredRole: "PROFESSIONAL",
       logger,
       lock: true,
+      evaluationId: purpose === "EVALUATION" ? evaluationId : null,
     });
     if (authorized.error) return { abort: authorized.error };
     const participantId = authorized.context.actor_participant_id;
@@ -1180,11 +1387,10 @@ async function runVersionCommand({
 }) {
   const logger = safeLogger(input.logger);
   return runTransaction(input.pool, async (client) => {
-    const authorized = await requireAuthority({
+    const authorized = await requireActorRole({
       client,
       actorUserId: validated.actorId,
       jobId,
-      capability,
       requiredRole: commandName === VISIT_COMMANDS.CONFIRM
         ? "CUSTOMER"
         : "PROFESSIONAL",
@@ -1192,6 +1398,31 @@ async function runVersionCommand({
       lock: true,
     });
     if (authorized.error) return { abort: authorized.error };
+    const current = await loadVisit(client, jobId, visitId, { lock: true });
+    if (!current) {
+      return {
+        abort: failure(404, "VISIT_UNAVAILABLE", "The Visit is unavailable."),
+      };
+    }
+    const granted = await hasActiveLifecycleGrant({
+      client,
+      participantId: authorized.context.actor_participant_id,
+      jobId,
+      capability,
+      evaluationId: current.purpose === "EVALUATION"
+        ? current.evaluation_id
+        : null,
+      logger,
+    });
+    if (!granted) {
+      return {
+        abort: failure(
+          403,
+          "VISIT_AUTHORITY_REQUIRED",
+          "Visit authority is required."
+        ),
+      };
+    }
     const participantId = authorized.context.actor_participant_id;
     const idempotency = await reserveCommand({
       client,
@@ -1220,12 +1451,6 @@ async function runVersionCommand({
       });
     }
 
-    const current = await loadVisit(client, jobId, visitId, { lock: true });
-    if (!current) {
-      return {
-        abort: failure(404, "VISIT_UNAVAILABLE", "The Visit is unavailable."),
-      };
-    }
     if (Number(current.version) !== expectedVersion) {
       return {
         abort: failure(
@@ -1383,16 +1608,42 @@ async function requestVisitChange(input = {}) {
   }
   const logger = safeLogger(input.logger);
   return runTransaction(input.pool, async (client) => {
-    const authorized = await requireAuthority({
+    const authorized = await requireActorRole({
       client,
       actorUserId: command.validated.actorId,
       jobId: command.jobId,
-      capability: VISIT_CAPABILITIES.CHANGE_REQUEST,
       requiredRole: "CUSTOMER",
       logger,
       lock: true,
     });
     if (authorized.error) return { abort: authorized.error };
+    const current = await loadVisit(client, command.jobId, command.visitId, {
+      lock: true,
+    });
+    if (!current) {
+      return {
+        abort: failure(404, "VISIT_UNAVAILABLE", "The Visit is unavailable."),
+      };
+    }
+    const granted = await hasActiveLifecycleGrant({
+      client,
+      participantId: authorized.context.actor_participant_id,
+      jobId: command.jobId,
+      capability: VISIT_CAPABILITIES.CHANGE_REQUEST,
+      evaluationId: current.purpose === "EVALUATION"
+        ? current.evaluation_id
+        : null,
+      logger,
+    });
+    if (!granted) {
+      return {
+        abort: failure(
+          403,
+          "VISIT_AUTHORITY_REQUIRED",
+          "Visit authority is required."
+        ),
+      };
+    }
     const participantId = authorized.context.actor_participant_id;
     const idempotency = await reserveCommand({
       client,
@@ -1417,14 +1668,6 @@ async function requestVisitChange(input = {}) {
         jobId: command.jobId,
         visitId: command.visitId,
       });
-    }
-    const current = await loadVisit(client, command.jobId, command.visitId, {
-      lock: true,
-    });
-    if (!current) {
-      return {
-        abort: failure(404, "VISIT_UNAVAILABLE", "The Visit is unavailable."),
-      };
     }
     if (Number(current.version) !== command.expectedVersion) {
       return {
@@ -1567,7 +1810,9 @@ module.exports = {
   cancelVisit,
   completeVisit,
   confirmVisit,
+  getEvaluationVisit,
   getVisit,
+  listEvaluationVisits,
   listVisits,
   proposeVisit,
   requestVisitChange,

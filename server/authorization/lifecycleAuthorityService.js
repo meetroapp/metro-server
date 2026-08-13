@@ -31,14 +31,21 @@ async function hasActiveLifecycleGrant({
   capability,
   jobId,
   concernId = null,
+  evaluationId = null,
   at = null,
   logger = null,
 } = {}) {
   const normalizedParticipantId = uuid(participantId);
   const normalizedJobId = uuid(jobId);
   const normalizedConcernId = concernId == null ? null : uuid(concernId);
+  const normalizedEvaluationId = evaluationId == null ? null : uuid(evaluationId);
   const normalizedCapability = String(capability || "").trim();
-  if (!normalizedParticipantId || !normalizedJobId || !normalizedCapability) {
+  if (
+    !normalizedParticipantId ||
+    !normalizedJobId ||
+    !normalizedCapability ||
+    (evaluationId != null && !normalizedEvaluationId)
+  ) {
     return false;
   }
 
@@ -61,11 +68,17 @@ async function hasActiveLifecycleGrant({
           AND lifecycle_authority_grants.scope_type = 'reported_concern'
           AND lifecycle_authority_grants.scope_concern_id = $4
         )
+        OR (
+          $5::uuid IS NOT NULL
+          AND lifecycle_authority_grants.scope_type = 'evaluation'
+          AND lifecycle_authority_grants.scope_concern_id IS NULL
+          AND lifecycle_authority_grants.scope_evaluation_id = $5
+        )
       )
-      AND lifecycle_authority_grants.valid_from <= COALESCE($5::timestamptz, CURRENT_TIMESTAMP)
+      AND lifecycle_authority_grants.valid_from <= COALESCE($6::timestamptz, CURRENT_TIMESTAMP)
       AND (
         lifecycle_authority_grants.valid_until IS NULL
-        OR lifecycle_authority_grants.valid_until > COALESCE($5::timestamptz, CURRENT_TIMESTAMP)
+        OR lifecycle_authority_grants.valid_until > COALESCE($6::timestamptz, CURRENT_TIMESTAMP)
       )
       AND lifecycle_authority_grant_revocations.id IS NULL
     LIMIT 1
@@ -75,6 +88,7 @@ async function hasActiveLifecycleGrant({
       normalizedCapability,
       normalizedJobId,
       normalizedConcernId,
+      normalizedEvaluationId,
       at,
     ]
   );
@@ -87,6 +101,7 @@ async function hasActiveLifecycleGrant({
       capability: normalizedCapability,
       jobId: normalizedJobId,
       concernId: normalizedConcernId,
+      evaluationId: normalizedEvaluationId,
     });
   }
   return granted;
@@ -269,6 +284,7 @@ async function createLifecycleAuthorityGrant({
   capability,
   scopeType = "job",
   scopeConcernId = null,
+  scopeEvaluationId = null,
   validUntil = null,
   sourceEvidenceType,
   sourceEvidenceReference,
@@ -291,10 +307,11 @@ async function createLifecycleAuthorityGrant({
     INSERT INTO lifecycle_authority_grants
     (
       id, grantee_participant_id, grantor_participant_id, job_id,
-      capability, scope_type, scope_job_id, scope_concern_id, valid_until,
+      capability, scope_type, scope_job_id, scope_concern_id,
+      scope_evaluation_id, valid_until,
       source_evidence_type, source_evidence_reference, idempotency_key
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $4, $7, $8, $9, $10, $11)
+    VALUES ($1, $2, $3, $4, $5, $6, $4, $7, $8, $9, $10, $11, $12)
     RETURNING *
     `,
     [
@@ -305,6 +322,7 @@ async function createLifecycleAuthorityGrant({
       String(capability || "").trim(),
       String(scopeType || "").trim(),
       scopeConcernId == null ? null : uuid(scopeConcernId),
+      scopeEvaluationId == null ? null : uuid(scopeEvaluationId),
       validUntil,
       String(sourceEvidenceType || "").trim(),
       String(sourceEvidenceReference || "").trim(),
