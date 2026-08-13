@@ -384,7 +384,9 @@ function deriveCanonicalLiveJob(state = {}, { derivedAt = new Date().toISOString
     });
   }
 
-  const pendingIssuedQuote = quotes.find((quote) => quote.status === "ISSUED");
+  const pendingIssuedQuote = quotes.find(
+    (quote) => quote.status === "ISSUED" && !quote.customer_decision
+  );
   if (pendingIssuedQuote) {
     return result({
       stage: "WAITING_FOR_CUSTOMER_DECISION",
@@ -397,7 +399,9 @@ function deriveCanonicalLiveJob(state = {}, { derivedAt = new Date().toISOString
     });
   }
 
-  const declinedQuote = quotes.find((quote) => quote.status === "DECLINED");
+  const declinedQuote = quotes.find(
+    (quote) => quote.status === "ISSUED" && quote.customer_decision === "DECLINED"
+  );
   if (declinedQuote) {
     return result({
       stage: "QUOTE_DECLINED",
@@ -410,7 +414,9 @@ function deriveCanonicalLiveJob(state = {}, { derivedAt = new Date().toISOString
     });
   }
 
-  const approvedQuote = quotes.find((quote) => quote.status === "APPROVED");
+  const approvedQuote = quotes.find(
+    (quote) => quote.status === "ISSUED" && quote.customer_decision === "APPROVED"
+  );
   if (approvedQuote) {
     return result({
       stage: "QUOTE_APPROVED",
@@ -641,7 +647,10 @@ async function loadCanonicalState(pool, context) {
         `/* live_job:quotes */
          SELECT canonical_quotes.id, canonical_quotes.created_at,
            canonical_quote_versions.version, canonical_quote_versions.status,
-           canonical_quote_versions.scope_item_count
+           canonical_quote_versions.scope_item_count,
+           decisions.decision AS customer_decision,
+           decisions.id AS customer_decision_id,
+           decisions.issued_quote_version AS customer_decision_quote_version
          FROM canonical_quotes
          INNER JOIN LATERAL (
            SELECT version, status, scope_item_count
@@ -649,6 +658,8 @@ async function loadCanonicalState(pool, context) {
            WHERE quote_id = canonical_quotes.id
            ORDER BY version DESC LIMIT 1
          ) AS canonical_quote_versions ON TRUE
+         LEFT JOIN canonical_quote_customer_decisions decisions
+           ON decisions.quote_id = canonical_quotes.id
          WHERE canonical_quotes.job_id = $1
          ORDER BY canonical_quotes.updated_at DESC, canonical_quotes.created_at DESC,
            canonical_quotes.id DESC`,

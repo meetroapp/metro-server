@@ -164,7 +164,7 @@ test("a derived Draft remains the next commercial step over an approved parent Q
   const projection = derive({
     quotes: [
       { id: "supplemental", version: 1, status: "DRAFT", scope_item_count: 1 },
-      { id: "approved-parent", version: 4, status: "APPROVED", scope_item_count: 2 },
+      { id: "approved-parent", version: 4, status: "ISSUED", customer_decision: "APPROVED", scope_item_count: 2 },
     ],
   });
   assert.equal(projection.stage.code, "QUOTE_DRAFT");
@@ -183,9 +183,27 @@ test("issued Quote without decision waits on the customer", () => {
   });
 });
 
+test("declined customer decision remains separate from issued Quote version status", () => {
+  const projection = derive({
+    quotes: [{
+      id: "quote",
+      version: 3,
+      status: "ISSUED",
+      customer_decision: "DECLINED",
+      scope_item_count: 2,
+    }],
+  });
+  assertProjection(projection, {
+    stage: "QUOTE_DECLINED",
+    responsibility: "PROFESSIONAL",
+    nextAction: "REVIEW_DECLINED_QUOTE",
+    blocker: "CUSTOMER_DECLINED_QUOTE",
+  });
+});
+
 test("approved Quote fails closed at absent Visit/Schedule authority", () => {
   const projection = derive({
-    quotes: [{ id: "quote", version: 4, status: "APPROVED", scope_item_count: 2 }],
+    quotes: [{ id: "quote", version: 4, status: "ISSUED", customer_decision: "APPROVED", scope_item_count: 2 }],
   });
   assertProjection(projection, {
     stage: "QUOTE_APPROVED",
@@ -201,7 +219,7 @@ test("approved Quote fails closed at absent Visit/Schedule authority", () => {
 
 test("active Workstream takes deterministic precedence over prior commercial records", () => {
   const projection = derive({
-    quotes: [{ id: "quote", version: 4, status: "APPROVED", scope_item_count: 2 }],
+    quotes: [{ id: "quote", version: 4, status: "ISSUED", customer_decision: "APPROVED", scope_item_count: 2 }],
     workstreams: [{ id: "workstream", version: 2, state: "ACTIVE" }],
     activities: [{ id: "activity", version: 2, status: "IN_PROGRESS" }],
   });

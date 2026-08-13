@@ -32,6 +32,8 @@ async function hasActiveLifecycleGrant({
   jobId,
   concernId = null,
   evaluationId = null,
+  approvedQuoteDecisionId = null,
+  allowJobScope = true,
   at = null,
   logger = null,
 } = {}) {
@@ -39,12 +41,16 @@ async function hasActiveLifecycleGrant({
   const normalizedJobId = uuid(jobId);
   const normalizedConcernId = concernId == null ? null : uuid(concernId);
   const normalizedEvaluationId = evaluationId == null ? null : uuid(evaluationId);
+  const normalizedApprovedQuoteDecisionId = approvedQuoteDecisionId == null
+    ? null
+    : uuid(approvedQuoteDecisionId);
   const normalizedCapability = String(capability || "").trim();
   if (
     !normalizedParticipantId ||
     !normalizedJobId ||
     !normalizedCapability ||
-    (evaluationId != null && !normalizedEvaluationId)
+    (evaluationId != null && !normalizedEvaluationId) ||
+    (approvedQuoteDecisionId != null && !normalizedApprovedQuoteDecisionId)
   ) {
     return false;
   }
@@ -62,7 +68,7 @@ async function hasActiveLifecycleGrant({
       AND lifecycle_authority_grants.job_id = $3
       AND lifecycle_authority_grants.scope_job_id = $3
       AND (
-        lifecycle_authority_grants.scope_type = 'job'
+        ($7::boolean = TRUE AND lifecycle_authority_grants.scope_type = 'job')
         OR (
           $4::uuid IS NOT NULL
           AND lifecycle_authority_grants.scope_type = 'reported_concern'
@@ -74,11 +80,19 @@ async function hasActiveLifecycleGrant({
           AND lifecycle_authority_grants.scope_concern_id IS NULL
           AND lifecycle_authority_grants.scope_evaluation_id = $5
         )
+        OR (
+          $6::uuid IS NOT NULL
+          AND lifecycle_authority_grants.scope_type = 'approved_work'
+          AND lifecycle_authority_grants.scope_concern_id IS NULL
+          AND lifecycle_authority_grants.scope_evaluation_id IS NULL
+          AND lifecycle_authority_grants.scope_approved_quote_decision_id = $6
+          AND lifecycle_authority_grants.scope_approved_quote_decision = 'APPROVED'
+        )
       )
-      AND lifecycle_authority_grants.valid_from <= COALESCE($6::timestamptz, CURRENT_TIMESTAMP)
+      AND lifecycle_authority_grants.valid_from <= COALESCE($8::timestamptz, CURRENT_TIMESTAMP)
       AND (
         lifecycle_authority_grants.valid_until IS NULL
-        OR lifecycle_authority_grants.valid_until > COALESCE($6::timestamptz, CURRENT_TIMESTAMP)
+        OR lifecycle_authority_grants.valid_until > COALESCE($8::timestamptz, CURRENT_TIMESTAMP)
       )
       AND lifecycle_authority_grant_revocations.id IS NULL
     LIMIT 1
@@ -89,6 +103,8 @@ async function hasActiveLifecycleGrant({
       normalizedJobId,
       normalizedConcernId,
       normalizedEvaluationId,
+      normalizedApprovedQuoteDecisionId,
+      allowJobScope === true,
       at,
     ]
   );
@@ -102,6 +118,8 @@ async function hasActiveLifecycleGrant({
       jobId: normalizedJobId,
       concernId: normalizedConcernId,
       evaluationId: normalizedEvaluationId,
+      approvedQuoteDecisionId: normalizedApprovedQuoteDecisionId,
+      allowJobScope: allowJobScope === true,
     });
   }
   return granted;

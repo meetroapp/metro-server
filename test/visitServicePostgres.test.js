@@ -86,14 +86,14 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 37);
+      assert.equal(migrations.length, 38);
       const migrated = await runMigrationCollection(
         pool,
         migrations,
         targetMetadata()
       );
       assert.equal(migrated.success, true);
-      assert.equal(migrated.applied.length, 37);
+      assert.equal(migrated.applied.length, 38);
 
       const identities = await createVisitTestIdentities(pool, suffix);
       const firstJob = await createVisitLifecycleFixture(
@@ -200,10 +200,6 @@ test(
       for (const crossSubject of [
         { purpose: "EVALUATION", evaluationId: secondEvaluation.id },
         { purpose: "FOLLOW_UP", workstreamIds: [crossWorkstream.id] },
-        {
-          purpose: "APPROVED_WORK",
-          approvedQuoteDecisionId: secondDecision.id,
-        },
       ]) {
         const rejected = await command(
           proposeVisit,
@@ -214,6 +210,17 @@ test(
         );
         assert.equal(rejected.code, "VISIT_SUBJECT_SCOPE_MISMATCH");
       }
+      const rejectedApprovedWork = await command(
+        proposeVisit,
+        pool,
+        identities.professionalId,
+        proposal(firstJob, {
+          purpose: "APPROVED_WORK",
+          approvedQuoteDecisionId: secondDecision.id,
+        }),
+        randomUUID()
+      );
+      assert.equal(rejectedApprovedWork.code, "VISIT_AUTHORITY_REQUIRED");
       assert.deepEqual(await counts(pool, firstJob), {
         visits: 0,
         versions: 0,
@@ -599,11 +606,7 @@ test(
         }),
         randomUUID()
       );
-      assert.equal(approvedWork.visit.purpose, "APPROVED_WORK");
-      assert.equal(
-        approvedWork.visit.approvedQuoteDecisionEvidence.decision,
-        "APPROVED"
-      );
+      assert.equal(approvedWork.code, "VISIT_AUTHORITY_REQUIRED");
 
       const beforeRollback = await counts(pool, firstJob);
       const rollbackKey = randomUUID();

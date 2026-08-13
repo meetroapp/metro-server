@@ -372,7 +372,31 @@ async function loadJobContext(client, jobId, actorUserId, { lock = false } = {})
           AND (grants.valid_until IS NULL OR grants.valid_until > CURRENT_TIMESTAMP)
           AND revocations.id IS NULL
         ORDER BY grants.capability
-      ) AS active_evaluation_visit_capabilities
+      ) AS active_evaluation_visit_capabilities,
+      COALESCE((
+        SELECT jsonb_agg(
+          jsonb_build_object(
+            'decisionId', grants.scope_approved_quote_decision_id,
+            'capability', grants.capability
+          )
+          ORDER BY grants.scope_approved_quote_decision_id, grants.capability
+        )
+        FROM lifecycle_authority_grants grants
+        LEFT JOIN lifecycle_authority_grant_revocations revocations
+          ON revocations.authority_grant_id = grants.id
+        WHERE grants.grantee_participant_id = participants.id
+          AND grants.job_id = jobs.id
+          AND grants.scope_type = 'approved_work'
+          AND grants.scope_job_id = jobs.id
+          AND grants.scope_concern_id IS NULL
+          AND grants.scope_evaluation_id IS NULL
+          AND grants.scope_approved_quote_decision_id IS NOT NULL
+          AND grants.scope_approved_quote_decision = 'APPROVED'
+          AND grants.capability = ANY($3::text[])
+          AND grants.valid_from <= CURRENT_TIMESTAMP
+          AND (grants.valid_until IS NULL OR grants.valid_until > CURRENT_TIMESTAMP)
+          AND revocations.id IS NULL
+      ), '[]'::jsonb) AS active_approved_work_visit_capabilities
     FROM jobs
     INNER JOIN posts
       ON posts.id = jobs.job_request_id
@@ -455,6 +479,8 @@ async function requireAuthority({
   logger,
   lock = false,
   evaluationId = null,
+  approvedQuoteDecisionId = null,
+  allowJobScope = true,
 }) {
   const authorized = await requireActorRole({
     client,
@@ -471,6 +497,8 @@ async function requireAuthority({
     capability,
     jobId,
     evaluationId,
+    approvedQuoteDecisionId,
+    allowJobScope,
     logger,
   });
   if (!granted) {
@@ -490,7 +518,9 @@ async function requireAuthority({
 
 function activeCapabilities(context, row = null) {
   const capabilities = new Set(
-    context?.active_job_visit_capabilities || context?.active_visit_capabilities || []
+    row?.purpose === "APPROVED_WORK"
+      ? []
+      : context?.active_job_visit_capabilities || context?.active_visit_capabilities || []
   );
   if (
     row?.purpose === "EVALUATION" &&
@@ -499,6 +529,13 @@ function activeCapabilities(context, row = null) {
   ) {
     for (const capability of context.active_evaluation_visit_capabilities || []) {
       capabilities.add(capability);
+    }
+  }
+  if (row?.purpose === "APPROVED_WORK" && row.approved_quote_decision_id) {
+    for (const grant of context?.active_approved_work_visit_capabilities || []) {
+      if (grant.decisionId === row.approved_quote_decision_id) {
+        capabilities.add(grant.capability);
+      }
     }
   }
   return capabilities;
@@ -794,23 +831,27 @@ function validateReadRequest(input = {}) {
 }
 
 async function authorizeRead(client, validated) {
-  const authorized = await requireAuthority({
+  const authorized = await requireActorRole({
     client,
     actorUserId: validated.actorId,
     jobId: validated.jobId,
-    capability: VISIT_CAPABILITIES.READ,
     requiredRole: "EITHER",
     logger: validated.logger,
   });
-  return authorized.error
-    ? { error: authorized.error }
-    : {
+  if (authorized.error) return { error: authorized.error };
+  const hasRead =
+    activeCapabilities(authorized.context).has(VISIT_CAPABILITIES.READ) ||
+    (authorized.context.active_approved_work_visit_capabilities || [])
+      .some((grant) => grant.capability === VISIT_CAPABILITIES.READ);
+  return hasRead
+    ? {
         actorId: validated.actorId,
         jobId: validated.jobId,
         context: authorized.context,
         role: authorized.role,
         logger: validated.logger,
-      };
+      }
+    : { error: failure(403, "VISIT_AUTHORITY_REQUIRED", "Visit authority is required.") };
 }
 
 function validateEvaluationReadRequest(input = {}) {
@@ -1009,7 +1050,11 @@ async function listVisits(input = {}) {
       success: true,
       status: 200,
       code: "VISITS_FOUND",
-      visits: result.rows.map((row) => visitProjection(row, authorized.context, now)),
+      visits: result.rows
+        .filter((row) =>
+          activeCapabilities(authorized.context, row).has(VISIT_CAPABILITIES.READ)
+        )
+        .map((row) => visitProjection(row, authorized.context, now)),
       actions: {
         canPropose:
           authorized.role === "PROFESSIONAL" &&
@@ -1030,7 +1075,10 @@ async function getVisit(input = {}) {
     const authorized = await authorizeRead(client, validated);
     if (authorized.error) return authorized.error;
     const row = await loadVisit(client, authorized.jobId, visitId);
-    if (!row) {
+    if (
+      !row ||
+      !activeCapabilities(authorized.context, row).has(VISIT_CAPABILITIES.READ)
+    ) {
       return failure(404, "VISIT_UNAVAILABLE", "The Visit is unavailable.");
     }
     const history = await loadVisitHistory(client, authorized.jobId, visitId);
@@ -1151,6 +1199,10 @@ async function proposeVisit(input = {}) {
       logger,
       lock: true,
       evaluationId: purpose === "EVALUATION" ? evaluationId : null,
+      approvedQuoteDecisionId: purpose === "APPROVED_WORK"
+        ? approvedQuoteDecisionId
+        : null,
+      allowJobScope: purpose !== "APPROVED_WORK",
     });
     if (authorized.error) return { abort: authorized.error };
     const participantId = authorized.context.actor_participant_id;
@@ -1412,6 +1464,10 @@ async function runVersionCommand({
       evaluationId: current.purpose === "EVALUATION"
         ? current.evaluation_id
         : null,
+      approvedQuoteDecisionId: current.purpose === "APPROVED_WORK"
+        ? current.approved_quote_decision_id
+        : null,
+      allowJobScope: current.purpose !== "APPROVED_WORK",
       logger,
     });
     if (!granted) {
@@ -1633,6 +1689,10 @@ async function requestVisitChange(input = {}) {
       evaluationId: current.purpose === "EVALUATION"
         ? current.evaluation_id
         : null,
+      approvedQuoteDecisionId: current.purpose === "APPROVED_WORK"
+        ? current.approved_quote_decision_id
+        : null,
+      allowJobScope: current.purpose !== "APPROVED_WORK",
       logger,
     });
     if (!granted) {
