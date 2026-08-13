@@ -53,6 +53,7 @@ Current inventory:
 33. `202608100004_create_quote_composition_feedback.sql`
 34. `202608110001_create_request_modification_authority_foundation.sql`
 35. `202608120001_create_business_portfolio_authority_foundation.sql`
+36. `202608130001_create_canonical_visit_persistence_foundation.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -170,6 +171,14 @@ order, future-insert Draft defaults, server-owned feature/privacy/version
 foundations, and an append-only publication-transition ledger. It does not
 classify existing projects, publish Portfolio content, create lifecycle HTTP
 commands, change governed media, or create frontend authority.
+
+`202608130001_create_canonical_visit_persistence_foundation.sql` adds immutable
+Job-child Visit identities, append-only scheduling versions and typed events,
+future command-idempotency persistence, exact approved-Quote decision evidence,
+same-Job Evaluation and Workstream links, and bounded Visit capability
+definitions. It creates no Visit business rows, grants no capability, infers no
+historical schedule, exposes no route, and does not transition Evaluation,
+Quote, Workstream, Activity, Job, Invoice, or completion authority.
 
 ## Migration Ledger and Transactions
 
