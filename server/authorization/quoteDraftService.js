@@ -1138,6 +1138,102 @@ async function loadQuoteProjection(client, quoteId) {
   };
 }
 
+function customerQuoteLineageLabel(quote = {}) {
+  if (quote.lineageType === "REVISED_QUOTE") return "Revised";
+  if (quote.lineageType === "SUPPLEMENTAL_QUOTE") return "Additional";
+  return "Original";
+}
+
+function customerFacingText(value) {
+  const candidate = typeof value === "string"
+    ? value
+    : isPlainObject(value)
+      ? value.description
+      : "";
+  return boundedText(candidate, 1000);
+}
+
+function customerFacingTextList(values) {
+  if (!Array.isArray(values)) return [];
+  return values.map(customerFacingText).filter(Boolean);
+}
+
+function customerScopeItemProjection(item = {}, { includeAmount = false } = {}) {
+  const description = customerFacingText(item);
+  const quantity = safeQuantity(item.quantity);
+  const amountMinor = includeAmount
+    ? safeNonNegativeInteger(item.lineTotalMinor)
+    : null;
+  if (!description || !quantity || (includeAmount && amountMinor == null)) {
+    return null;
+  }
+  const projection = {
+    description,
+    quantity,
+  };
+  if (includeAmount) {
+    projection.amountMinor = amountMinor;
+  }
+  return projection;
+}
+
+function customerQuoteDetailProjection(
+  quote = {},
+  { canApprove = false, canDecline = false } = {}
+) {
+  if (quote.status !== QUOTE_STATUS.ISSUED) return null;
+  const customerDecision = QUOTE_DECISIONS.includes(quote.decisionState)
+    ? quote.decisionState
+    : null;
+  const decisionPending = customerDecision == null;
+  const includedScopeItems = Array.isArray(quote.scopeItems)
+    ? quote.scopeItems
+        .filter((item) => item?.includedInTotal === true)
+        .map((item) => customerScopeItemProjection(item, { includeAmount: true }))
+        .filter(Boolean)
+    : [];
+  const excludedScopeItems = Array.isArray(quote.scopeItems)
+    ? quote.scopeItems
+        .filter((item) => item?.includedInTotal === false)
+        .map((item) => customerScopeItemProjection(item))
+        .filter(Boolean)
+    : [];
+  const persistedExclusions = customerFacingTextList(quote.exclusions).map(
+    (description) => ({ description, quantity: 1 })
+  );
+  const seenExclusions = new Set();
+  const exclusions = [...excludedScopeItems, ...persistedExclusions].filter(
+    ({ description, quantity }) => {
+      const key = `${description}\u0000${quantity}`;
+      if (seenExclusions.has(key)) return false;
+      seenExclusions.add(key);
+      return true;
+    }
+  );
+
+  return {
+    quoteId: quote.id,
+    jobId: quote.jobId,
+    status: QUOTE_STATUS.ISSUED,
+    businessStatus: customerDecision || "WAITING_ON_CUSTOMER",
+    customerDecision,
+    lineageLabel: customerQuoteLineageLabel(quote),
+    totalMinor: safeNonNegativeInteger(quote.totalMinor),
+    currency: validateCurrency(quote.currency),
+    scopeItems: includedScopeItems,
+    conditions: customerFacingTextList(quote.conditions),
+    exclusions,
+    issuedAt: quote.issuedAt || null,
+    decidedAt: quote.decidedAt || null,
+    decisionCommandVersion: positiveInteger(quote.currentVersion),
+    actions: {
+      canViewQuote: true,
+      canApprove: decisionPending && canApprove === true,
+      canDecline: decisionPending && canDecline === true,
+    },
+  };
+}
+
 async function createDraftQuote(input = {}) {
   const validated = validateCommand(input, ["jobId", "currency"]);
   if (validated.error) return validated.error;
@@ -1827,7 +1923,33 @@ async function getCustomerIssuedQuote(input = {}) {
   if (context.status !== QUOTE_STATUS.ISSUED) {
     return failure(404, "QUOTE_UNAVAILABLE", "The Quote is unavailable.");
   }
-  return quoteResult("CUSTOMER_QUOTE_FOUND", 200, await loadQuoteProjection(input.pool, quoteId));
+  const quote = await loadQuoteProjection(input.pool, quoteId);
+  const decisionPending = quote.decisionState == null;
+  const [canApprove, canDecline] = decisionPending
+    ? await Promise.all([
+        hasActiveLifecycleGrant({
+          client: input.pool,
+          participantId: context.actor_participant_id,
+          capability: QUOTE_CAPABILITIES.APPROVE,
+          jobId: context.job_id,
+          logger,
+        }),
+        hasActiveLifecycleGrant({
+          client: input.pool,
+          participantId: context.actor_participant_id,
+          capability: QUOTE_CAPABILITIES.DECLINE,
+          jobId: context.job_id,
+          logger,
+        }),
+      ])
+    : [false, false];
+  return {
+    ok: true,
+    success: true,
+    status: 200,
+    code: "CUSTOMER_QUOTE_FOUND",
+    quote: customerQuoteDetailProjection(quote, { canApprove, canDecline }),
+  };
 }
 
 async function decideIssuedQuote(input = {}, decision) {
@@ -2215,4 +2337,7 @@ module.exports = {
   listDraftQuotesByJob,
   removeDraftScopeItem,
   validateScopeItem,
+  quoteDraftServiceInternals: Object.freeze({
+    customerQuoteDetailProjection,
+  }),
 };

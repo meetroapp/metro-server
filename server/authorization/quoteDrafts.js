@@ -34,8 +34,11 @@ function createQuoteDraftHandlers({
     throw new TypeError("sendPublicDatabaseError must be a function.");
   }
 
-  function handle(operation, action) {
+  function handle(operation, action, { privateNoStore = false } = {}) {
     return async (req, res) => {
+      if (privateNoStore) {
+        res.setHeader?.("Cache-Control", "private, no-store");
+      }
       try {
         return sendQuoteDraftResult(res, await action(req));
       } catch (error) {
@@ -103,12 +106,14 @@ function createQuoteDraftHandlers({
         idempotencyKey: req.headers?.["idempotency-key"],
       })
     ),
-    getCustomerIssuedQuote: handle("get_customer_issued_quote", (req) =>
-      service.getCustomerIssuedQuote({
+    getCustomerIssuedQuote: handle(
+      "get_customer_issued_quote",
+      (req) => service.getCustomerIssuedQuote({
         pool: getPool(req),
         authenticatedActor: req.user,
         quoteId: req.params.quoteId,
-      })
+      }),
+      { privateNoStore: true }
     ),
     approveIssuedQuote: handle("approve_issued_quote", (req) =>
       service.approveIssuedQuote({

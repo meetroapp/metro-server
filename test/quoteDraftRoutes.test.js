@@ -10,8 +10,10 @@ const {
 
 function response() {
   return {
+    headers: {},
     statusCode: null,
     payload: null,
+    setHeader(name, value) { this.headers[name] = value; },
     status(value) { this.statusCode = value; return this; },
     json(value) { this.payload = value; return this; },
   };
@@ -107,4 +109,29 @@ test("handlers forward only governed Draft inputs and idempotency", async () => 
   assert.equal(calls[9][1].lineageType, "SUPPLEMENTAL_QUOTE");
   assert.equal(calls[9][1].reasonCategory, "SUPPLEMENTAL_WORK");
   assert.equal(calls[9][1].totalMinor, undefined);
+});
+
+test("customer Quote detail is private and no-store", async () => {
+  const handlers = createQuoteDraftHandlers({
+    getPool: () => "pool",
+    sendPublicDatabaseError() {},
+    service: {
+      async getCustomerIssuedQuote() {
+        return {
+          ok: true,
+          status: 200,
+          code: "CUSTOMER_QUOTE_FOUND",
+          quote: { quoteId: "quote" },
+        };
+      },
+    },
+  });
+  const res = response();
+  await handlers.getCustomerIssuedQuote({
+    user: { id: 7 },
+    params: { quoteId: "quote" },
+  }, res);
+  assert.equal(res.headers["Cache-Control"], "private, no-store");
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.payload.code, "CUSTOMER_QUOTE_FOUND");
 });

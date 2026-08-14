@@ -272,13 +272,13 @@ test("clean disposable PostgreSQL certifies canonical $920 Draft and issued Quot
   const suffix = randomUUID();
   try {
     const migrations = getMigrationFiles();
-    assert.equal(migrations.length, 33);
+    assert.equal(migrations.length, 38);
     const applied = await runMigrationCollection(pool, migrations, targetMetadata(cleanDatabaseUrl));
     assert.equal(applied.success, true);
-    assert.equal(applied.applied.length, 33);
+    assert.equal(applied.applied.length, 38);
     const replay = await runMigrationCollection(pool, migrations, targetMetadata(cleanDatabaseUrl));
     assert.equal(replay.success, true);
-    assert.equal(replay.skipped.length, 33);
+    assert.equal(replay.skipped.length, 38);
 
     const identities = await createIdentities(pool, suffix);
     const fixture = await createLifecycleFixture(pool, identities, `${suffix}-primary`, "A/C, disposal, lighting, fan and microwave work");
@@ -612,10 +612,23 @@ test("clean disposable PostgreSQL certifies canonical $920 Draft and issued Quot
       logger: quiet,
     });
     assert.equal(customerRead.code, "CUSTOMER_QUOTE_FOUND");
+    assert.equal("authoritySource" in customerRead, false);
     assert.equal(customerRead.quote.status, "ISSUED");
-    assert.equal(customerRead.quote.currentVersion, 15);
+    assert.equal(customerRead.quote.decisionCommandVersion, 15);
     assert.equal(customerRead.quote.totalMinor, 92000);
-    assert.equal(customerRead.quote.decisionState, null);
+    assert.equal(customerRead.quote.customerDecision, null);
+    assert.deepEqual(customerRead.quote.actions, {
+      canViewQuote: true,
+      canApprove: true,
+      canDecline: true,
+    });
+    assert.equal(customerRead.quote.scopeItems.length, 9);
+    assert.equal(customerRead.quote.exclusions.length, 2);
+    assert.equal("relationshipId" in customerRead.quote, false);
+    assert.equal("issuerParticipantId" in customerRead.quote, false);
+    assert.equal("materialsSubtotalMinor" in customerRead.quote, false);
+    assert.equal("laborServiceSubtotalMinor" in customerRead.quote, false);
+    assert.equal("versions" in customerRead.quote, false);
     assert.equal((await getCustomerIssuedQuote({
       pool,
       authenticatedActor: { id: identities.occupantId },
@@ -778,9 +791,13 @@ test("clean disposable PostgreSQL certifies canonical $920 Draft and issued Quot
       logger: quiet,
     });
     assert.equal(approvedParentAfterSupplement.quote.status, "ISSUED");
-    assert.equal(approvedParentAfterSupplement.quote.decisionState, "APPROVED");
+    assert.equal(approvedParentAfterSupplement.quote.customerDecision, "APPROVED");
     assert.equal(approvedParentAfterSupplement.quote.totalMinor, 92000);
-    assert.equal(approvedParentAfterSupplement.quote.versions.at(-1).integrityHash, frozenHash);
+    assert.deepEqual(approvedParentAfterSupplement.quote.actions, {
+      canViewQuote: true,
+      canApprove: false,
+      canDecline: false,
+    });
     assert.equal((await quoteCommand(createDraftQuote, pool, identities.professionalId, {
       jobId: fixture.jobId,
       currency: "USD",
@@ -797,6 +814,18 @@ test("clean disposable PostgreSQL certifies canonical $920 Draft and issued Quot
       expectedIssuedVersion: declinedIssued.currentVersion,
     }, `decline-${suffix}`);
     assert.equal(declined.quote.decisionState, "DECLINED");
+    const declinedCustomerRead = await getCustomerIssuedQuote({
+      pool,
+      authenticatedActor: { id: identities.homeownerId },
+      quoteId: declinedIssued.id,
+      logger: quiet,
+    });
+    assert.equal(declinedCustomerRead.quote.customerDecision, "DECLINED");
+    assert.deepEqual(declinedCustomerRead.quote.actions, {
+      canViewQuote: true,
+      canApprove: false,
+      canDecline: false,
+    });
     assert.equal((await quoteCommand(approveIssuedQuote, pool, identities.homeownerId, {
       quoteId: declinedIssued.id,
       expectedIssuedVersion: declinedIssued.currentVersion,
@@ -991,7 +1020,7 @@ test("clean disposable PostgreSQL certifies canonical $920 Draft and issued Quot
       issue_evidence: 3,
       r22_priced: 1,
       legacy_quote_requests: 0,
-      ledger: 33,
+      ledger: 38,
       no_approvals: true,
       no_procurement: true,
       legacy_contract: 1,
