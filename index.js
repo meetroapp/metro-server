@@ -155,6 +155,9 @@ const {
 const {
   registerProfessionalQuotesRoutes,
 } = require("./server/authorization/professionalQuotes");
+const {
+  registerCustomerJobQuotesRoutes,
+} = require("./server/authorization/customerJobQuotes");
 
 
 const JWT_SECRET = resolveJwtSecret(process.env);
@@ -881,6 +884,13 @@ registerProfessionalScheduleRoutes({
 });
 
 registerProfessionalQuotesRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerCustomerJobQuotesRoutes({
   app,
   authMiddleware,
   getPool,
