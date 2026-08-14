@@ -149,6 +149,9 @@ const {
 const {
   registerApprovedWorkVisitRoutes,
 } = require("./server/workflow/approvedWorkVisits");
+const {
+  registerProfessionalScheduleRoutes,
+} = require("./server/workflow/professionalSchedule");
 
 
 const JWT_SECRET = resolveJwtSecret(process.env);
@@ -861,6 +864,13 @@ registerEvaluationVisitRoutes({
 });
 
 registerApprovedWorkVisitRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerProfessionalScheduleRoutes({
   app,
   authMiddleware,
   getPool,
