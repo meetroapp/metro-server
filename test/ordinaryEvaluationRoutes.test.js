@@ -81,8 +81,10 @@ test("ordinary Job and Finding route families are bounded and authenticated", ()
   assert.ok(routes.some((route) =>
     route.method === "get" && route.path === "/jobs/:jobId/evaluations"
   ));
-  assert.equal(routes.filter((route) => /finding/i.test(route.path)).length, 6);
-  assert.equal(routes.some((route) => route.method === "patch" && /finding/i.test(route.path)), false);
+  assert.equal(routes.filter((route) => /finding/i.test(route.path)).length, 7);
+  assert.equal(routes.some((route) =>
+    route.method === "patch" && route.path === "/findings/:findingId"
+  ), true);
   assert.equal(routes.some((route) => /resolve|recommendation|workstream/i.test(route.path)), false);
   assert.ok(routes.every((route) => route.handlers[0] === auth));
 });

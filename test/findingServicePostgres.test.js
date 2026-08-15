@@ -11,9 +11,11 @@ const { submitProfessionalResponse } = require("../server/relationships/professi
 const { selectProfessionalResponse } = require("../server/relationships/requestSelectionService");
 const { bootstrapLifecycleJob } = require("../server/workflow/jobFoundationService");
 const {
+  completeEvaluation,
   createEvaluation,
   createOrdinaryJobEvaluation,
   getEvaluation,
+  updateEvaluationDraft,
 } = require("../server/authorization/evaluationService");
 const {
   addFindingEvidenceReference,
@@ -22,6 +24,7 @@ const {
   linkFindingConcern,
   listEvaluationFindings,
   submitFinding,
+  updateFinding,
 } = require("../server/authorization/findingService");
 const { getMigrationFiles, runMigrationCollection } = require("../scripts/run-migrations");
 
@@ -278,7 +281,15 @@ test(
         targetMetadata()
       );
       assert.equal(migrations.success, true, JSON.stringify(migrations));
-      assert.equal(migrations.applied.length, 33);
+      assert.equal(migrations.applied.length, 40);
+      const migrationReplay = await runMigrationCollection(
+        pool,
+        getMigrationFiles(),
+        targetMetadata()
+      );
+      assert.equal(migrationReplay.success, true, JSON.stringify(migrationReplay));
+      assert.equal(migrationReplay.applied.length, 0);
+      assert.equal(migrationReplay.skipped.length, 40);
       const identities = await createIdentities(pool, suffix);
       const fixture = await createLifecycleFixture(
         pool,
@@ -292,14 +303,28 @@ test(
         fixture,
         `${suffix}-acceptance`
       );
+      const completed = await completeEvaluation({
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+        evaluationId: evaluation.evaluation.id,
+        expectedVersion: 1,
+        idempotencyKey: `finding-evaluation-complete-${suffix}`,
+        logger,
+      });
+      assert.equal(completed.ok, true);
+      assert.equal(completed.evaluation.status, "completed");
       const evaluationBefore = await pool.query(
         `
         SELECT count(*)::integer AS versions,
-          max(observations) AS observations
+          max(observations) AS observations,
+          (SELECT count(*) FROM lifecycle_authority_grants
+            WHERE job_id = $2
+              AND (capability LIKE 'quote.%'
+                OR capability LIKE 'approval.%'))::integer AS downstream_grants
         FROM canonical_evaluation_versions
         WHERE evaluation_id = $1
         `,
-        [evaluation.evaluation.id]
+        [evaluation.evaluation.id, fixture.jobId]
       );
 
       const submitInput = {
@@ -307,6 +332,7 @@ test(
         authenticatedActor: { id: identities.professionalId },
         evaluationId: evaluation.evaluation.id,
         statement: "garbage disposal and drainage fault",
+        customerVisible: true,
         idempotencyKey: `finding-submit-${suffix}`,
         logger,
       };
@@ -323,6 +349,29 @@ test(
         statement: "different semantic statement",
       });
       assert.equal(submitConflict.code, "COMMERCIAL_IDEMPOTENCY_KEY_CONFLICT");
+
+      const updateInput = {
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+        findingId: proposed.finding.id,
+        expectedVersion: 1,
+        statement: "possible garbage disposal and drainage fault",
+        customerVisible: true,
+        idempotencyKey: `finding-update-${suffix}`,
+        logger,
+      };
+      const updated = await updateFinding(updateInput);
+      assert.equal(updated.ok, true);
+      assert.equal(updated.finding.currentVersion, 2);
+      assert.equal(updated.finding.confirmationState, "PROPOSED");
+      assert.equal(updated.finding.resolutionState, "OPEN");
+      assert.equal(updated.finding.customerVisible, true);
+      assert.equal((await updateFinding(updateInput)).replayed, true);
+      assert.equal((await updateFinding({
+        ...updateInput,
+        expectedVersion: 1,
+        idempotencyKey: `finding-update-stale-${suffix}`,
+      })).code, "STALE_FINDING_VERSION");
 
       const linkInput = {
         pool,
@@ -407,7 +456,7 @@ test(
         pool,
         authenticatedActor: { id: identities.professionalId },
         findingId: proposed.finding.id,
-        expectedVersion: 1,
+        expectedVersion: 2,
         idempotencyKey: `finding-confirm-${suffix}`,
         logger,
       };
@@ -415,13 +464,14 @@ test(
       assert.equal(confirmed.ok, true);
       assert.equal(confirmed.finding.confirmationState, "CONFIRMED");
       assert.equal(confirmed.finding.resolutionState, "OPEN");
-      assert.equal(confirmed.finding.currentVersion, 2);
+      assert.equal(confirmed.finding.currentVersion, 3);
       assert.equal(confirmed.finding.versions[0].confirmationState, "PROPOSED");
       assert.equal(confirmed.finding.versions[0].statement, submitInput.statement);
+      assert.equal(confirmed.finding.versions[1].statement, updateInput.statement);
       assert.equal((await confirmFinding(confirmInput)).replayed, true);
       const confirmConflict = await confirmFinding({
         ...confirmInput,
-        expectedVersion: 2,
+        expectedVersion: 3,
       });
       assert.equal(confirmConflict.code, "COMMERCIAL_IDEMPOTENCY_KEY_CONFLICT");
 
@@ -636,6 +686,17 @@ test(
       });
       assert.equal(emergencyFinding.code, "FINDING_UNAVAILABLE");
 
+      const completedEdit = await updateEvaluationDraft({
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+        evaluationId: evaluation.evaluation.id,
+        expectedVersion: 2,
+        content: evaluationContent("Attempted completed Evaluation rewrite."),
+        idempotencyKey: `finding-evaluation-immutable-${suffix}`,
+        logger,
+      });
+      assert.equal(completedEdit.code, "EVALUATION_COMPLETED");
+
       const acceptance = await pool.query(
         `
         SELECT
@@ -651,36 +712,40 @@ test(
           (SELECT count(*) FROM commercial_authority_aggregates
             WHERE aggregate_type = 'quote')::integer AS quotes,
           (SELECT count(*) FROM lifecycle_authority_grants
-            WHERE capability LIKE 'quote.%' OR capability LIKE 'approval.%')::integer AS downstream_grants,
-          to_regclass('public.workstreams') IS NULL AS no_workstreams,
-          to_regclass('public.recommendations') IS NULL AS no_recommendations
+            WHERE job_id = $3
+              AND (capability LIKE 'quote.%'
+                OR capability LIKE 'approval.%'))::integer AS downstream_grants,
+          (SELECT count(*) FROM canonical_workstream_versions
+            WHERE job_id = $3)::integer AS workstream_versions,
+          (SELECT count(*) FROM canonical_recommendation_versions
+            WHERE job_id = $3)::integer AS recommendation_versions
         FROM canonical_evaluation_finding_versions AS current_finding
         INNER JOIN canonical_finding_concern_links
           ON canonical_finding_concern_links.finding_id = current_finding.finding_id
         INNER JOIN reported_concerns
           ON reported_concerns.id = canonical_finding_concern_links.concern_id
         WHERE current_finding.finding_id = $2
-          AND current_finding.version = 2
+          AND current_finding.version = 3
         `,
-        [evaluation.evaluation.id, proposed.finding.id]
+        [evaluation.evaluation.id, proposed.finding.id, fixture.jobId]
       );
       assert.deepEqual(acceptance.rows[0], {
         original_text: "dishwasher issue",
-        statement: "garbage disposal and drainage fault",
+        statement: "possible garbage disposal and drainage fault",
         confirmation_state: "CONFIRMED",
         resolution_state: "OPEN",
         relationship_type: "EXPLAINS",
         evaluation_versions: evaluationBefore.rows[0].versions,
         evaluation_observations: evaluationBefore.rows[0].observations,
         quotes: 0,
-        downstream_grants: 0,
-        no_workstreams: true,
-        no_recommendations: true,
+        downstream_grants: evaluationBefore.rows[0].downstream_grants,
+        workstream_versions: 0,
+        recommendation_versions: 0,
       });
       const ledger = await pool.query(
         "SELECT count(*)::integer AS count FROM schema_migrations"
       );
-      assert.equal(ledger.rows[0].count, 33);
+      assert.equal(ledger.rows[0].count, 40);
 
       const logText = JSON.stringify(events);
       assert.match(logText, /FINDING_SUBMITTED/);

@@ -13,6 +13,7 @@ const {
   addFindingEvidenceReference,
   confirmFinding,
   submitFinding,
+  updateFinding,
 } = require("../server/authorization/findingService");
 
 test("Finding authority exposes only submit and confirm capabilities", () => {
@@ -31,6 +32,7 @@ test("Finding commands are explicit and subordinate to the Evaluation aggregate"
     "finding.confirm",
     "finding.evidence.add",
     "finding.submit",
+    "finding.update",
   ]);
   assert.deepEqual(FINDING_RELATIONSHIPS, [
     "EXPLAINS",
@@ -71,10 +73,17 @@ test("invalid Finding inputs fail before database access", async () => {
     expectedVersion: 1,
   });
   assert.equal(invalidConfirmation.code, "INVALID_FINDING_CONFIRMATION");
+  const invalidUpdate = await updateFinding({
+    ...base,
+    findingId: "not-a-finding",
+    expectedVersion: 1,
+    statement: "Updated Finding statement",
+  });
+  assert.equal(invalidUpdate.code, "INVALID_FINDING_UPDATE");
   assert.equal(touched, false);
 });
 
-test("Finding runtime has no update-in-place, resolution, downstream, or source-domain writes", () => {
+test("Finding runtime versions updates without resolution, downstream, or source-domain writes", () => {
   const source = readFileSync(
     join(__dirname, "..", "server", "authorization", "findingService.js"),
     "utf8"

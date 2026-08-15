@@ -142,6 +142,19 @@ function createEvaluationHandlers({
         authenticatedActor: req.user,
         evaluationId: req.params.evaluationId,
         statement: req.body?.statement,
+        customerVisible: req.body?.customerVisible,
+        idempotencyKey: req.headers?.["idempotency-key"],
+      })
+    ),
+
+    updateFinding: handle("update_finding", (req) =>
+      findingAuthority.updateFinding({
+        pool: getPool(req),
+        authenticatedActor: req.user,
+        findingId: req.params.findingId,
+        expectedVersion: req.body?.expectedVersion,
+        statement: req.body?.statement,
+        customerVisible: req.body?.customerVisible,
         idempotencyKey: req.headers?.["idempotency-key"],
       })
     ),
@@ -241,6 +254,11 @@ function registerEvaluationRoutes({
     "/findings/:findingId",
     authMiddleware,
     handlers.getFinding
+  );
+  app.patch(
+    "/findings/:findingId",
+    authMiddleware,
+    handlers.updateFinding
   );
   app.post(
     "/findings/:findingId/concern-links",

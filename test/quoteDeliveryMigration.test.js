@@ -12,8 +12,8 @@ const sql = readFileSync(join(__dirname, "..", "migrations", migrationName), "ut
 
 test("Quote delivery is the single additive migration after the certified baseline", () => {
   const migrations = getMigrationFiles();
-  assert.equal(migrations.length, 39);
-  assert.equal(migrations.at(-1).filename, migrationName);
+  assert.equal(migrations.length, 40);
+  assert.ok(migrations.some((migration) => migration.filename === migrationName));
   assert.doesNotMatch(sql, /^\s*(?:BEGIN|COMMIT|ROLLBACK)\s*;/im);
   assert.doesNotMatch(sql, /\b(?:DROP\s+(?:TABLE|COLUMN)|TRUNCATE|DELETE\s+FROM)\b/i);
 });

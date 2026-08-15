@@ -20,6 +20,12 @@ test("Recommendation constants expose only bounded capabilities and states", () 
   assert.equal(service.RECOMMENDATION_STATUSES.includes("DEFERRED"), true);
   assert.equal(service.RECOMMENDATION_STATUSES.includes("EXCLUDED_FROM_CURRENT_QUOTE"), true);
   assert.equal(service.RECOMMENDATION_STATUSES.some((status) => /APPROVED|PAID/.test(status)), false);
+  assert.deepEqual(Object.values(service.RECOMMENDATION_COMMANDS), [
+    "recommendation.create",
+    "recommendation.update",
+    "recommendation.transition",
+    "customer_constraint.record",
+  ]);
 });
 
 test("Recommendation commands reject invalid lineage and server-owned scope", async () => {
@@ -49,6 +55,14 @@ test("Recommendation commands reject invalid lineage and server-owned scope", as
     targetStatus: "SUPERSEDED",
     idempotencyKey: "key",
   })).code, "INVALID_RECOMMENDATION_REPLACEMENT");
+  assert.equal((await service.updateRecommendation({
+    pool,
+    authenticatedActor: { id: 1 },
+    recommendationId: UUID,
+    expectedVersion: 0,
+    statement: "Updated recommendation",
+    idempotencyKey: "key",
+  })).code, "INVALID_RECOMMENDATION_UPDATE");
 });
 
 test("service source creates no Quote, procurement, scheduling, or Job-completion authority", () => {
@@ -58,6 +72,7 @@ test("service source creates no Quote, procurement, scheduling, or Job-completio
   );
   assert.doesNotMatch(source, /quote\.(?:issue|approve)|procurement\.|scheduling\.|job\.complete/i);
   assert.doesNotMatch(source, /(?:INSERT INTO|UPDATE|DELETE FROM)\s+(?:jobs|canonical_workstreams|canonical_evaluation_finding_versions|canonical_quotes|quotes)\b/i);
+  assert.doesNotMatch(source, /UPDATE\s+canonical_recommendation_versions/i);
   const logCalls = source.match(/logger\.(?:info|warn)\([\s\S]*?\n\s*\}\)/g) || [];
   assert.ok(logCalls.length > 0);
   for (const call of logCalls) {

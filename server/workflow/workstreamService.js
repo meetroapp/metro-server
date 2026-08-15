@@ -1344,6 +1344,7 @@ async function loadFindingForResolution(
       findings.author_participant_id, findings.created_at,
       versions.version, versions.evaluation_version, versions.statement,
       versions.confirmation_state, versions.resolution_state,
+      versions.customer_visible,
       versions.created_by_participant_id,
       versions.created_at AS version_created_at
     FROM canonical_evaluation_findings AS findings
@@ -1522,6 +1523,7 @@ async function resolveFinding(input = {}) {
       statement: current.statement,
       confirmationState: current.confirmation_state,
       resolutionState: targetResolutionState,
+      customerVisible: current.customer_visible === true,
       participantId,
     });
     await client.query(
@@ -1529,9 +1531,9 @@ async function resolveFinding(input = {}) {
       INSERT INTO canonical_evaluation_finding_versions (
         finding_id, version, evaluation_id, evaluation_version, job_id,
         statement, confirmation_state, resolution_state,
-        created_by_participant_id, integrity_hash
+        customer_visible, created_by_participant_id, integrity_hash
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
       `,
       [
         findingId,
@@ -1542,6 +1544,7 @@ async function resolveFinding(input = {}) {
         current.statement,
         current.confirmation_state,
         targetResolutionState,
+        current.customer_visible === true,
         participantId,
         findingIntegrity,
       ]

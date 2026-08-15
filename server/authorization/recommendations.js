@@ -58,6 +58,18 @@ function createRecommendationHandlers({
         kind: req.body?.kind,
         statement: req.body?.statement,
         primaryRecommendationId: req.body?.primaryRecommendationId,
+        customerVisible: req.body?.customerVisible,
+        idempotencyKey: req.headers?.["idempotency-key"],
+      })
+    ),
+    updateRecommendation: handle("update_recommendation", (req) =>
+      service.updateRecommendation({
+        pool: getPool(req),
+        authenticatedActor: req.user,
+        recommendationId: req.params.recommendationId,
+        expectedVersion: req.body?.expectedVersion,
+        statement: req.body?.statement,
+        customerVisible: req.body?.customerVisible,
         idempotencyKey: req.headers?.["idempotency-key"],
       })
     ),
@@ -130,6 +142,11 @@ function registerRecommendationRoutes({
     "/recommendations/:recommendationId",
     authMiddleware,
     handlers.getRecommendation
+  );
+  app.patch(
+    "/recommendations/:recommendationId",
+    authMiddleware,
+    handlers.updateRecommendation
   );
   app.post(
     "/recommendations/:recommendationId/constraints",

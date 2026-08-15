@@ -30,6 +30,7 @@ const RECOMMENDATION_CAPABILITIES = Object.freeze({
 
 const RECOMMENDATION_COMMANDS = Object.freeze({
   CREATE: "recommendation.create",
+  UPDATE: "recommendation.update",
   TRANSITION: "recommendation.transition",
   RECORD_CONSTRAINT: "customer_constraint.record",
 });
@@ -305,6 +306,7 @@ async function loadRecommendationContext(
       current.evaluation_version,
       current.statement,
       current.status,
+      current.customer_visible,
       current.created_at AS version_created_at
     FROM canonical_recommendations recommendations
     INNER JOIN jobs ON jobs.id = recommendations.job_id
@@ -316,7 +318,8 @@ async function loadRecommendationContext(
       ON participants.job_id = recommendations.job_id
       AND participants.user_id = $2
     INNER JOIN LATERAL (
-      SELECT version, evaluation_version, statement, status, created_at
+      SELECT version, evaluation_version, statement, status, customer_visible,
+        created_at
       FROM canonical_recommendation_versions versions
       WHERE versions.recommendation_id = recommendations.id
       ORDER BY versions.version DESC
@@ -381,10 +384,12 @@ async function loadRecommendationProjection(client, recommendationId) {
     `
     SELECT recommendations.*,
       current.version, current.evaluation_version, current.statement,
-      current.status, current.created_at AS version_created_at
+      current.status, current.customer_visible,
+      current.created_at AS version_created_at
     FROM canonical_recommendations recommendations
     INNER JOIN LATERAL (
-      SELECT version, evaluation_version, statement, status, created_at
+      SELECT version, evaluation_version, statement, status, customer_visible,
+        created_at
       FROM canonical_recommendation_versions versions
       WHERE versions.recommendation_id = recommendations.id
       ORDER BY versions.version DESC LIMIT 1
@@ -396,7 +401,8 @@ async function loadRecommendationProjection(client, recommendationId) {
   )).rows[0];
   if (!identity) return null;
   const versions = await client.query(
-    `SELECT version, evaluation_version, statement, status, created_at
+    `SELECT version, evaluation_version, statement, status, customer_visible,
+       created_at
      FROM canonical_recommendation_versions
      WHERE recommendation_id = $1 ORDER BY version ASC`,
     [recommendationId]
@@ -426,6 +432,7 @@ async function loadRecommendationProjection(client, recommendationId) {
     evaluationVersion: Number(identity.evaluation_version),
     statement: identity.statement,
     status: identity.status,
+    customerVisible: identity.customer_visible === true,
     createdAt: identity.created_at,
     versionCreatedAt: identity.version_created_at,
     versions: versions.rows.map((row) => ({
@@ -433,6 +440,7 @@ async function loadRecommendationProjection(client, recommendationId) {
       evaluationVersion: Number(row.evaluation_version),
       statement: row.statement,
       status: row.status,
+      customerVisible: row.customer_visible === true,
       createdAt: row.created_at,
     })),
     constraints: constraints.rows.map((row) => ({
@@ -466,15 +474,22 @@ async function createRecommendation(input = {}) {
     "kind",
     "statement",
     "primaryRecommendationId",
+    "customerVisible",
   ]);
   if (validated.error) return validated.error;
   const findingId = normalizedUuid(input.findingId);
   const kind = String(input.kind || "").trim().toUpperCase();
   const statement = boundedText(input.statement, 5000);
+  const customerVisible = input.customerVisible === true;
   const primaryRecommendationId = input.primaryRecommendationId == null
     ? null
     : normalizedUuid(input.primaryRecommendationId);
-  if (!findingId || !RECOMMENDATION_KINDS.includes(kind) || !statement) {
+  if (
+    !findingId ||
+    !RECOMMENDATION_KINDS.includes(kind) ||
+    !statement ||
+    (input.customerVisible != null && typeof input.customerVisible !== "boolean")
+  ) {
     return failure(400, "INVALID_RECOMMENDATION", "The Recommendation is invalid.");
   }
   if ((kind === "PRIMARY" && primaryRecommendationId) ||
@@ -525,6 +540,7 @@ async function createRecommendation(input = {}) {
       kind,
       statement,
       primaryRecommendationId,
+      customerVisible,
     });
     const idempotency = await reserveCommand({
       client,
@@ -596,9 +612,9 @@ async function createRecommendation(input = {}) {
       INSERT INTO canonical_recommendation_versions (
         recommendation_id, version, job_id, finding_id, evaluation_id,
         evaluation_version, statement, status, created_by_participant_id,
-        integrity_hash
+        customer_visible, integrity_hash
       )
-      VALUES ($1, 1, $2, $3, $4, $5, $6, 'ACTIVE', $7, $8)
+      VALUES ($1, 1, $2, $3, $4, $5, $6, 'ACTIVE', $7, $8, $9)
       `,
       [
         recommendationId,
@@ -608,6 +624,7 @@ async function createRecommendation(input = {}) {
         Number(context.evaluation_version),
         statement,
         context.actor_participant_id,
+        customerVisible,
         integrityHash({
           recommendationId,
           version: 1,
@@ -617,6 +634,7 @@ async function createRecommendation(input = {}) {
           evaluationVersion: Number(context.evaluation_version),
           statement,
           status: "ACTIVE",
+          customerVisible,
           actorParticipantId: context.actor_participant_id,
         }),
       ]
@@ -634,6 +652,139 @@ async function createRecommendation(input = {}) {
         findingId,
         kind,
         version: 1,
+      }),
+    };
+  });
+}
+
+async function updateRecommendation(input = {}) {
+  const validated = validateCommand(input, [
+    "recommendationId",
+    "expectedVersion",
+    "statement",
+    "customerVisible",
+  ]);
+  if (validated.error) return validated.error;
+  const recommendationId = normalizedUuid(input.recommendationId);
+  const expectedVersion = positiveInteger(input.expectedVersion);
+  const statement = boundedText(input.statement, 5000);
+  const customerVisible = input.customerVisible === true;
+  if (
+    !recommendationId ||
+    !expectedVersion ||
+    !statement ||
+    (input.customerVisible != null && typeof input.customerVisible !== "boolean")
+  ) {
+    return failure(
+      400,
+      "INVALID_RECOMMENDATION_UPDATE",
+      "The Recommendation update is invalid."
+    );
+  }
+  const logger = safeLogger(input.logger);
+
+  return runTransaction(input.pool, async (client) => {
+    const context = await loadRecommendationContext(
+      client,
+      recommendationId,
+      validated.actorId,
+      { lock: true }
+    );
+    const authorityError = await requireAuthority({
+      client,
+      context,
+      capability: RECOMMENDATION_CAPABILITIES.CREATE,
+      logger,
+    });
+    if (authorityError) return { abort: authorityError };
+    const idempotency = await reserveCommand({
+      client,
+      participantId: context.actor_participant_id,
+      jobId: context.job_id,
+      commandName: RECOMMENDATION_COMMANDS.UPDATE,
+      commandScope: `recommendation:${recommendationId}:update`,
+      idempotencyKey: validated.idempotencyKey,
+      requestFingerprint: fingerprint({
+        recommendationId,
+        expectedVersion,
+        statement,
+        customerVisible,
+      }),
+    });
+    if (idempotency.error) return { abort: idempotency.error };
+    if (idempotency.replay) {
+      return { result: { ...idempotency.replay, replayed: true } };
+    }
+    if (Number(context.version) !== expectedVersion) {
+      return {
+        abort: failure(
+          409,
+          "STALE_RECOMMENDATION_VERSION",
+          "The Recommendation version is stale."
+        ),
+      };
+    }
+    if (context.status !== "ACTIVE") {
+      return {
+        abort: failure(
+          409,
+          "RECOMMENDATION_IMMUTABLE",
+          "Only an active Recommendation can be updated."
+        ),
+      };
+    }
+    const nextVersion = expectedVersion + 1;
+    await client.query(
+      `
+      INSERT INTO canonical_recommendation_versions (
+        recommendation_id, version, job_id, finding_id, evaluation_id,
+        evaluation_version, statement, status, created_by_participant_id,
+        customer_visible, integrity_hash
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, 'ACTIVE', $8, $9, $10)
+      `,
+      [
+        recommendationId,
+        nextVersion,
+        context.job_id,
+        context.finding_id,
+        context.evaluation_id,
+        Number(context.evaluation_version),
+        statement,
+        context.actor_participant_id,
+        customerVisible,
+        integrityHash({
+          recommendationId,
+          version: nextVersion,
+          jobId: context.job_id,
+          findingId: context.finding_id,
+          evaluationId: context.evaluation_id,
+          evaluationVersion: Number(context.evaluation_version),
+          statement,
+          status: "ACTIVE",
+          customerVisible,
+          actorParticipantId: context.actor_participant_id,
+        }),
+      ]
+    );
+    const recommendation = await loadRecommendationProjection(
+      client,
+      recommendationId
+    );
+    const result = commandResult(
+      "RECOMMENDATION_UPDATED",
+      200,
+      recommendation
+    );
+    await completeCommand(client, idempotency.reservation.id, result);
+    return {
+      result,
+      afterCommit: () => logger.info("Recommendation updated", {
+        code: "RECOMMENDATION_UPDATED",
+        recommendationId,
+        jobId: context.job_id,
+        findingId: context.finding_id,
+        version: nextVersion,
       }),
     };
   });
@@ -895,9 +1046,9 @@ async function transitionRecommendation(input = {}) {
       INSERT INTO canonical_recommendation_versions (
         recommendation_id, version, job_id, finding_id, evaluation_id,
         evaluation_version, statement, status, created_by_participant_id,
-        integrity_hash
+        customer_visible, integrity_hash
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
       `,
       [
         recommendationId,
@@ -909,6 +1060,7 @@ async function transitionRecommendation(input = {}) {
         context.statement,
         targetStatus,
         context.actor_participant_id,
+        context.customer_visible === true,
         integrityHash({
           recommendationId,
           version: nextVersion,
@@ -918,6 +1070,7 @@ async function transitionRecommendation(input = {}) {
           evaluationVersion: Number(context.evaluation_version),
           statement: context.statement,
           status: targetStatus,
+          customerVisible: context.customer_visible === true,
           actorParticipantId: context.actor_participant_id,
         }),
       ]
@@ -994,4 +1147,5 @@ module.exports = {
   listRecommendationsByFinding,
   recordCustomerConstraint,
   transitionRecommendation,
+  updateRecommendation,
 };

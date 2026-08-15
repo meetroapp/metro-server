@@ -22,6 +22,7 @@ test("Recommendation routes register only the bounded Slice 004 surface", () => 
   const app = {
     get(path) { routes.push(["GET", path]); },
     post(path) { routes.push(["POST", path]); },
+    patch(path) { routes.push(["PATCH", path]); },
   };
   registerRecommendationRoutes({
     app,
@@ -34,6 +35,7 @@ test("Recommendation routes register only the bounded Slice 004 surface", () => 
     ["POST", "/findings/:findingId/recommendations"],
     ["GET", "/findings/:findingId/recommendations"],
     ["GET", "/recommendations/:recommendationId"],
+    ["PATCH", "/recommendations/:recommendationId"],
     ["POST", "/recommendations/:recommendationId/constraints"],
     ["POST", "/recommendations/:recommendationId/transition"],
   ]);
@@ -54,6 +56,10 @@ test("handlers pass bounded client fields and idempotency", async () => {
     async getRecommendation(input) {
       calls.push(["get", input]);
       return { ok: true, status: 200, code: "RECOMMENDATION_FOUND", recommendation: { id: "r" } };
+    },
+    async updateRecommendation(input) {
+      calls.push(["update", input]);
+      return { ok: true, status: 200, code: "RECOMMENDATION_UPDATED", recommendation: { id: "r" } };
     },
     async recordCustomerConstraint(input) {
       calls.push(["constraint", input]);
@@ -76,6 +82,7 @@ test("handlers pass bounded client fields and idempotency", async () => {
     body: {
       kind: "ALTERNATIVE",
       statement: "R-22 recharge - $350",
+      customerVisible: true,
       primaryRecommendationId: "primary",
       constraintType: "BUDGET",
       expectedVersion: 1,
@@ -87,6 +94,7 @@ test("handlers pass bounded client fields and idempotency", async () => {
     "createRecommendation",
     "listRecommendations",
     "getRecommendation",
+    "updateRecommendation",
     "recordConstraint",
     "transitionRecommendation",
   ]) {
@@ -95,10 +103,11 @@ test("handlers pass bounded client fields and idempotency", async () => {
     assert.ok([200, 201].includes(res.statusCode));
     assert.equal(res.payload.success, true);
   }
-  assert.equal(calls.length, 5);
+  assert.equal(calls.length, 6);
   assert.equal(calls[0][1].jobId, undefined);
-  assert.equal(calls[4][1].targetStatus, "DEFERRED");
-  assert.equal(calls[4][1].idempotencyKey, "key");
+  assert.equal(calls[3][1].customerVisible, true);
+  assert.equal(calls[5][1].targetStatus, "DEFERRED");
+  assert.equal(calls[5][1].idempotencyKey, "key");
 });
 
 test("handler failures remain public and bounded", async () => {

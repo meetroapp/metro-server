@@ -57,12 +57,19 @@ Current inventory:
 37. `202608130002_activate_evaluation_visit_authority.sql`
 38. `202608130003_activate_approved_work_visit_authority.sql`
 39. `202608140001_create_canonical_quote_delivery_foundation.sql`
+40. `202608150001_activate_customer_safe_efr.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
 
 This inventory records migration source files, not applied database state.
 Migration creation and governed migration execution remain separate operations.
+
+`202608150001_activate_customer_safe_efr.sql` adds explicit, conservative
+customer visibility to append-only Finding and Recommendation versions and
+registers bounded version-edit commands. Existing EFR records remain
+professional-only and no customer grant, Quote, decision, Workstream, or Job
+state is changed.
 
 `202608030002_create_canonical_alerts.sql` creates the additive
 recipient-scoped `alerts` table for canonical backend alert persistence. It

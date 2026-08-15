@@ -88,3 +88,46 @@ test("Finding confirmation accepts only expected version from the command body",
   assert.equal(Object.hasOwn(received, "statement"), false);
   assert.equal(Object.hasOwn(received, "resolutionState"), false);
 });
+
+test("Finding update derives exact identity and bounded editable fields", async () => {
+  let received;
+  const handlers = createEvaluationHandlers({
+    getPool: () => ({ query() {} }),
+    sendPublicDatabaseError() { throw new Error("not expected"); },
+    service: {},
+    findingAuthority: {
+      async updateFinding(input) {
+        received = input;
+        return {
+          ok: true,
+          status: 200,
+          code: "FINDING_UPDATED",
+          finding: { id: input.findingId, currentVersion: 2 },
+        };
+      },
+    },
+  });
+  const res = response();
+  await handlers.updateFinding({
+    user: { id: 17 },
+    params: { findingId: "finding-from-path" },
+    headers: { "idempotency-key": "finding-update-key" },
+    body: {
+      expectedVersion: 1,
+      statement: "Updated professional observation",
+      customerVisible: true,
+      jobId: "browser-job",
+      confirmationState: "CONFIRMED",
+    },
+  }, res);
+  assert.deepEqual(received, {
+    pool: received.pool,
+    authenticatedActor: { id: 17 },
+    findingId: "finding-from-path",
+    expectedVersion: 1,
+    statement: "Updated professional observation",
+    customerVisible: true,
+    idempotencyKey: "finding-update-key",
+  });
+  assert.equal(res.statusCode, 200);
+});

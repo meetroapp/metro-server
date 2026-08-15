@@ -30,6 +30,7 @@ const FINDING_CAPABILITIES = Object.freeze({
 
 const FINDING_COMMANDS = Object.freeze({
   SUBMIT: "finding.submit",
+  UPDATE: "finding.update",
   LINK_CONCERN: "finding.concern.link",
   ADD_EVIDENCE: "finding.evidence.add",
   CONFIRM: "finding.confirm",
@@ -287,6 +288,7 @@ function findingVersionProjection(row) {
     statement: row.statement,
     confirmationState: row.confirmation_state,
     resolutionState: row.resolution_state,
+    customerVisible: row.customer_visible === true,
     createdByParticipantId: row.created_by_participant_id,
     integrity: {
       algorithm: row.integrity_algorithm,
@@ -341,6 +343,7 @@ async function findingProjection(client, identity, context) {
     statement: current.statement,
     confirmationState: current.confirmationState,
     resolutionState: current.resolutionState,
+    customerVisible: current.customerVisible,
     evaluationVersion: current.evaluationVersion,
     createdAt: identity.created_at,
     versions,
@@ -410,6 +413,7 @@ function integrityHash({
   statement,
   confirmationState,
   resolutionState,
+  customerVisible = false,
   actorParticipantId,
 }) {
   return fingerprint({
@@ -422,15 +426,24 @@ function integrityHash({
     statement,
     confirmationState,
     resolutionState,
+    customerVisible,
     actorParticipantId,
   });
 }
 
 async function submitFinding(input = {}) {
-  const validated = validateBaseCommand(input, ["evaluationId", "statement"]);
+  const validated = validateBaseCommand(input, [
+    "evaluationId",
+    "statement",
+    "customerVisible",
+  ]);
   if (validated.error) return validated.error;
   const evaluationId = normalizedUuid(input.evaluationId);
   const statement = boundedText(input.statement, 5000);
+  const customerVisible = input.customerVisible === true;
+  if (input.customerVisible != null && typeof input.customerVisible !== "boolean") {
+    return failure(400, "INVALID_FINDING_VISIBILITY", "Finding visibility is invalid.");
+  }
   if (!evaluationId) {
     return failure(400, "INVALID_EVALUATION_ID", "A valid Evaluation ID is required.");
   }
@@ -460,7 +473,7 @@ async function submitFinding(input = {}) {
       commandName: FINDING_COMMANDS.SUBMIT,
       commandScope: `finding:submit:evaluation:${evaluationId}`,
       idempotencyKey: validated.idempotencyKey,
-      requestFingerprint: fingerprint({ evaluationId, statement }),
+      requestFingerprint: fingerprint({ evaluationId, statement, customerVisible }),
     });
     if (idempotency.error) return { abort: idempotency.error };
     if (idempotency.replay) {
@@ -474,7 +487,7 @@ async function submitFinding(input = {}) {
         }),
       };
     }
-    if (context.evaluation_status !== "draft") {
+    if (!["draft", "completed"].includes(context.evaluation_status)) {
       return {
         abort: failure(
           409,
@@ -499,9 +512,9 @@ async function submitFinding(input = {}) {
       INSERT INTO canonical_evaluation_finding_versions (
         finding_id, version, evaluation_id, evaluation_version, job_id,
         statement, confirmation_state, resolution_state,
-        created_by_participant_id, integrity_hash
+        customer_visible, created_by_participant_id, integrity_hash
       )
-      VALUES ($1, 1, $2, $3, $4, $5, 'PROPOSED', 'OPEN', $6, $7)
+      VALUES ($1, 1, $2, $3, $4, $5, 'PROPOSED', 'OPEN', $6, $7, $8)
       `,
       [
         findingId,
@@ -509,6 +522,7 @@ async function submitFinding(input = {}) {
         Number(context.evaluation_version),
         context.job_id,
         statement,
+        customerVisible,
         context.actor_participant_id,
         integrityHash({
           findingId,
@@ -519,6 +533,7 @@ async function submitFinding(input = {}) {
           statement,
           confirmationState: "PROPOSED",
           resolutionState: "OPEN",
+          customerVisible,
           actorParticipantId: context.actor_participant_id,
         }),
       ]
@@ -542,6 +557,127 @@ async function submitFinding(input = {}) {
         findingId,
         jobId: context.job_id,
         version: 1,
+      }),
+    };
+  });
+}
+
+async function updateFinding(input = {}) {
+  const validated = validateBaseCommand(input, [
+    "findingId",
+    "expectedVersion",
+    "statement",
+    "customerVisible",
+  ]);
+  if (validated.error) return validated.error;
+  const findingId = normalizedUuid(input.findingId);
+  const expectedVersion = positiveInteger(input.expectedVersion);
+  const statement = boundedText(input.statement, 5000);
+  const customerVisible = input.customerVisible === true;
+  if (
+    !findingId ||
+    !expectedVersion ||
+    !statement ||
+    (input.customerVisible != null && typeof input.customerVisible !== "boolean")
+  ) {
+    return failure(400, "INVALID_FINDING_UPDATE", "The Finding update is invalid.");
+  }
+  const logger = safeLogger(input.logger);
+
+  return runTransaction(input.pool, async (client) => {
+    const authorized = await loadAuthorizedFinding({
+      client,
+      findingId,
+      actorUserId: validated.actorId,
+      capability: FINDING_CAPABILITIES.SUBMIT,
+      logger,
+      lock: true,
+    });
+    if (authorized.error) return { abort: authorized.error };
+    const { identity, context } = authorized;
+    const idempotency = await reserveIdempotency({
+      client,
+      actorUserId: validated.actorId,
+      commandName: FINDING_COMMANDS.UPDATE,
+      commandScope: `finding:update:${findingId}`,
+      idempotencyKey: validated.idempotencyKey,
+      requestFingerprint: fingerprint({
+        findingId,
+        expectedVersion,
+        statement,
+        customerVisible,
+      }),
+    });
+    if (idempotency.error) return { abort: idempotency.error };
+    if (idempotency.replay) {
+      return { result: { ...idempotency.replay, replayed: true } };
+    }
+    const current = await loadFindingVersion(client, findingId, { lock: true });
+    if (Number(current.version) !== expectedVersion) {
+      return {
+        abort: failure(409, "STALE_FINDING_VERSION", "The Finding version is no longer current."),
+      };
+    }
+    if (
+      !["draft", "completed"].includes(context.evaluation_status) ||
+      current.confirmation_state !== "PROPOSED"
+    ) {
+      return {
+        abort: failure(409, "FINDING_IMMUTABLE", "Only a proposed Finding can be updated."),
+      };
+    }
+    const nextVersion = expectedVersion + 1;
+    await client.query(
+      `
+      INSERT INTO canonical_evaluation_finding_versions (
+        finding_id, version, evaluation_id, evaluation_version, job_id,
+        statement, confirmation_state, resolution_state, customer_visible,
+        created_by_participant_id, integrity_hash
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, 'PROPOSED', 'OPEN', $7, $8, $9)
+      `,
+      [
+        findingId,
+        nextVersion,
+        identity.evaluation_id,
+        Number(context.evaluation_version),
+        context.job_id,
+        statement,
+        customerVisible,
+        context.actor_participant_id,
+        integrityHash({
+          findingId,
+          version: nextVersion,
+          evaluationId: identity.evaluation_id,
+          evaluationVersion: Number(context.evaluation_version),
+          jobId: context.job_id,
+          statement,
+          confirmationState: "PROPOSED",
+          resolutionState: "OPEN",
+          customerVisible,
+          actorParticipantId: context.actor_participant_id,
+        }),
+      ]
+    );
+    const finding = await findingProjection(client, identity, context);
+    const result = commandResult("FINDING_UPDATED", 200, finding);
+    if (!(await completeIdempotency(
+      client,
+      idempotency.reservation.id,
+      identity.evaluation_id,
+      result
+    ))) {
+      throw new Error("Finding update idempotency completion failed.");
+    }
+    return {
+      result,
+      afterCommit: () => logger.info("Finding updated", {
+        code: "FINDING_UPDATED",
+        actorUserId: validated.actorId,
+        evaluationId: identity.evaluation_id,
+        findingId,
+        jobId: context.job_id,
+        version: nextVersion,
       }),
     };
   });
@@ -871,9 +1007,9 @@ async function confirmFinding(input = {}) {
       INSERT INTO canonical_evaluation_finding_versions (
         finding_id, version, evaluation_id, evaluation_version, job_id,
         statement, confirmation_state, resolution_state,
-        created_by_participant_id, integrity_hash
+        customer_visible, created_by_participant_id, integrity_hash
       )
-      VALUES ($1, $2, $3, $4, $5, $6, 'CONFIRMED', 'OPEN', $7, $8)
+      VALUES ($1, $2, $3, $4, $5, $6, 'CONFIRMED', 'OPEN', $7, $8, $9)
       `,
       [
         findingId,
@@ -882,6 +1018,7 @@ async function confirmFinding(input = {}) {
         Number(current.evaluation_version),
         context.job_id,
         current.statement,
+        current.customer_visible === true,
         context.actor_participant_id,
         integrityHash({
           findingId,
@@ -892,6 +1029,7 @@ async function confirmFinding(input = {}) {
           statement: current.statement,
           confirmationState: "CONFIRMED",
           resolutionState: "OPEN",
+          customerVisible: current.customer_visible === true,
           actorParticipantId: context.actor_participant_id,
         }),
       ]
@@ -997,4 +1135,5 @@ module.exports = {
   linkFindingConcern,
   listEvaluationFindings,
   submitFinding,
+  updateFinding,
 };

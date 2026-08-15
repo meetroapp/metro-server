@@ -125,6 +125,6 @@ test("registration requires authentication middleware and does not create public
     sendPublicDatabaseError: () => {},
     service: {},
   });
-  assert.equal(routes.length, 13);
+  assert.equal(routes.length, 14);
   assert.ok(routes.every((item) => item.handlers[0] === auth));
 });

@@ -26,11 +26,13 @@ const {
   listRecommendationsByFinding,
   recordCustomerConstraint,
   transitionRecommendation,
+  updateRecommendation,
 } = require("../server/authorization/recommendationService");
 const {
   getMigrationFiles,
   runMigrationCollection,
 } = require("../scripts/run-migrations");
+const { getCustomerEfr } = require("../server/authorization/customerEfrService");
 
 const cleanDatabaseUrl = process.env.RECOMMENDATION_FOUNDATION_DATABASE_URL;
 const upgradeDatabaseUrl = process.env.RECOMMENDATION_UPGRADE_DATABASE_URL;
@@ -196,6 +198,7 @@ async function createEvaluationAndFindings(pool, identities, fixture, suffix, st
       authenticatedActor: { id: identities.professionalId },
       evaluationId: evaluation.evaluation.id,
       statement,
+      customerVisible: true,
       idempotencyKey: `recommendation-finding-${key}-${suffix}`,
       logger: quiet,
     });
@@ -232,14 +235,14 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 33);
+      assert.equal(migrations.length, 40);
       const applied = await runMigrationCollection(
         pool,
         migrations,
         targetMetadata(cleanDatabaseUrl)
       );
       assert.equal(applied.success, true);
-      assert.equal(applied.applied.length, 33);
+      assert.equal(applied.applied.length, 40);
       const replay = await runMigrationCollection(
         pool,
         migrations,
@@ -247,7 +250,7 @@ test(
       );
       assert.equal(replay.success, true);
       assert.equal(replay.applied.length, 0);
-      assert.equal(replay.skipped.length, 33);
+      assert.equal(replay.skipped.length, 40);
 
       const identities = await createIdentities(pool, suffix);
       const fixture = await createLifecycleFixture(
@@ -315,6 +318,7 @@ test(
         findingId: primary.findings.ac.id,
         kind: "PRIMARY",
         statement: "replace A/C system",
+        customerVisible: true,
       };
       const acPrimary = await command(
         createRecommendation,
@@ -336,6 +340,35 @@ test(
         { ...primaryInput, statement: "conflicting key reuse" },
         `recommendation-primary-${suffix}`
       )).code, "RECOMMENDATION_IDEMPOTENCY_KEY_CONFLICT");
+
+      const updateInput = {
+        pool,
+        recommendationId: acPrimary.recommendation.id,
+        expectedVersion: 1,
+        statement: "replace the aging A/C system",
+        customerVisible: true,
+      };
+      const updated = await command(
+        updateRecommendation,
+        identities,
+        updateInput,
+        `recommendation-update-${suffix}`
+      );
+      assert.equal(updated.recommendation.currentVersion, 2);
+      assert.equal(updated.recommendation.status, "ACTIVE");
+      assert.equal(updated.recommendation.customerVisible, true);
+      assert.equal((await command(
+        updateRecommendation,
+        identities,
+        updateInput,
+        `recommendation-update-${suffix}`
+      )).replayed, true);
+      assert.equal((await command(
+        updateRecommendation,
+        identities,
+        updateInput,
+        `recommendation-update-stale-${suffix}`
+      )).code, "STALE_RECOMMENDATION_VERSION");
 
       const alternativeInput = {
         pool,
@@ -372,7 +405,7 @@ test(
         `recommendation-constraint-${suffix}`
       );
       assert.equal(constraint.constraint.type, "BUDGET");
-      assert.equal(constraint.recommendation.currentVersion, 1);
+      assert.equal(constraint.recommendation.currentVersion, 2);
       assert.equal((await command(
         recordCustomerConstraint,
         identities,
@@ -383,7 +416,7 @@ test(
       const transitionInput = {
         pool,
         recommendationId: acPrimary.recommendation.id,
-        expectedVersion: 1,
+        expectedVersion: 2,
         targetStatus: "DEFERRED",
         decisionEvidenceNote: "Professional recorded the customer's stated budget limitation.",
       };
@@ -394,7 +427,7 @@ test(
         `recommendation-transition-${suffix}`
       );
       assert.equal(deferred.recommendation.status, "DEFERRED");
-      assert.equal(deferred.recommendation.currentVersion, 2);
+      assert.equal(deferred.recommendation.currentVersion, 3);
       assert.equal(
         deferred.dispositionEvent.authorityClassification,
         "PROFESSIONAL_RECORDED_CUSTOMER_DECISION"
@@ -509,11 +542,31 @@ test(
       });
       assert.deepEqual(detail.recommendation.versions.map((row) => row.status), [
         "ACTIVE",
+        "ACTIVE",
         "DEFERRED",
       ]);
       assert.equal(detail.recommendation.versions[0].statement, "replace A/C system");
-      assert.equal(detail.recommendation.versions[1].statement, "replace A/C system");
+      assert.equal(detail.recommendation.versions[1].statement, "replace the aging A/C system");
+      assert.equal(detail.recommendation.versions[2].statement, "replace the aging A/C system");
       assert.equal(alternative.recommendation.status, "ACTIVE");
+
+      const customerProjection = await getCustomerEfr({
+        pool,
+        authenticatedActor: { id: identities.homeownerId },
+        jobId: fixture.jobId,
+      });
+      assert.equal(customerProjection.ok, true);
+      assert.equal(customerProjection.projectAssessment.jobId, fixture.jobId);
+      assert.equal(customerProjection.projectAssessment.findings.length, 3);
+      assert.equal(customerProjection.projectAssessment.recommendations.length, 1);
+      assert.equal(
+        customerProjection.projectAssessment.recommendations[0].statement,
+        "replace the aging A/C system"
+      );
+      assert.doesNotMatch(
+        JSON.stringify(customerProjection.projectAssessment),
+        /internalNotes|integrityHash|idempotency|customerVisible|version|margin|cost/i
+      );
 
       const after = await pool.query(
         `SELECT
@@ -535,7 +588,7 @@ test(
       assert.equal(after.rows[0].quotes, 0);
       assert.equal(after.rows[0].quote_grants, 16);
       assert.equal(after.rows[0].recommendations, 5);
-      assert.equal(after.rows[0].versions, 7);
+      assert.equal(after.rows[0].versions, 8);
       assert.equal(after.rows[0].constraints, 1);
       assert.equal(after.rows[0].dispositions, 2);
     } finally {
