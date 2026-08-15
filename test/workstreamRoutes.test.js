@@ -19,7 +19,7 @@ function response() {
   };
 }
 
-test("route registration exposes only fifteen authenticated bounded endpoints", () => {
+test("route registration exposes only sixteen authenticated bounded endpoints", () => {
   const routes = [];
   const app = {
     get(path, ...handlers) { routes.push({ method: "GET", path, handlers }); },
@@ -32,7 +32,7 @@ test("route registration exposes only fifteen authenticated bounded endpoints", 
     getPool: () => ({}),
     sendPublicDatabaseError: () => {},
   });
-  assert.equal(routes.length, 15);
+  assert.equal(routes.length, 16);
   assert.equal(routes.every((route) => route.handlers[0] === authMiddleware), true);
   assert.deepEqual(routes.map(({ method, path }) => `${method} ${path}`), [
     "POST /jobs/:jobId/workstreams",
@@ -43,6 +43,7 @@ test("route registration exposes only fifteen authenticated bounded endpoints", 
     "GET /jobs/:jobId/workstreams/:workstreamId/activities",
     "GET /jobs/:jobId/workstreams/:workstreamId/activities/:activityId",
     "POST /jobs/:jobId/workstreams/:workstreamId/activities/:activityId/progress",
+    "POST /jobs/:jobId/workstreams/:workstreamId/activities/:activityId/update",
     "POST /jobs/:jobId/workstreams/:workstreamId/obligations",
     "GET /jobs/:jobId/workstreams/:workstreamId/obligations",
     "GET /jobs/:jobId/workstreams/:workstreamId/obligations/:obligationId",
@@ -88,6 +89,29 @@ test("handlers derive actor, scope, version, and idempotency from governed reque
       expectedVersion: 2,
       targetStatus: "DONE",
       idempotencyKey: "progress-key",
+    },
+  });
+  await handlers.updateActivity({
+    ...req,
+    body: {
+      expectedVersion: 3,
+      statement: "Customer-safe progress recorded.",
+      customerVisible: true,
+    },
+    headers: { "idempotency-key": "update-key" },
+  }, response());
+  assert.deepEqual(calls[1], {
+    operation: "updateWorkActivity",
+    input: {
+      pool: "pool",
+      authenticatedActor: { id: 9 },
+      jobId: "job",
+      workstreamId: "workstream",
+      activityId: "activity",
+      expectedVersion: 3,
+      statement: "Customer-safe progress recorded.",
+      customerVisible: true,
+      idempotencyKey: "update-key",
     },
   });
 });

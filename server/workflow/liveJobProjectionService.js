@@ -40,7 +40,7 @@ const STAGE_DEFINITIONS = Object.freeze({
   WORK_IN_PROGRESS: "Work in progress",
   WORK_BLOCKED: "Work needs attention",
   WORK_REVIEW_NEEDED: "Work status needs review",
-  WORKSTREAMS_COMPLETE_PENDING_JOB_COMPLETION: "Recorded work is complete",
+  WORKSTREAMS_COMPLETE_PENDING_JOB_COMPLETION: "Ready for completion review",
 });
 
 const RESPONSIBILITY_DEFINITIONS = Object.freeze({
@@ -102,8 +102,8 @@ const NEXT_ACTION_DEFINITIONS = Object.freeze({
     description: "Resolve the recorded blocker before the work can move forward.",
   },
   REVIEW_WORKSTREAM_COMPLETION: {
-    label: "Review the completed work record",
-    description: "Recorded work is complete; whole-job completion is not available yet.",
+    label: "Ready for completion review",
+    description: "Approved work is complete; whole-job completion remains a separate next step.",
   },
   NEXT_STEP_NOT_YET_AVAILABLE: {
     label: "The next step is not available yet",
@@ -760,6 +760,22 @@ async function loadCanonicalState(pool, context) {
            ORDER BY version DESC LIMIT 1
          ) AS canonical_workstream_versions ON TRUE
          WHERE canonical_workstreams.job_id = $1
+           AND EXISTS (
+             SELECT 1
+             FROM canonical_quote_scope_item_snapshots snapshots
+             INNER JOIN canonical_quote_customer_decisions decisions
+               ON decisions.quote_id = snapshots.quote_id
+               AND decisions.job_id = snapshots.job_id
+               AND decisions.issued_quote_version = snapshots.quote_version
+               AND decisions.decision = 'APPROVED'
+             INNER JOIN canonical_quotes approved_quotes
+               ON approved_quotes.id = snapshots.quote_id
+               AND approved_quotes.job_id = snapshots.job_id
+               AND approved_quotes.status = 'ISSUED'
+             WHERE snapshots.job_id = canonical_workstreams.job_id
+               AND snapshots.source_workstream_id = canonical_workstreams.id
+               AND snapshots.included_in_total = TRUE
+           )
          ORDER BY canonical_workstreams.sequence, canonical_workstreams.id`,
         [jobId]
       ),
@@ -778,6 +794,22 @@ async function loadCanonicalState(pool, context) {
            ORDER BY version DESC LIMIT 1
          ) AS canonical_work_activity_versions ON TRUE
          WHERE canonical_work_activities.job_id = $1
+           AND EXISTS (
+             SELECT 1
+             FROM canonical_quote_scope_item_snapshots snapshots
+             INNER JOIN canonical_quote_customer_decisions decisions
+               ON decisions.quote_id = snapshots.quote_id
+               AND decisions.job_id = snapshots.job_id
+               AND decisions.issued_quote_version = snapshots.quote_version
+               AND decisions.decision = 'APPROVED'
+             INNER JOIN canonical_quotes approved_quotes
+               ON approved_quotes.id = snapshots.quote_id
+               AND approved_quotes.job_id = snapshots.job_id
+               AND approved_quotes.status = 'ISSUED'
+             WHERE snapshots.job_id = canonical_work_activities.job_id
+               AND snapshots.source_workstream_id = canonical_work_activities.workstream_id
+               AND snapshots.included_in_total = TRUE
+           )
          ORDER BY canonical_work_activities.created_at, canonical_work_activities.id`,
         [jobId]
       ),
@@ -796,6 +828,22 @@ async function loadCanonicalState(pool, context) {
            ORDER BY version DESC LIMIT 1
          ) AS canonical_workstream_obligation_versions ON TRUE
          WHERE canonical_workstream_obligations.job_id = $1
+           AND EXISTS (
+             SELECT 1
+             FROM canonical_quote_scope_item_snapshots snapshots
+             INNER JOIN canonical_quote_customer_decisions decisions
+               ON decisions.quote_id = snapshots.quote_id
+               AND decisions.job_id = snapshots.job_id
+               AND decisions.issued_quote_version = snapshots.quote_version
+               AND decisions.decision = 'APPROVED'
+             INNER JOIN canonical_quotes approved_quotes
+               ON approved_quotes.id = snapshots.quote_id
+               AND approved_quotes.job_id = snapshots.job_id
+               AND approved_quotes.status = 'ISSUED'
+             WHERE snapshots.job_id = canonical_workstream_obligations.job_id
+               AND snapshots.source_workstream_id = canonical_workstream_obligations.workstream_id
+               AND snapshots.included_in_total = TRUE
+           )
          ORDER BY canonical_workstream_obligations.workstream_id,
            canonical_workstream_obligations.sequence,
            canonical_workstream_obligations.id`,

@@ -18,6 +18,7 @@ const {
   progressWorkActivity,
   resolveFinding,
   transitionWorkObligation,
+  updateWorkActivity,
 } = require("../server/workflow/workstreamService");
 const {
   PROFESSIONAL_BOOTSTRAP_CAPABILITIES,
@@ -47,6 +48,7 @@ test("Slice 003 exposes exactly eleven bounded operational capabilities", () => 
     "finding.resolve",
     "work_activity.create",
     "work_activity.progress",
+    "work_activity.update",
     "work_obligation.create",
     "work_obligation.transition",
     "workstream.complete",
@@ -142,6 +144,17 @@ test("invalid and server-owned workflow inputs fail before database access", asy
     targetStatus: "RESOLVED",
     idempotencyKey: "progress-key",
   })).code, "INVALID_ACTIVITY_PROGRESSION");
+  assert.equal((await updateWorkActivity({
+    pool,
+    authenticatedActor: actor,
+    jobId: "00000000-0000-4000-8000-000000000001",
+    workstreamId: "00000000-0000-4000-8000-000000000002",
+    activityId: "00000000-0000-4000-8000-000000000003",
+    expectedVersion: 1,
+    statement: "Progress",
+    customerVisible: "yes",
+    idempotencyKey: "update-key",
+  })).code, "INVALID_WORK_ACTIVITY_UPDATE");
   assert.equal((await createWorkObligation({
     pool,
     authenticatedActor: actor,

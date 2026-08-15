@@ -102,6 +102,7 @@ function createWorkstreamHandlers({
         statement: req.body?.statement,
         temporaryIntervention: req.body?.temporaryIntervention,
         temporaryDetails: req.body?.temporaryDetails,
+        customerVisible: req.body?.customerVisible,
         idempotencyKey: req.headers?.["idempotency-key"],
       })
     ),
@@ -120,6 +121,16 @@ function createWorkstreamHandlers({
         activityId: req.params.activityId,
         expectedVersion: req.body?.expectedVersion,
         targetStatus: req.body?.targetStatus,
+        idempotencyKey: req.headers?.["idempotency-key"],
+      })
+    ),
+    updateActivity: handle("update_work_activity", (req) =>
+      service.updateWorkActivity({
+        ...workstream(req),
+        activityId: req.params.activityId,
+        expectedVersion: req.body?.expectedVersion,
+        statement: req.body?.statement,
+        customerVisible: req.body?.customerVisible,
         idempotencyKey: req.headers?.["idempotency-key"],
       })
     ),
@@ -222,6 +233,11 @@ function registerWorkstreamRoutes({
     "/jobs/:jobId/workstreams/:workstreamId/activities/:activityId/progress",
     authMiddleware,
     handlers.progressActivity
+  );
+  app.post(
+    "/jobs/:jobId/workstreams/:workstreamId/activities/:activityId/update",
+    authMiddleware,
+    handlers.updateActivity
   );
   app.post(
     "/jobs/:jobId/workstreams/:workstreamId/obligations",

@@ -12,8 +12,13 @@ const migrationPath = join(__dirname, "..", "migrations", migrationName);
 
 test("EFR activation is the additive migration 40 boundary", () => {
   const migrations = getMigrationFiles();
-  assert.equal(migrations.length, 40);
-  assert.equal(migrations.at(-1).filename, migrationName);
+  assert.equal(migrations.length, 41);
+  const migrationIndex = migrations.findIndex(({ filename }) => filename === migrationName);
+  assert.equal(migrationIndex, 39);
+  assert.equal(
+    migrations[migrationIndex + 1].filename,
+    "202608150002_activate_work_plan_execution.sql"
+  );
   const sql = readFileSync(migrationPath, "utf8");
   assert.match(sql, /canonical_evaluation_finding_versions[\s\S]*customer_visible BOOLEAN NOT NULL DEFAULT FALSE/i);
   assert.match(sql, /canonical_recommendation_versions[\s\S]*customer_visible BOOLEAN NOT NULL DEFAULT FALSE/i);

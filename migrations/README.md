@@ -58,6 +58,7 @@ Current inventory:
 38. `202608130003_activate_approved_work_visit_authority.sql`
 39. `202608140001_create_canonical_quote_delivery_foundation.sql`
 40. `202608150001_activate_customer_safe_efr.sql`
+41. `202608150002_activate_work_plan_execution.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -70,6 +71,12 @@ customer visibility to append-only Finding and Recommendation versions and
 registers bounded version-edit commands. Existing EFR records remain
 professional-only and no customer grant, Quote, decision, Workstream, or Job
 state is changed.
+
+`202608150002_activate_work_plan_execution.sql` adds conservative customer
+visibility to append-only Work Activity versions and registers the bounded
+Work Activity update command. Existing Activities remain professional-only;
+the migration creates no Workstream, Activity, Quote, Job, Invoice, Payment,
+or completion business record.
 
 `202608030002_create_canonical_alerts.sql` creates the additive
 recipient-scoped `alerts` table for canonical backend alert persistence. It

@@ -141,6 +141,9 @@ const {
   registerLiveJobRoutes,
 } = require("./server/workflow/liveJobs");
 const {
+  registerWorkPlanRoutes,
+} = require("./server/workflow/workPlans");
+const {
   registerVisitRoutes,
 } = require("./server/workflow/visits");
 const {
@@ -852,6 +855,13 @@ registerRequestModificationRoutes({
 });
 
 registerWorkstreamRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerWorkPlanRoutes({
   app,
   authMiddleware,
   getPool,

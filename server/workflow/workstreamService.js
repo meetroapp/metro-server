@@ -39,6 +39,7 @@ const WORKFLOW_COMMANDS = Object.freeze({
   CREATE_WORKSTREAM: "workstream.create",
   ASSIGN_FINDING: "finding.assign_workstream",
   CREATE_ACTIVITY: "work_activity.create",
+  UPDATE_ACTIVITY: "work_activity.update",
   PROGRESS_ACTIVITY: "work_activity.progress",
   CREATE_OBLIGATION: "work_obligation.create",
   RESOLVE_FINDING: "finding.resolve",
@@ -337,6 +338,7 @@ function activityProjection(row) {
     status: row.status,
     temporaryIntervention: row.temporary_intervention,
     temporaryDetails: row.temporary_details,
+    customerVisible: row.customer_visible === true,
     performedAt: row.performed_at,
     currentVersion: Number(row.version),
     createdAt: row.created_at,
@@ -400,7 +402,8 @@ async function loadActivity(
       activities.actor_participant_id, activities.created_at,
       versions.version, versions.activity_type, versions.statement,
       versions.status, versions.temporary_intervention,
-      versions.temporary_details, versions.performed_at,
+      versions.temporary_details, versions.customer_visible,
+      versions.performed_at,
       versions.created_at AS version_created_at
     FROM canonical_work_activities AS activities
     INNER JOIN LATERAL (
@@ -794,6 +797,7 @@ async function createWorkActivity(input = {}) {
     "statement",
     "temporaryIntervention",
     "temporaryDetails",
+    "customerVisible",
   ]);
   if (validated.error) return validated.error;
   const jobId = normalizedUuid(input.jobId);
@@ -804,13 +808,15 @@ async function createWorkActivity(input = {}) {
   const temporaryDetails = temporaryIntervention
     ? boundedText(input.temporaryDetails, 2000)
     : input.temporaryDetails == null ? null : false;
+  const customerVisible = input.customerVisible === true;
   if (
     !jobId ||
     !workstreamId ||
     !ACTIVITY_TYPE_PATTERN.test(activityType) ||
     !statement ||
     (temporaryIntervention && !temporaryDetails) ||
-    temporaryDetails === false
+    temporaryDetails === false ||
+    (input.customerVisible != null && typeof input.customerVisible !== "boolean")
   ) {
     return failure(400, "INVALID_WORK_ACTIVITY", "The Work Activity is invalid.");
   }
@@ -845,6 +851,7 @@ async function createWorkActivity(input = {}) {
         statement,
         temporaryIntervention,
         temporaryDetails,
+        customerVisible,
       }),
     });
     if (idempotency.error) return { abort: idempotency.error };
@@ -882,9 +889,9 @@ async function createWorkActivity(input = {}) {
       INSERT INTO canonical_work_activity_versions (
         activity_id, version, workstream_id, job_id, activity_type,
         statement, status, temporary_intervention, temporary_details,
-        performed_at, created_by_participant_id, integrity_hash
+        customer_visible, performed_at, created_by_participant_id, integrity_hash
       )
-      VALUES ($1, 1, $2, $3, $4, $5, 'PLANNED', $6, $7, NULL, $8, $9)
+      VALUES ($1, 1, $2, $3, $4, $5, 'PLANNED', $6, $7, $8, NULL, $9, $10)
       `,
       [
         activityId,
@@ -894,6 +901,7 @@ async function createWorkActivity(input = {}) {
         statement,
         temporaryIntervention,
         temporaryDetails,
+        customerVisible,
         participantId,
         integrityHash("work_activity", {
           activityId,
@@ -905,6 +913,7 @@ async function createWorkActivity(input = {}) {
           status: "PLANNED",
           temporaryIntervention,
           temporaryDetails,
+          customerVisible,
           performedAt: null,
           participantId,
         }),
@@ -928,6 +937,151 @@ async function createWorkActivity(input = {}) {
         workstreamId,
         activityId,
         temporaryIntervention,
+      }),
+    };
+  });
+}
+
+async function updateWorkActivity(input = {}) {
+  const validated = validateCommand(input, [
+    "jobId",
+    "workstreamId",
+    "activityId",
+    "expectedVersion",
+    "statement",
+    "customerVisible",
+  ]);
+  if (validated.error) return validated.error;
+  const jobId = normalizedUuid(input.jobId);
+  const workstreamId = normalizedUuid(input.workstreamId);
+  const activityId = normalizedUuid(input.activityId);
+  const expectedVersion = positiveInteger(input.expectedVersion);
+  const statement = boundedText(input.statement, 5000);
+  const customerVisible = input.customerVisible === true;
+  if (
+    !jobId ||
+    !workstreamId ||
+    !activityId ||
+    !expectedVersion ||
+    !statement ||
+    (input.customerVisible != null && typeof input.customerVisible !== "boolean")
+  ) {
+    return failure(400, "INVALID_WORK_ACTIVITY_UPDATE", "The Work Activity update is invalid.");
+  }
+  const logger = safeLogger(input.logger);
+
+  return runTransaction(input.pool, async (client) => {
+    const authorized = await requireAuthority({
+      client,
+      actorUserId: validated.actorId,
+      jobId,
+      capability: WORKFLOW_CAPABILITIES.PROGRESS_ACTIVITY,
+      logger,
+      lock: true,
+    });
+    if (authorized.error) return { abort: authorized.error };
+    const participantId = authorized.context.actor_participant_id;
+    const idempotency = await reserveCommand({
+      client,
+      participantId,
+      jobId,
+      commandName: WORKFLOW_COMMANDS.UPDATE_ACTIVITY,
+      commandScope: `activity:${activityId}:update`,
+      idempotencyKey: validated.idempotencyKey,
+      requestFingerprint: fingerprint({
+        jobId,
+        workstreamId,
+        activityId,
+        expectedVersion,
+        statement,
+        customerVisible,
+      }),
+    });
+    if (idempotency.error) return { abort: idempotency.error };
+    if (idempotency.replay) {
+      return replayOutcome(idempotency.replay, logger, {
+        command: WORKFLOW_COMMANDS.UPDATE_ACTIVITY,
+        actorUserId: validated.actorId,
+        participantId,
+        jobId,
+        workstreamId,
+        activityId,
+      });
+    }
+
+    const current = await loadActivity(
+      client,
+      jobId,
+      workstreamId,
+      activityId,
+      { lock: true }
+    );
+    if (!current) {
+      return { abort: failure(404, "WORK_ACTIVITY_UNAVAILABLE", "The Work Activity is unavailable.") };
+    }
+    if (Number(current.version) !== expectedVersion) {
+      return { abort: failure(409, "STALE_WORK_ACTIVITY_VERSION", "The Work Activity version is no longer current.") };
+    }
+    if (!["PLANNED", "IN_PROGRESS"].includes(current.status)) {
+      return { abort: failure(409, "WORK_ACTIVITY_UPDATE_CLOSED", "The Work Activity can no longer be updated.") };
+    }
+
+    const nextVersion = expectedVersion + 1;
+    await client.query(
+      `
+      INSERT INTO canonical_work_activity_versions (
+        activity_id, version, workstream_id, job_id, activity_type,
+        statement, status, temporary_intervention, temporary_details,
+        customer_visible, performed_at, created_by_participant_id, integrity_hash
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      `,
+      [
+        activityId,
+        nextVersion,
+        workstreamId,
+        jobId,
+        current.activity_type,
+        statement,
+        current.status,
+        current.temporary_intervention,
+        current.temporary_details,
+        customerVisible,
+        current.performed_at,
+        participantId,
+        integrityHash("work_activity", {
+          activityId,
+          version: nextVersion,
+          workstreamId,
+          jobId,
+          activityType: current.activity_type,
+          statement,
+          status: current.status,
+          temporaryIntervention: current.temporary_intervention,
+          temporaryDetails: current.temporary_details,
+          customerVisible,
+          performedAt: current.performed_at?.toISOString?.() || current.performed_at || null,
+          participantId,
+        }),
+      ]
+    );
+    await invokeFailure(input.failureInjector, "after_write");
+    const activity = activityProjection(
+      await loadActivity(client, jobId, workstreamId, activityId)
+    );
+    const result = commandResult("WORK_ACTIVITY_UPDATED", 200, "activity", activity);
+    await completeCommand(client, idempotency.reservation.id, result);
+    return {
+      result,
+      afterCommit: () => logger.info("Work Activity updated", {
+        code: "WORK_ACTIVITY_UPDATED",
+        actorUserId: validated.actorId,
+        participantId,
+        jobId,
+        workstreamId,
+        activityId,
+        version: nextVersion,
+        customerVisible,
       }),
     };
   });
@@ -1020,9 +1174,9 @@ async function progressWorkActivity(input = {}) {
       INSERT INTO canonical_work_activity_versions (
         activity_id, version, workstream_id, job_id, activity_type,
         statement, status, temporary_intervention, temporary_details,
-        performed_at, created_by_participant_id, integrity_hash
+        customer_visible, performed_at, created_by_participant_id, integrity_hash
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
       `,
       [
         activityId,
@@ -1034,6 +1188,7 @@ async function progressWorkActivity(input = {}) {
         targetStatus,
         current.temporary_intervention,
         current.temporary_details,
+        current.customer_visible === true,
         performedAt,
         participantId,
         integrityHash("work_activity", {
@@ -1046,6 +1201,7 @@ async function progressWorkActivity(input = {}) {
           status: targetStatus,
           temporaryIntervention: current.temporary_intervention,
           temporaryDetails: current.temporary_details,
+          customerVisible: current.customer_visible === true,
           performedAt: performedAt?.toISOString() || null,
           participantId,
         }),
@@ -1088,7 +1244,8 @@ async function listWorkActivities(input = {}) {
       activities.actor_participant_id, activities.created_at,
       versions.version, versions.activity_type, versions.statement,
       versions.status, versions.temporary_intervention,
-      versions.temporary_details, versions.performed_at,
+      versions.temporary_details, versions.customer_visible,
+      versions.performed_at,
       versions.created_at AS version_created_at
     FROM canonical_work_activities AS activities
     INNER JOIN LATERAL (
@@ -2066,4 +2223,5 @@ module.exports = {
   progressWorkActivity,
   resolveFinding,
   transitionWorkObligation,
+  updateWorkActivity,
 };

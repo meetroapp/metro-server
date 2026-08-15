@@ -272,13 +272,13 @@ test("clean disposable PostgreSQL certifies canonical $920 Draft and issued Quot
   const suffix = randomUUID();
   try {
     const migrations = getMigrationFiles();
-    assert.equal(migrations.length, 40);
+    assert.equal(migrations.length, 41);
     const applied = await runMigrationCollection(pool, migrations, targetMetadata(cleanDatabaseUrl));
     assert.equal(applied.success, true);
-    assert.equal(applied.applied.length, 40);
+    assert.equal(applied.applied.length, 41);
     const replay = await runMigrationCollection(pool, migrations, targetMetadata(cleanDatabaseUrl));
     assert.equal(replay.success, true);
-    assert.equal(replay.skipped.length, 40);
+    assert.equal(replay.skipped.length, 41);
 
     const identities = await createIdentities(pool, suffix);
     const fixture = await createLifecycleFixture(pool, identities, `${suffix}-primary`, "A/C, disposal, lighting, fan and microwave work");
@@ -1020,7 +1020,7 @@ test("clean disposable PostgreSQL certifies canonical $920 Draft and issued Quot
       issue_evidence: 3,
       r22_priced: 1,
       legacy_quote_requests: 0,
-      ledger: 40,
+      ledger: 41,
       no_approvals: true,
       no_procurement: true,
       legacy_contract: 1,
