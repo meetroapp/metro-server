@@ -426,7 +426,7 @@ function buildProfessionalProjection({ context, approvedWork, rows }) {
     relationshipId: Number(context.relationship_id),
     approvedQuotes: approvedWork.quotes.map((quote) => ({
       id: quote.id,
-      lineageType: quote.lineage_type,
+      lineageType: quote.lineage_type || "ORIGINAL_QUOTE",
     })),
     summary: {
       workItemCount: activities.length,

@@ -32,7 +32,7 @@ function fixture() {
     ],
   };
   const approvedWork = {
-    quotes: [{ id: IDS.quote, lineage_type: "ORIGINAL_QUOTE" }],
+    quotes: [{ id: IDS.quote, lineage_type: null }],
     workstreamLinks: [{ workstream_id: IDS.workstream, quote_id: IDS.quote }],
   };
   const rows = {
