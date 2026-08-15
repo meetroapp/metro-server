@@ -171,12 +171,30 @@ async function createQuote(pool, ids, fixture, suffix, { issue = true } = {}) {
     logger: quiet,
   });
   assert.equal(scoped.ok, true, scoped.code);
-  if (!issue) return scoped.quote;
-  const issued = await issueQuote({
+  const excluded = await addDraftScopeItem({
     pool,
     authenticatedActor: { id: ids.professionalId },
     quoteId: created.quote.id,
     expectedVersion: scoped.quote.currentVersion,
+    item: {
+      classification: "MATERIAL",
+      scopeSemantic: "MATERIAL_EXCLUDED",
+      materialResponsibility: "PENDING_SELECTION",
+      description: "Customer-safe finish pending selection",
+      unitAmountMinor: 0,
+      quantity: 1,
+      source: { type: "MANUAL_PROFESSIONAL" },
+    },
+    idempotencyKey: `delivery-excluded-scope-${suffix}`,
+    logger: quiet,
+  });
+  assert.equal(excluded.ok, true, excluded.code);
+  if (!issue) return excluded.quote;
+  const issued = await issueQuote({
+    pool,
+    authenticatedActor: { id: ids.professionalId },
+    quoteId: created.quote.id,
+    expectedVersion: excluded.quote.currentVersion,
     idempotencyKey: `delivery-issue-${suffix}`,
     logger: quiet,
   });

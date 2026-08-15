@@ -1,6 +1,7 @@
 "use strict";
 
 const { createHash } = require("node:crypto");
+const { isDeepStrictEqual } = require("node:util");
 
 const {
   commercialAuthorityInternals,
@@ -151,8 +152,8 @@ function validIssuedQuote(quote, issuance) {
     Number(current.laborServiceSubtotalMinor) !== totals.laborServiceSubtotalMinor ||
     Number(current.totalMinor) !== Number(quote.totalMinor) ||
     Number(current.scopeItemCount) !== quote.scopeItems.length ||
-    JSON.stringify(current.conditions) !== JSON.stringify(commercialSnapshots.conditions) ||
-    JSON.stringify(current.exclusions) !== JSON.stringify(commercialSnapshots.exclusions) ||
+    !isDeepStrictEqual(current.conditions, commercialSnapshots.conditions) ||
+    !isDeepStrictEqual(current.exclusions, commercialSnapshots.exclusions) ||
     new Date(current.issuedAt).getTime() !== new Date(quote.issuedAt).getTime()
   ) return false;
   const recomputedHash = integrityHash({
@@ -163,8 +164,8 @@ function validIssuedQuote(quote, issuance) {
     issuedAt: current.issuedAt,
     totals,
     snapshots: quote.scopeItems,
-    conditions: current.conditions,
-    exclusions: current.exclusions,
+    conditions: commercialSnapshots.conditions,
+    exclusions: commercialSnapshots.exclusions,
   });
   return Boolean(
     issuance &&

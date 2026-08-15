@@ -130,6 +130,68 @@ test("issued Quote eligibility requires matching current issuance integrity", ()
   }, issuance(hash)), false);
 });
 
+test("issued Quote eligibility ignores PostgreSQL JSONB object key order", () => {
+  const base = validQuote();
+  const excluded = {
+    scopeItemId: "55555555-5555-4555-8555-555555555555",
+    scopeItemRevision: 1,
+    sequence: 2,
+    classification: "MATERIAL",
+    scopeSemantic: "MATERIAL_EXCLUDED",
+    materialResponsibility: "PENDING_SELECTION",
+    description: "Finish pending selection",
+    quantity: 1,
+    unitAmountMinor: 0,
+    lineTotalMinor: 0,
+    includedInTotal: false,
+    source: { type: "MANUAL_PROFESSIONAL" },
+  };
+  const scopeItems = [...base.scopeItems, excluded];
+  const commercial = quoteDraftServiceInternals.deriveCommercialSnapshots(scopeItems);
+  const current = {
+    ...base.versions[0],
+    scopeItemCount: scopeItems.length,
+    conditions: commercial.conditions,
+    exclusions: commercial.exclusions.map(({ source, ...item }) => ({
+      source: {
+        source_type: source.source_type,
+        source_version: source.source_version,
+        source_finding_id: source.source_finding_id,
+        source_activity_id: source.source_activity_id,
+        source_obligation_id: source.source_obligation_id,
+        source_workstream_id: source.source_workstream_id,
+        source_recommendation_id: source.source_recommendation_id,
+        source_workstream_version: source.source_workstream_version,
+      },
+      sequence: item.sequence,
+      scopeItemId: item.scopeItemId,
+      scopeSemantic: item.scopeSemantic,
+      classification: item.classification,
+      materialResponsibility: item.materialResponsibility,
+    })),
+  };
+  current.integrityHash = quoteDraftServiceInternals.integrityHash({
+    quoteId: base.id,
+    version: base.currentVersion,
+    currency: base.currency,
+    status: current.status,
+    issuedAt: current.issuedAt,
+    totals: {
+      materialsSubtotalMinor: 0,
+      laborServiceSubtotalMinor: 92000,
+      totalMinor: 92000,
+    },
+    snapshots: scopeItems,
+    ...commercial,
+  });
+  const quote = { ...base, scopeItems, scopeItemCount: scopeItems.length, versions: [current] };
+
+  assert.equal(
+    quoteDeliveryInternals.validIssuedQuote(quote, issuance(current.integrityHash)),
+    true
+  );
+});
+
 test("server-owned delivery snapshot allowlists customer-safe Quote truth", () => {
   const snapshot = quoteDeliveryInternals.buildSafeSnapshot(issuedQuote(), deliveryContext);
   assert.deepEqual(snapshot, {
