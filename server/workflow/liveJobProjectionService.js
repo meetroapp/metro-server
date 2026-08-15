@@ -41,6 +41,7 @@ const STAGE_DEFINITIONS = Object.freeze({
   WORK_BLOCKED: "Work needs attention",
   WORK_REVIEW_NEEDED: "Work status needs review",
   WORKSTREAMS_COMPLETE_PENDING_JOB_COMPLETION: "Ready for completion review",
+  JOB_COMPLETED: "Work Completed",
 });
 
 const RESPONSIBILITY_DEFINITIONS = Object.freeze({
@@ -103,7 +104,11 @@ const NEXT_ACTION_DEFINITIONS = Object.freeze({
   },
   REVIEW_WORKSTREAM_COMPLETION: {
     label: "Ready for completion review",
-    description: "Approved work is complete; whole-job completion remains a separate next step.",
+    description: "Approved work is complete and ready for final review.",
+  },
+  READY_TO_INVOICE: {
+    label: "Ready to Invoice",
+    description: "The operational Job is complete. Billing remains a separate next step.",
   },
   NEXT_STEP_NOT_YET_AVAILABLE: {
     label: "The next step is not available yet",
@@ -125,9 +130,11 @@ const ACTION_DEFINITIONS = Object.freeze({
   REVIEW_ACTIVE_WORK: "Review active work",
   CONTINUE_ACTIVE_WORK: "Continue active work",
   REVIEW_WORKSTREAM_COMPLETION: "Review completed work record",
+  VIEW_JOB_HISTORY: "View Job History",
 });
 
 const DERIVATION_PRECEDENCE = Object.freeze([
+  "JOB_COMPLETION",
   "BLOCKED_WORK",
   "ACTIVE_WORK",
   "READY_WORK",
@@ -260,6 +267,9 @@ function baseAvailableActions(state, capabilities, stage) {
   ) {
     actions.push("REVIEW_WORKSTREAM_COMPLETION");
   }
+  if (stage === "JOB_COMPLETED" && capabilities.has("workstream.read")) {
+    actions.push("VIEW_JOB_HISTORY");
+  }
   return [...new Set(actions)].map(availableAction);
 }
 
@@ -325,6 +335,17 @@ function deriveCanonicalLiveJob(state = {}, { derivedAt = new Date().toISOString
     approvedWorkScheduling,
   };
 
+  if (state.completion) {
+    return result({
+      stage: "JOB_COMPLETED",
+      responsibility: "NONE",
+      action: "READY_TO_INVOICE",
+      reasons: ["JOB_COMPLETION_RECORDED", "FINANCIAL_SETTLEMENT_REMAINS_SEPARATE"],
+      state: scopedState,
+      derivedAt,
+    });
+  }
+
   const blockedWorkstream = workstreams.some((workstream) => workstream.state === "BLOCKED");
   const openObligation = obligations.some((obligation) => obligation.status === "OPEN");
   if (blockedWorkstream || openObligation) {
@@ -371,9 +392,8 @@ function deriveCanonicalLiveJob(state = {}, { derivedAt = new Date().toISOString
     return result({
       stage: "WORKSTREAMS_COMPLETE_PENDING_JOB_COMPLETION",
       responsibility: "PROFESSIONAL",
-      blocker: "JOB_COMPLETION_NOT_AVAILABLE",
       action: "REVIEW_WORKSTREAM_COMPLETION",
-      reasons: ["ALL_WORKSTREAMS_COMPLETED", "JOB_COMPLETION_AUTHORITY_ABSENT"],
+      reasons: ["ALL_WORKSTREAMS_COMPLETED", "JOB_COMPLETION_REVIEW_AVAILABLE"],
       state: scopedState,
       derivedAt,
     });
@@ -670,6 +690,7 @@ async function loadCanonicalState(pool, context) {
     activities,
     obligations,
     approvedWorkScheduling,
+    completion,
   ] =
     await Promise.all([
       pool.query(
@@ -935,6 +956,14 @@ async function loadCanonicalState(pool, context) {
           ["visit.read", "visit.confirm", "visit.change_request"],
         ]
       ),
+      pool.query(
+        `/* live_job:completion */
+         SELECT id, version, status, completed_at
+         FROM canonical_job_completion_records
+         WHERE job_id = $1
+         LIMIT 1`,
+        [jobId]
+      ),
     ]);
 
   return {
@@ -948,6 +977,7 @@ async function loadCanonicalState(pool, context) {
     workstreams: workstreams.rows,
     activities: activities.rows,
     obligations: obligations.rows,
+    completion: completion.rows[0] || null,
     approvedWorkScheduling: quotes.rows
       .filter((quote) => quote.customer_decision === "APPROVED")
       .map((quote) => {

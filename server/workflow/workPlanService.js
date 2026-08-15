@@ -556,6 +556,10 @@ async function getProfessionalWorkPlanSummary(input = {}) {
         LEFT JOIN participant_role_revocations role_revocations
           ON role_revocations.role_assignment_id = roles.id
         WHERE role_revocations.id IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM canonical_job_completion_records completions
+            WHERE completions.job_id = jobs.id
+          )
           AND EXISTS (
             SELECT 1 FROM lifecycle_authority_grants grants
             LEFT JOIN lifecycle_authority_grant_revocations revocations

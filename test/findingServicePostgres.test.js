@@ -281,7 +281,7 @@ test(
         targetMetadata()
       );
       assert.equal(migrations.success, true, JSON.stringify(migrations));
-      assert.equal(migrations.applied.length, 41);
+      assert.equal(migrations.applied.length, 42);
       const migrationReplay = await runMigrationCollection(
         pool,
         getMigrationFiles(),
@@ -289,7 +289,7 @@ test(
       );
       assert.equal(migrationReplay.success, true, JSON.stringify(migrationReplay));
       assert.equal(migrationReplay.applied.length, 0);
-      assert.equal(migrationReplay.skipped.length, 41);
+      assert.equal(migrationReplay.skipped.length, 42);
       const identities = await createIdentities(pool, suffix);
       const fixture = await createLifecycleFixture(
         pool,
@@ -745,7 +745,7 @@ test(
       const ledger = await pool.query(
         "SELECT count(*)::integer AS count FROM schema_migrations"
       );
-      assert.equal(ledger.rows[0].count, 41);
+      assert.equal(ledger.rows[0].count, 42);
 
       const logText = JSON.stringify(events);
       assert.match(logText, /FINDING_SUBMITTED/);

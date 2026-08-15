@@ -346,7 +346,7 @@ test("blocked Workstream and open obligation identify a bounded blocker", () => 
   assert.equal(obligation.blocker.code, "UNRESOLVED_OBLIGATION");
 });
 
-test("completed Workstreams do not fabricate whole-Job completion", () => {
+test("completed Workstreams require the separate whole-Job completion command", () => {
   const projection = derive({
     workstreams: [
       { id: "workstream-1", version: 3, state: "COMPLETED" },
@@ -357,13 +357,40 @@ test("completed Workstreams do not fabricate whole-Job completion", () => {
     stage: "WORKSTREAMS_COMPLETE_PENDING_JOB_COMPLETION",
     responsibility: "PROFESSIONAL",
     nextAction: "REVIEW_WORKSTREAM_COMPLETION",
-    blocker: "JOB_COMPLETION_NOT_AVAILABLE",
   });
-  assert.equal(projection.stage.label.includes("Job complete"), false);
+  assert.equal(projection.blocker, null);
+  assert.deepEqual(projection.reasonCodes, [
+    "ALL_WORKSTREAMS_COMPLETED",
+    "JOB_COMPLETION_REVIEW_AVAILABLE",
+  ]);
+});
+
+test("durable Job completion outranks work and hands off without financial mutation", () => {
+  const projection = derive({
+    completion: {
+      id: "completion",
+      version: 1,
+      status: "COMPLETED",
+      completed_at: "2026-08-15T12:00:00.000Z",
+    },
+    workstreams: [{ id: "workstream", version: 3, state: "COMPLETED" }],
+  });
+  assertProjection(projection, {
+    stage: "JOB_COMPLETED",
+    responsibility: "NONE",
+    nextAction: "READY_TO_INVOICE",
+  });
+  assert.deepEqual(projection.availableActions.map((action) => action.code), [
+    "VIEW_CONCERN",
+    "MESSAGE_CUSTOMER",
+    "VIEW_JOB_HISTORY",
+  ]);
+  assert.match(projection.nextAction.description, /separate next step/i);
 });
 
 test("projection vocabulary and precedence are code-owned and exclude deferred domains", () => {
   assert.deepEqual(DERIVATION_PRECEDENCE, [
+    "JOB_COMPLETION",
     "BLOCKED_WORK",
     "ACTIVE_WORK",
     "READY_WORK",
@@ -445,7 +472,7 @@ test("authorized lifecycle-v2 professional receives the read-only canonical proj
   assert.equal(result.code, "LIVE_JOB_STATE_LOADED");
   assert.equal(result.liveJob.stage.code, "EVALUATION_NEEDED");
   assert.equal(result.liveJob.requestId, 41);
-  assert.equal(queries.filter((sql) => sql.includes("live_job:")).length, 9);
+  assert.equal(queries.filter((sql) => sql.includes("live_job:")).length, 10);
   assert.equal(queries.some((sql) => /\bINSERT\b|\bUPDATE\b|\bDELETE\b/.test(sql)), false);
 });
 

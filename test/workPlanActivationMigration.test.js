@@ -12,8 +12,13 @@ const sql = readFileSync(join(__dirname, "..", "migrations", migrationName), "ut
 
 test("Work Plan execution is additive governed migration 41", () => {
   const migrations = getMigrationFiles();
-  assert.equal(migrations.length, 41);
-  assert.equal(migrations.at(-1).filename, migrationName);
+  assert.equal(migrations.length, 42);
+  const migrationIndex = migrations.findIndex(({ filename }) => filename === migrationName);
+  assert.equal(migrationIndex, 40);
+  assert.equal(
+    migrations[migrationIndex + 1].filename,
+    "202608150003_create_job_completion_history.sql"
+  );
   assert.match(sql, /canonical_work_activity_versions[\s\S]*customer_visible BOOLEAN NOT NULL DEFAULT FALSE/i);
   assert.match(sql, /'work_activity\.update'/i);
   for (const command of [
