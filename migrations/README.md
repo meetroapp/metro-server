@@ -56,6 +56,7 @@ Current inventory:
 36. `202608130001_create_canonical_visit_persistence_foundation.sql`
 37. `202608130002_activate_evaluation_visit_authority.sql`
 38. `202608130003_activate_approved_work_visit_authority.sql`
+39. `202608140001_create_canonical_quote_delivery_foundation.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -192,6 +193,12 @@ approved-Quote-decision lifecycle grant scope and immutable Approved Work Visit
 activation evidence. It creates no grants, activations, Visits, or adjacent
 business rows. Quote approval remains scope authority; explicit professional
 activation governs only the timing and attendance capability.
+
+`202608140001_create_canonical_quote_delivery_foundation.sql` adds exact
+canonical Quote and Job references plus bounded delivery-idempotency evidence
+to structured Conversation messages. It preserves ordinary text messages and
+creates no Quote status, customer decision, Visit, scheduling, or external-share
+authority.
 
 ## Migration Ledger and Transactions
 

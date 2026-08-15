@@ -501,6 +501,8 @@ async function listConversationMessages({
       messages.workflow_type,
       messages.workflow_status,
       messages.workflow_payload,
+      messages.quote_id,
+      messages.job_id,
       messages.created_at
     FROM messages
     WHERE messages.conversation_id = $1

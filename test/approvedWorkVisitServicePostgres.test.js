@@ -176,10 +176,10 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 38);
+      assert.equal(migrations.length, 39);
       const migrated = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(migrated.success, true);
-      assert.equal(migrated.applied.length, 38);
+      assert.equal(migrated.applied.length, 39);
 
       const identities = await createVisitTestIdentities(pool, suffix);
       const fixture = await createVisitLifecycleFixture(pool, identities, `${suffix}-a`);
@@ -498,8 +498,11 @@ test(
     const pool = new Pool({ connectionString: upgradeDatabaseUrl, max: 8 });
     try {
       const migrations = getMigrationFiles();
-      const before002d = migrations.slice(0, -1);
-      const activationMigration = migrations.at(-1);
+      const activationIndex = migrations.findIndex(({ filename }) =>
+        filename === "202608130003_activate_approved_work_visit_authority.sql"
+      );
+      const before002d = migrations.slice(0, activationIndex);
+      const activationMigration = migrations[activationIndex];
       assert.equal(before002d.length, 37);
       assert.equal(
         activationMigration.filename,

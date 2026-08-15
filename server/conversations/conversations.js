@@ -347,8 +347,79 @@ function normalizeMessageWorkflowPayload(value) {
     : {};
 }
 
-function serializeConversationMessage(row = {}, viewerUserId) {
+function normalizeQuoteSharedPayload(row = {}) {
+  const payload = normalizeMessageWorkflowPayload(row.workflow_payload);
+  if (
+    row.message_type !== "quote_shared" ||
+    row.workflow_type !== "QUOTE_SHARED" ||
+    row.workflow_status !== "SENT" ||
+    payload.schemaVersion !== 1 ||
+    payload.quoteId !== row.quote_id ||
+    payload.jobId !== row.job_id
+  ) return {};
+
+  const text = (value, max = 1000) =>
+    typeof value === "string" && value.trim()
+      ? value.trim().slice(0, max)
+      : null;
+  const integer = (value) =>
+    typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+      ? value
+      : null;
+  const scopeItems = Array.isArray(payload.scopeItems)
+    ? payload.scopeItems.slice(0, 200).map((item) => ({
+        description: text(item?.description),
+        quantity: integer(item?.quantity),
+        amountMinor: integer(item?.amountMinor),
+      })).filter((item) => item.description && item.quantity && item.amountMinor !== null)
+    : [];
+  const conditions = Array.isArray(payload.conditions)
+    ? payload.conditions.slice(0, 200).map((item) => text(item)).filter(Boolean)
+    : [];
+  const exclusions = Array.isArray(payload.exclusions)
+    ? payload.exclusions.slice(0, 200).map((item) => ({
+        description: text(item?.description),
+        quantity: integer(item?.quantity),
+      })).filter((item) => item.description && item.quantity)
+    : [];
+  const totalMinor = integer(payload.totalMinor);
+  const currency = typeof payload.currency === "string" && /^[A-Z]{3}$/.test(payload.currency)
+    ? payload.currency
+    : null;
+  const lineageLabel = ["Original", "Revised", "Additional"].includes(payload.lineageLabel)
+    ? payload.lineageLabel
+    : null;
+  const businessStatus = ["WAITING_ON_CUSTOMER", "APPROVED", "DECLINED"].includes(payload.businessStatus)
+    ? payload.businessStatus
+    : null;
+  if (totalMinor === null || !currency || !lineageLabel || !businessStatus) return {};
+
   return {
+    schemaVersion: 1,
+    quoteId: row.quote_id,
+    jobId: row.job_id,
+    lineageLabel,
+    businessStatus,
+    totalMinor,
+    currency,
+    scopeItems,
+    conditions,
+    exclusions,
+    issuedAt: text(payload.issuedAt, 80),
+    decidedAt: text(payload.decidedAt, 80),
+    business: {
+      displayName: text(payload.business?.displayName, 200) || "Professional",
+    },
+    job: {
+      title: text(payload.job?.title, 200) || "Job",
+      service: text(payload.job?.service, 120),
+    },
+  };
+}
+
+function serializeConversationMessage(row = {}, viewerUserId) {
+  const quoteShared = row.message_type === "quote_shared";
+  const value = {
     id: row.id,
     sender: {
       id: row.sender_id,
@@ -366,12 +437,20 @@ function serializeConversationMessage(row = {}, viewerUserId) {
     workflow: {
       type: row.workflow_type || null,
       status: row.workflow_status || null,
-      payload: normalizeMessageWorkflowPayload(
-        row.workflow_payload
-      ),
+      payload: quoteShared
+        ? normalizeQuoteSharedPayload(row)
+        : normalizeMessageWorkflowPayload(row.workflow_payload),
     },
     createdAt: row.created_at || null,
   };
+  if (quoteShared) {
+    value.reference = {
+      type: "quote",
+      quoteId: row.quote_id || null,
+      jobId: row.job_id || null,
+    };
+  }
+  return value;
 }
 
 function serializeConversationDetail(row = {}, viewerUserId) {
@@ -485,6 +564,7 @@ module.exports = {
   isValidPositiveInteger,
   parsePositiveInteger,
   participantArchiveField,
+  normalizeQuoteSharedPayload,
   serializeConversationForHomeowner,
   serializeConversationForProfessional,
   serializeConversationDetail,

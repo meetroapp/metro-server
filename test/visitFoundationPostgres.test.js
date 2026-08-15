@@ -455,14 +455,14 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 38);
+      assert.equal(migrations.length, 39);
       const applied = await runMigrationCollection(
         pool,
         migrations,
         targetMetadata(cleanDatabaseUrl)
       );
       assert.equal(applied.success, true);
-      assert.equal(applied.applied.length, 38);
+      assert.equal(applied.applied.length, 39);
 
       const replay = await runMigrationCollection(
         pool,
@@ -470,7 +470,7 @@ test(
         targetMetadata(cleanDatabaseUrl)
       );
       assert.equal(replay.success, true);
-      assert.equal(replay.skipped.length, 38);
+      assert.equal(replay.skipped.length, 39);
 
       const empty = await pool.query(
         `SELECT

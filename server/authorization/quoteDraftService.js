@@ -2339,5 +2339,11 @@ module.exports = {
   validateScopeItem,
   quoteDraftServiceInternals: Object.freeze({
     customerQuoteDetailProjection,
+    deriveCommercialSnapshots,
+    integrityHash,
+    loadQuoteContext,
+    loadQuoteProjection,
+    persistedSnapshotIsValid,
+    requireQuoteAuthority,
   }),
 };

@@ -19,11 +19,11 @@ function response() {
   };
 }
 
-test("professional Quotes registers one authenticated private read route", () => {
+test("professional Quotes registers bounded authenticated read and delivery routes", () => {
   const routes = [];
   const app = {
     get(path, ...handlers) { routes.push({ method: "GET", path, handlers }); },
-    post() { throw new Error("Professional Quotes projection must not register commands"); },
+    post(path, ...handlers) { routes.push({ method: "POST", path, handlers }); },
   };
   const authMiddleware = () => {};
   registerProfessionalQuotesRoutes({
@@ -34,8 +34,55 @@ test("professional Quotes registers one authenticated private read route", () =>
   });
   assert.deepEqual(routes.map(({ method, path }) => `${method} ${path}`), [
     "GET /professional/quotes",
+    "GET /professional/quotes/:quoteId/delivery",
+    "POST /professional/quotes/:quoteId/send-in-meetro",
   ]);
-  assert.equal(routes[0].handlers[0], authMiddleware);
+  for (const route of routes) assert.equal(route.handlers[0], authMiddleware);
+});
+
+test("delivery handlers derive actor and Quote identity from authenticated routing", async () => {
+  const calls = [];
+  const handlers = createProfessionalQuotesHandlers({
+    getPool: () => "pool",
+    sendPublicDatabaseError: () => {},
+    deliveryService: {
+      async getProfessionalQuoteDelivery(input) {
+        calls.push(["get", input]);
+        return { ok: true, status: 200, code: "PROFESSIONAL_QUOTE_DELIVERY_LOADED", delivery: {} };
+      },
+      async sendQuoteInMeetro(input) {
+        calls.push(["send", input]);
+        return { ok: true, status: 201, code: "QUOTE_SENT_IN_MEETRO", delivery: { messageId: 7 } };
+      },
+    },
+  });
+  const req = {
+    user: { id: 41 },
+    params: { quoteId: "11111111-1111-4111-8111-111111111111" },
+    body: { expectedIssuedVersion: 3, customerId: 999, conversationId: 888 },
+    headers: { "idempotency-key": "send-key" },
+  };
+  const readRes = response();
+  await handlers.getProfessionalQuoteDelivery(req, readRes);
+  const sendRes = response();
+  await handlers.sendQuoteInMeetro(req, sendRes);
+  assert.deepEqual(calls, [
+    ["get", {
+      pool: "pool",
+      authenticatedActor: { id: 41 },
+      quoteId: req.params.quoteId,
+    }],
+    ["send", {
+      pool: "pool",
+      authenticatedActor: { id: 41 },
+      quoteId: req.params.quoteId,
+      expectedIssuedVersion: 3,
+      idempotencyKey: "send-key",
+    }],
+  ]);
+  assert.equal(readRes.headers["Cache-Control"], "private, no-store");
+  assert.equal(sendRes.statusCode, 201);
+  assert.deepEqual(sendRes.body.delivery, { messageId: 7 });
 });
 
 test("handler derives identity only from authentication and forwards bounded read controls", async () => {

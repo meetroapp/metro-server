@@ -14,10 +14,10 @@ const sql = readFileSync(
   "utf8"
 );
 
-test("MC-PL-002D adds only the governed Approved Work Visit activation migration", () => {
+test("MC-PL-002D retains the governed Approved Work Visit activation migration", () => {
   const migrations = getMigrationFiles();
-  assert.equal(migrations.length, 38);
-  assert.equal(migrations.at(-1).filename, migrationName);
+  assert.equal(migrations.length, 39);
+  assert.ok(migrations.some((migration) => migration.filename === migrationName));
   assert.doesNotMatch(sql, /^\s*(?:BEGIN|COMMIT|ROLLBACK)\s*;/im);
   assert.doesNotMatch(sql, /\b(?:DROP\s+(?:TABLE|COLUMN)|TRUNCATE|DELETE\s+FROM)\b/i);
 });
