@@ -285,5 +285,10 @@ test("Invoice assistant rejects provider-owned financial totals", () => {
     balanceExplanation: "",
     warnings: [],
     balanceMinor: 1,
-  }, { semanticInput: { context: {} }, operationId: randomUUID() }), /operation contract/);
+  }, { semanticInput: { context: {} }, operationId: randomUUID() }), (error) => {
+    assert.match(error.message, /operation contract/);
+    assert.match(error.diagnosticCode, /^[a-f0-9]{16}$/);
+    assert.equal(error.message.includes(error.diagnosticCode), false);
+    return true;
+  });
 });

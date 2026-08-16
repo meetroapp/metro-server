@@ -340,6 +340,34 @@ test("provider failures and unsafe normalized results do not leak or become succ
   assert.equal(unsafe.providerRequests.length, 1);
 });
 
+test("parser rejection logs only a non-secret diagnostic fingerprint", async () => {
+  const events = [];
+  const fixture = createFixture({
+    parseResult() {
+      throw Object.assign(new Error("private provider result detail"), {
+        code: "malformed_operation_result",
+        diagnosticCode: "0123456789abcdef",
+      });
+    },
+  });
+
+  const result = await fixture.run({
+    logger: {
+      info() {},
+      warn(event, metadata) { events.push({ event, metadata }); },
+    },
+  });
+
+  assert.equal(result.code, "INTELLIGENCE_RESULT_REJECTED");
+  const rejected = events.find((event) => event.event === "intelligence.orchestration.result_rejected");
+  assert.deepEqual(rejected.metadata, {
+    operation: "test.echo",
+    operationId: result.operationId,
+    diagnosticCode: "0123456789abcdef",
+  });
+  assert.equal(JSON.stringify(events).includes("private provider result detail"), false);
+});
+
 test("canonical runtime has no direct product-domain imports", () => {
   const intelligenceDirectory = join(__dirname, "..", "server", "intelligence");
   const runtimeFiles = [

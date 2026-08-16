@@ -98,12 +98,25 @@ async function orchestrateIntelligenceOperation({
       selectedEngines: [...definition.engineIds],
     }),
   });
-  const parsedResult = await definition.parseResult(providerResult, {
-    semanticInput,
-    engineContext,
-    operationId,
-    correlationId,
-  });
+  let parsedResult;
+  try {
+    parsedResult = await definition.parseResult(providerResult, {
+      semanticInput,
+      engineContext,
+      operationId,
+      correlationId,
+    });
+  } catch (error) {
+    const diagnosticCode = /^[a-f0-9]{16}$/.test(String(error?.diagnosticCode || ""))
+      ? error.diagnosticCode
+      : null;
+    logMetadata(logger, "warn", "intelligence.orchestration.result_rejected", {
+      operation: definition.operation,
+      operationId,
+      diagnosticCode,
+    });
+    throw error;
+  }
   if (!isPlainObject(parsedResult)) {
     throw Object.assign(new Error("The provider result was not a normalized object."), {
       code: "malformed_operation_result",

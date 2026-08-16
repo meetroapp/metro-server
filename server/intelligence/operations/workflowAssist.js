@@ -30,7 +30,15 @@ function contextError(message) {
 }
 
 function resultError(message) {
-  return operationError("malformed_operation_result", message);
+  return Object.assign(
+    operationError("malformed_operation_result", message),
+    {
+      diagnosticCode: createHash("sha256")
+        .update(String(message))
+        .digest("hex")
+        .slice(0, 16),
+    }
+  );
 }
 
 function exact(value, required, optional = [], errorFactory = resultError) {
