@@ -388,7 +388,27 @@ test("durable Job completion outranks work and hands off without financial mutat
   assert.match(projection.nextAction.description, /separate next step/i);
 });
 
-test("projection vocabulary and precedence are code-owned and exclude deferred domains", () => {
+test("completed Job financial next actions come from canonical Invoice truth", () => {
+  const completion = { id: "completion", version: 1, status: "COMPLETED" };
+  const cases = [
+    ["DRAFT", "REVIEW_DRAFT_INVOICE"],
+    ["SENT", "WAIT_FOR_PAYMENT"],
+    ["PARTIALLY_PAID", "REVIEW_BALANCE_DUE"],
+    ["PAID", "REVIEW_PAID_INVOICE"],
+  ];
+  for (const [status, nextAction] of cases) {
+    const projection = derive({
+      completion,
+      invoice: { id: "invoice", version: status === "DRAFT" ? 1 : 2, status },
+    });
+    assert.equal(projection.stage.code, "JOB_COMPLETED");
+    assert.equal(projection.nextAction.code, nextAction);
+    assert.equal(projection.availableActions.some((action) => action.code === "VIEW_INVOICE"), true);
+    assert.equal(projection.freshness.invoiceVersion, status === "DRAFT" ? 1 : 2);
+  }
+});
+
+test("projection vocabulary and precedence are code-owned and exclude still-deferred domains", () => {
   assert.deepEqual(DERIVATION_PRECEDENCE, [
     "JOB_COMPLETION",
     "BLOCKED_WORK",
@@ -407,7 +427,7 @@ test("projection vocabulary and precedence are code-owned and exclude deferred d
   ]);
   assert.equal(
     Object.keys(ACTION_DEFINITIONS).some((action) =>
-      /SCHEDULE|VISIT|INVOICE|PAYMENT|COMPLETE_JOB|CLOSE_JOB/.test(action)
+      /SCHEDULE|VISIT|COMPLETE_JOB|CLOSE_JOB/.test(action)
     ),
     false
   );
@@ -472,7 +492,7 @@ test("authorized lifecycle-v2 professional receives the read-only canonical proj
   assert.equal(result.code, "LIVE_JOB_STATE_LOADED");
   assert.equal(result.liveJob.stage.code, "EVALUATION_NEEDED");
   assert.equal(result.liveJob.requestId, 41);
-  assert.equal(queries.filter((sql) => sql.includes("live_job:")).length, 10);
+  assert.equal(queries.filter((sql) => sql.includes("live_job:")).length, 11);
   assert.equal(queries.some((sql) => /\bINSERT\b|\bUPDATE\b|\bDELETE\b/.test(sql)), false);
 });
 

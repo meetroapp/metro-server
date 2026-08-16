@@ -60,6 +60,7 @@ Current inventory:
 40. `202608150001_activate_customer_safe_efr.sql`
 41. `202608150002_activate_work_plan_execution.sql`
 42. `202608150003_create_job_completion_history.sql`
+43. `202608150004_create_canonical_invoice_payment_foundation.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -83,6 +84,12 @@ or completion business record.
 Job completion evidence and an exact, idempotent completion-command ledger.
 It creates no completion business record, changes no Quote or Visit truth,
 and introduces no Invoice, Payment, Portfolio, or financial settlement state.
+
+`202608150004_create_canonical_invoice_payment_foundation.sql` adds versioned
+Invoice authority, immutable approved-scope line snapshots, exact Conversation
+issuance evidence, append-only offline Payment evidence, and durable command
+idempotency. It creates no Invoice, Payment, message, alert, Job, Quote, Visit,
+or Work Plan business record and introduces no payment-processor authority.
 
 `202608030002_create_canonical_alerts.sql` creates the additive
 recipient-scoped `alerts` table for canonical backend alert persistence. It

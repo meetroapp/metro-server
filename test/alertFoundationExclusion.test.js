@@ -83,16 +83,22 @@ test("004D permits only the canonical communication producer and resolver", () =
   const quoteDeliverySource = read(
     "server/authorization/quoteDeliveryService.js"
   );
+  const invoiceDeliverySource = read(
+    "server/finance/invoicePaymentService.js"
+  );
   assert.match(messageSource, /createOrRefreshCommunicationMessageAlert/);
   assert.match(messageSource, /getCommunicationAttentionWindowWithClient/);
   assert.match(participantSource, /resolveCommunicationMessageAlerts/);
   assert.match(quoteDeliverySource, /createOrRefreshCommunicationMessageAlert/);
   assert.match(quoteDeliverySource, /getCommunicationAttentionWindowWithClient/);
+  assert.match(invoiceDeliverySource, /createOrRefreshCommunicationMessageAlert/);
+  assert.match(invoiceDeliverySource, /getCommunicationAttentionWindowWithClient/);
 
   const approved = new Set([
     "server/conversations/conversationMessageService.js",
     "server/conversations/conversationParticipantStateService.js",
     "server/authorization/quoteDeliveryService.js",
+    "server/finance/invoicePaymentService.js",
   ]);
   for (const relativePath of listJsFilesRecursively("server")
     .filter((item) => !item.startsWith("server/alerts/"))) {

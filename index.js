@@ -167,6 +167,9 @@ const {
 const {
   registerJobCompletionRoutes,
 } = require("./server/workflow/jobCompletions");
+const {
+  registerInvoicePaymentRoutes,
+} = require("./server/finance/invoicePayments");
 
 
 const JWT_SECRET = resolveJwtSecret(process.env);
@@ -921,6 +924,13 @@ registerCustomerEfrRoutes({
 });
 
 registerJobCompletionRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerInvoicePaymentRoutes({
   app,
   authMiddleware,
   getPool,

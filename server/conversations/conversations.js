@@ -417,8 +417,64 @@ function normalizeQuoteSharedPayload(row = {}) {
   };
 }
 
+function normalizeInvoiceSharedPayload(row = {}) {
+  const payload = normalizeMessageWorkflowPayload(row.workflow_payload);
+  const text = (value, max = 1000) =>
+    typeof value === "string" && value.trim()
+      ? value.trim().slice(0, max)
+      : null;
+  const integer = (value) =>
+    typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+      ? value
+      : null;
+  const dueMode = ["DUE_ON_RECEIPT", "SPECIFIC_DATE"].includes(payload.due?.mode)
+    ? payload.due.mode
+    : null;
+  const totalMinor = integer(payload.totalMinor);
+  const balanceMinor = integer(payload.balanceMinor);
+  const currency = typeof payload.currency === "string" && /^[A-Z]{3}$/.test(payload.currency)
+    ? payload.currency
+    : null;
+  if (
+    row.message_type !== "invoice_shared" ||
+    row.workflow_type !== "INVOICE_SHARED" ||
+    row.workflow_status !== "SENT" ||
+    payload.schemaVersion !== 1 ||
+    payload.invoiceId !== row.invoice_id ||
+    payload.jobId !== row.job_id ||
+    !text(payload.invoiceNumber, 40) ||
+    payload.status !== "SENT" ||
+    totalMinor === null || balanceMinor === null || balanceMinor > totalMinor ||
+    !currency || !dueMode
+  ) return {};
+
+  return {
+    schemaVersion: 1,
+    invoiceId: row.invoice_id,
+    invoiceNumber: text(payload.invoiceNumber, 40),
+    jobId: row.job_id,
+    status: "SENT",
+    totalMinor,
+    balanceMinor,
+    currency,
+    due: {
+      mode: dueMode,
+      date: dueMode === "SPECIFIC_DATE" ? text(payload.due?.date, 10) : null,
+    },
+    business: {
+      displayName: text(payload.business?.displayName, 200) || "Professional",
+    },
+    job: {
+      title: text(payload.job?.title, 200) || "Job",
+      service: text(payload.job?.service, 120),
+    },
+    issuedAt: text(payload.issuedAt, 80),
+  };
+}
+
 function serializeConversationMessage(row = {}, viewerUserId) {
   const quoteShared = row.message_type === "quote_shared";
+  const invoiceShared = row.message_type === "invoice_shared";
   const value = {
     id: row.id,
     sender: {
@@ -439,7 +495,9 @@ function serializeConversationMessage(row = {}, viewerUserId) {
       status: row.workflow_status || null,
       payload: quoteShared
         ? normalizeQuoteSharedPayload(row)
-        : normalizeMessageWorkflowPayload(row.workflow_payload),
+        : invoiceShared
+          ? normalizeInvoiceSharedPayload(row)
+          : normalizeMessageWorkflowPayload(row.workflow_payload),
     },
     createdAt: row.created_at || null,
   };
@@ -447,6 +505,13 @@ function serializeConversationMessage(row = {}, viewerUserId) {
     value.reference = {
       type: "quote",
       quoteId: row.quote_id || null,
+      jobId: row.job_id || null,
+    };
+  }
+  if (invoiceShared) {
+    value.reference = {
+      type: "invoice",
+      invoiceId: row.invoice_id || null,
       jobId: row.job_id || null,
     };
   }
@@ -564,6 +629,7 @@ module.exports = {
   isValidPositiveInteger,
   parsePositiveInteger,
   participantArchiveField,
+  normalizeInvoiceSharedPayload,
   normalizeQuoteSharedPayload,
   serializeConversationForHomeowner,
   serializeConversationForProfessional,

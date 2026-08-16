@@ -124,14 +124,14 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 42);
+      assert.equal(migrations.length, 43);
       const migrated = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(migrated.success, true);
-      assert.equal(migrated.applied.length, 42);
+      assert.equal(migrated.applied.length, 43);
       const replay = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(replay.success, true);
       assert.equal(replay.applied.length, 0);
-      assert.equal(replay.skipped.length, 42);
+      assert.equal(replay.skipped.length, 43);
 
       const identities = await createVisitTestIdentities(pool, suffix);
       const draftFixture = await createVisitLifecycleFixture(

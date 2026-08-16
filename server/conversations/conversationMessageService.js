@@ -502,6 +502,7 @@ async function listConversationMessages({
       messages.workflow_status,
       messages.workflow_payload,
       messages.quote_id,
+      messages.invoice_id,
       messages.job_id,
       messages.created_at
     FROM messages

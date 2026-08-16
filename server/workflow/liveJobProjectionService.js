@@ -110,6 +110,22 @@ const NEXT_ACTION_DEFINITIONS = Object.freeze({
     label: "Ready to Invoice",
     description: "The operational Job is complete. Billing remains a separate next step.",
   },
+  REVIEW_DRAFT_INVOICE: {
+    label: "Review the draft Invoice",
+    description: "Review the canonical billing record before it is sent to the customer.",
+  },
+  WAIT_FOR_PAYMENT: {
+    label: "Waiting for Payment",
+    description: "The Invoice is with the customer and the full balance remains due.",
+  },
+  REVIEW_BALANCE_DUE: {
+    label: "Balance Remaining",
+    description: "A partial Payment is recorded and a balance remains on the Invoice.",
+  },
+  REVIEW_PAID_INVOICE: {
+    label: "Paid",
+    description: "The Invoice balance is fully paid and preserved with Job History.",
+  },
   NEXT_STEP_NOT_YET_AVAILABLE: {
     label: "The next step is not available yet",
     description: "This Job is waiting for a later workflow capability.",
@@ -131,6 +147,7 @@ const ACTION_DEFINITIONS = Object.freeze({
   CONTINUE_ACTIVE_WORK: "Continue active work",
   REVIEW_WORKSTREAM_COMPLETION: "Review completed work record",
   VIEW_JOB_HISTORY: "View Job History",
+  VIEW_INVOICE: "View Invoice",
 });
 
 const DERIVATION_PRECEDENCE = Object.freeze([
@@ -270,6 +287,7 @@ function baseAvailableActions(state, capabilities, stage) {
   if (stage === "JOB_COMPLETED" && capabilities.has("workstream.read")) {
     actions.push("VIEW_JOB_HISTORY");
   }
+  if (stage === "JOB_COMPLETED" && state.invoice) actions.push("VIEW_INVOICE");
   return [...new Set(actions)].map(availableAction);
 }
 
@@ -303,6 +321,7 @@ function result({
       workstreamVersion: currentVersion(state.workstreams),
       activityVersion: currentVersion(state.activities),
       obligationVersion: currentVersion(state.obligations),
+      invoiceVersion: Number(state.invoice?.version) || 0,
       evaluationCount: state.evaluation ? 1 : 0,
       findingCount: state.findings.length,
       recommendationCount: state.recommendations.length,
@@ -336,11 +355,21 @@ function deriveCanonicalLiveJob(state = {}, { derivedAt = new Date().toISOString
   };
 
   if (state.completion) {
+    const invoiceAction = {
+      DRAFT: "REVIEW_DRAFT_INVOICE",
+      SENT: "WAIT_FOR_PAYMENT",
+      PARTIALLY_PAID: "REVIEW_BALANCE_DUE",
+      PAID: "REVIEW_PAID_INVOICE",
+    }[state.invoice?.status] || "READY_TO_INVOICE";
     return result({
       stage: "JOB_COMPLETED",
       responsibility: "NONE",
-      action: "READY_TO_INVOICE",
-      reasons: ["JOB_COMPLETION_RECORDED", "FINANCIAL_SETTLEMENT_REMAINS_SEPARATE"],
+      action: invoiceAction,
+      reasons: [
+        "JOB_COMPLETION_RECORDED",
+        state.invoice ? `INVOICE_${state.invoice.status}` : "INVOICE_NOT_CREATED",
+        "FINANCIAL_SETTLEMENT_REMAINS_SEPARATE",
+      ],
       state: scopedState,
       derivedAt,
     });
@@ -681,19 +710,8 @@ async function loadAuthorizedJob(pool, jobId, actorUserId) {
 
 async function loadCanonicalState(pool, context) {
   const jobId = context.job_id;
-  const [
-    evaluation,
-    findings,
-    recommendations,
-    quotes,
-    workstreams,
-    activities,
-    obligations,
-    approvedWorkScheduling,
-    completion,
-  ] =
-    await Promise.all([
-      pool.query(
+  const queries = [
+      () => pool.query(
         `/* live_job:evaluation */
          SELECT canonical_evaluations.id, canonical_evaluations.status,
            canonical_evaluation_versions.version,
@@ -711,7 +729,7 @@ async function loadCanonicalState(pool, context) {
          LIMIT 1`,
         [jobId]
       ),
-      pool.query(
+      () => pool.query(
         `/* live_job:findings */
          SELECT canonical_evaluation_findings.id,
            canonical_evaluation_finding_versions.version,
@@ -728,7 +746,7 @@ async function loadCanonicalState(pool, context) {
          ORDER BY canonical_evaluation_findings.created_at, canonical_evaluation_findings.id`,
         [jobId]
       ),
-      pool.query(
+      () => pool.query(
         `/* live_job:recommendations */
          SELECT canonical_recommendations.id, canonical_recommendations.finding_id,
            canonical_recommendation_versions.version,
@@ -744,7 +762,7 @@ async function loadCanonicalState(pool, context) {
          ORDER BY canonical_recommendations.created_at, canonical_recommendations.id`,
         [jobId]
       ),
-      pool.query(
+      () => pool.query(
         `/* live_job:quotes */
          SELECT canonical_quotes.id, canonical_quotes.created_at,
            canonical_quotes.parent_quote_id, canonical_quotes.lineage_type,
@@ -767,7 +785,7 @@ async function loadCanonicalState(pool, context) {
            canonical_quotes.id DESC`,
         [jobId]
       ),
-      pool.query(
+      () => pool.query(
         `/* live_job:workstreams */
          SELECT canonical_workstreams.id,
            canonical_workstream_versions.version,
@@ -800,7 +818,7 @@ async function loadCanonicalState(pool, context) {
          ORDER BY canonical_workstreams.sequence, canonical_workstreams.id`,
         [jobId]
       ),
-      pool.query(
+      () => pool.query(
         `/* live_job:activities */
          SELECT canonical_work_activities.id,
            canonical_work_activity_versions.version,
@@ -834,7 +852,7 @@ async function loadCanonicalState(pool, context) {
          ORDER BY canonical_work_activities.created_at, canonical_work_activities.id`,
         [jobId]
       ),
-      pool.query(
+      () => pool.query(
         `/* live_job:obligations */
          SELECT canonical_workstream_obligations.id,
            canonical_workstream_obligation_versions.version,
@@ -870,7 +888,7 @@ async function loadCanonicalState(pool, context) {
            canonical_workstream_obligations.id`,
         [jobId]
       ),
-      pool.query(
+      () => pool.query(
         `/* live_job:approved_work_scheduling */
          SELECT canonical_quotes.id AS quote_id,
            decisions.id AS approved_quote_decision_id,
@@ -956,7 +974,7 @@ async function loadCanonicalState(pool, context) {
           ["visit.read", "visit.confirm", "visit.change_request"],
         ]
       ),
-      pool.query(
+      () => pool.query(
         `/* live_job:completion */
          SELECT id, version, status, completed_at
          FROM canonical_job_completion_records
@@ -964,7 +982,37 @@ async function loadCanonicalState(pool, context) {
          LIMIT 1`,
         [jobId]
       ),
-    ]);
+      () => pool.query(
+        `/* live_job:invoice */
+         SELECT invoices.id, current.version, current.status,
+           current.currency, current.total_minor,
+           current.paid_minor, current.balance_minor
+         FROM canonical_invoices invoices
+         INNER JOIN LATERAL (
+           SELECT version, status, currency, total_minor, paid_minor, balance_minor
+           FROM canonical_invoice_versions versions
+           WHERE versions.invoice_id = invoices.id
+           ORDER BY versions.version DESC LIMIT 1
+         ) current ON TRUE
+         WHERE invoices.job_id = $1
+         LIMIT 1`,
+        [jobId]
+      ),
+    ];
+  const results = [];
+  for (const query of queries) results.push(await query());
+  const [
+    evaluation,
+    findings,
+    recommendations,
+    quotes,
+    workstreams,
+    activities,
+    obligations,
+    approvedWorkScheduling,
+    completion,
+    invoice,
+  ] = results;
 
   return {
     jobCreatedAt: context.job_created_at,
@@ -978,6 +1026,7 @@ async function loadCanonicalState(pool, context) {
     activities: activities.rows,
     obligations: obligations.rows,
     completion: completion.rows[0] || null,
+    invoice: invoice.rows[0] || null,
     approvedWorkScheduling: quotes.rows
       .filter((quote) => quote.customer_decision === "APPROVED")
       .map((quote) => {
