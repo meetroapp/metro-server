@@ -44,11 +44,11 @@ const ESTIMATE_COMPOSE_OUTPUT_SCHEMA = Object.freeze({
           "retailerReferenceId", "assumption", "needsVerification",
         ],
         properties: {
-          id: { type: "string" },
-          description: { type: "string" },
-          quantity: { type: "number" },
-          unit: { type: "string" },
-          wastePercent: { type: "number" },
+          id: { type: "string", pattern: "^[a-z][a-z0-9_.:-]{0,159}$" },
+          description: { type: "string", minLength: 1, maxLength: 500 },
+          quantity: { type: "number", exclusiveMinimum: 0, maximum: 1000000 },
+          unit: { type: "string", minLength: 1, maxLength: 80 },
+          wastePercent: { type: "number", minimum: 0, maximum: 100 },
           costInputKey: { type: ["string", "null"] },
           retailerReferenceId: { type: ["string", "null"] },
           assumption: { type: "string" },
@@ -63,10 +63,10 @@ const ESTIMATE_COMPOSE_OUTPUT_SCHEMA = Object.freeze({
         additionalProperties: false,
         required: ["id", "description", "crewCount", "hoursPerWorker", "costInputKey", "assumption"],
         properties: {
-          id: { type: "string" },
-          description: { type: "string" },
-          crewCount: { type: "number" },
-          hoursPerWorker: { type: "number" },
+          id: { type: "string", pattern: "^[a-z][a-z0-9_.:-]{0,159}$" },
+          description: { type: "string", minLength: 1, maxLength: 500 },
+          crewCount: { type: "number", exclusiveMinimum: 0, maximum: 1000000 },
+          hoursPerWorker: { type: "number", exclusiveMinimum: 0, maximum: 1000000 },
           costInputKey: { type: ["string", "null"] },
           assumption: { type: "string" },
         },
@@ -79,8 +79,8 @@ const ESTIMATE_COMPOSE_OUTPUT_SCHEMA = Object.freeze({
         additionalProperties: false,
         required: ["id", "description", "costInputKey"],
         properties: {
-          id: { type: "string" },
-          description: { type: "string" },
+          id: { type: "string", pattern: "^[a-z][a-z0-9_.:-]{0,159}$" },
+          description: { type: "string", minLength: 1, maxLength: 500 },
           costInputKey: { type: ["string", "null"] },
         },
       },
@@ -94,7 +94,7 @@ const ESTIMATE_COMPOSE_OUTPUT_SCHEMA = Object.freeze({
         costInputKey: { type: ["string", "null"] },
       },
     },
-    contingencyPercent: { type: "number" },
+    contingencyPercent: { type: "number", minimum: 0, maximum: 50 },
     assumptions: {
       type: "array",
       items: {
@@ -102,8 +102,8 @@ const ESTIMATE_COMPOSE_OUTPUT_SCHEMA = Object.freeze({
         additionalProperties: false,
         required: ["id", "text"],
         properties: {
-          id: { type: "string" },
-          text: { type: "string" },
+          id: { type: "string", pattern: "^[a-z][a-z0-9_.:-]{0,159}$" },
+          text: { type: "string", minLength: 1, maxLength: 1000 },
         },
       },
     },
@@ -113,8 +113,8 @@ const ESTIMATE_COMPOSE_OUTPUT_SCHEMA = Object.freeze({
       additionalProperties: false,
       required: ["minimumMinor", "maximumMinor", "rationale"],
       properties: {
-        minimumMinor: { type: "integer" },
-        maximumMinor: { type: "integer" },
+        minimumMinor: { type: "integer", minimum: 0 },
+        maximumMinor: { type: "integer", minimum: 0 },
         rationale: { type: "string" },
       },
     },
@@ -134,13 +134,37 @@ const ESTIMATE_COMPOSE_OUTPUT_SCHEMA = Object.freeze({
   },
 });
 
-function workflowResponseFormat(operation) {
-  if (operation === "estimate.compose") {
+function governedIdentifierEnum(values, classification = null) {
+  const identifiers = (Array.isArray(values) ? values : [])
+    .filter((item) => !classification || item?.classification === classification)
+    .map((item) => item?.key || item?.id)
+    .filter((value) => typeof value === "string" && value);
+  return { enum: [null, ...new Set(identifiers)] };
+}
+
+function estimateComposeOutputSchema(request) {
+  const context = request?.internalProfessionalContext || {};
+  const costInputs = context?.professionalInput?.costInputs;
+  const retailerReferences = context?.retailerReferences;
+  const schema = structuredClone(ESTIMATE_COMPOSE_OUTPUT_SCHEMA);
+  const materialProperties = schema.properties.materials.items.properties;
+  const laborProperties = schema.properties.labor.items.properties;
+  const equipmentProperties = schema.properties.equipment.items.properties;
+  materialProperties.costInputKey = governedIdentifierEnum(costInputs, "MATERIAL");
+  materialProperties.retailerReferenceId = governedIdentifierEnum(retailerReferences);
+  laborProperties.costInputKey = governedIdentifierEnum(costInputs, "LABOR");
+  equipmentProperties.costInputKey = governedIdentifierEnum(costInputs, "EQUIPMENT");
+  schema.properties.disposal.properties.costInputKey = governedIdentifierEnum(costInputs, "DISPOSAL");
+  return schema;
+}
+
+function workflowResponseFormat(request) {
+  if (request?.operation === "estimate.compose") {
     return {
       type: "json_schema",
       name: "meetro_estimate_compose",
       strict: true,
-      schema: ESTIMATE_COMPOSE_OUTPUT_SCHEMA,
+      schema: estimateComposeOutputSchema(request),
     };
   }
   return { type: "json_object" };
@@ -296,7 +320,7 @@ function createOpenAiWorkflowProvider({
       const { response, payload } = await createResponse({
         instructions: workflowInstructions(request),
         input: JSON.stringify(request),
-        text: { format: workflowResponseFormat(request?.operation) },
+        text: { format: workflowResponseFormat(request) },
       });
       const output = responseOutputText(payload);
       if (!output) {

@@ -135,7 +135,18 @@ test("Estimate provider uses strict Structured Outputs for its governed result c
     },
   });
 
-  await provider.complete({ operation: "estimate.compose" });
+  await provider.complete({
+    operation: "estimate.compose",
+    internalProfessionalContext: {
+      professionalInput: {
+        costInputs: [
+          { key: "material.valid", classification: "MATERIAL" },
+          { key: "labor.valid", classification: "LABOR" },
+        ],
+      },
+      retailerReferences: [{ id: "retailer.valid" }],
+    },
+  });
   const format = JSON.parse(calls[0].options.body).text.format;
   assert.equal(format.type, "json_schema");
   assert.equal(format.name, "meetro_estimate_compose");
@@ -147,7 +158,13 @@ test("Estimate provider uses strict Structured Outputs for its governed result c
     "customerQuoteDraft", "warnings",
   ]);
   assert.equal(format.schema.properties.materials.items.additionalProperties, false);
-  assert.deepEqual(format.schema.properties.materials.items.properties.costInputKey.type, ["string", "null"]);
+  assert.deepEqual(format.schema.properties.materials.items.properties.costInputKey.enum, [null, "material.valid"]);
+  assert.deepEqual(format.schema.properties.materials.items.properties.retailerReferenceId.enum, [null, "retailer.valid"]);
+  assert.deepEqual(format.schema.properties.labor.items.properties.costInputKey.enum, [null, "labor.valid"]);
+  assert.deepEqual(format.schema.properties.equipment.items.properties.costInputKey.enum, [null]);
+  assert.deepEqual(format.schema.properties.disposal.properties.costInputKey.enum, [null]);
+  assert.equal(format.schema.properties.materials.items.properties.quantity.exclusiveMinimum, 0);
+  assert.equal(format.schema.properties.contingencyPercent.maximum, 50);
 });
 
 test("provider failures are reduced to safe governed classifications", async () => {
