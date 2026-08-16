@@ -254,7 +254,9 @@ const pool = new Pool({
   },
 });
 
-const workflowProviderConfiguration = createWorkflowProviderConfiguration(process.env);
+const workflowProviderConfiguration = createWorkflowProviderConfiguration(process.env, {
+  logger: console,
+});
 app.locals.intelligenceProviders = workflowProviderConfiguration.providers;
 app.locals.intelligenceTranscriptionProvider = workflowProviderConfiguration.transcriptionProvider;
 app.locals.intelligenceProviderMetadata = workflowProviderConfiguration.metadata;

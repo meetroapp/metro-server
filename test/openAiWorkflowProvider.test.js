@@ -10,8 +10,13 @@ const {
   createWorkflowProviderConfiguration,
 } = require("../server/intelligence/openAiWorkflowProvider");
 
-function response({ ok = true, status = 200, payload = {} } = {}) {
-  return { ok, status, async json() { return payload; } };
+function response({ ok = true, status = 200, payload = {}, requestId = "req_fixture" } = {}) {
+  return {
+    ok,
+    status,
+    headers: { get(name) { return name === "x-request-id" ? requestId : null; } },
+    async json() { return payload; },
+  };
 }
 
 test("workflow provider configuration is server-owned and exposes only safe metadata", () => {
@@ -59,6 +64,7 @@ test("workflow provider sends governed JSON through the Responses API without em
   assert.equal(calls[0].options.headers.Authorization, "Bearer fixture-secret");
   const body = JSON.parse(calls[0].options.body);
   assert.equal(body.model, "fixture-model");
+  assert.equal(body.store, false);
   assert.deepEqual(body.text, { format: { type: "json_object" } });
   assert.equal(body.input.includes("fixture-secret"), false);
   assert.equal(body.instructions.includes("advisory"), true);
@@ -71,6 +77,8 @@ test("provider failures are reduced to safe governed classifications", async () 
   assert.equal(classifyProviderFailure(403, {}), "provider_access_denied");
   assert.equal(classifyProviderFailure(404, {}), "provider_model_unavailable");
   assert.equal(classifyProviderFailure(400, { error: { code: "billing_hard_limit_reached" } }), "provider_billing_required");
+  assert.equal(classifyProviderFailure(400, { error: { type: "invalid_request_error" } }), "provider_request_invalid");
+  assert.equal(classifyProviderFailure(500, {}), "provider_upstream_failure");
 
   const provider = createOpenAiWorkflowProvider({
     apiKey: "fixture-secret",
@@ -80,6 +88,75 @@ test("provider failures are reduced to safe governed classifications", async () 
     provider.complete({ operation: "evaluation.assist" }),
     (error) => error.code === "provider_quota_exhausted" && !error.message.includes("private detail")
   );
+});
+
+test("provider diagnostics log only safe upstream metadata", async () => {
+  const events = [];
+  const provider = createOpenAiWorkflowProvider({
+    apiKey: "fixture-secret",
+    model: "fixture-model",
+    logger: { error(event, metadata) { events.push({ event, metadata }); } },
+    fetchImpl: async () => response({
+      ok: false,
+      status: 400,
+      requestId: "req_safe_fixture",
+      payload: {
+        error: {
+          type: "invalid_request_error",
+          code: "unsupported_parameter",
+          param: "text.format",
+          message: "Bearer fixture-secret rejected sk-private-value",
+        },
+      },
+    }),
+  });
+
+  await assert.rejects(
+    provider.complete({ operation: "evaluation.assist", privateContext: "customer detail" }),
+    (error) => error.code === "provider_request_invalid"
+  );
+  assert.equal(events.length, 1);
+  assert.equal(events[0].event, "intelligence.provider.upstream_failure");
+  assert.deepEqual(events[0].metadata, {
+    httpStatus: 400,
+    errorType: "invalid_request_error",
+    errorCode: "unsupported_parameter",
+    errorParam: "text.format",
+    errorMessage: "Bearer [redacted] rejected [redacted]",
+    requestId: "req_safe_fixture",
+    model: "fixture-model",
+    endpointFamily: "responses",
+  });
+  assert.equal(JSON.stringify(events).includes("customer detail"), false);
+  assert.equal(JSON.stringify(events).includes("fixture-secret"), false);
+});
+
+test("minimal provider smoke uses the governed adapter without storage", async () => {
+  const calls = [];
+  const events = [];
+  const provider = createOpenAiWorkflowProvider({
+    apiKey: "fixture-secret",
+    model: "fixture-model",
+    logger: { info(event, metadata) { events.push({ event, metadata }); } },
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return response({ payload: { output_text: "OK" }, requestId: "req_smoke_fixture" });
+    },
+  });
+
+  assert.deepEqual(await provider.smoke(), {
+    ok: true,
+    model: "fixture-model",
+    endpointFamily: "responses",
+    requestId: "req_smoke_fixture",
+    store: false,
+  });
+  const body = JSON.parse(calls[0].options.body);
+  assert.equal(body.model, "fixture-model");
+  assert.equal(body.store, false);
+  assert.equal(body.input, "Reply with the word OK.");
+  assert.equal(body.text, undefined);
+  assert.equal(events[0].event, "intelligence.provider.smoke_completed");
 });
 
 test("transcription provider sends audio as multipart and returns transcript only", async () => {

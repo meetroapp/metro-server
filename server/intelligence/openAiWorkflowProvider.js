@@ -4,6 +4,7 @@ const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const OPENAI_TRANSCRIPTIONS_URL = "https://api.openai.com/v1/audio/transcriptions";
 const DEFAULT_WORKFLOW_MODEL = "gpt-5.4-mini";
 const DEFAULT_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe";
+const RESPONSES_ENDPOINT_FAMILY = "responses";
 
 const OUTPUT_CONTRACTS = Object.freeze({
   "job_request.interpret": `Return exactly this JSON object shape:
@@ -26,6 +27,41 @@ function providerError(code, message) {
   return Object.assign(new Error(message), { code });
 }
 
+function boundedDiagnosticText(value, maximum = 160) {
+  if (value == null) return null;
+  const normalized = String(value)
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/Bearer\s+\S+/gi, "Bearer [redacted]")
+    .replace(/\bsk-[A-Za-z0-9_-]+\b/g, "[redacted]")
+    .replace(/(["'])(.{65,}?)\1/g, "$1[redacted]$1")
+    .replace(/\s+/g, " ")
+    .trim();
+  return normalized ? normalized.slice(0, maximum) : null;
+}
+
+function responseRequestId(response) {
+  return boundedDiagnosticText(response?.headers?.get?.("x-request-id"), 160);
+}
+
+function safeProviderDiagnostics({ response, payload = {}, model, error } = {}) {
+  return Object.freeze({
+    httpStatus: Number.isInteger(response?.status) ? response.status : null,
+    errorType: boundedDiagnosticText(payload?.error?.type),
+    errorCode: boundedDiagnosticText(payload?.error?.code),
+    errorParam: boundedDiagnosticText(payload?.error?.param),
+    errorMessage: boundedDiagnosticText(payload?.error?.message || error?.message, 400),
+    requestId: responseRequestId(response),
+    model: boundedDiagnosticText(model),
+    endpointFamily: RESPONSES_ENDPOINT_FAMILY,
+  });
+}
+
+function logProviderDiagnostic(logger, level, event, metadata) {
+  if (logger && typeof logger[level] === "function") {
+    logger[level](event, metadata);
+  }
+}
+
 function classifyProviderFailure(status, payload = {}) {
   const code = String(payload?.error?.code || "").trim().toLowerCase();
   const type = String(payload?.error?.type || "").trim().toLowerCase();
@@ -37,6 +73,8 @@ function classifyProviderFailure(status, payload = {}) {
   if (status === 404 || code.includes("model") || type.includes("model")) {
     return "provider_model_unavailable";
   }
+  if (status === 400) return "provider_request_invalid";
+  if (status >= 500) return "provider_upstream_failure";
   return "provider_failure";
 }
 
@@ -78,6 +116,7 @@ function createOpenAiWorkflowProvider({
   apiKey,
   model = DEFAULT_WORKFLOW_MODEL,
   fetchImpl = globalThis.fetch,
+  logger = null,
 } = {}) {
   const normalizedKey = typeof apiKey === "string" ? apiKey.trim() : "";
   const normalizedModel = typeof model === "string" ? model.trim() : "";
@@ -85,12 +124,10 @@ function createOpenAiWorkflowProvider({
     return null;
   }
 
-  return Object.freeze({
-    name: "workflow_assistance",
-    provider: "openai",
-    model: normalizedModel,
-    async complete(request) {
-      const response = await fetchImpl(OPENAI_RESPONSES_URL, {
+  async function createResponse(body) {
+    let response;
+    try {
+      response = await fetchImpl(OPENAI_RESPONSES_URL, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${normalizedKey}`,
@@ -98,25 +135,101 @@ function createOpenAiWorkflowProvider({
         },
         body: JSON.stringify({
           model: normalizedModel,
-          instructions: workflowInstructions(request),
-          input: JSON.stringify(request),
-          text: { format: { type: "json_object" } },
+          store: false,
+          ...body,
         }),
       });
-      const payload = await readSafeJson(response);
-      if (!response.ok) {
-        throw providerError(
-          classifyProviderFailure(response.status, payload),
-          "The governed workflow provider rejected the request."
-        );
-      }
+    } catch (error) {
+      logProviderDiagnostic(
+        logger,
+        "error",
+        "intelligence.provider.transport_failure",
+        safeProviderDiagnostics({ model: normalizedModel, error })
+      );
+      throw providerError("provider_transport_failure", "The governed workflow provider could not be reached.");
+    }
+
+    const payload = await readSafeJson(response);
+    if (!response.ok) {
+      logProviderDiagnostic(
+        logger,
+        "error",
+        "intelligence.provider.upstream_failure",
+        safeProviderDiagnostics({ response, payload, model: normalizedModel })
+      );
+      throw providerError(
+        classifyProviderFailure(response.status, payload),
+        "The governed workflow provider rejected the request."
+      );
+    }
+    return { response, payload };
+  }
+
+  return Object.freeze({
+    name: "workflow_assistance",
+    provider: "openai",
+    model: normalizedModel,
+    async complete(request) {
+      const { response, payload } = await createResponse({
+        instructions: workflowInstructions(request),
+        input: JSON.stringify(request),
+        text: { format: { type: "json_object" } },
+      });
       const output = responseOutputText(payload);
-      if (!output) throw providerError("malformed_operation_result", "The provider returned no output.");
+      if (!output) {
+        logProviderDiagnostic(
+          logger,
+          "error",
+          "intelligence.provider.response_parse_failure",
+          {
+            ...safeProviderDiagnostics({ response, model: normalizedModel }),
+            parserCode: "empty_output",
+          }
+        );
+        throw providerError("malformed_operation_result", "The provider returned no output.");
+      }
       try {
         return JSON.parse(output);
       } catch {
+        logProviderDiagnostic(
+          logger,
+          "error",
+          "intelligence.provider.response_parse_failure",
+          {
+            ...safeProviderDiagnostics({ response, model: normalizedModel }),
+            parserCode: "invalid_json",
+          }
+        );
         throw providerError("malformed_operation_result", "The provider output was not valid JSON.");
       }
+    },
+    async smoke() {
+      const { response, payload } = await createResponse({
+        instructions: "Return exactly the word OK.",
+        input: "Reply with the word OK.",
+      });
+      const output = responseOutputText(payload).trim();
+      if (output !== "OK") {
+        logProviderDiagnostic(
+          logger,
+          "error",
+          "intelligence.provider.response_parse_failure",
+          {
+            ...safeProviderDiagnostics({ response, model: normalizedModel }),
+            parserCode: "smoke_output_mismatch",
+          }
+        );
+        throw providerError("malformed_operation_result", "The provider smoke response was invalid.");
+      }
+      const result = {
+        ok: true,
+        model: normalizedModel,
+        endpointFamily: RESPONSES_ENDPOINT_FAMILY,
+        requestId: responseRequestId(response),
+        store: false,
+      };
+      logProviderDiagnostic(logger, "info", "intelligence.provider.smoke_completed", result);
+      return result;
     },
   });
 }
@@ -174,6 +287,7 @@ function createWorkflowProviderConfiguration(env = process.env, dependencies = {
     apiKey,
     model: workflowModel,
     fetchImpl: dependencies.fetchImpl,
+    logger: dependencies.logger,
   });
   const transcriptionProvider = createOpenAiTranscriptionProvider({
     apiKey,
@@ -206,4 +320,5 @@ module.exports = {
   createOpenAiWorkflowProvider,
   createWorkflowProviderConfiguration,
   responseOutputText,
+  safeProviderDiagnostics,
 };
