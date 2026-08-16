@@ -16,7 +16,7 @@ const sql = readFileSync(
 
 test("MC-PL-002D retains the governed Approved Work Visit activation migration", () => {
   const migrations = getMigrationFiles();
-  assert.equal(migrations.length, 43);
+  assert.equal(migrations.length, 44);
   assert.ok(migrations.some((migration) => migration.filename === migrationName));
   assert.doesNotMatch(sql, /^\s*(?:BEGIN|COMMIT|ROLLBACK)\s*;/im);
   assert.doesNotMatch(sql, /\b(?:DROP\s+(?:TABLE|COLUMN)|TRUNCATE|DELETE\s+FROM)\b/i);

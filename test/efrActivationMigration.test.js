@@ -12,7 +12,7 @@ const migrationPath = join(__dirname, "..", "migrations", migrationName);
 
 test("EFR activation is the additive migration 40 boundary", () => {
   const migrations = getMigrationFiles();
-  assert.equal(migrations.length, 43);
+  assert.equal(migrations.length, 44);
   const migrationIndex = migrations.findIndex(({ filename }) => filename === migrationName);
   assert.equal(migrationIndex, 39);
   assert.equal(

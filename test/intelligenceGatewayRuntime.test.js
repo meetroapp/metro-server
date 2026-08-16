@@ -90,7 +90,7 @@ function createFixture({ providerComplete, parseResult, buildContext } = {}) {
   };
 }
 
-test("production registry ships only the governed Job Request and Quote advisory operations", () => {
+test("production registry ships only the governed core workflow advisory operations", () => {
   assert.deepEqual(canonicalIntelligenceOperationRegistry.list(), [
     {
       operation: "job_request.interpret",
@@ -106,8 +106,32 @@ test("production registry ships only the governed Job Request and Quote advisory
       engineIds: ["quote_composition_advisory", "quote_composition_authority_boundary"],
       providerName: "quote_composition",
     },
+    {
+      operation: "evaluation.assist",
+      capability: "evaluation.assist",
+      supportedRoles: ["professional"],
+      engineIds: ["evaluation_advisory_boundary"],
+      providerName: "workflow_assistance",
+    },
+    {
+      operation: "estimate.compose",
+      capability: "estimate.compose",
+      supportedRoles: ["professional"],
+      engineIds: ["estimate_advisory_boundary"],
+      providerName: "workflow_assistance",
+    },
+    {
+      operation: "invoice.assist",
+      capability: "invoice.assist",
+      supportedRoles: ["professional"],
+      engineIds: ["invoice_advisory_boundary"],
+      providerName: "workflow_assistance",
+    },
   ]);
   assert.deepEqual(canonicalIntelligenceEngineRegistry.list(), [
+    "estimate_advisory_boundary",
+    "evaluation_advisory_boundary",
+    "invoice_advisory_boundary",
     "job_request_capability",
     "job_request_validation",
     "quote_composition_advisory",
@@ -116,6 +140,9 @@ test("production registry ships only the governed Job Request and Quote advisory
   assert.equal(canonicalIntelligenceOperationRegistry.get("test.echo"), null);
   assert.ok(canonicalIntelligenceOperationRegistry.get("job_request.interpret"));
   assert.ok(canonicalIntelligenceOperationRegistry.get("quote.compose"));
+  assert.ok(canonicalIntelligenceOperationRegistry.get("evaluation.assist"));
+  assert.ok(canonicalIntelligenceOperationRegistry.get("estimate.compose"));
+  assert.ok(canonicalIntelligenceOperationRegistry.get("invoice.assist"));
 });
 
 test("operation registration requires explicit server-owned provider packaging", () => {
@@ -330,7 +357,7 @@ test("canonical runtime has no direct product-domain imports", () => {
 
   assert.doesNotMatch(
     source,
-    /require\([^)]*(requests|relationships|conversations|evaluations|quotes|invoices|payments|workflow|projects)/i
+    /require\([^)]*(?:\/requests\/|\/relationships\/|\/conversations\/|\/evaluations\/|\/quotes\/|\/invoices\/|\/payments\/|\/workflow\/|\/projects\/)/i
   );
   assert.doesNotMatch(source, /test\.echo|ask_meetro/);
 });

@@ -124,14 +124,14 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 43);
+      assert.equal(migrations.length, 44);
       const migrated = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(migrated.success, true);
-      assert.equal(migrated.applied.length, 43);
+      assert.equal(migrated.applied.length, 44);
       const replay = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(replay.success, true);
       assert.equal(replay.applied.length, 0);
-      assert.equal(replay.skipped.length, 43);
+      assert.equal(replay.skipped.length, 44);
 
       const identities = await createVisitTestIdentities(pool, suffix);
       const draftFixture = await createVisitLifecycleFixture(
@@ -463,7 +463,7 @@ test(
         [issued.id, draft.id]
       );
       assert.deepEqual(preserved.rows[0], {
-        ledger: 41,
+        ledger: 44,
         quote_status: "ISSUED",
         quote_decision: "APPROVED",
         draft_status: "DRAFT",

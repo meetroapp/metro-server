@@ -6,6 +6,9 @@ const {
 const {
   quoteComposeEngines,
 } = require("./operations/quoteCompose");
+const {
+  workflowAssistEngines,
+} = require("./operations/workflowAssist");
 
 function createIntelligenceEngineRegistry(engines = []) {
   const registry = new Map();
@@ -29,7 +32,7 @@ function createIntelligenceEngineRegistry(engines = []) {
 }
 
 const canonicalIntelligenceEngineRegistry = createIntelligenceEngineRegistry(
-  [...jobRequestInterpretEngines, ...quoteComposeEngines]
+  [...jobRequestInterpretEngines, ...quoteComposeEngines, ...workflowAssistEngines]
 );
 
 module.exports = {

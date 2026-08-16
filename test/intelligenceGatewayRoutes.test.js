@@ -20,6 +20,7 @@ const {
 } = require("../server/intelligence/intelligenceOperationRegistry");
 const {
   INTELLIGENCE_COMPANION_ROUTE,
+  WORKFLOW_REVIEW_ROUTE,
   registerIntelligenceRoutes,
   setIntelligenceNoStore,
 } = require("../server/intelligence/intelligenceRoutes");
@@ -291,4 +292,42 @@ test("route rejects browser actor fields and never lets injected dependencies ov
   assert.equal(res.body.code, "INTELLIGENCE_REQUEST_FIELDS_UNSUPPORTED");
   assert.equal(runtime.repository.calls.length, 0);
   assert.equal(runtime.providerCalls.length, 0);
+});
+
+test("workflow review route is authenticated, no-store, and preserves non-canonical authority", async () => {
+  const registrations = [];
+  const calls = [];
+  registerIntelligenceRoutes({
+    app: { post(path, ...handlers) { registrations.push({ path, handlers }); } },
+    authMiddleware(req, _res, next) {
+      req.user = { id: 73, role: "professional" };
+      next();
+    },
+    getPool: () => ({ name: "review-pool" }),
+    workflowReview: {
+      async recordWorkflowReview(input) {
+        calls.push(input);
+        return {
+          ok: true,
+          status: 201,
+          code: "INTELLIGENCE_REVIEW_RECORDED",
+          message: "Recorded.",
+          review: { proposalId: input.proposalId, elementId: input.elementId, action: input.action },
+          canonicalMutationPerformed: false,
+        };
+      },
+    },
+  });
+  const route = registrations.find(({ path }) => path === WORKFLOW_REVIEW_ROUTE);
+  const req = {
+    params: { proposalId: randomUUID() },
+    headers: { "idempotency-key": randomUUID() },
+    body: { elementId: "customer_notes", action: "ACCEPTED" },
+  };
+  const res = response();
+  await runHandlers(route.handlers, req, res);
+  assert.equal(res.statusCode, 201);
+  assert.equal(res.body.canonicalMutationPerformed, false);
+  assert.equal(res.getHeader("Cache-Control"), "no-store");
+  assert.equal(calls[0].authenticatedActor.id, 73);
 });

@@ -10,6 +10,11 @@ const {
 const {
   quoteComposeOperationDefinition,
 } = require("./operations/quoteCompose");
+const {
+  estimateComposeOperationDefinition,
+  evaluationAssistOperationDefinition,
+  invoiceAssistOperationDefinition,
+} = require("./operations/workflowAssist");
 
 function validateOperationDefinition(definition) {
   const operation = normalizeOperation(definition?.operation);
@@ -96,6 +101,9 @@ const canonicalIntelligenceOperationRegistry =
   createIntelligenceOperationRegistry([
     jobRequestInterpretOperationDefinition,
     quoteComposeOperationDefinition,
+    evaluationAssistOperationDefinition,
+    estimateComposeOperationDefinition,
+    invoiceAssistOperationDefinition,
   ]);
 
 module.exports = {

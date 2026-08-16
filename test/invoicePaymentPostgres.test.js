@@ -131,12 +131,12 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 43);
+      assert.equal(migrations.length, 44);
       const migrated = await runMigrationCollection(pool, migrations, targetMetadata());
-      assert.equal(migrated.applied.length, 43);
+      assert.equal(migrated.applied.length, 44);
       const replay = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(replay.applied.length, 0);
-      assert.equal(replay.skipped.length, 43);
+      assert.equal(replay.skipped.length, 44);
 
       const { identities, fixture, quote, completion } = await prepareCompletedJob(pool, suffix);
       const before = await pool.query(

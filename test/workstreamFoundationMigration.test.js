@@ -16,7 +16,7 @@ test("Slice 003 migration is the unique additive migration after Slice 002", () 
     .filter((name) => /^\d+.*\.sql$/.test(name))
     .sort();
 
-  assert.equal(migrations.length, 43);
+  assert.equal(migrations.length, 44);
   const index = migrations.indexOf(migrationName);
   assert.equal(
     migrations[index + 1],

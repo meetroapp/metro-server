@@ -61,6 +61,7 @@ Current inventory:
 41. `202608150002_activate_work_plan_execution.sql`
 42. `202608150003_create_job_completion_history.sql`
 43. `202608150004_create_canonical_invoice_payment_foundation.sql`
+44. `202608150005_create_ask_meetro_workflow_review.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -90,6 +91,12 @@ Invoice authority, immutable approved-scope line snapshots, exact Conversation
 issuance evidence, append-only offline Payment evidence, and durable command
 idempotency. It creates no Invoice, Payment, message, alert, Job, Quote, Visit,
 or Work Plan business record and introduces no payment-processor authority.
+
+`202608150005_create_ask_meetro_workflow_review.sql` adds append-only human
+review evidence for bounded Ask Meetro proposals. It stores accepted, edited,
+and rejected decisions without granting Evaluation, Finding, Recommendation,
+Quote, Invoice, Payment, Job, or Portfolio authority and creates no business
+record by itself.
 
 `202608030002_create_canonical_alerts.sql` creates the additive
 recipient-scoped `alerts` table for canonical backend alert persistence. It

@@ -58,6 +58,7 @@ async function executeIntelligenceGateway({
   repository,
   usageFinalizer,
   providerTimeoutMs,
+  retailerReferenceAdapter,
   logger = null,
   onDiagnostics,
 } = {}) {
@@ -121,7 +122,7 @@ async function executeIntelligenceGateway({
     semanticInput = await prepareOperationSemanticInput({
       definition,
       request,
-      runtimeContext: { pool, authenticatedActor: actor },
+      runtimeContext: { pool, authenticatedActor: actor, retailerReferenceAdapter },
     });
   } catch (error) {
     const governedFailure = {
@@ -129,6 +130,9 @@ async function executeIntelligenceGateway({
       intelligence_lifecycle_v2_required: [409, "INTELLIGENCE_LIFECYCLE_V2_REQUIRED", "A lifecycle-v2 Job is required."],
       intelligence_quote_authority_required: [403, "INTELLIGENCE_QUOTE_AUTHORITY_REQUIRED", "Professional Quote authority is required."],
       intelligence_quote_draft_unavailable: [404, "INTELLIGENCE_QUOTE_DRAFT_UNAVAILABLE", "The requested Draft Quote is unavailable."],
+      intelligence_evaluation_authority_required: [403, "INTELLIGENCE_EVALUATION_AUTHORITY_REQUIRED", "Professional Evaluation authority is required."],
+      intelligence_evaluation_unavailable: [404, "INTELLIGENCE_EVALUATION_UNAVAILABLE", "The Evaluation is unavailable."],
+      intelligence_invoice_unavailable: [404, "INTELLIGENCE_INVOICE_UNAVAILABLE", "The Invoice context is unavailable."],
     }[error?.code];
     if (governedFailure) {
       return gatewayResponse(false, governedFailure[0], governedFailure[1], governedFailure[2]);

@@ -129,6 +129,9 @@ const {
   registerIntelligenceRoutes,
 } = require("./server/intelligence/intelligenceRoutes");
 const {
+  createWorkflowProviderConfiguration,
+} = require("./server/intelligence/openAiWorkflowProvider");
+const {
   registerLifecycleRoutes,
 } = require("./server/requests/lifecycleRoutes");
 const {
@@ -250,6 +253,11 @@ const pool = new Pool({
     rejectUnauthorized: false,
   },
 });
+
+const workflowProviderConfiguration = createWorkflowProviderConfiguration(process.env);
+app.locals.intelligenceProviders = workflowProviderConfiguration.providers;
+app.locals.intelligenceTranscriptionProvider = workflowProviderConfiguration.transcriptionProvider;
+app.locals.intelligenceProviderMetadata = workflowProviderConfiguration.metadata;
 
 function getPool(req) {
   return req.app?.locals?.pool || pool;

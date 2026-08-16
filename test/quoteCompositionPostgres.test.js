@@ -71,13 +71,13 @@ test("disposable PostgreSQL certifies migration 33, proposal audit, feedback, an
   const suffix = randomUUID();
   try {
     const migrations = getMigrationFiles();
-    assert.equal(migrations.length, 33);
+    assert.equal(migrations.length, 44);
     const applied = await runMigrationCollection(pool, migrations, targetMetadata(databaseUrl));
     assert.equal(applied.success, true);
-    assert.equal(applied.applied.length, 33);
+    assert.equal(applied.applied.length, 44);
     const replay = await runMigrationCollection(pool, migrations, targetMetadata(databaseUrl));
     assert.equal(replay.success, true);
-    assert.equal(replay.skipped.length, 33);
+    assert.equal(replay.skipped.length, 44);
 
     const rollbackClient = await pool.connect();
     try {
@@ -202,7 +202,7 @@ test("disposable PostgreSQL certifies migration 33, proposal audit, feedback, an
         (SELECT count(*)::integer FROM canonical_quote_customer_decisions) AS decisions`
     );
     assert.deepEqual(preservation.rows[0], {
-      ledger: 33,
+      ledger: 44,
       feedback: 1,
       quotes: 0,
       issuances: 0,
