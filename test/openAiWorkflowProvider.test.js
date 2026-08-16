@@ -68,7 +68,37 @@ test("workflow provider sends governed JSON through the Responses API without em
   assert.deepEqual(body.text, { format: { type: "json_object" } });
   assert.equal(body.input.includes("fixture-secret"), false);
   assert.equal(body.instructions.includes("advisory"), true);
+  assert.equal(body.instructions.includes("assistant_suggested or assistant_inferred"), false);
   assert.deepEqual(result, { schemaVersion: 1, summary: "Review this suggestion." });
+});
+
+test("Job Request provider instructions use the exact governed parser vocabulary", async () => {
+  const calls = [];
+  const provider = createOpenAiWorkflowProvider({
+    apiKey: "fixture-secret",
+    model: "fixture-model",
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return response({
+        payload: {
+          output_text: JSON.stringify({
+            schemaVersion: 1,
+            summary: "Review this suggestion.",
+            draftPatch: { fields: [] },
+            clarifications: [],
+            warnings: [],
+          }),
+        },
+      });
+    },
+  });
+
+  await provider.complete({ operation: "job_request.interpret" });
+  const instructions = JSON.parse(calls[0].options.body).instructions;
+  assert.match(instructions, /assistant_suggested or assistant_inferred/);
+  assert.match(instructions, /assistant_suggested or approximate or uncertain/);
+  assert.doesNotMatch(instructions, /AI_SUGGESTED or INFERRED/);
+  assert.doesNotMatch(instructions, /KNOWN or UNCERTAIN or NEEDS_CLARIFICATION/);
 });
 
 test("provider failures are reduced to safe governed classifications", async () => {
