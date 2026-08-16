@@ -72,6 +72,120 @@ test("workflow provider sends governed JSON through the Responses API without em
   assert.deepEqual(result, { schemaVersion: 1, summary: "Review this suggestion." });
 });
 
+test("explicit Evaluation photo analysis sends authorized canonical media as Responses input_image content", async () => {
+  const calls = [];
+  const mediaId = "meetro/users/65/request-photos/selected";
+  const mediaUrl = "https://res.cloudinary.com/meetro/image/upload/selected.jpg";
+  const provider = createOpenAiWorkflowProvider({
+    apiKey: "fixture-secret",
+    model: "gpt-5.4-mini",
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return response({ payload: { output_text: '{"schemaVersion":1}' } });
+    },
+  });
+
+  await provider.complete({
+    operation: "evaluation.assist",
+    canonicalJobContext: {
+      intent: "ANALYZE_PHOTOS",
+      requestPhotos: [{ id: mediaId, mediaType: "IMAGE" }],
+    },
+    authorizedImageInputs: [{ mediaId, imageUrl: mediaUrl }],
+  });
+
+  const body = JSON.parse(calls[0].options.body);
+  assert.equal(body.model, "gpt-5.4-mini");
+  assert.equal(body.store, false);
+  assert.deepEqual(body.text, { format: { type: "json_object" } });
+  assert.equal(Array.isArray(body.input), true);
+  assert.equal(body.input[0].role, "user");
+  assert.equal(body.input[0].content[0].type, "input_text");
+  assert.equal(body.input[0].content[0].text.includes(mediaUrl), false);
+  assert.deepEqual(body.input[0].content.slice(1), [{
+    type: "input_image",
+    image_url: mediaUrl,
+    detail: "auto",
+  }]);
+});
+
+test("Evaluation metadata and non-photo intents never become image transport", async () => {
+  const calls = [];
+  const mediaUrl = "https://res.cloudinary.com/meetro/image/upload/metadata-only.jpg";
+  const provider = createOpenAiWorkflowProvider({
+    apiKey: "fixture-secret",
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return response({ payload: { output_text: '{"schemaVersion":1}' } });
+    },
+  });
+
+  await provider.complete({
+    operation: "evaluation.assist",
+    canonicalJobContext: {
+      intent: "DESCRIBE_CONDITION",
+      requestPhotos: [{ id: "metadata-only", secureUrl: mediaUrl }],
+    },
+    authorizedImageInputs: [{ mediaId: "metadata-only", imageUrl: mediaUrl }],
+  });
+
+  const body = JSON.parse(calls[0].options.body);
+  assert.equal(typeof body.input, "string");
+  assert.equal(body.input.includes("input_image"), false);
+  assert.equal(body.input.includes("authorizedImageInputs"), false);
+});
+
+test("Evaluation image transport rejects foreign URLs, mismatched identities, and more than five images", async () => {
+  let calls = 0;
+  const provider = createOpenAiWorkflowProvider({
+    apiKey: "fixture-secret",
+    fetchImpl: async () => {
+      calls += 1;
+      return response({ payload: { output_text: '{"schemaVersion":1}' } });
+    },
+  });
+  const request = {
+    operation: "evaluation.assist",
+    canonicalJobContext: {
+      intent: "ANALYZE_PHOTOS",
+      requestPhotos: [{ id: "canonical-photo" }],
+    },
+  };
+
+  await assert.rejects(
+    provider.complete({
+      ...request,
+      authorizedImageInputs: [{ mediaId: "canonical-photo", imageUrl: "https://attacker.example/photo.jpg" }],
+    }),
+    (error) => error.code === "provider_request_invalid"
+  );
+  await assert.rejects(
+    provider.complete({
+      ...request,
+      authorizedImageInputs: [{
+        mediaId: "other-job-photo",
+        imageUrl: "https://res.cloudinary.com/meetro/image/upload/other.jpg",
+      }],
+    }),
+    (error) => error.code === "provider_request_invalid"
+  );
+  await assert.rejects(
+    provider.complete({
+      ...request,
+      canonicalJobContext: {
+        ...request.canonicalJobContext,
+        requestPhotos: Array.from({ length: 6 }, (_, index) => ({ id: `photo-${index}` })),
+      },
+      authorizedImageInputs: Array.from({ length: 6 }, (_, index) => ({
+        mediaId: `photo-${index}`,
+        imageUrl: `https://res.cloudinary.com/meetro/image/upload/photo-${index}.jpg`,
+      })),
+    }),
+    (error) => error.code === "provider_request_invalid"
+  );
+  assert.equal(calls, 0);
+});
+
 test("Job Request provider instructions use the exact governed parser vocabulary", async () => {
   const calls = [];
   const provider = createOpenAiWorkflowProvider({
@@ -148,6 +262,7 @@ test("Estimate provider uses strict Structured Outputs for its governed result c
     },
   });
   const format = JSON.parse(calls[0].options.body).text.format;
+  const estimateInput = JSON.parse(calls[0].options.body).input;
   assert.equal(format.type, "json_schema");
   assert.equal(format.name, "meetro_estimate_compose");
   assert.equal(format.strict, true);
@@ -165,6 +280,8 @@ test("Estimate provider uses strict Structured Outputs for its governed result c
   assert.deepEqual(format.schema.properties.disposal.properties.costInputKey.enum, [null]);
   assert.equal(format.schema.properties.materials.items.properties.quantity.exclusiveMinimum, 0);
   assert.equal(format.schema.properties.contingencyPercent.maximum, 50);
+  assert.equal(typeof estimateInput, "string");
+  assert.equal(estimateInput.includes("input_image"), false);
 });
 
 test("provider failures are reduced to safe governed classifications", async () => {
@@ -225,6 +342,39 @@ test("provider diagnostics log only safe upstream metadata", async () => {
   });
   assert.equal(JSON.stringify(events).includes("customer detail"), false);
   assert.equal(JSON.stringify(events).includes("fixture-secret"), false);
+});
+
+test("multimodal provider failures do not log image URLs or raw image request content", async () => {
+  const events = [];
+  const mediaId = "meetro/users/65/request-photos/private-fixture";
+  const mediaUrl = "https://res.cloudinary.com/meetro/image/upload/private-fixture.jpg";
+  const provider = createOpenAiWorkflowProvider({
+    apiKey: "fixture-secret",
+    model: "gpt-5.4-mini",
+    logger: { error(event, metadata) { events.push({ event, metadata }); } },
+    fetchImpl: async () => response({
+      ok: false,
+      status: 400,
+      requestId: "req_multimodal_safe",
+      payload: { error: { type: "invalid_request_error", code: "invalid_image" } },
+    }),
+  });
+
+  await assert.rejects(provider.complete({
+    operation: "evaluation.assist",
+    canonicalJobContext: {
+      intent: "ANALYZE_PHOTOS",
+      requestPhotos: [{ id: mediaId }],
+    },
+    authorizedImageInputs: [{ mediaId, imageUrl: mediaUrl }],
+  }));
+
+  const logged = JSON.stringify(events);
+  assert.equal(logged.includes(mediaUrl), false);
+  assert.equal(logged.includes(mediaId), false);
+  assert.equal(logged.includes("input_image"), false);
+  assert.equal(logged.includes("fixture-secret"), false);
+  assert.equal(events[0].metadata.requestId, "req_multimodal_safe");
 });
 
 test("minimal provider smoke uses the governed adapter without storage", async () => {

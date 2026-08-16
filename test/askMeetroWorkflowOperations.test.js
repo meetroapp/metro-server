@@ -5,6 +5,7 @@ const { randomUUID } = require("node:crypto");
 const test = require("node:test");
 
 const {
+  buildEvaluationAssistContext,
   estimateComposeOperationDefinition,
   evaluationAssistOperationDefinition,
   invoiceAssistOperationDefinition,
@@ -12,9 +13,59 @@ const {
   parseEvaluationAssistResult,
   parseInvoiceAssistResult,
 } = require("../server/intelligence/operations/workflowAssist");
+const evaluationService = require("../server/authorization/evaluationService");
 
 function source(type, id, version = 1) {
   return { type, id, version };
+}
+
+function evaluationAssistInput(overrides = {}) {
+  return {
+    jobId: "11111111-1111-4111-8111-111111111111",
+    evaluationId: "22222222-2222-4222-8222-222222222222",
+    intent: "ANALYZE_PHOTOS",
+    photoReferenceIds: ["meetro/users/65/request-photos/selected"],
+    professionalInput: { observations: null, measurements: [], notes: null },
+    ...overrides,
+  };
+}
+
+function evaluationAssistRuntime(requestPhotos) {
+  return {
+    authenticatedActor: { id: 65, role: "professional" },
+    pool: {
+      async query(sql, values) {
+        assert.match(sql, /intelligence_evaluation_assist:job/);
+        assert.deepEqual(values, ["11111111-1111-4111-8111-111111111111", 65]);
+        return {
+          rows: [{
+            id: values[0],
+            job_request_id: 14,
+            source_request_relationship_id: 18,
+            title: "Exact governed request",
+            description: "Authorized Evaluation context.",
+            service_domain: "home_services",
+            service_specialty: "masonry",
+            request_photos: requestPhotos,
+          }],
+        };
+      },
+    },
+  };
+}
+
+function authorizeEvaluationContext(t) {
+  t.mock.method(evaluationService, "listEvaluationsForJob", async () => ({
+    ok: true,
+    evaluations: [{
+      evaluation: {
+        id: "22222222-2222-4222-8222-222222222222",
+        status: "DRAFT",
+        content: {},
+      },
+      aggregate: { version: 2 },
+    }],
+  }));
 }
 
 test("professional workflow assistance delegates service-role authorization to governed context builders", () => {
@@ -26,6 +77,101 @@ test("professional workflow assistance delegates service-role authorization to g
     assert.equal(definition.roleAuthorization, "context_builder");
     assert.deepEqual(definition.supportedRoles, ["professional"]);
   }
+});
+
+test("Evaluation photo analysis resolves exact selected canonical media after Job authorization", async (t) => {
+  authorizeEvaluationContext(t);
+  const selected = {
+    public_id: "meetro/users/65/request-photos/selected",
+    secure_url: "https://res.cloudinary.com/meetro/image/upload/selected.jpg",
+    format: "jpg",
+    width: 1200,
+    height: 900,
+  };
+  const unrelated = {
+    public_id: "meetro/users/65/request-photos/unrelated",
+    secure_url: "https://res.cloudinary.com/meetro/image/upload/unrelated.jpg",
+  };
+  const context = await buildEvaluationAssistContext({
+    context: {},
+    input: evaluationAssistInput(),
+    runtimeContext: evaluationAssistRuntime([unrelated, selected]),
+  });
+  const providerRequest = evaluationAssistOperationDefinition.buildProviderRequest({
+    semanticInput: { locale: "en-US", context },
+    engineContext: { evaluation_advisory_boundary: { mutationAllowed: false } },
+  });
+
+  assert.deepEqual(context.requestPhotos.map((photo) => photo.id), [selected.public_id]);
+  assert.equal(context.requestPhotos[0].secureUrl, selected.secure_url);
+  assert.equal(JSON.stringify(providerRequest.canonicalJobContext).includes(selected.secure_url), false);
+  assert.equal(JSON.stringify(providerRequest).includes(unrelated.secure_url), false);
+  assert.deepEqual(providerRequest.authorizedImageInputs, [{
+    mediaId: selected.public_id,
+    imageUrl: selected.secure_url,
+  }]);
+});
+
+test("Evaluation photo analysis rejects foreign, excessive, or caller-supplied media authority", async (t) => {
+  authorizeEvaluationContext(t);
+  const authorized = [{
+    public_id: "meetro/users/65/request-photos/selected",
+    secure_url: "https://res.cloudinary.com/meetro/image/upload/selected.jpg",
+  }];
+  const runtimeContext = evaluationAssistRuntime(authorized);
+
+  await assert.rejects(
+    buildEvaluationAssistContext({
+      context: {},
+      input: evaluationAssistInput({ photoReferenceIds: ["other-job/photo"] }),
+      runtimeContext,
+    }),
+    (error) => error.code === "intelligence_context_invalid"
+  );
+  await assert.rejects(
+    buildEvaluationAssistContext({
+      context: {},
+      input: evaluationAssistInput({
+        photoReferenceIds: Array.from({ length: 6 }, (_, index) => `photo-${index}`),
+      }),
+      runtimeContext,
+    }),
+    (error) => error.code === "intelligence_context_invalid"
+  );
+  await assert.rejects(
+    buildEvaluationAssistContext({
+      context: {},
+      input: evaluationAssistInput({ imageUrl: "https://attacker.example/private.jpg" }),
+      runtimeContext,
+    }),
+    (error) => error.code === "intelligence_context_invalid"
+  );
+});
+
+test("non-photo Evaluation assistance cannot select or transport image media", async (t) => {
+  authorizeEvaluationContext(t);
+  const runtimeContext = evaluationAssistRuntime([{
+    public_id: "meetro/users/65/request-photos/selected",
+    secure_url: "https://res.cloudinary.com/meetro/image/upload/selected.jpg",
+  }]);
+  await assert.rejects(
+    buildEvaluationAssistContext({
+      context: {},
+      input: evaluationAssistInput({ intent: "DESCRIBE_CONDITION" }),
+      runtimeContext,
+    }),
+    (error) => error.code === "intelligence_context_invalid"
+  );
+
+  const input = evaluationAssistInput({ intent: "DESCRIBE_CONDITION" });
+  delete input.photoReferenceIds;
+  const context = await buildEvaluationAssistContext({ context: {}, input, runtimeContext });
+  const providerRequest = evaluationAssistOperationDefinition.buildProviderRequest({
+    semanticInput: { locale: "en-US", context },
+    engineContext: {},
+  });
+  assert.deepEqual(context.requestPhotos, []);
+  assert.deepEqual(providerRequest.authorizedImageInputs, []);
 });
 
 test("Evaluation assistance separates observed, professional input, and unverified assumptions", () => {

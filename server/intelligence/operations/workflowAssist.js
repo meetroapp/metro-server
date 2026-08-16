@@ -154,15 +154,34 @@ function reference(type, id, version = 1) {
   return { type, id: String(id), version: Number(version) };
 }
 
+function canonicalCloudinaryImageUrl(value) {
+  const candidate = typeof value === "string" ? value.trim() : "";
+  try {
+    const parsed = new URL(candidate);
+    if (
+      parsed.protocol !== "https:" ||
+      parsed.hostname !== "res.cloudinary.com" ||
+      parsed.username ||
+      parsed.password ||
+      parsed.hash
+    ) {
+      return null;
+    }
+    return parsed.href;
+  } catch {
+    return null;
+  }
+}
+
 function safeRequestPhotos(value) {
   const photos = Array.isArray(value) ? value : (() => {
     try { return JSON.parse(value || "[]"); } catch { return []; }
   })();
-  return photos.slice(0, 5).flatMap((photo) => {
+  return photos.slice(0, 12).flatMap((photo) => {
     if (!isPlainObject(photo)) return [];
     const id = String(photo.public_id || photo.id || "").trim();
-    const secureUrl = String(photo.secure_url || "").trim();
-    if (!id || !secureUrl.startsWith("https://res.cloudinary.com/")) return [];
+    const secureUrl = canonicalCloudinaryImageUrl(photo.secure_url);
+    if (!id || id.length > 500 || !secureUrl) return [];
     return [{
       id,
       secureUrl,
@@ -173,6 +192,32 @@ function safeRequestPhotos(value) {
       sourceReferences: [reference("REQUEST_PHOTO", id)],
     }];
   });
+}
+
+function selectedEvaluationPhotos(input, authorizedPhotos) {
+  const hasPhotoReferences = Object.hasOwn(input, "photoReferenceIds");
+  if (input.intent !== "ANALYZE_PHOTOS") {
+    if (hasPhotoReferences) {
+      throw contextError("Photo references require explicit photo analysis intent.");
+    }
+    return [];
+  }
+  if (!Array.isArray(input.photoReferenceIds) ||
+      input.photoReferenceIds.length < 1 || input.photoReferenceIds.length > 5) {
+    throw contextError("Photo analysis requires between one and five canonical media references.");
+  }
+  const selectedIds = input.photoReferenceIds.map((value) =>
+    text(value, 500, { errorFactory: contextError })
+  );
+  if (new Set(selectedIds).size !== selectedIds.length) {
+    throw contextError("Photo analysis media references must be unique.");
+  }
+  const authorizedById = new Map(authorizedPhotos.map((photo) => [photo.id, photo]));
+  const selected = selectedIds.map((id) => authorizedById.get(id));
+  if (selected.some((photo) => !photo)) {
+    throw contextError("Photo analysis media is outside the authorized Job context.");
+  }
+  return selected;
 }
 
 function normalizeProfessionalEvaluationInput(value) {
@@ -189,7 +234,7 @@ function normalizeProfessionalEvaluationInput(value) {
 
 async function buildEvaluationAssistContext({ context, input, runtimeContext }) {
   exact(context, [], [], contextError);
-  exact(input, ["jobId", "evaluationId", "intent", "professionalInput"], [], contextError);
+  exact(input, ["jobId", "evaluationId", "intent", "professionalInput"], ["photoReferenceIds"], contextError);
   const jobId = uuid(input.jobId);
   const evaluationId = input.evaluationId == null ? null : uuid(input.evaluationId);
   if (!EVALUATION_INTENTS.has(input.intent)) throw contextError("Evaluation assistance intent is invalid.");
@@ -230,7 +275,7 @@ async function buildEvaluationAssistContext({ context, input, runtimeContext }) 
   const job = jobResult.rows[0];
   if (!job) throw operationError("intelligence_job_unavailable", "Job unavailable.");
   const professionalInput = normalizeProfessionalEvaluationInput(input.professionalInput);
-  const requestPhotos = safeRequestPhotos(job.request_photos);
+  const requestPhotos = selectedEvaluationPhotos(input, safeRequestPhotos(job.request_photos));
   const assembled = {
     mode: "ADVISORY",
     job: {
@@ -357,12 +402,27 @@ function parseEvaluationAssistResult(providerResult, { semanticInput, operationI
 }
 
 function buildEvaluationAssistProviderRequest({ semanticInput, engineContext }) {
+  const requestPhotos = semanticInput.context.requestPhotos.map((photo) => {
+    const providerVisiblePhoto = { ...photo };
+    delete providerVisiblePhoto.secureUrl;
+    return providerVisiblePhoto;
+  });
+  const authorizedImageInputs = semanticInput.context.intent === "ANALYZE_PHOTOS"
+    ? semanticInput.context.requestPhotos.map((photo) => ({
+      mediaId: photo.id,
+      imageUrl: photo.secureUrl,
+    }))
+    : [];
   return {
     schemaVersion: 1,
     operation: "evaluation.assist",
     capability: "evaluation.assist",
     locale: semanticInput.locale,
-    canonicalJobContext: semanticInput.context,
+    canonicalJobContext: {
+      ...semanticInput.context,
+      requestPhotos,
+    },
+    authorizedImageInputs,
     operationContext: engineContext,
     instructions: {
       authority: "proposal_only",

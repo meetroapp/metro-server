@@ -277,6 +277,59 @@ function workflowInstructions(request) {
   ].join("\n");
 }
 
+function governedCloudinaryImageUrl(value) {
+  const candidate = typeof value === "string" ? value.trim() : "";
+  try {
+    const parsed = new URL(candidate);
+    if (
+      parsed.protocol !== "https:" ||
+      parsed.hostname !== "res.cloudinary.com" ||
+      parsed.username ||
+      parsed.password ||
+      parsed.hash
+    ) {
+      return null;
+    }
+    return parsed.href;
+  } catch {
+    return null;
+  }
+}
+
+function workflowProviderInput(request) {
+  const imageInputs = Array.isArray(request?.authorizedImageInputs)
+    ? request.authorizedImageInputs
+    : [];
+  const photoAnalysisRequested = request?.operation === "evaluation.assist" &&
+    request?.canonicalJobContext?.intent === "ANALYZE_PHOTOS";
+  const textRequest = { ...(request || {}) };
+  delete textRequest.authorizedImageInputs;
+  if (!photoAnalysisRequested) return JSON.stringify(textRequest);
+  if (imageInputs.length < 1 || imageInputs.length > 5) {
+    throw providerError(
+      "provider_request_invalid",
+      "Governed photo analysis requires between one and five authorized images."
+    );
+  }
+  const canonicalMediaIds = new Set(
+    (Array.isArray(request?.canonicalJobContext?.requestPhotos)
+      ? request.canonicalJobContext.requestPhotos
+      : [])
+      .map((photo) => typeof photo?.id === "string" ? photo.id.trim() : "")
+      .filter(Boolean)
+  );
+  const content = [{ type: "input_text", text: JSON.stringify(textRequest) }];
+  for (const image of imageInputs) {
+    const mediaId = typeof image?.mediaId === "string" ? image.mediaId.trim() : "";
+    const imageUrl = governedCloudinaryImageUrl(image?.imageUrl);
+    if (!mediaId || !canonicalMediaIds.has(mediaId) || !imageUrl) {
+      throw providerError("provider_request_invalid", "Governed photo analysis media is invalid.");
+    }
+    content.push({ type: "input_image", image_url: imageUrl, detail: "auto" });
+  }
+  return [{ role: "user", content }];
+}
+
 function createOpenAiWorkflowProvider({
   apiKey,
   model = DEFAULT_WORKFLOW_MODEL,
@@ -337,7 +390,7 @@ function createOpenAiWorkflowProvider({
     async complete(request) {
       const { response, payload } = await createResponse({
         instructions: workflowInstructions(request),
-        input: JSON.stringify(request),
+        input: workflowProviderInput(request),
         text: { format: workflowResponseFormat(request) },
       });
       const output = responseOutputText(payload);
