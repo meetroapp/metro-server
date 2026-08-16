@@ -5,6 +5,9 @@ const { randomUUID } = require("node:crypto");
 const test = require("node:test");
 
 const {
+  estimateComposeOperationDefinition,
+  evaluationAssistOperationDefinition,
+  invoiceAssistOperationDefinition,
   parseEstimateComposeResult,
   parseEvaluationAssistResult,
   parseInvoiceAssistResult,
@@ -13,6 +16,17 @@ const {
 function source(type, id, version = 1) {
   return { type, id, version };
 }
+
+test("professional workflow assistance delegates service-role authorization to governed context builders", () => {
+  for (const definition of [
+    evaluationAssistOperationDefinition,
+    estimateComposeOperationDefinition,
+    invoiceAssistOperationDefinition,
+  ]) {
+    assert.equal(definition.roleAuthorization, "context_builder");
+    assert.deepEqual(definition.supportedRoles, ["professional"]);
+  }
+});
 
 test("Evaluation assistance separates observed, professional input, and unverified assumptions", () => {
   const jobId = randomUUID();

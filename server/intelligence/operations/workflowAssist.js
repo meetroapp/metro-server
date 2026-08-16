@@ -744,18 +744,21 @@ const workflowAssistEngines = Object.freeze([
 
 const evaluationAssistOperationDefinition = Object.freeze({
   operation: "evaluation.assist", capability: "evaluation.assist", supportedRoles: Object.freeze(["professional"]),
+  roleAuthorization: "context_builder",
   engineIds: Object.freeze(["evaluation_advisory_boundary"]), providerName: "workflow_assistance",
   buildContext: buildEvaluationAssistContext, buildProviderRequest: buildEvaluationAssistProviderRequest,
   parseResult: parseEvaluationAssistResult,
 });
 const estimateComposeOperationDefinition = Object.freeze({
   operation: "estimate.compose", capability: "estimate.compose", supportedRoles: Object.freeze(["professional"]),
+  roleAuthorization: "context_builder",
   engineIds: Object.freeze(["estimate_advisory_boundary"]), providerName: "workflow_assistance",
   buildContext: buildEstimateComposeContext, buildProviderRequest: buildEstimateComposeProviderRequest,
   parseResult: parseEstimateComposeResult,
 });
 const invoiceAssistOperationDefinition = Object.freeze({
   operation: "invoice.assist", capability: "invoice.assist", supportedRoles: Object.freeze(["professional"]),
+  roleAuthorization: "context_builder",
   engineIds: Object.freeze(["invoice_advisory_boundary"]), providerName: "workflow_assistance",
   buildContext: buildInvoiceAssistContext, buildProviderRequest: buildInvoiceAssistProviderRequest,
   parseResult: parseInvoiceAssistResult,
