@@ -98,6 +98,9 @@ async function orchestrateIntelligenceOperation({
       selectedEngines: [...definition.engineIds],
     }),
   });
+  const providerMetadata = providerResult && typeof providerResult === "object"
+    ? providerResult.__providerMetadata || providerResult.providerMetadata || null
+    : null;
   let parsedResult;
   try {
     parsedResult = await definition.parseResult(providerResult, {
@@ -105,16 +108,21 @@ async function orchestrateIntelligenceOperation({
       engineContext,
       operationId,
       correlationId,
+      providerMetadata,
     });
   } catch (error) {
     const diagnosticCode = /^[a-f0-9]{16}$/.test(String(error?.diagnosticCode || ""))
       ? error.diagnosticCode
       : null;
-    logMetadata(logger, "warn", "intelligence.orchestration.result_rejected", {
+    const warningMetadata = {
       operation: definition.operation,
       operationId,
       diagnosticCode,
-    });
+    };
+    if (error?.parserDiagnostics) {
+      warningMetadata.parserDiagnostics = error.parserDiagnostics;
+    }
+    logMetadata(logger, "warn", "intelligence.orchestration.result_rejected", warningMetadata);
     throw error;
   }
   if (!isPlainObject(parsedResult)) {

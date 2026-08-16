@@ -292,3 +292,75 @@ test("Invoice assistant rejects provider-owned financial totals", () => {
     return true;
   });
 });
+
+test("Estimate parser emits bounded diagnostics for malformed provider output", () => {
+  const jobId = randomUUID();
+  const operationId = randomUUID();
+  const context = {
+    mode: "INTERNAL_ESTIMATE_DRAFT",
+    job: { id: jobId },
+    professionalInput: {
+      instructions: "Keep customer-facing content generic.",
+      measurements: [{ id: "length", label: "Length", value: 5, unit: "ft", source: "PROFESSIONAL_INPUT" }],
+      costInputs: [],
+      sellingPriceMinor: null,
+    },
+    retailerReferences: [],
+    retailerPolicy: {
+      retailer: "HOME_DEPOT",
+      referenceOnly: true,
+      guaranteedCost: false,
+      customerVisibleByDefault: false,
+      directScrapingImplemented: false,
+    },
+    intent: "PREPARE_QUOTE",
+    generatedFor: { professionalParticipantId: randomUUID() },
+    sourceContextFingerprint: "d".repeat(64),
+  };
+
+  let error;
+  try {
+    parseEstimateComposeResult({
+      schemaVersion: 1,
+      summary: "Estimate summary",
+      materials: [],
+      labor: [],
+      equipment: [],
+      disposal: { description: "", costInputKey: null },
+      contingencyPercent: 0,
+      assumptions: [],
+      missingInformation: [],
+      suggestedSellingRange: { minimumMinor: 12000, maximumMinor: 13000, rationale: "Range for advisory estimate." },
+      customerQuoteDraft: {
+        scopeSummary: "Replace damaged section.",
+        conditions: ["Access required."],
+        exclusions: ["Interior finishes excluded."],
+        durationGuidance: "One-day response window.",
+        customerWording: "Rework and restore the affected area.",
+      },
+      warnings: [],
+      unexpected: "legacy-field",
+    }, {
+      semanticInput: { context },
+      operationId,
+      providerMetadata: {
+        providerRequestId: "req_fixture_qa",
+        configuredModel: "gpt-5.4-mini",
+      },
+    });
+    assert.fail("estimate parser must reject malformed provider output");
+  } catch (value) {
+    error = value;
+  }
+
+  assert.equal(error?.code, "malformed_operation_result");
+  assert.equal(error?.parserDiagnostics?.operation, "estimate.compose");
+  assert.equal(error?.parserDiagnostics?.parserStage, "payload_shape");
+  assert.equal(error?.parserDiagnostics?.validationBranch, "extra_fields");
+  assert.equal(error?.parserDiagnostics?.providerRequestId, "req_fixture_qa");
+  assert.equal(error?.parserDiagnostics?.configuredModel, "gpt-5.4-mini");
+  assert.equal(error?.parserDiagnostics?.schemaVersion, 1);
+  assert.equal(error?.parserDiagnostics?.extraFields[0], "unexpected");
+  assert.equal(Array.isArray(error?.parserDiagnostics?.missingFields), true);
+  assert.equal(typeof error?.parserDiagnostics?.structuralFingerprint, "string");
+});

@@ -389,3 +389,63 @@ test("canonical runtime has no direct product-domain imports", () => {
   );
   assert.doesNotMatch(source, /test\.echo|ask_meetro/);
 });
+
+test("orchestrator forwards estimate parser diagnostics to orchestration rejection logs", async () => {
+  const diagnostics = [];
+  const providerMetadata = {
+    providerRequestId: "req_route_gate_01",
+    configuredModel: "gpt-5.4-mini",
+  };
+  const result = await createFixture({
+    providerComplete() {
+      return { answer: "unused", __providerMetadata: providerMetadata };
+    },
+    parseResult(_, { providerMetadata: receivedMetadata }) {
+      const error = Object.assign(
+        new Error("Estimate schema invalid for diagnostics capture."),
+        {
+          code: "malformed_operation_result",
+          diagnosticCode: "0123456789abcdef",
+          parserDiagnostics: {
+            operation: "estimate.compose",
+            schemaVersion: 1,
+            parserStage: "payload_shape",
+            validationBranch: "missing_fields",
+            structuralFingerprint: "abc123",
+            missingFields: ["disposal"],
+            extraFields: ["unexpected"],
+            rejectionClassification: "missing_required_fields",
+            providerRequestId: receivedMetadata?.providerRequestId || null,
+            configuredModel: receivedMetadata?.configuredModel || null,
+            timestamp: new Date().toISOString(),
+          },
+        }
+      );
+      throw error;
+    },
+  }).run({
+    logger: {
+      warn(event, metadata) {
+        diagnostics.push({ event, metadata });
+      },
+      info() {},
+    },
+  });
+
+  assert.equal(result.code, "INTELLIGENCE_RESULT_REJECTED");
+  const rejected = diagnostics.find((entry) => entry.event === "intelligence.orchestration.result_rejected");
+  assert.equal(rejected?.metadata?.operation, "test.echo");
+  assert.deepEqual(rejected?.metadata?.parserDiagnostics, {
+    operation: "estimate.compose",
+    schemaVersion: 1,
+    parserStage: "payload_shape",
+    validationBranch: "missing_fields",
+    structuralFingerprint: "abc123",
+    missingFields: ["disposal"],
+    extraFields: ["unexpected"],
+    rejectionClassification: "missing_required_fields",
+    providerRequestId: providerMetadata.providerRequestId,
+    configuredModel: providerMetadata.configuredModel,
+    timestamp: typeof rejected?.metadata?.parserDiagnostics.timestamp === "string" ? rejected.metadata.parserDiagnostics.timestamp : undefined,
+  });
+});

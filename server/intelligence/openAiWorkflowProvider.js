@@ -243,6 +243,24 @@ function responseOutputText(payload) {
   return "";
 }
 
+function safeProviderResultMetadata({ response, model }) {
+  const providerRequestId = responseRequestId(response);
+  return Object.freeze({
+    providerRequestId: typeof providerRequestId === "string" ? providerRequestId : null,
+    configuredModel: typeof model === "string" ? model : null,
+  });
+}
+
+function attachProviderMetadata(payload, metadata) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
+  return Object.defineProperty(payload, "__providerMetadata", {
+    value: metadata || null,
+    enumerable: false,
+    configurable: true,
+    writable: false,
+  });
+}
+
 function workflowInstructions(request) {
   const contract = OUTPUT_CONTRACTS[request?.operation];
   if (!contract) {
@@ -336,7 +354,11 @@ function createOpenAiWorkflowProvider({
         throw providerError("malformed_operation_result", "The provider returned no output.");
       }
       try {
-        return JSON.parse(output);
+        const parsed = JSON.parse(output);
+        return attachProviderMetadata(
+          parsed,
+          safeProviderResultMetadata({ response, model: normalizedModel })
+        );
       } catch {
         logProviderDiagnostic(
           logger,

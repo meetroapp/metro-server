@@ -87,6 +87,65 @@ function parsePayload(value) {
   }
 }
 
+function safeProviderMetadata(metadata = null) {
+  if (!metadata || typeof metadata !== "object") return null;
+  return {
+    providerRequestId: typeof metadata.providerRequestId === "string" ? metadata.providerRequestId : null,
+    configuredModel: typeof metadata.configuredModel === "string" ? metadata.configuredModel : null,
+  };
+}
+
+function estimateShapeFingerprint(value) {
+  const signature = {
+    keys: isPlainObject(value) ? Object.keys(value).sort() : [],
+    kind: value === null ? "null" : Array.isArray(value) ? "array" : typeof value,
+  };
+  return createHash("sha256").update(JSON.stringify(signature)).digest("hex").slice(0, 16);
+}
+
+function enrichEstimateParseError(message, {
+  parserStage,
+  validationBranch,
+  schemaVersion = null,
+  missingFields = [],
+  extraFields = [],
+  rejectionClassification = "schema_validation",
+  providerMetadata = null,
+  payload = null,
+}) {
+  const error = resultError(message);
+  return Object.assign(error, {
+    parserDiagnostics: {
+      operation: "estimate.compose",
+      schemaVersion: Number.isInteger(schemaVersion) ? schemaVersion : null,
+      parserStage,
+      validationBranch,
+      structuralFingerprint: estimateShapeFingerprint(payload),
+      missingFields: Array.isArray(missingFields) ? [...new Set(missingFields)].sort() : [],
+      extraFields: Array.isArray(extraFields) ? [...new Set(extraFields)].sort() : [],
+      rejectionClassification,
+      providerRequestId: safeProviderMetadata(providerMetadata)?.providerRequestId || null,
+      configuredModel: safeProviderMetadata(providerMetadata)?.configuredModel || null,
+      timestamp: new Date().toISOString(),
+    },
+  });
+}
+
+function normalizeEstimateParseError(error, context) {
+  if (error?.parserDiagnostics) return error;
+  if (error?.code !== "malformed_operation_result") {
+    return error;
+  }
+  return enrichEstimateParseError(error.message, {
+    parserStage: "operation_contract_validation",
+    validationBranch: "result_validation_failure",
+    schemaVersion: context?.schemaVersion ?? null,
+    providerMetadata: context?.providerMetadata,
+    payload: context?.payload,
+    rejectionClassification: "operation_contract_validation",
+  });
+}
+
 function fingerprint(value) {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
@@ -428,170 +487,309 @@ function finitePositive(value, label) {
   return parsed;
 }
 
-function parseEstimateComposeResult(providerResult, { semanticInput, operationId }) {
-  const payload = parsePayload(providerResult);
-  exact(payload, [
-    "schemaVersion", "summary", "materials", "labor", "equipment", "disposal",
-    "contingencyPercent", "assumptions", "missingInformation", "suggestedSellingRange",
-    "customerQuoteDraft", "warnings",
-  ]);
-  if (payload.schemaVersion !== 1) throw resultError("Unsupported Estimate Draft version.");
-  const context = semanticInput.context;
-  const arrays = ["materials", "labor", "equipment", "assumptions", "missingInformation", "warnings"];
-  if (arrays.some((key) => !Array.isArray(payload[key]) || payload[key].length > 80)) {
-    throw resultError("Estimate Draft exceeds collection bounds.");
-  }
-  const costInputs = new Map(context.professionalInput.costInputs.map((item) => [item.key, item]));
-  const retailerReferences = new Map(context.retailerReferences.map((item) => [item.id, item]));
-  let materialsCostMinor = 0;
-  const materials = payload.materials.map((value) => {
-    exact(value, [
-      "id", "description", "quantity", "unit", "wastePercent", "costInputKey",
-      "retailerReferenceId", "assumption", "needsVerification",
-    ]);
-    const quantity = finitePositive(value.quantity, "Material quantity");
-    const wastePercent = Number(value.wastePercent);
-    if (!Number.isFinite(wastePercent) || wastePercent < 0 || wastePercent > 100) {
-      throw resultError("Material waste allowance is invalid.");
+function parseEstimateComposeResult(providerResult, {
+  semanticInput,
+  operationId,
+  providerMetadata = null,
+}) {
+  const metadata = safeProviderMetadata(providerMetadata);
+  const contextPayload = {
+    providerMetadata: metadata,
+    payload: providerResult,
+    schemaVersion: null,
+  };
+  try {
+    const payload = parsePayload(providerResult);
+    contextPayload.payload = payload;
+    if (!isPlainObject(payload)) {
+      throw enrichEstimateParseError("Estimate Draft result is not an object.", {
+        parserStage: "provider_output",
+        validationBranch: "type_validation",
+        rejectionClassification: "provider_output_not_object",
+        providerMetadata: metadata,
+        payload,
+      });
     }
-    const cost = value.costInputKey == null ? null : costInputs.get(value.costInputKey);
-    if (cost && cost.classification !== "MATERIAL") throw resultError("Material override classification is invalid.");
-    const retailer = value.retailerReferenceId == null ? null : retailerReferences.get(value.retailerReferenceId);
-    if (value.retailerReferenceId != null && !retailer) throw resultError("Retailer reference is outside governed context.");
-    const effectiveUnitCostMinor = cost?.unitCostMinor ?? retailer?.listedPriceMinor ?? null;
-    const effectiveQuantity = quantity * (1 + wastePercent / 100);
-    const estimatedCostMinor = effectiveUnitCostMinor == null
-      ? null
-      : Math.round(effectiveUnitCostMinor * effectiveQuantity);
-    if (estimatedCostMinor != null) materialsCostMinor += estimatedCostMinor;
-    return {
-      id: elementId(value.id),
-      description: text(value.description, 500),
-      quantity,
-      unit: text(value.unit, 80),
-      wastePercent,
-      professionalOverride: cost || null,
-      retailerReference: retailer || null,
-      effectiveUnitCostMinor,
-      estimatedCostMinor,
-      priceProvenance: cost ? "PROFESSIONAL_OVERRIDE" : retailer ? "RETAILER_REFERENCE" : "PRICE_MISSING",
-      assumption: text(value.assumption, 500, { required: false }),
-      needsVerification: value.needsVerification === true,
+
+    const estimateFields = [
+      "schemaVersion", "summary", "materials", "labor", "equipment", "disposal",
+      "contingencyPercent", "assumptions", "missingInformation", "suggestedSellingRange",
+      "customerQuoteDraft", "warnings",
+    ];
+    const missingFields = estimateFields.filter((field) => !Object.hasOwn(payload, field));
+    const extraFields = Object.keys(payload).filter((field) => !estimateFields.includes(field));
+    if (missingFields.length || extraFields.length) {
+      throw enrichEstimateParseError("Object fields do not match the operation contract.", {
+        parserStage: "payload_shape",
+        validationBranch: missingFields.length ? "missing_fields" : "extra_fields",
+        schemaVersion: Number.isInteger(payload.schemaVersion) ? payload.schemaVersion : null,
+        missingFields,
+        extraFields,
+        rejectionClassification: missingFields.length ? "missing_required_fields" : "unexpected_fields",
+        providerMetadata: metadata,
+        payload,
+      });
+    }
+
+    if (payload.schemaVersion !== 1) {
+      throw enrichEstimateParseError("Unsupported Estimate Draft version.", {
+        parserStage: "schema",
+        validationBranch: "schema_version",
+        schemaVersion: Number.isInteger(payload.schemaVersion) ? payload.schemaVersion : null,
+        rejectionClassification: "unsupported_schema_version",
+        providerMetadata: metadata,
+        payload,
+      });
+    }
+    contextPayload.schemaVersion = 1;
+
+    const context = semanticInput.context;
+    const arrays = ["materials", "labor", "equipment", "assumptions", "missingInformation", "warnings"];
+    if (arrays.some((key) => !Array.isArray(payload[key]) || payload[key].length > 80)) {
+      throw enrichEstimateParseError("Estimate Draft exceeds collection bounds.", {
+        parserStage: "collection_validation",
+        validationBranch: "collection_length_limit",
+        schemaVersion: payload.schemaVersion,
+        rejectionClassification: "collection_length_validation",
+        providerMetadata: metadata,
+        payload,
+      });
+    }
+
+    const costInputs = new Map(context.professionalInput.costInputs.map((item) => [item.key, item]));
+    const retailerReferences = new Map(context.retailerReferences.map((item) => [item.id, item]));
+    let materialsCostMinor = 0;
+    const materials = payload.materials.map((value) => {
+      exact(value, [
+        "id", "description", "quantity", "unit", "wastePercent", "costInputKey",
+        "retailerReferenceId", "assumption", "needsVerification",
+      ]);
+      const quantity = finitePositive(value.quantity, "Material quantity");
+      const wastePercent = Number(value.wastePercent);
+      if (!Number.isFinite(wastePercent) || wastePercent < 0 || wastePercent > 100) {
+        throw enrichEstimateParseError("Material waste allowance is invalid.", {
+          parserStage: "financial_projection",
+          validationBranch: "waste_percent_range",
+          schemaVersion: payload.schemaVersion,
+          rejectionClassification: "financial_projection_validation",
+          providerMetadata: metadata,
+          payload,
+        });
+      }
+      const cost = value.costInputKey == null ? null : costInputs.get(value.costInputKey);
+      if (cost && cost.classification !== "MATERIAL") {
+        throw enrichEstimateParseError("Material override classification is invalid.", {
+          parserStage: "cost_projection",
+          validationBranch: "material_override_classification",
+          schemaVersion: payload.schemaVersion,
+          rejectionClassification: "material_classification_invalid",
+          providerMetadata: metadata,
+          payload,
+        });
+      }
+      const retailer = value.retailerReferenceId == null ? null : retailerReferences.get(value.retailerReferenceId);
+      if (value.retailerReferenceId != null && !retailer) {
+        throw enrichEstimateParseError("Retailer reference is outside governed context.", {
+          parserStage: "reference_validation",
+          validationBranch: "retailer_reference_lookup",
+          schemaVersion: payload.schemaVersion,
+          rejectionClassification: "retailer_reference_invalid",
+          providerMetadata: metadata,
+          payload,
+        });
+      }
+      const effectiveUnitCostMinor = cost?.unitCostMinor ?? retailer?.listedPriceMinor ?? null;
+      const effectiveQuantity = quantity * (1 + wastePercent / 100);
+      const estimatedCostMinor = effectiveUnitCostMinor == null
+        ? null
+        : Math.round(effectiveUnitCostMinor * effectiveQuantity);
+      if (estimatedCostMinor != null) materialsCostMinor += estimatedCostMinor;
+      return {
+        id: elementId(value.id),
+        description: text(value.description, 500),
+        quantity,
+        unit: text(value.unit, 80),
+        wastePercent,
+        professionalOverride: cost || null,
+        retailerReference: retailer || null,
+        effectiveUnitCostMinor,
+        estimatedCostMinor,
+        priceProvenance: cost ? "PROFESSIONAL_OVERRIDE" : retailer ? "RETAILER_REFERENCE" : "PRICE_MISSING",
+        assumption: text(value.assumption, 500, { required: false }),
+        needsVerification: value.needsVerification === true,
+        customerVisibleByDefault: false,
+      };
+    });
+
+    let laborCostMinor = 0;
+    const labor = payload.labor.map((value) => {
+      exact(value, ["id", "description", "crewCount", "hoursPerWorker", "costInputKey", "assumption"]);
+      const crewCount = finitePositive(value.crewCount, "Crew count");
+      const hoursPerWorker = finitePositive(value.hoursPerWorker, "Labor hours");
+      const cost = value.costInputKey == null ? null : costInputs.get(value.costInputKey);
+      if (cost && cost.classification !== "LABOR") {
+        throw enrichEstimateParseError("Labor override classification is invalid.", {
+          parserStage: "cost_projection",
+          validationBranch: "labor_override_classification",
+          schemaVersion: payload.schemaVersion,
+          rejectionClassification: "labor_override_validation",
+          providerMetadata: metadata,
+          payload,
+        });
+      }
+      const estimatedCostMinor = cost ? Math.round(cost.unitCostMinor * crewCount * hoursPerWorker) : null;
+      if (estimatedCostMinor != null) laborCostMinor += estimatedCostMinor;
+      return {
+        id: elementId(value.id),
+        description: text(value.description, 500),
+        crewCount,
+        hoursPerWorker,
+        professionalOverride: cost || null,
+        estimatedCostMinor,
+        assumption: text(value.assumption, 500),
+        needsProfessionalAcceptance: true,
+        customerVisibleByDefault: false,
+      };
+    });
+
+    const normalizeCostSection = (values, classification) => values.map((value) => {
+      exact(value, ["id", "description", "costInputKey"]);
+      const cost = value.costInputKey == null ? null : costInputs.get(value.costInputKey);
+      if (cost && cost.classification !== classification) {
+        throw enrichEstimateParseError("Estimate cost classification is invalid.", {
+          parserStage: "cost_projection",
+          validationBranch: "section_classification",
+          schemaVersion: payload.schemaVersion,
+          rejectionClassification: "cost_classification_invalid",
+          providerMetadata: metadata,
+          payload,
+        });
+      }
+      return {
+        id: elementId(value.id),
+        description: text(value.description, 500),
+        professionalOverride: cost || null,
+        estimatedCostMinor: cost ? Math.round(cost.unitCostMinor * cost.quantity) : null,
+        customerVisibleByDefault: false,
+      };
+    });
+
+    const equipment = normalizeCostSection(payload.equipment, "EQUIPMENT");
+    exact(payload.disposal, ["description", "costInputKey"]);
+    const disposalInput = payload.disposal.costInputKey == null ? null : costInputs.get(payload.disposal.costInputKey);
+    if (disposalInput && disposalInput.classification !== "DISPOSAL") {
+      throw enrichEstimateParseError("Disposal cost classification is invalid.", {
+        parserStage: "reference_validation",
+        validationBranch: "disposal_classification",
+        schemaVersion: payload.schemaVersion,
+        rejectionClassification: "disposal_classification_invalid",
+        providerMetadata: metadata,
+        payload,
+      });
+    }
+
+    const disposal = {
+      description: text(payload.disposal.description, 500, { required: false }),
+      professionalOverride: disposalInput || null,
+      estimatedCostMinor: disposalInput ? Math.round(disposalInput.unitCostMinor * disposalInput.quantity) : null,
       customerVisibleByDefault: false,
     };
-  });
-  let laborCostMinor = 0;
-  const labor = payload.labor.map((value) => {
-    exact(value, ["id", "description", "crewCount", "hoursPerWorker", "costInputKey", "assumption"]);
-    const crewCount = finitePositive(value.crewCount, "Crew count");
-    const hoursPerWorker = finitePositive(value.hoursPerWorker, "Labor hours");
-    const cost = value.costInputKey == null ? null : costInputs.get(value.costInputKey);
-    if (cost && cost.classification !== "LABOR") throw resultError("Labor override classification is invalid.");
-    const estimatedCostMinor = cost ? Math.round(cost.unitCostMinor * crewCount * hoursPerWorker) : null;
-    if (estimatedCostMinor != null) laborCostMinor += estimatedCostMinor;
-    return {
-      id: elementId(value.id),
-      description: text(value.description, 500),
-      crewCount,
-      hoursPerWorker,
-      professionalOverride: cost || null,
-      estimatedCostMinor,
-      assumption: text(value.assumption, 500),
-      needsProfessionalAcceptance: true,
-      customerVisibleByDefault: false,
-    };
-  });
-  const normalizeCostSection = (values, classification) => values.map((value) => {
-    exact(value, ["id", "description", "costInputKey"]);
-    const cost = value.costInputKey == null ? null : costInputs.get(value.costInputKey);
-    if (cost && cost.classification !== classification) throw resultError("Estimate cost classification is invalid.");
-    return {
-      id: elementId(value.id),
-      description: text(value.description, 500),
-      professionalOverride: cost || null,
-      estimatedCostMinor: cost ? Math.round(cost.unitCostMinor * cost.quantity) : null,
-      customerVisibleByDefault: false,
-    };
-  });
-  const equipment = normalizeCostSection(payload.equipment, "EQUIPMENT");
-  exact(payload.disposal, ["description", "costInputKey"]);
-  const disposalInput = payload.disposal.costInputKey == null ? null : costInputs.get(payload.disposal.costInputKey);
-  if (disposalInput && disposalInput.classification !== "DISPOSAL") throw resultError("Disposal cost classification is invalid.");
-  const disposal = {
-    description: text(payload.disposal.description, 500, { required: false }),
-    professionalOverride: disposalInput || null,
-    estimatedCostMinor: disposalInput ? Math.round(disposalInput.unitCostMinor * disposalInput.quantity) : null,
-    customerVisibleByDefault: false,
-  };
-  const equipmentCostMinor = equipment.reduce((sum, item) => sum + (item.estimatedCostMinor || 0), 0);
-  const disposalCostMinor = disposal.estimatedCostMinor || 0;
-  const contingencyPercent = Number(payload.contingencyPercent);
-  if (!Number.isFinite(contingencyPercent) || contingencyPercent < 0 || contingencyPercent > 50) {
-    throw resultError("Estimate contingency is invalid.");
-  }
-  const baseCostMinor = materialsCostMinor + laborCostMinor + equipmentCostMinor + disposalCostMinor;
-  const contingencyMinor = Math.round(baseCostMinor * contingencyPercent / 100);
-  exact(payload.suggestedSellingRange, ["minimumMinor", "maximumMinor", "rationale"]);
-  const minimumMinor = Number(payload.suggestedSellingRange.minimumMinor);
-  const maximumMinor = Number(payload.suggestedSellingRange.maximumMinor);
-  if (!Number.isSafeInteger(minimumMinor) || !Number.isSafeInteger(maximumMinor) ||
+    const equipmentCostMinor = equipment.reduce((sum, item) => sum + (item.estimatedCostMinor || 0), 0);
+    const disposalCostMinor = disposal.estimatedCostMinor || 0;
+    const contingencyPercent = Number(payload.contingencyPercent);
+    if (!Number.isFinite(contingencyPercent) || contingencyPercent < 0 || contingencyPercent > 50) {
+      throw enrichEstimateParseError("Estimate contingency is invalid.", {
+        parserStage: "financial_projection",
+        validationBranch: "contingency_range",
+        schemaVersion: payload.schemaVersion,
+        rejectionClassification: "contingency_validation",
+        providerMetadata: metadata,
+        payload,
+      });
+    }
+    const baseCostMinor = materialsCostMinor + laborCostMinor + equipmentCostMinor + disposalCostMinor;
+    const contingencyMinor = Math.round(baseCostMinor * contingencyPercent / 100);
+    exact(payload.suggestedSellingRange, ["minimumMinor", "maximumMinor", "rationale"]);
+    const minimumMinor = Number(payload.suggestedSellingRange.minimumMinor);
+    const maximumMinor = Number(payload.suggestedSellingRange.maximumMinor);
+    if (!Number.isSafeInteger(minimumMinor) || !Number.isSafeInteger(maximumMinor) ||
       minimumMinor < 0 || maximumMinor < minimumMinor) {
-    throw resultError("Suggested selling range is invalid.");
+      throw enrichEstimateParseError("Suggested selling range is invalid.", {
+        parserStage: "financial_projection",
+        validationBranch: "selling_range_bounds",
+        schemaVersion: payload.schemaVersion,
+        rejectionClassification: "selling_range_validation",
+        providerMetadata: metadata,
+        payload,
+      });
+    }
+
+    exact(payload.customerQuoteDraft, ["scopeSummary", "conditions", "exclusions", "durationGuidance", "customerWording"]);
+    if (!Array.isArray(payload.customerQuoteDraft.conditions) || !Array.isArray(payload.customerQuoteDraft.exclusions)) {
+      throw enrichEstimateParseError("Customer Quote Draft content is invalid.", {
+        parserStage: "quote_projection",
+        validationBranch: "quote_draft_shape",
+        schemaVersion: payload.schemaVersion,
+        rejectionClassification: "customer_quote_validation",
+        providerMetadata: metadata,
+        payload,
+      });
+    }
+
+    const customerQuoteDraft = {
+      id: "customer_quote_draft",
+      scopeSummary: text(payload.customerQuoteDraft.scopeSummary, 3000),
+      conditions: payload.customerQuoteDraft.conditions.map((item) => text(item, 1000)),
+      exclusions: payload.customerQuoteDraft.exclusions.map((item) => text(item, 1000)),
+      durationGuidance: text(payload.customerQuoteDraft.durationGuidance, 500, { required: false }),
+      customerWording: text(payload.customerQuoteDraft.customerWording, 3000),
+    };
+    const assumptions = payload.assumptions.map((item) => ({ id: elementId(item.id), text: text(item.text, 1000), classification: "NEEDS_VERIFICATION" }));
+    return {
+      schemaVersion: 1,
+      proposalId: operationId,
+      authorityClassification: "INTERNAL_ESTIMATE_DRAFT_NON_CANONICAL",
+      jobId: context.job.id,
+      sourceContextFingerprint: context.sourceContextFingerprint,
+      summary: text(payload.summary, 1200),
+      materials,
+      labor,
+      equipment,
+      disposal,
+      contingency: { percent: contingencyPercent, amountMinor: contingencyMinor },
+      internalCost: {
+        currency: "USD",
+        materialsMinor: materialsCostMinor,
+        laborMinor: laborCostMinor,
+        equipmentMinor: equipmentCostMinor,
+        disposalMinor: disposalCostMinor,
+        contingencyMinor,
+        totalMinor: baseCostMinor + contingencyMinor,
+        customerVisible: false,
+      },
+      suggestedSellingRange: {
+        minimumMinor, maximumMinor,
+        rationale: text(payload.suggestedSellingRange.rationale, 1000),
+        authorityClassification: "ADVISORY",
+      },
+      professionalSellingPriceMinor: context.professionalInput.sellingPriceMinor,
+      assumptions,
+      missingInformation: payload.missingInformation.map((item) => text(item, 500)),
+      retailerReferences: context.retailerReferences,
+      customerQuoteDraft,
+      warnings: payload.warnings.map((item) => text(item, 500)),
+      reviewContract: { actions: ["ACCEPTED", "EDITED", "REJECTED"], explicitProfessionalDecisionRequired: true },
+      humanToCanonicalBoundary: {
+        directMutationAllowed: false,
+        requiredCanonicalCommands: ["quote.draft.create", "quote.scope.add"],
+        prohibitedCanonicalCommands: ["quote.issue", "quote.customer.approve", "quote.customer.decline"],
+      },
+      learningContext: { context: "internal_estimate", job: context.job.id, learnedPatternIsCanonicalRule: false },
+    };
+  } catch (error) {
+    if (error?.parserDiagnostics) throw error;
+    throw normalizeEstimateParseError(error, contextPayload);
   }
-  exact(payload.customerQuoteDraft, ["scopeSummary", "conditions", "exclusions", "durationGuidance", "customerWording"]);
-  if (!Array.isArray(payload.customerQuoteDraft.conditions) || !Array.isArray(payload.customerQuoteDraft.exclusions)) {
-    throw resultError("Customer Quote Draft content is invalid.");
-  }
-  const customerQuoteDraft = {
-    id: "customer_quote_draft",
-    scopeSummary: text(payload.customerQuoteDraft.scopeSummary, 3000),
-    conditions: payload.customerQuoteDraft.conditions.map((item) => text(item, 1000)),
-    exclusions: payload.customerQuoteDraft.exclusions.map((item) => text(item, 1000)),
-    durationGuidance: text(payload.customerQuoteDraft.durationGuidance, 500, { required: false }),
-    customerWording: text(payload.customerQuoteDraft.customerWording, 3000),
-  };
-  const assumptions = payload.assumptions.map((item) => ({ id: elementId(item.id), text: text(item.text, 1000), classification: "NEEDS_VERIFICATION" }));
-  return {
-    schemaVersion: 1,
-    proposalId: operationId,
-    authorityClassification: "INTERNAL_ESTIMATE_DRAFT_NON_CANONICAL",
-    jobId: context.job.id,
-    sourceContextFingerprint: context.sourceContextFingerprint,
-    summary: text(payload.summary, 1200),
-    materials,
-    labor,
-    equipment,
-    disposal,
-    contingency: { percent: contingencyPercent, amountMinor: contingencyMinor },
-    internalCost: {
-      currency: "USD",
-      materialsMinor: materialsCostMinor,
-      laborMinor: laborCostMinor,
-      equipmentMinor: equipmentCostMinor,
-      disposalMinor: disposalCostMinor,
-      contingencyMinor,
-      totalMinor: baseCostMinor + contingencyMinor,
-      customerVisible: false,
-    },
-    suggestedSellingRange: {
-      minimumMinor, maximumMinor,
-      rationale: text(payload.suggestedSellingRange.rationale, 1000),
-      authorityClassification: "ADVISORY",
-    },
-    professionalSellingPriceMinor: context.professionalInput.sellingPriceMinor,
-    assumptions,
-    missingInformation: payload.missingInformation.map((item) => text(item, 500)),
-    retailerReferences: context.retailerReferences,
-    customerQuoteDraft,
-    warnings: payload.warnings.map((item) => text(item, 500)),
-    reviewContract: { actions: ["ACCEPTED", "EDITED", "REJECTED"], explicitProfessionalDecisionRequired: true },
-    humanToCanonicalBoundary: {
-      directMutationAllowed: false,
-      requiredCanonicalCommands: ["quote.draft.create", "quote.scope.add"],
-      prohibitedCanonicalCommands: ["quote.issue", "quote.customer.approve", "quote.customer.decline"],
-    },
-    learningContext: { context: "internal_estimate", job: context.job.id, learnedPatternIsCanonicalRule: false },
-  };
 }
 
 function buildEstimateComposeProviderRequest({ semanticInput, engineContext }) {

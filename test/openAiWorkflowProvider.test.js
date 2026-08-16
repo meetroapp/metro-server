@@ -277,3 +277,48 @@ test("transcription provider sends audio as multipart and returns transcript onl
   assert.equal(calls[0].options.body instanceof FormData, true);
   assert.deepEqual(result, { transcript: "inspect the drain line" });
 });
+
+test("workflow provider returns out-of-band privacy-safe metadata with completed result", async () => {
+  const provider = createOpenAiWorkflowProvider({
+    apiKey: "fixture-secret",
+    model: "fixture-model",
+    fetchImpl: async () => response({
+      payload: {
+        output_text: JSON.stringify({
+          schemaVersion: 1,
+          summary: "Review this suggestion.",
+          materials: [],
+          labor: [],
+          equipment: [],
+          disposal: { description: "", costInputKey: null },
+          contingencyPercent: 0,
+          assumptions: [],
+          missingInformation: [],
+          suggestedSellingRange: { minimumMinor: 0, maximumMinor: 0, rationale: "Pricing is unverified." },
+          customerQuoteDraft: {
+            scopeSummary: "Draft scope.",
+            conditions: [],
+            exclusions: [],
+            durationGuidance: "",
+            customerWording: "Draft wording.",
+          },
+          warnings: [],
+        }),
+      },
+      requestId: "req_workflow_provider_metadata",
+    }),
+  });
+
+  const result = await provider.complete({
+    operation: "estimate.compose",
+    internalProfessionalContext: {
+      professionalInput: { costInputs: [] },
+      retailerReferences: [],
+    },
+  });
+
+  const descriptor = Object.getOwnPropertyDescriptor(result, "__providerMetadata");
+  assert.ok(descriptor && descriptor.enumerable === false);
+  assert.equal(result.__providerMetadata.providerRequestId, "req_workflow_provider_metadata");
+  assert.equal(result.__providerMetadata.configuredModel, "fixture-model");
+});
