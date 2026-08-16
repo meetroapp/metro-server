@@ -101,6 +101,55 @@ test("Job Request provider instructions use the exact governed parser vocabulary
   assert.doesNotMatch(instructions, /KNOWN or UNCERTAIN or NEEDS_CLARIFICATION/);
 });
 
+test("Estimate provider uses strict Structured Outputs for its governed result contract", async () => {
+  const calls = [];
+  const provider = createOpenAiWorkflowProvider({
+    apiKey: "fixture-secret",
+    model: "fixture-model",
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return response({
+        payload: {
+          output_text: JSON.stringify({
+            schemaVersion: 1,
+            summary: "Verify measurements and prices.",
+            materials: [],
+            labor: [],
+            equipment: [],
+            disposal: { description: "", costInputKey: null },
+            contingencyPercent: 0,
+            assumptions: [],
+            missingInformation: [],
+            suggestedSellingRange: { minimumMinor: 0, maximumMinor: 0, rationale: "Pricing is unverified." },
+            customerQuoteDraft: {
+              scopeSummary: "Draft scope.",
+              conditions: [],
+              exclusions: [],
+              durationGuidance: "",
+              customerWording: "Draft wording.",
+            },
+            warnings: [],
+          }),
+        },
+      });
+    },
+  });
+
+  await provider.complete({ operation: "estimate.compose" });
+  const format = JSON.parse(calls[0].options.body).text.format;
+  assert.equal(format.type, "json_schema");
+  assert.equal(format.name, "meetro_estimate_compose");
+  assert.equal(format.strict, true);
+  assert.equal(format.schema.additionalProperties, false);
+  assert.deepEqual(format.schema.required, [
+    "schemaVersion", "summary", "materials", "labor", "equipment", "disposal",
+    "contingencyPercent", "assumptions", "missingInformation", "suggestedSellingRange",
+    "customerQuoteDraft", "warnings",
+  ]);
+  assert.equal(format.schema.properties.materials.items.additionalProperties, false);
+  assert.deepEqual(format.schema.properties.materials.items.properties.costInputKey.type, ["string", "null"]);
+});
+
 test("provider failures are reduced to safe governed classifications", async () => {
   assert.equal(classifyProviderFailure(401, {}), "provider_authentication_failed");
   assert.equal(classifyProviderFailure(429, { error: { code: "insufficient_quota" } }), "provider_quota_exhausted");

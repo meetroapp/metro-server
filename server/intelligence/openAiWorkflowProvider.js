@@ -23,6 +23,129 @@ where sourcedElement is exactly {"id":"stable_id","description":"string","proven
 Draft wording only. Never calculate, alter, or assert payment, total, paid, balance, or status authority.`,
 });
 
+const ESTIMATE_COMPOSE_OUTPUT_SCHEMA = Object.freeze({
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "schemaVersion", "summary", "materials", "labor", "equipment", "disposal",
+    "contingencyPercent", "assumptions", "missingInformation", "suggestedSellingRange",
+    "customerQuoteDraft", "warnings",
+  ],
+  properties: {
+    schemaVersion: { type: "integer", const: 1 },
+    summary: { type: "string" },
+    materials: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "id", "description", "quantity", "unit", "wastePercent", "costInputKey",
+          "retailerReferenceId", "assumption", "needsVerification",
+        ],
+        properties: {
+          id: { type: "string" },
+          description: { type: "string" },
+          quantity: { type: "number" },
+          unit: { type: "string" },
+          wastePercent: { type: "number" },
+          costInputKey: { type: ["string", "null"] },
+          retailerReferenceId: { type: ["string", "null"] },
+          assumption: { type: "string" },
+          needsVerification: { type: "boolean" },
+        },
+      },
+    },
+    labor: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["id", "description", "crewCount", "hoursPerWorker", "costInputKey", "assumption"],
+        properties: {
+          id: { type: "string" },
+          description: { type: "string" },
+          crewCount: { type: "number" },
+          hoursPerWorker: { type: "number" },
+          costInputKey: { type: ["string", "null"] },
+          assumption: { type: "string" },
+        },
+      },
+    },
+    equipment: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["id", "description", "costInputKey"],
+        properties: {
+          id: { type: "string" },
+          description: { type: "string" },
+          costInputKey: { type: ["string", "null"] },
+        },
+      },
+    },
+    disposal: {
+      type: "object",
+      additionalProperties: false,
+      required: ["description", "costInputKey"],
+      properties: {
+        description: { type: "string" },
+        costInputKey: { type: ["string", "null"] },
+      },
+    },
+    contingencyPercent: { type: "number" },
+    assumptions: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["id", "text"],
+        properties: {
+          id: { type: "string" },
+          text: { type: "string" },
+        },
+      },
+    },
+    missingInformation: { type: "array", items: { type: "string" } },
+    suggestedSellingRange: {
+      type: "object",
+      additionalProperties: false,
+      required: ["minimumMinor", "maximumMinor", "rationale"],
+      properties: {
+        minimumMinor: { type: "integer" },
+        maximumMinor: { type: "integer" },
+        rationale: { type: "string" },
+      },
+    },
+    customerQuoteDraft: {
+      type: "object",
+      additionalProperties: false,
+      required: ["scopeSummary", "conditions", "exclusions", "durationGuidance", "customerWording"],
+      properties: {
+        scopeSummary: { type: "string" },
+        conditions: { type: "array", items: { type: "string" } },
+        exclusions: { type: "array", items: { type: "string" } },
+        durationGuidance: { type: "string" },
+        customerWording: { type: "string" },
+      },
+    },
+    warnings: { type: "array", items: { type: "string" } },
+  },
+});
+
+function workflowResponseFormat(operation) {
+  if (operation === "estimate.compose") {
+    return {
+      type: "json_schema",
+      name: "meetro_estimate_compose",
+      strict: true,
+      schema: ESTIMATE_COMPOSE_OUTPUT_SCHEMA,
+    };
+  }
+  return { type: "json_object" };
+}
+
 function providerError(code, message) {
   return Object.assign(new Error(message), { code });
 }
@@ -173,7 +296,7 @@ function createOpenAiWorkflowProvider({
       const { response, payload } = await createResponse({
         instructions: workflowInstructions(request),
         input: JSON.stringify(request),
-        text: { format: { type: "json_object" } },
+        text: { format: workflowResponseFormat(request?.operation) },
       });
       const output = responseOutputText(payload);
       if (!output) {
