@@ -12,6 +12,9 @@ const {
   serializeOwnedRequest,
   validateRequestPayload,
 } = require("./requestLifecycle");
+const {
+  hasActiveLifecycleGrant,
+} = require("../authorization/lifecycleAuthorityService");
 
 const REQUEST_MODIFICATION_MODES = Object.freeze({
   EDITABLE: "EDITABLE",
@@ -139,10 +142,46 @@ async function loadRequestModificationContext(
              FROM relationship_participants
              INNER JOIN jobs
                ON jobs.id = relationship_participants.job_id
+             INNER JOIN request_relationships
+               ON request_relationships.id = jobs.source_request_relationship_id
+              AND request_relationships.post_id = jobs.job_request_id
+              AND request_relationships.id =
+                  relationship_participants.request_relationship_id
              WHERE jobs.job_request_id = posts.id
                AND relationship_participants.user_id = $2
              LIMIT 1
            ) AS actor_participant_id,
+           EXISTS (
+             SELECT 1
+             FROM jobs
+             INNER JOIN request_relationships
+               ON request_relationships.id = jobs.source_request_relationship_id
+              AND request_relationships.post_id = jobs.job_request_id
+              AND request_relationships.emergency_request_id IS NULL
+              AND request_relationships.professional_user_id = $2
+              AND request_relationships.status = 'active'
+             INNER JOIN relationship_participants
+               ON relationship_participants.job_id = jobs.id
+              AND relationship_participants.request_relationship_id =
+                  request_relationships.id
+              AND relationship_participants.user_id = $2
+             INNER JOIN participant_role_assignments
+               ON participant_role_assignments.participant_id =
+                  relationship_participants.id
+              AND participant_role_assignments.job_id = jobs.id
+              AND participant_role_assignments.role = 'PRIMARY_PROFESSIONAL'
+              AND participant_role_assignments.valid_from <= CURRENT_TIMESTAMP
+              AND (
+                participant_role_assignments.valid_until IS NULL
+                OR participant_role_assignments.valid_until > CURRENT_TIMESTAMP
+              )
+             LEFT JOIN participant_role_revocations
+               ON participant_role_revocations.role_assignment_id =
+                  participant_role_assignments.id
+             WHERE jobs.job_request_id = posts.id
+               AND jobs.lifecycle_contract_version = 2
+               AND participant_role_revocations.id IS NULL
+           ) AS actor_primary_professional_role_active,
            EXISTS (
              SELECT 1
              FROM professional_responses
@@ -588,6 +627,38 @@ function serializeAttachment(row = {}) {
   };
 }
 
+function hasExactProfessionalPhotoContext(context = {}, actorUserId) {
+  return Boolean(
+    normalizedUuid(context.job_id) &&
+    normalizedUuid(context.actor_participant_id) &&
+    positiveInteger(context.source_request_relationship_id) &&
+    positiveInteger(actorUserId) &&
+    booleanValue(context.actor_primary_professional_role_active)
+  );
+}
+
+async function authorizePhotoAppendActor({
+  client,
+  context,
+  actorUserId,
+  logger,
+} = {}) {
+  if (Number(context?.user_id) === actorUserId) {
+    return { kind: "owner", participantId: null };
+  }
+  if (!hasExactProfessionalPhotoContext(context, actorUserId)) return null;
+  const granted = await hasActiveLifecycleGrant({
+    client,
+    participantId: context.actor_participant_id,
+    capability: "evaluation.perform",
+    jobId: context.job_id,
+    logger,
+  });
+  return granted
+    ? { kind: "professional", participantId: context.actor_participant_id }
+    : null;
+}
+
 async function appendRequestPhoto({
   pool,
   authenticatedActor,
@@ -621,7 +692,15 @@ async function appendRequestPhoto({
       actorUserId,
       { lock: true }
     );
-    if (!context || Number(context.user_id) !== actorUserId) {
+    const authority = context
+      ? await authorizePhotoAppendActor({
+          client,
+          context,
+          actorUserId,
+          logger,
+        })
+      : null;
+    if (!authority) {
       await client.query("ROLLBACK");
       transactionStarted = false;
       return failure(404, "REQUEST_NOT_FOUND", "The request was not found.");
@@ -766,28 +845,103 @@ async function appendRequestPhoto({
         requestFingerprint,
       ]
     );
-    const postResult = await client.query(
-      `
-      /* request_modification:photo_append */
-      UPDATE posts
-      SET request_photos = COALESCE(request_photos, '[]'::jsonb) || $1::jsonb,
-          image_url = COALESCE(NULLIF(image_url, ''), $2),
-          modification_version = modification_version + 1,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = $3
-        AND user_id = $4
-        AND status = 'open'
-        AND modification_version = $5
-      RETURNING *
-      `,
-      [
-        JSON.stringify([attachment]),
-        attachment.secure_url,
-        postId,
-        actorUserId,
-        actualVersion,
-      ]
-    );
+    const postResult = authority.kind === "owner"
+      ? await client.query(
+          `
+          /* request_modification:photo_append_owner */
+          UPDATE posts
+          SET request_photos = COALESCE(request_photos, '[]'::jsonb) || $1::jsonb,
+              image_url = COALESCE(NULLIF(image_url, ''), $2),
+              modification_version = modification_version + 1,
+              updated_at = CURRENT_TIMESTAMP
+          WHERE id = $3
+            AND user_id = $4
+            AND status = 'open'
+            AND modification_version = $5
+          RETURNING *
+          `,
+          [
+            JSON.stringify([attachment]),
+            attachment.secure_url,
+            postId,
+            actorUserId,
+            actualVersion,
+          ]
+        )
+      : await client.query(
+          `
+          /* request_modification:photo_append_professional */
+          UPDATE posts
+          SET request_photos = COALESCE(request_photos, '[]'::jsonb) || $1::jsonb,
+              image_url = COALESCE(NULLIF(image_url, ''), $2),
+              modification_version = modification_version + 1,
+              updated_at = CURRENT_TIMESTAMP
+          WHERE id = $3
+            AND status = 'open'
+            AND modification_version = $5
+            AND EXISTS (
+              SELECT 1
+              FROM jobs
+              INNER JOIN request_relationships
+                ON request_relationships.id = jobs.source_request_relationship_id
+               AND request_relationships.post_id = jobs.job_request_id
+               AND request_relationships.emergency_request_id IS NULL
+               AND request_relationships.professional_user_id = $4
+               AND request_relationships.status = 'active'
+              INNER JOIN relationship_participants
+                ON relationship_participants.job_id = jobs.id
+               AND relationship_participants.request_relationship_id =
+                   request_relationships.id
+               AND relationship_participants.user_id = $4
+               AND relationship_participants.id = $7
+              INNER JOIN participant_role_assignments
+                ON participant_role_assignments.participant_id =
+                   relationship_participants.id
+               AND participant_role_assignments.job_id = jobs.id
+               AND participant_role_assignments.role = 'PRIMARY_PROFESSIONAL'
+               AND participant_role_assignments.valid_from <= CURRENT_TIMESTAMP
+               AND (
+                 participant_role_assignments.valid_until IS NULL
+                 OR participant_role_assignments.valid_until > CURRENT_TIMESTAMP
+               )
+              LEFT JOIN participant_role_revocations
+                ON participant_role_revocations.role_assignment_id =
+                   participant_role_assignments.id
+              INNER JOIN lifecycle_authority_grants
+                ON lifecycle_authority_grants.grantee_participant_id =
+                   relationship_participants.id
+               AND lifecycle_authority_grants.job_id = jobs.id
+               AND lifecycle_authority_grants.scope_job_id = jobs.id
+               AND lifecycle_authority_grants.capability = 'evaluation.perform'
+               AND lifecycle_authority_grants.scope_type = 'job'
+               AND lifecycle_authority_grants.valid_from <= CURRENT_TIMESTAMP
+               AND (
+                 lifecycle_authority_grants.valid_until IS NULL
+                 OR lifecycle_authority_grants.valid_until > CURRENT_TIMESTAMP
+               )
+              LEFT JOIN lifecycle_authority_grant_revocations
+                ON lifecycle_authority_grant_revocations.authority_grant_id =
+                   lifecycle_authority_grants.id
+              WHERE jobs.id = $6
+                AND jobs.job_request_id = posts.id
+                AND jobs.source_request_relationship_id = $8
+                AND jobs.lifecycle_contract_version = 2
+                AND participant_role_revocations.id IS NULL
+                AND lifecycle_authority_grant_revocations.id IS NULL
+            )
+          RETURNING *
+          `,
+          [
+            JSON.stringify([attachment]),
+            attachment.secure_url,
+            postId,
+            actorUserId,
+            actualVersion,
+            context.job_id,
+            context.actor_participant_id,
+            Number(context.source_request_relationship_id),
+          ]
+        );
     if (!eventResult.rows[0] || !postResult.rows[0]) {
       await client.query("ROLLBACK");
       transactionStarted = false;
@@ -810,7 +964,14 @@ async function appendRequestPhoto({
       status: 201,
       code: "REQUEST_PHOTO_ATTACHED",
       photo: serializeAttachment(eventResult.rows[0]),
-      post: serializeOwnedRequest(postResult.rows[0], parseStoredRequestPhotos(postResult.rows[0].request_photos)),
+      ...(authority.kind === "owner"
+        ? {
+            post: serializeOwnedRequest(
+              postResult.rows[0],
+              parseStoredRequestPhotos(postResult.rows[0].request_photos)
+            ),
+          }
+        : {}),
       requestVersion: nextVersion,
     };
   } catch (error) {

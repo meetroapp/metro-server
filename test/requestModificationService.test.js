@@ -12,6 +12,7 @@ const { MediaValidationError } = require("../server/media/cloudinary");
 const {
   REQUEST_MODIFICATION_MODES,
   appendRequestPhoto,
+  loadRequestModificationContext,
   resolveRequestModificationMode,
   serializeRequestModificationAuthority,
   updateRequest,
@@ -19,6 +20,7 @@ const {
 
 const CONCERN_ID = "33333333-3333-4333-8333-333333333333";
 const JOB_ID = "22222222-2222-4222-8222-222222222222";
+const PARTICIPANT_ID = "66666666-6666-4666-8666-666666666666";
 
 function context(overrides = {}) {
   return {
@@ -52,12 +54,28 @@ function context(overrides = {}) {
     request_photos: [],
     primary_concern_id: CONCERN_ID,
     job_id: null,
+    source_request_relationship_id: null,
+    actor_participant_id: null,
+    actor_primary_professional_role_active: false,
+    actor_evaluation_grant_active: false,
     professional_response_exists: false,
     request_relationship_exists: false,
     selection_exists: false,
     active_work_exists: false,
     ...overrides,
   };
+}
+
+function professionalContext(overrides = {}) {
+  return context({
+    job_id: JOB_ID,
+    source_request_relationship_id: 91,
+    actor_participant_id: PARTICIPANT_ID,
+    actor_primary_professional_role_active: true,
+    actor_evaluation_grant_active: true,
+    request_relationship_exists: true,
+    ...overrides,
+  });
 }
 
 function logger() {
@@ -153,12 +171,14 @@ function createPhotoPool(initialContext, initialEvents = []) {
     context: structuredClone(initialContext),
     events: structuredClone(initialEvents),
     appendedPayloads: [],
+    queries: [],
   };
   let snapshot = null;
   return {
     state,
     async query(text, values = []) {
       const sql = String(text).replace(/\s+/g, " ").trim();
+      state.queries.push(sql);
       if (sql === "BEGIN") {
         snapshot = structuredClone(state);
         return { rows: [] };
@@ -178,6 +198,13 @@ function createPhotoPool(initialContext, initialEvents = []) {
       }
       if (sql.includes("reported_concern:request_context")) {
         return { rows: [structuredClone(state.context)] };
+      }
+      if (sql.includes("lifecycle_authority:active_grant")) {
+        return {
+          rows: state.context.actor_evaluation_grant_active
+            ? [{ id: "77777777-7777-4777-8777-777777777777" }]
+            : [],
+        };
       }
       if (sql.includes("request_modification:photo_existing_command")) {
         return {
@@ -213,7 +240,7 @@ function createPhotoPool(initialContext, initialEvents = []) {
         state.events.push(row);
         return { rows: [row] };
       }
-      if (sql.includes("request_modification:photo_append")) {
+      if (sql.includes("request_modification:photo_append_")) {
         if (Number(values[4]) !== Number(state.context.modification_version)) {
           return { rows: [] };
         }
@@ -265,6 +292,34 @@ test("server-owned mode resolution covers editable, reliance, active work, and r
   assert.equal(authority.actions.editRequest, false);
   assert.equal(authority.actions.appendPhoto, true);
   assert.equal(authority.actions.contractChangeGuidance, true);
+});
+
+test("request context proves exact active primary-professional relationship server-side", async () => {
+  let contextQuery = "";
+  const client = {
+    async query(text) {
+      contextQuery = String(text).replace(/\s+/g, " ").trim();
+      return { rows: [professionalContext()] };
+    },
+  };
+  const result = await loadRequestModificationContext(client, 41, 8);
+
+  assert.equal(result.actor_participant_id, PARTICIPANT_ID);
+  for (const requiredSql of [
+    "jobs.job_request_id = posts.id",
+    "request_relationships.id = jobs.source_request_relationship_id",
+    "request_relationships.post_id = jobs.job_request_id",
+    "request_relationships.professional_user_id = $2",
+    "request_relationships.status = 'active'",
+    "relationship_participants.request_relationship_id = request_relationships.id",
+    "relationship_participants.user_id = $2",
+    "participant_role_assignments.role = 'PRIMARY_PROFESSIONAL'",
+    "participant_role_assignments.valid_from <= CURRENT_TIMESTAMP",
+    "participant_role_revocations.id IS NULL",
+    "jobs.lifecycle_contract_version = 2",
+  ]) {
+    assert.ok(contextQuery.includes(requiredSql), requiredSql);
+  }
 });
 
 test("pre-reliance lifecycle-v2 edit advances version and appends concern supersession", async () => {
@@ -359,6 +414,144 @@ test("post-reliance photo append preserves prior media and persists provenance",
   assert.equal(pool.state.events[0].concern_id, CONCERN_ID);
   assert.equal(pool.state.events[0].actor_user_id, 7);
   assert.equal(pool.state.appendedPayloads.length, 1);
+  assert.ok(pool.state.queries.some((sql) =>
+    sql.includes("request_modification:photo_append_owner") &&
+    sql.includes("AND user_id = $4")
+  ));
+});
+
+test("authorized exact-Job primary professional can append governed Evaluation photo evidence", async () => {
+  const pool = createPhotoPool(professionalContext({ modification_version: 3 }));
+  const result = await appendRequestPhoto({
+    pool,
+    authenticatedActor: { id: 8 },
+    postId: 41,
+    concernId: CONCERN_ID,
+    payload: { expected_version: 3, media: requestPhoto(1, 8) },
+    idempotencyKey: "request-photo:professional-append",
+    logger: logger(),
+  });
+
+  assert.equal(result.code, "REQUEST_PHOTO_ATTACHED");
+  assert.equal(result.requestVersion, 4);
+  assert.equal(result.photo.created_by_user_id, 8);
+  assert.equal(Object.hasOwn(result, "post"), false);
+  assert.equal(pool.state.context.request_photos.length, 1);
+  assert.ok(pool.state.queries.some((sql) =>
+    sql.includes("lifecycle_authority:active_grant")
+  ));
+  assert.ok(pool.state.queries.some((sql) =>
+    sql.includes("request_modification:photo_append_professional") &&
+    sql.includes("PRIMARY_PROFESSIONAL") &&
+    sql.includes("evaluation.perform") &&
+    sql.includes("request_relationships.status = 'active'")
+  ));
+  const mutationQueries = pool.state.queries.filter((sql) =>
+    sql.includes("request_modification:photo_event_insert") ||
+    sql.includes("request_modification:photo_append_")
+  );
+  assert.equal(mutationQueries.length, 2);
+  assert.ok(mutationQueries.some((sql) =>
+    sql.includes("INSERT INTO request_photo_attachment_events")
+  ));
+  assert.ok(mutationQueries.some((sql) =>
+    sql.includes("UPDATE posts")
+  ));
+});
+
+test("professional photo authority fails closed for wrong Job request role relationship or grant", async () => {
+  const cases = [
+    ["another Job", { actor_primary_professional_role_active: false }],
+    ["another request relationship", { actor_primary_professional_role_active: false }],
+    ["missing participant", { actor_participant_id: null }],
+    ["different participant user", { actor_primary_professional_role_active: false }],
+    ["inactive relationship", { actor_primary_professional_role_active: false }],
+    ["inactive or revoked role", { actor_primary_professional_role_active: false }],
+    ["missing Evaluation authority", { actor_evaluation_grant_active: false }],
+  ];
+
+  for (const [label, overrides] of cases) {
+    const pool = createPhotoPool(professionalContext(overrides));
+    const result = await appendRequestPhoto({
+      pool,
+      authenticatedActor: { id: 8 },
+      postId: 41,
+      concernId: CONCERN_ID,
+      payload: { expected_version: 1, media: requestPhoto(1, 8) },
+      idempotencyKey: `request-photo:denied-${label.replaceAll(" ", "-")}`,
+      logger: logger(),
+    });
+    assert.equal(result.status, 404, label);
+    assert.equal(result.code, "REQUEST_NOT_FOUND", label);
+    assert.equal(result.message, "The request was not found.", label);
+    assert.equal(pool.state.events.length, 0, label);
+    assert.equal(pool.state.appendedPayloads.length, 0, label);
+  }
+});
+
+test("professional append preserves concern lifecycle normalization capacity and non-photo truth", async () => {
+  const wrongConcernPool = createPhotoPool(professionalContext());
+  const wrongConcern = await appendRequestPhoto({
+    pool: wrongConcernPool,
+    authenticatedActor: { id: 8 },
+    postId: 41,
+    concernId: "44444444-4444-4444-8444-444444444444",
+    payload: { expected_version: 1, media: requestPhoto(1, 8) },
+    idempotencyKey: "request-photo:professional-wrong-concern",
+    logger: logger(),
+  });
+  assert.equal(wrongConcern.code, "REPORTED_CONCERN_NOT_FOUND");
+
+  const readOnlyPool = createPhotoPool(professionalContext({ status: "cancelled" }));
+  const readOnly = await appendRequestPhoto({
+    pool: readOnlyPool,
+    authenticatedActor: { id: 8 },
+    postId: 41,
+    concernId: CONCERN_ID,
+    payload: { expected_version: 1, media: requestPhoto(1, 8) },
+    idempotencyKey: "request-photo:professional-read-only",
+    logger: logger(),
+  });
+  assert.equal(readOnly.code, "REQUEST_READ_ONLY");
+
+  const fullPool = createPhotoPool(professionalContext({
+    request_photos: Array.from({ length: 12 }, (_, index) => ({
+      ...requestPhoto(index + 1, 7).media,
+      purpose: "request-photo",
+      display_order: index,
+      created_by_user_id: 7,
+    })),
+  }));
+  const full = await appendRequestPhoto({
+    pool: fullPool,
+    authenticatedActor: { id: 8 },
+    postId: 41,
+    concernId: CONCERN_ID,
+    payload: { expected_version: 1, media: requestPhoto(13, 8) },
+    idempotencyKey: "request-photo:professional-capacity",
+    logger: logger(),
+  });
+  assert.equal(full.code, "MEDIA_COUNT_EXCEEDED");
+
+  await assert.rejects(
+    appendRequestPhoto({
+      pool: createPhotoPool(professionalContext()),
+      authenticatedActor: { id: 8 },
+      postId: 41,
+      concernId: CONCERN_ID,
+      payload: { expected_version: 1, media: requestPhoto(1, 7) },
+      idempotencyKey: "request-photo:professional-foreign-media",
+      logger: logger(),
+    }),
+    (error) => error instanceof MediaValidationError &&
+      error.code === "MEDIA_ASSET_OWNERSHIP_INVALID"
+  );
+
+  for (const pool of [wrongConcernPool, readOnlyPool, fullPool]) {
+    assert.equal(pool.state.events.length, 0);
+    assert.equal(pool.state.appendedPayloads.length, 0);
+    assert.equal(pool.state.queries.some((sql) => /canonical_evaluations|findings|recommendations|quotes|invoices|payments/i.test(sql)), false);
+  }
 });
 
 test("photo append rejects editable requests, wrong concern, and foreign media", async () => {
