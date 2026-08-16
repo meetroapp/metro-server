@@ -14,6 +14,12 @@ const {
   resolveRequestModificationMode,
   serializeRequestModificationAuthority,
 } = require("./requestModificationService");
+const {
+  parseStoredRequestPhotos,
+} = require("../media/requestPhoto");
+const {
+  serializeProfessionalOpportunityPhoto,
+} = require("./requestLifecycle");
 
 const CLARIFICATION_SEMANTICS = Object.freeze([
   "CLARIFIES",
@@ -86,6 +92,63 @@ function serializeConcern(row = {}, clarifications = []) {
     },
     clarifications,
   };
+}
+
+function serializeLifecycleRequestPhoto(photo = {}) {
+  const referenceId = String(photo.public_id || photo.id || "").trim();
+  const preview = serializeProfessionalOpportunityPhoto(photo);
+  if (
+    !referenceId ||
+    referenceId.length > 500 ||
+    !preview ||
+    preview.resource_type !== "image"
+  ) {
+    return null;
+  }
+
+  try {
+    const parsedPreview = new URL(preview.secure_url);
+    if (
+      parsedPreview.protocol !== "https:" ||
+      parsedPreview.hostname !== "res.cloudinary.com" ||
+      parsedPreview.username ||
+      parsedPreview.password ||
+      parsedPreview.hash ||
+      parsedPreview.search ||
+      !decodeURIComponent(parsedPreview.pathname).includes("/image/upload/") ||
+      !decodeURIComponent(parsedPreview.pathname).includes(`/${referenceId}`)
+    ) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+
+  return {
+    reference_id: referenceId,
+    preview_url: preview.secure_url,
+    display_order: preview.display_order,
+    display_metadata: {
+      format: preview.format,
+      width: preview.width,
+      height: preview.height,
+    },
+  };
+}
+
+function serializeLifecycleRequestPhotos(value) {
+  const seen = new Set();
+  return parseStoredRequestPhotos(value)
+    .map(serializeLifecycleRequestPhoto)
+    .filter((photo) => {
+      if (!photo || seen.has(photo.reference_id)) return false;
+      seen.add(photo.reference_id);
+      return true;
+    })
+    .sort((left, right) =>
+      left.display_order - right.display_order ||
+      left.reference_id.localeCompare(right.reference_id)
+    );
 }
 
 async function createReportedConcern({
@@ -340,6 +403,8 @@ async function listRequestLifecycle({
         : null,
       reportedConcerns: concerns,
       participants,
+      request_photos: serializeLifecycleRequestPhotos(context.request_photos),
+      modification_version: Number(context.modification_version || 1),
       modificationAuthority: serializeRequestModificationAuthority(
         context,
         actorUserId
@@ -551,5 +616,7 @@ module.exports = {
   createReportedConcern,
   listRequestLifecycle,
   serializeConcern,
+  serializeLifecycleRequestPhoto,
+  serializeLifecycleRequestPhotos,
   validateClarificationPayload,
 };

@@ -17,6 +17,9 @@ const {
   serializeRequestModificationAuthority,
   updateRequest,
 } = require("../server/requests/requestModificationService");
+const {
+  listRequestLifecycle,
+} = require("../server/requests/reportedConcernService");
 
 const CONCERN_ID = "33333333-3333-4333-8333-333333333333";
 const JOB_ID = "22222222-2222-4222-8222-222222222222";
@@ -204,6 +207,24 @@ function createPhotoPool(initialContext, initialEvents = []) {
           rows: state.context.actor_evaluation_grant_active
             ? [{ id: "77777777-7777-4777-8777-777777777777" }]
             : [],
+        };
+      }
+      if (sql.includes("reported_concern:list_participants")) {
+        return { rows: [] };
+      }
+      if (sql.includes("reported_concern:list")) {
+        return {
+          rows: [{
+            concern_id: CONCERN_ID,
+            job_request_id: 41,
+            reporter_user_id: 7,
+            original_text: state.context.description,
+            reported_at: "2026-08-11T12:00:00.000Z",
+            sequence: 1,
+            integrity_algorithm: "sha256",
+            integrity_hash: "a".repeat(64),
+            integrity_version: 1,
+          }],
         };
       }
       if (sql.includes("request_modification:photo_existing_command")) {
@@ -437,6 +458,16 @@ test("authorized exact-Job primary professional can append governed Evaluation p
   assert.equal(result.photo.created_by_user_id, 8);
   assert.equal(Object.hasOwn(result, "post"), false);
   assert.equal(pool.state.context.request_photos.length, 1);
+  const refreshed = await listRequestLifecycle({
+    pool,
+    authenticatedActor: { id: 8 },
+    postId: 41,
+  });
+  assert.equal(refreshed.ok, true);
+  assert.equal(refreshed.lifecycle.modification_version, 4);
+  assert.deepEqual(refreshed.lifecycle.request_photos.map((photo) => photo.reference_id), [
+    result.photo.public_id,
+  ]);
   assert.ok(pool.state.queries.some((sql) =>
     sql.includes("lifecycle_authority:active_grant")
   ));

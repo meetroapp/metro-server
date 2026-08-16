@@ -14,6 +14,9 @@ const {
   parseInvoiceAssistResult,
 } = require("../server/intelligence/operations/workflowAssist");
 const evaluationService = require("../server/authorization/evaluationService");
+const {
+  serializeLifecycleRequestPhoto,
+} = require("../server/requests/reportedConcernService");
 
 function source(type, id, version = 1) {
   return { type, id, version };
@@ -83,7 +86,9 @@ test("Evaluation photo analysis resolves exact selected canonical media after Jo
   authorizeEvaluationContext(t);
   const selected = {
     public_id: "meetro/users/65/request-photos/selected",
-    secure_url: "https://res.cloudinary.com/meetro/image/upload/selected.jpg",
+    secure_url:
+      "https://res.cloudinary.com/meetro/image/upload/meetro/users/65/request-photos/selected.jpg",
+    resource_type: "image",
     format: "jpg",
     width: 1200,
     height: 900,
@@ -92,9 +97,12 @@ test("Evaluation photo analysis resolves exact selected canonical media after Jo
     public_id: "meetro/users/65/request-photos/unrelated",
     secure_url: "https://res.cloudinary.com/meetro/image/upload/unrelated.jpg",
   };
+  const lifecyclePhoto = serializeLifecycleRequestPhoto(selected);
   const context = await buildEvaluationAssistContext({
     context: {},
-    input: evaluationAssistInput(),
+    input: evaluationAssistInput({
+      photoReferenceIds: [lifecyclePhoto.reference_id],
+    }),
     runtimeContext: evaluationAssistRuntime([unrelated, selected]),
   });
   const providerRequest = evaluationAssistOperationDefinition.buildProviderRequest({
@@ -103,6 +111,7 @@ test("Evaluation photo analysis resolves exact selected canonical media after Jo
   });
 
   assert.deepEqual(context.requestPhotos.map((photo) => photo.id), [selected.public_id]);
+  assert.equal(lifecyclePhoto.reference_id, selected.public_id);
   assert.equal(context.requestPhotos[0].secureUrl, selected.secure_url);
   assert.equal(JSON.stringify(providerRequest.canonicalJobContext).includes(selected.secure_url), false);
   assert.equal(JSON.stringify(providerRequest).includes(unrelated.secure_url), false);
