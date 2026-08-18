@@ -121,7 +121,14 @@ function registerIntelligenceRoutes({
           proposalId: req.params.proposalId,
           elementId: req.body?.elementId,
           action: req.body?.action,
-          editedValue: req.body?.editedValue,
+          ...(
+            req.body &&
+            typeof req.body === "object" &&
+            !Array.isArray(req.body) &&
+            Object.hasOwn(req.body, "editedValue")
+              ? { editedValue: req.body.editedValue }
+              : {}
+          ),
           reasonCategory: req.body?.reasonCategory,
           idempotencyKey: req.headers?.["idempotency-key"],
           logger: dependencies.logger,

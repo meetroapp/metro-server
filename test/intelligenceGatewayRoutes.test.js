@@ -330,4 +330,8 @@ test("workflow review route is authenticated, no-store, and preserves non-canoni
   assert.equal(res.body.canonicalMutationPerformed, false);
   assert.equal(res.getHeader("Cache-Control"), "no-store");
   assert.equal(calls[0].authenticatedActor.id, 73);
+  assert.equal(
+    Object.hasOwn(calls[0], "editedValue"),
+    false
+  );
 });
