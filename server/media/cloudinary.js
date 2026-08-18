@@ -7,6 +7,7 @@ const ALLOWED_MEDIA_PURPOSES = Object.freeze([
   "business-logo",
   "business-portfolio",
   "request-photo",
+  "quote-draft-photo",
   "business_profile",
   "business_cover",
 ]);
@@ -144,6 +145,10 @@ function buildOwnedMediaFolder(configuration, purpose, ownership = {}) {
 
   if (purpose === "business-portfolio") {
     return `${configuration.uploadFolder}/businesses/${contractorProfileId}/portfolio`;
+  }
+
+  if (purpose === "quote-draft-photo") {
+    return `${configuration.uploadFolder}/businesses/${contractorProfileId}/quote-drafts`;
   }
 
   const destination = purpose === "business_cover" ? "cover" : "profile";

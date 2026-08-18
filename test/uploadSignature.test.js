@@ -142,6 +142,10 @@ test("media foundation exposes signatures and governed cleanup only", () => {
       methods: ["post"],
     },
     {
+      path: "/media/quote-draft-photo/cleanup",
+      methods: ["post"],
+    },
+    {
       path: "/media/business-portfolio/cleanup",
       methods: ["post"],
     },
@@ -214,6 +218,33 @@ test("business portfolio signatures use the authenticated business portfolio fol
 
   assert.equal(result.statusCode, 200);
   assert.equal(result.body.upload.folder, "meetro/production/businesses/91/portfolio");
+});
+
+test("Quick Quote draft photo signatures use only the authenticated business draft folder", async () => {
+  const pool = createPool();
+
+  const result = await invoke({
+    pool,
+    token: createToken(pool.user),
+    body: validBody({
+      purpose: "quote-draft-photo",
+      fileName: "damage.jpg",
+      contentType: "image/jpeg",
+    }),
+    cloudinaryMedia: createMedia(),
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(
+    result.body.upload.folder,
+    "meetro/production/businesses/91/quote-drafts"
+  );
+  assert.equal(
+    pool.calls.filter((call) =>
+      call.sql.includes("FROM contractor_profiles")
+    ).length,
+    1
+  );
 });
 
 test("business cover and legacy business profile signatures are not enabled", async () => {

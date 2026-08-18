@@ -12,6 +12,7 @@ const ENABLED_SIGNATURE_PURPOSES = Object.freeze([
   "business-logo",
   "business-portfolio",
   "request-photo",
+  "quote-draft-photo",
 ]);
 
 async function findOwnedContractorProfileId(pool, userId) {

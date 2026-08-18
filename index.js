@@ -42,6 +42,9 @@ const {
   parseStoredRequestPhotos,
   safelyDeleteRequestPhoto,
 } = require("./server/media/requestPhoto");
+const {
+  createQuoteDraftPhotoCleanupHandler,
+} = require("./server/media/quoteDraftPhoto");
 const { createPersonalProfileImageHandler } = require("./server/profile/personalProfileImage");
 const { createBusinessProfileLogoHandler } = require("./server/profile/businessProfileLogo");
 const {
@@ -967,6 +970,11 @@ app.post(
   "/media/request-photo/cleanup",
   authMiddleware,
   createRequestPhotoCleanupHandler()
+);
+app.post(
+  "/media/quote-draft-photo/cleanup",
+  authMiddleware,
+  createQuoteDraftPhotoCleanupHandler({ getPool })
 );
 app.post(
   "/media/business-portfolio/cleanup",
