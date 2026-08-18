@@ -230,6 +230,41 @@ test(
 );
 
 test(
+  "service-role professional tokens authorize Quick Quote media through exact owned business profile",
+  async () => {
+    const photo = governedPhoto();
+
+    const context =
+      await buildQuickQuotePhotoAssistContext({
+        context: {},
+        input: {
+          prompt:
+            "Review the visible job condition.",
+          photos: [photo],
+        },
+        runtimeContext: runtime({
+          role: "windows_doors",
+        }),
+      });
+
+    assert.equal(
+      context.generatedFor.professionalUserId,
+      65
+    );
+
+    assert.equal(
+      context.photos[0].id,
+      photo.public_id
+    );
+
+    assert.equal(
+      context.photos[0].secureUrl,
+      photo.secure_url
+    );
+  }
+);
+
+test(
   "Quick Quote photo assistance fails closed for foreign media and missing business ownership",
   async () => {
     await assert.rejects(
@@ -254,6 +289,7 @@ test(
         context: {},
         input: input(),
         runtimeContext: runtime({
+          role: "windows_doors",
           contractorProfileId: null,
         }),
       }),

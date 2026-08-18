@@ -121,7 +121,6 @@ async function buildQuickQuotePhotoAssistContext({
 
   if (
     !actor ||
-    actor.role !== "professional" ||
     !Number.isInteger(Number(actor.id)) ||
     Number(actor.id) <= 0
   ) {
