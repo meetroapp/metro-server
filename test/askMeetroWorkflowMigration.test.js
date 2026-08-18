@@ -12,8 +12,8 @@ const sql = readFileSync(join(__dirname, "..", "migrations", migrationName), "ut
 
 test("migration 44 is additive, replay-safe, append-only review evidence", () => {
   const migrations = getMigrationFiles();
-  assert.equal(migrations.length, 44);
-  assert.equal(migrations.at(-1).filename, migrationName);
+  assert.equal(migrations.length, 45);
+  assert.equal(migrations.at(-2).filename, migrationName);
   assert.match(sql, /CREATE TABLE IF NOT EXISTS intelligence_workflow_review_events/i);
   assert.match(sql, /action IN \('ACCEPTED', 'EDITED', 'REJECTED'\)/i);
   assert.match(sql, /prevent_lifecycle_append_only_mutation/i);

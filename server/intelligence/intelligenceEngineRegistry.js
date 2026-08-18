@@ -7,6 +7,9 @@ const {
   quoteComposeEngines,
 } = require("./operations/quoteCompose");
 const {
+  quickQuotePhotoAssistEngines,
+} = require("./operations/quickQuotePhotoAssist");
+const {
   workflowAssistEngines,
 } = require("./operations/workflowAssist");
 
@@ -32,7 +35,12 @@ function createIntelligenceEngineRegistry(engines = []) {
 }
 
 const canonicalIntelligenceEngineRegistry = createIntelligenceEngineRegistry(
-  [...jobRequestInterpretEngines, ...quoteComposeEngines, ...workflowAssistEngines]
+  [
+    ...jobRequestInterpretEngines,
+    ...quoteComposeEngines,
+    ...quickQuotePhotoAssistEngines,
+    ...workflowAssistEngines,
+  ]
 );
 
 module.exports = {

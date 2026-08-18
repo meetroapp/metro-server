@@ -131,6 +131,7 @@ async function executeIntelligenceGateway({
       intelligence_quote_authority_required: [403, "INTELLIGENCE_QUOTE_AUTHORITY_REQUIRED", "Professional Quote authority is required."],
       intelligence_quote_draft_unavailable: [404, "INTELLIGENCE_QUOTE_DRAFT_UNAVAILABLE", "The requested Draft Quote is unavailable."],
       intelligence_evaluation_authority_required: [403, "INTELLIGENCE_EVALUATION_AUTHORITY_REQUIRED", "Professional Evaluation authority is required."],
+      intelligence_quick_quote_media_authority_required: [403, "INTELLIGENCE_QUICK_QUOTE_MEDIA_AUTHORITY_REQUIRED", "Professional Quick Quote media authority is required."],
       intelligence_evaluation_unavailable: [404, "INTELLIGENCE_EVALUATION_UNAVAILABLE", "The Evaluation is unavailable."],
       intelligence_invoice_unavailable: [404, "INTELLIGENCE_INVOICE_UNAVAILABLE", "The Invoice context is unavailable."],
     }[error?.code];

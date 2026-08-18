@@ -376,14 +376,14 @@ test(
     const pool = new Pool({ connectionString: cleanDatabaseUrl, max: 2 });
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 44);
+      assert.equal(migrations.length, 45);
       const applied = await runMigrationCollection(
         pool,
         migrations,
         targetMetadata(cleanDatabaseUrl)
       );
       assert.equal(applied.success, true);
-      assert.equal(applied.applied.length, 44);
+      assert.equal(applied.applied.length, 45);
       const replay = await runMigrationCollection(
         pool,
         migrations,
@@ -391,7 +391,7 @@ test(
       );
       assert.equal(replay.success, true);
       assert.equal(replay.applied.length, 0);
-      assert.equal(replay.skipped.length, 44);
+      assert.equal(replay.skipped.length, 45);
     } finally {
       await pool.end();
     }
@@ -971,7 +971,7 @@ test(
         targetMetadata(runtimeDatabaseUrl)
       );
       assert.equal(migrations.success, true);
-      assert.equal(migrations.applied.length, 44);
+      assert.equal(migrations.applied.length, 45);
 
       const identities = await createIdentities(pool, suffix);
       const outsider = await pool.query(
@@ -1659,7 +1659,7 @@ test(
         targetMetadata(completionDatabaseUrl)
       );
       assert.equal(migrations.success, true);
-      assert.equal(migrations.applied.length, 44);
+      assert.equal(migrations.applied.length, 45);
 
       const identities = await createIdentities(pool, suffix);
       const fixture = await createLifecycleFixture(

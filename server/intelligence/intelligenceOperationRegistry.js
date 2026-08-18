@@ -11,6 +11,9 @@ const {
   quoteComposeOperationDefinition,
 } = require("./operations/quoteCompose");
 const {
+  quickQuotePhotoAssistOperationDefinition,
+} = require("./operations/quickQuotePhotoAssist");
+const {
   estimateComposeOperationDefinition,
   evaluationAssistOperationDefinition,
   invoiceAssistOperationDefinition,
@@ -101,6 +104,7 @@ const canonicalIntelligenceOperationRegistry =
   createIntelligenceOperationRegistry([
     jobRequestInterpretOperationDefinition,
     quoteComposeOperationDefinition,
+    quickQuotePhotoAssistOperationDefinition,
     evaluationAssistOperationDefinition,
     estimateComposeOperationDefinition,
     invoiceAssistOperationDefinition,

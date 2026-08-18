@@ -10,6 +10,7 @@ const {
 const OPERATIONS = new Set([
   "job_request.interpret",
   "evaluation.assist",
+  "quick_quote.photo_assist",
   "estimate.compose",
   "invoice.assist",
 ]);

@@ -126,6 +126,7 @@ test("canonical registration retains the bounded homeowner operation and fixed e
       "evaluation.assist",
       "invoice.assist",
       "job_request.interpret",
+      "quick_quote.photo_assist",
       "quote.compose",
     ]
   );

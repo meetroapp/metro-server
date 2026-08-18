@@ -9,6 +9,9 @@ const RESPONSES_ENDPOINT_FAMILY = "responses";
 const OUTPUT_CONTRACTS = Object.freeze({
   "job_request.interpret": `Return exactly this JSON object shape:
 {"schemaVersion":1,"summary":"string","draftPatch":{"fields":[{"path":"allowed path from request","value":"string","provenance":"assistant_suggested or assistant_inferred","confidence":0.0,"uncertainty":"assistant_suggested or approximate or uncertain","requiresConfirmation":true,"rationale":"optional string"}]},"clarifications":[{"question":"string","fieldPath":"optional allowed path"}],"warnings":[{"code":"lowercase_code","message":"string"}]}`,
+  "quick_quote.photo_assist": `Return exactly this JSON object shape:
+{"schemaVersion":1,"summary":"string","observed":[assistanceItem],"needsVerification":[assistanceItem],"repairSuggestions":[assistanceItem],"materialSuggestions":[assistanceItem],"photoAnalysis":{"analyzedReferenceIds":["authorized photo id"],"limitations":["string"]},"warnings":["string"]}
+where assistanceItem is exactly {"id":"lowercase_stable_id","text":"string","classification":"OBSERVED or NEEDS_VERIFICATION or AI_SUGGESTED","sourceReferences":[{"type":"QUOTE_DRAFT_PHOTO","id":"authorized photo id","version":1}]}. OBSERVED items require exact authorized photo sourceReferences. Repair and material suggestions are advisory only. Do not provide prices, markup, retailer claims, customer attachment decisions, or hidden-condition certainty. Use empty arrays when evidence is absent.`,
   "evaluation.assist": `Return exactly this JSON object shape:
 {"schemaVersion":1,"summary":"string","observed":[assistanceItem],"professionalInput":[assistanceItem],"needsVerification":[assistanceItem],"inspectionSuggestions":[assistanceItem],"measurementSuggestions":[assistanceItem],"evaluationDraft":{"observations":"string","diagnosisSummary":"string","limitations":"string"},"findingDrafts":[assistanceItem],"recommendationDrafts":[assistanceItem],"photoAnalysis":{"analyzedReferenceIds":["authorized photo id"],"limitations":["string"]},"warnings":["string"]}
 where assistanceItem is exactly {"id":"lowercase_stable_id","text":"string","classification":"OBSERVED or PROFESSIONAL_INPUT or NEEDS_VERIFICATION or AI_SUGGESTED","sourceReferences":[{"type":"authorized type","id":"authorized id","version":1}]}. OBSERVED and PROFESSIONAL_INPUT items require exact authorized sourceReferences. Use empty arrays when evidence is absent.`,
@@ -300,33 +303,86 @@ function workflowProviderInput(request) {
   const imageInputs = Array.isArray(request?.authorizedImageInputs)
     ? request.authorizedImageInputs
     : [];
-  const photoAnalysisRequested = request?.operation === "evaluation.assist" &&
+
+  const evaluationPhotoAnalysisRequested =
+    request?.operation === "evaluation.assist" &&
     request?.canonicalJobContext?.intent === "ANALYZE_PHOTOS";
+
+  const quickQuotePhotoAnalysisRequested =
+    request?.operation === "quick_quote.photo_assist" &&
+    request?.quickQuoteDraftContext?.intent === "ANALYZE_PHOTOS";
+
+  const photoAnalysisRequested =
+    evaluationPhotoAnalysisRequested ||
+    quickQuotePhotoAnalysisRequested;
+
   const textRequest = { ...(request || {}) };
   delete textRequest.authorizedImageInputs;
-  if (!photoAnalysisRequested) return JSON.stringify(textRequest);
+
+  if (!photoAnalysisRequested) {
+    return JSON.stringify(textRequest);
+  }
+
   if (imageInputs.length < 1 || imageInputs.length > 5) {
     throw providerError(
       "provider_request_invalid",
       "Governed photo analysis requires between one and five authorized images."
     );
   }
+
+  const canonicalPhotos =
+    evaluationPhotoAnalysisRequested
+      ? request?.canonicalJobContext?.requestPhotos
+      : request?.quickQuoteDraftContext?.photos;
+
   const canonicalMediaIds = new Set(
-    (Array.isArray(request?.canonicalJobContext?.requestPhotos)
-      ? request.canonicalJobContext.requestPhotos
+    (Array.isArray(canonicalPhotos)
+      ? canonicalPhotos
       : [])
-      .map((photo) => typeof photo?.id === "string" ? photo.id.trim() : "")
+      .map((photo) =>
+        typeof photo?.id === "string"
+          ? photo.id.trim()
+          : ""
+      )
       .filter(Boolean)
   );
-  const content = [{ type: "input_text", text: JSON.stringify(textRequest) }];
+
+  const content = [
+    {
+      type: "input_text",
+      text: JSON.stringify(textRequest),
+    },
+  ];
+
   for (const image of imageInputs) {
-    const mediaId = typeof image?.mediaId === "string" ? image.mediaId.trim() : "";
-    const imageUrl = governedCloudinaryImageUrl(image?.imageUrl);
-    if (!mediaId || !canonicalMediaIds.has(mediaId) || !imageUrl) {
-      throw providerError("provider_request_invalid", "Governed photo analysis media is invalid.");
+    const mediaId =
+      typeof image?.mediaId === "string"
+        ? image.mediaId.trim()
+        : "";
+
+    const imageUrl =
+      governedCloudinaryImageUrl(
+        image?.imageUrl
+      );
+
+    if (
+      !mediaId ||
+      !canonicalMediaIds.has(mediaId) ||
+      !imageUrl
+    ) {
+      throw providerError(
+        "provider_request_invalid",
+        "Governed photo analysis media is invalid."
+      );
     }
-    content.push({ type: "input_image", image_url: imageUrl, detail: "auto" });
+
+    content.push({
+      type: "input_image",
+      image_url: imageUrl,
+      detail: "auto",
+    });
   }
+
   return [{ role: "user", content }];
 }
 

@@ -62,6 +62,7 @@ Current inventory:
 42. `202608150003_create_job_completion_history.sql`
 43. `202608150004_create_canonical_invoice_payment_foundation.sql`
 44. `202608150005_create_ask_meetro_workflow_review.sql`
+45. `202608180001_expand_ask_meetro_workflow_review_operations.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -97,6 +98,12 @@ review evidence for bounded Ask Meetro proposals. It stores accepted, edited,
 and rejected decisions without granting Evaluation, Finding, Recommendation,
 Quote, Invoice, Payment, Job, or Portfolio authority and creates no business
 record by itself.
+
+`202608180001_expand_ask_meetro_workflow_review_operations.sql` expands only
+the append-only Ask Meetro review-event operation allowlist to include governed
+standalone Quick Quote photo assistance. It creates no Quote, Job, Request,
+customer-visible media, pricing, lifecycle, Payment, or other business record
+and grants no canonical mutation authority.
 
 `202608030002_create_canonical_alerts.sql` creates the additive
 recipient-scoped `alerts` table for canonical backend alert persistence. It

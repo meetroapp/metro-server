@@ -186,6 +186,116 @@ test("Evaluation image transport rejects foreign URLs, mismatched identities, an
   assert.equal(calls, 0);
 });
 
+test("standalone Quick Quote photo assistance sends only authorized governed image inputs", async () => {
+  const calls = [];
+  const mediaId =
+    "meetro/businesses/71/quote-drafts/photo-one";
+  const mediaUrl =
+    "https://res.cloudinary.com/meetro/image/upload/meetro/businesses/71/quote-drafts/photo-one.jpg";
+
+  const provider = createOpenAiWorkflowProvider({
+    apiKey: "fixture-secret",
+    model: "gpt-5.4-mini",
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return response({
+        payload: {
+          output_text: '{"schemaVersion":1}',
+        },
+      });
+    },
+  });
+
+  await provider.complete({
+    operation: "quick_quote.photo_assist",
+    quickQuoteDraftContext: {
+      intent: "ANALYZE_PHOTOS",
+      prompt: "",
+      photos: [
+        {
+          id: mediaId,
+          mediaType: "IMAGE",
+          format: "jpg",
+          version: 7,
+        },
+      ],
+    },
+    authorizedImageInputs: [
+      {
+        mediaId,
+        imageUrl: mediaUrl,
+      },
+    ],
+  });
+
+  const body =
+    JSON.parse(calls[0].options.body);
+
+  assert.equal(
+    Array.isArray(body.input),
+    true
+  );
+
+  assert.equal(
+    body.input[0].content[0].type,
+    "input_text"
+  );
+
+  assert.equal(
+    body.input[0].content[0].text.includes(
+      mediaUrl
+    ),
+    false
+  );
+
+  assert.deepEqual(
+    body.input[0].content.slice(1),
+    [
+      {
+        type: "input_image",
+        image_url: mediaUrl,
+        detail: "auto",
+      },
+    ]
+  );
+
+  let foreignCalls = 0;
+
+  const guardedProvider =
+    createOpenAiWorkflowProvider({
+      apiKey: "fixture-secret",
+      fetchImpl: async () => {
+        foreignCalls += 1;
+        return response({
+          payload: {
+            output_text: '{"schemaVersion":1}',
+          },
+        });
+      },
+    });
+
+  await assert.rejects(
+    guardedProvider.complete({
+      operation: "quick_quote.photo_assist",
+      quickQuoteDraftContext: {
+        intent: "ANALYZE_PHOTOS",
+        photos: [{ id: mediaId }],
+      },
+      authorizedImageInputs: [
+        {
+          mediaId: "foreign-photo",
+          imageUrl: mediaUrl,
+        },
+      ],
+    }),
+    (error) =>
+      error.code ===
+      "provider_request_invalid"
+  );
+
+  assert.equal(foreignCalls, 0);
+});
+
 test("Job Request provider instructions use the exact governed parser vocabulary", async () => {
   const calls = [];
   const provider = createOpenAiWorkflowProvider({

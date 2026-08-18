@@ -107,6 +107,13 @@ test("production registry ships only the governed core workflow advisory operati
       providerName: "quote_composition",
     },
     {
+      operation: "quick_quote.photo_assist",
+      capability: "quick_quote.photo_assist",
+      supportedRoles: ["professional"],
+      engineIds: ["quick_quote_photo_advisory_boundary"],
+      providerName: "workflow_assistance",
+    },
+    {
       operation: "evaluation.assist",
       capability: "evaluation.assist",
       supportedRoles: ["professional"],
@@ -134,12 +141,14 @@ test("production registry ships only the governed core workflow advisory operati
     "invoice_advisory_boundary",
     "job_request_capability",
     "job_request_validation",
+    "quick_quote_photo_advisory_boundary",
     "quote_composition_advisory",
     "quote_composition_authority_boundary",
   ]);
   assert.equal(canonicalIntelligenceOperationRegistry.get("test.echo"), null);
   assert.ok(canonicalIntelligenceOperationRegistry.get("job_request.interpret"));
   assert.ok(canonicalIntelligenceOperationRegistry.get("quote.compose"));
+  assert.ok(canonicalIntelligenceOperationRegistry.get("quick_quote.photo_assist"));
   assert.ok(canonicalIntelligenceOperationRegistry.get("evaluation.assist"));
   assert.ok(canonicalIntelligenceOperationRegistry.get("estimate.compose"));
   assert.ok(canonicalIntelligenceOperationRegistry.get("invoice.assist"));

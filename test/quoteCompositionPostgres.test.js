@@ -71,13 +71,13 @@ test("disposable PostgreSQL certifies migration 33, proposal audit, feedback, an
   const suffix = randomUUID();
   try {
     const migrations = getMigrationFiles();
-    assert.equal(migrations.length, 44);
+    assert.equal(migrations.length, 45);
     const applied = await runMigrationCollection(pool, migrations, targetMetadata(databaseUrl));
     assert.equal(applied.success, true);
-    assert.equal(applied.applied.length, 44);
+    assert.equal(applied.applied.length, 45);
     const replay = await runMigrationCollection(pool, migrations, targetMetadata(databaseUrl));
     assert.equal(replay.success, true);
-    assert.equal(replay.skipped.length, 44);
+    assert.equal(replay.skipped.length, 45);
 
     const rollbackClient = await pool.connect();
     try {
