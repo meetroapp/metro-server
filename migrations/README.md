@@ -64,6 +64,7 @@ Current inventory:
 44. `202608150005_create_ask_meetro_workflow_review.sql`
 45. `202608180001_expand_ask_meetro_workflow_review_operations.sql`
 46. `202608190001_create_quick_quote_analysis_session_foundation.sql`
+47. `202608190002_expand_ask_meetro_analysis_continuation_review.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -114,6 +115,14 @@ explicit governed discard so private draft evidence and conversation history can
 be permanently removed. It creates no Job, Quote, Request, Conversation,
 customer-visible record, pricing, lifecycle, Invoice, Payment, publication, or
 provider-continuation authority.
+
+`202608190002_expand_ask_meetro_analysis_continuation_review.sql` expands
+only the append-only Ask Meetro workflow-review operation allowlist to
+include governed private `quick_quote.analysis.continue` proposals. It
+stores explicit ACCEPTED, EDITED, or REJECTED professional decisions and
+grants no Quote, Job, Request, Conversation, customer-visible content,
+pricing, lifecycle, Invoice, Payment, Visit, publication, or canonical
+mutation authority.
 
 `202608030002_create_canonical_alerts.sql` creates the additive
 recipient-scoped `alerts` table for canonical backend alert persistence. It

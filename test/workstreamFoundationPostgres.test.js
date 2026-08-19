@@ -376,7 +376,7 @@ test(
     const pool = new Pool({ connectionString: cleanDatabaseUrl, max: 2 });
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 46);
+      assert.equal(migrations.length, 47);
       const applied = await runMigrationCollection(
         pool,
         migrations,

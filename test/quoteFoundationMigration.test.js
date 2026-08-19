@@ -14,7 +14,7 @@ test("Slice 005 is one additive migration after Recommendation foundation", () =
   const migrations = readdirSync(join(root, "migrations"))
     .filter((name) => /^\d+.*\.sql$/.test(name))
     .sort();
-  assert.equal(migrations.length, 46);
+  assert.equal(migrations.length, 47);
   const index = migrations.indexOf(migrationName);
   assert.equal(migrations[index - 1], "202608100002_create_recommendation_hierarchy_foundation.sql");
   assert.equal(migrations[index + 1], "202608100004_create_quote_composition_feedback.sql");

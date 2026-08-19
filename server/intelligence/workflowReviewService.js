@@ -11,6 +11,7 @@ const OPERATIONS = new Set([
   "job_request.interpret",
   "evaluation.assist",
   "quick_quote.photo_assist",
+  "quick_quote.analysis.continue",
   "estimate.compose",
   "invoice.assist",
 ]);

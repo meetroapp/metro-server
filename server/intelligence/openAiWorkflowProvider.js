@@ -12,6 +12,9 @@ const OUTPUT_CONTRACTS = Object.freeze({
   "quick_quote.photo_assist": `Return exactly this JSON object shape:
 {"schemaVersion":1,"summary":"string","observed":[assistanceItem],"needsVerification":[assistanceItem],"repairSuggestions":[assistanceItem],"materialSuggestions":[assistanceItem],"photoAnalysis":{"analyzedReferenceIds":["authorized photo id"],"limitations":["string"]},"warnings":["string"]}
 where assistanceItem is exactly {"id":"lowercase_stable_id","text":"string","classification":"OBSERVED or NEEDS_VERIFICATION or AI_SUGGESTED","sourceReferences":[{"type":"QUOTE_DRAFT_PHOTO","id":"authorized photo id","version":1}]}. OBSERVED items require exact authorized photo sourceReferences. Repair and material suggestions are advisory only. Do not provide prices, markup, retailer claims, customer attachment decisions, or hidden-condition certainty. Use empty arrays when evidence is absent.`,
+  "quick_quote.analysis.continue": `Return exactly this JSON object shape:
+{"schemaVersion":1,"assistantMessage":"string","summary":"string","questionsForProfessional":[{"id":"stable_id","text":"string"}],"observed":[assistanceItem],"needsVerification":[assistanceItem],"repairSuggestions":[assistanceItem],"materialSuggestions":[assistanceItem],"photoAnalysis":{"analyzedReferenceIds":["authorized photo id"],"limitations":["string"]},"warnings":["string"]}
+where assistanceItem is exactly {"id":"lowercase_stable_id","text":"string","classification":"OBSERVED or NEEDS_VERIFICATION or AI_SUGGESTED","sourceReferences":[{"type":"QUOTE_DRAFT_PHOTO","id":"authorized photo id","version":1}]}. Copy the exact authorized photo version from request context. OBSERVED items require exact authorized photo sourceReferences. Treat only reviewedContext.trustedElements as accepted prior proposal context. Never treat unreviewed prior proposal content as accepted truth. Never restore rejectedElementIds as trusted content. Return advisory analysis only; do not create or issue a Quote, schedule work, issue an Invoice, record Payment, or claim customer-visible authority. Use empty arrays when evidence is absent.`,
   "evaluation.assist": `Return exactly this JSON object shape:
 {"schemaVersion":1,"summary":"string","observed":[assistanceItem],"professionalInput":[assistanceItem],"needsVerification":[assistanceItem],"inspectionSuggestions":[assistanceItem],"measurementSuggestions":[assistanceItem],"evaluationDraft":{"observations":"string","diagnosisSummary":"string","limitations":"string"},"findingDrafts":[assistanceItem],"recommendationDrafts":[assistanceItem],"photoAnalysis":{"analyzedReferenceIds":["authorized photo id"],"limitations":["string"]},"warnings":["string"]}
 where assistanceItem is exactly {"id":"lowercase_stable_id","text":"string","classification":"OBSERVED or PROFESSIONAL_INPUT or NEEDS_VERIFICATION or AI_SUGGESTED","sourceReferences":[{"type":"authorized type","id":"authorized id","version":1}]}. OBSERVED and PROFESSIONAL_INPUT items require exact authorized sourceReferences. Use empty arrays when evidence is absent.`,
@@ -312,9 +315,17 @@ function workflowProviderInput(request) {
     request?.operation === "quick_quote.photo_assist" &&
     request?.quickQuoteDraftContext?.intent === "ANALYZE_PHOTOS";
 
+  const quickQuoteAnalysisContinuationRequested =
+    request?.operation === "quick_quote.analysis.continue" &&
+    Array.isArray(
+      request?.quickQuoteAnalysisContext?.photos
+    ) &&
+    request.quickQuoteAnalysisContext.photos.length > 0;
+
   const photoAnalysisRequested =
     evaluationPhotoAnalysisRequested ||
-    quickQuotePhotoAnalysisRequested;
+    quickQuotePhotoAnalysisRequested ||
+    quickQuoteAnalysisContinuationRequested;
 
   const textRequest = { ...(request || {}) };
   delete textRequest.authorizedImageInputs;
@@ -333,7 +344,9 @@ function workflowProviderInput(request) {
   const canonicalPhotos =
     evaluationPhotoAnalysisRequested
       ? request?.canonicalJobContext?.requestPhotos
-      : request?.quickQuoteDraftContext?.photos;
+      : quickQuoteAnalysisContinuationRequested
+        ? request?.quickQuoteAnalysisContext?.photos
+        : request?.quickQuoteDraftContext?.photos;
 
   const canonicalMediaIds = new Set(
     (Array.isArray(canonicalPhotos)

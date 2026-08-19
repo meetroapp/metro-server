@@ -235,7 +235,7 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 46);
+      assert.equal(migrations.length, 47);
       const applied = await runMigrationCollection(
         pool,
         migrations,

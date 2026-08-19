@@ -71,7 +71,7 @@ test("disposable PostgreSQL certifies migration 33, proposal audit, feedback, an
   const suffix = randomUUID();
   try {
     const migrations = getMigrationFiles();
-    assert.equal(migrations.length, 46);
+    assert.equal(migrations.length, 47);
     const applied = await runMigrationCollection(pool, migrations, targetMetadata(databaseUrl));
     assert.equal(applied.success, true);
     assert.equal(applied.applied.length, 45);

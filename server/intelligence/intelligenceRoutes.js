@@ -14,6 +14,9 @@ const {
 const {
   canonicalQuickQuoteAnalysisSessionService,
 } = require("./quickQuoteAnalysisSessionService");
+const {
+  canonicalQuickQuoteAnalysisContinuationService,
+} = require("./quickQuoteAnalysisContinuationService");
 
 const INTELLIGENCE_COMPANION_ROUTE = "/api/companion/ask";
 const QUOTE_COMPOSITION_FEEDBACK_ROUTE =
@@ -31,6 +34,12 @@ const QUICK_QUOTE_ANALYSIS_SESSION_ROUTE =
 
 const QUICK_QUOTE_ANALYSIS_EVIDENCE_ROUTE =
   "/api/intelligence/quick-quote-analysis/sessions/:sessionId/evidence";
+
+const QUICK_QUOTE_ANALYSIS_ANALYZE_ROUTE =
+  "/api/intelligence/quick-quote-analysis/sessions/:sessionId/analyze";
+
+const QUICK_QUOTE_ANALYSIS_CONTINUE_ROUTE =
+  "/api/intelligence/quick-quote-analysis/sessions/:sessionId/continue";
 
 function setIntelligenceNoStore(_req, res, next) {
   res.setHeader("Cache-Control", "no-store");
@@ -75,6 +84,87 @@ function normalizeQuickQuoteAnalysisEvidenceBody(body) {
 
     normalized[key] =
       descriptor.value;
+  }
+
+  return normalized;
+}
+
+function normalizeQuickQuoteAnalysisExecutionBody(
+  body,
+  {
+    continuation = false,
+  } = {}
+) {
+  const source =
+    body == null
+      ? {}
+      : body;
+
+  if (!isPlainObject(source)) {
+    return null;
+  }
+
+  const allowed =
+    new Set(
+      continuation
+        ? [
+            "priorProposalId",
+            "message",
+            "locale",
+          ]
+        : [
+            "locale",
+          ]
+    );
+
+  const required =
+    continuation
+      ? new Set([
+          "priorProposalId",
+          "message",
+        ])
+      : new Set();
+
+  const normalized = {};
+
+  for (const key of Reflect.ownKeys(source)) {
+    if (
+      typeof key !== "string" ||
+      !allowed.has(key)
+    ) {
+      return null;
+    }
+
+    const descriptor =
+      Object.getOwnPropertyDescriptor(
+        source,
+        key
+      );
+
+    if (
+      !descriptor ||
+      !descriptor.enumerable ||
+      !Object.hasOwn(
+        descriptor,
+        "value"
+      )
+    ) {
+      return null;
+    }
+
+    normalized[key] =
+      descriptor.value;
+  }
+
+  for (const key of required) {
+    if (
+      !Object.hasOwn(
+        normalized,
+        key
+      )
+    ) {
+      return null;
+    }
   }
 
   return normalized;
@@ -166,6 +256,8 @@ function registerIntelligenceRoutes({
   transcriptionService = workflowTranscriptionService,
   analysisSessionService =
     canonicalQuickQuoteAnalysisSessionService,
+  analysisContinuationService =
+    canonicalQuickQuoteAnalysisContinuationService,
   ...dependencies
 }) {
   if (!app || typeof app.post !== "function" || typeof authMiddleware !== "function") {
@@ -351,6 +443,166 @@ function registerIntelligenceRoutes({
   }
 
   app.post(
+    QUICK_QUOTE_ANALYSIS_ANALYZE_ROUTE,
+    setIntelligenceNoStore,
+    authMiddleware,
+    async (req, res) => {
+      const execution =
+        normalizeQuickQuoteAnalysisExecutionBody(
+          req.body,
+          {
+            continuation: false,
+          }
+        );
+
+      if (!execution) {
+        return res.status(400).json({
+          success: false,
+          code:
+            "QUICK_QUOTE_ANALYSIS_REQUEST_INVALID",
+          message:
+            "The Job Analysis request is invalid.",
+        });
+      }
+
+      try {
+        const result =
+          await analysisContinuationService
+            .analyzeSession({
+              pool:
+                getPool(req),
+
+              authenticatedActor:
+                req.user,
+
+              sessionId:
+                req.params.sessionId,
+
+              idempotencyKey:
+                req.headers?.[
+                  "idempotency-key"
+                ],
+
+              locale:
+                execution.locale,
+
+              providers:
+                req.app?.locals
+                  ?.intelligenceProviders ||
+                dependencies.providers,
+
+              intelligenceRepository:
+                dependencies.repository,
+
+              usageFinalizer:
+                dependencies.usageFinalizer,
+
+              providerTimeoutMs:
+                dependencies.providerTimeoutMs,
+
+              logger:
+                dependencies.logger,
+
+              onDiagnostics:
+                dependencies.onDiagnostics,
+            });
+
+        return sendQuickQuoteAnalysisResult(
+          res,
+          result
+        );
+      } catch {
+        return sendQuickQuoteAnalysisRouteFailure(
+          res
+        );
+      }
+    }
+  );
+
+  app.post(
+    QUICK_QUOTE_ANALYSIS_CONTINUE_ROUTE,
+    setIntelligenceNoStore,
+    authMiddleware,
+    async (req, res) => {
+      const execution =
+        normalizeQuickQuoteAnalysisExecutionBody(
+          req.body,
+          {
+            continuation: true,
+          }
+        );
+
+      if (!execution) {
+        return res.status(400).json({
+          success: false,
+          code:
+            "QUICK_QUOTE_ANALYSIS_REQUEST_INVALID",
+          message:
+            "The Job Analysis request is invalid.",
+        });
+      }
+
+      try {
+        const result =
+          await analysisContinuationService
+            .continueSession({
+              pool:
+                getPool(req),
+
+              authenticatedActor:
+                req.user,
+
+              sessionId:
+                req.params.sessionId,
+
+              priorProposalId:
+                execution.priorProposalId,
+
+              message:
+                execution.message,
+
+              idempotencyKey:
+                req.headers?.[
+                  "idempotency-key"
+                ],
+
+              locale:
+                execution.locale,
+
+              providers:
+                req.app?.locals
+                  ?.intelligenceProviders ||
+                dependencies.providers,
+
+              intelligenceRepository:
+                dependencies.repository,
+
+              usageFinalizer:
+                dependencies.usageFinalizer,
+
+              providerTimeoutMs:
+                dependencies.providerTimeoutMs,
+
+              logger:
+                dependencies.logger,
+
+              onDiagnostics:
+                dependencies.onDiagnostics,
+            });
+
+        return sendQuickQuoteAnalysisResult(
+          res,
+          result
+        );
+      } catch {
+        return sendQuickQuoteAnalysisRouteFailure(
+          res
+        );
+      }
+    }
+  );
+
+  app.post(
     QUOTE_COMPOSITION_FEEDBACK_ROUTE,
     setIntelligenceNoStore,
     authMiddleware,
@@ -467,6 +719,8 @@ function registerIntelligenceRoutes({
 module.exports = {
   INTELLIGENCE_COMPANION_ROUTE,
   INTELLIGENCE_PROVIDER_STATUS_ROUTE,
+  QUICK_QUOTE_ANALYSIS_ANALYZE_ROUTE,
+  QUICK_QUOTE_ANALYSIS_CONTINUE_ROUTE,
   QUICK_QUOTE_ANALYSIS_EVIDENCE_ROUTE,
   QUICK_QUOTE_ANALYSIS_SESSION_COLLECTION_ROUTE,
   QUICK_QUOTE_ANALYSIS_SESSION_ROUTE,

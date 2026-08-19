@@ -132,6 +132,10 @@ async function executeIntelligenceGateway({
       intelligence_quote_draft_unavailable: [404, "INTELLIGENCE_QUOTE_DRAFT_UNAVAILABLE", "The requested Draft Quote is unavailable."],
       intelligence_evaluation_authority_required: [403, "INTELLIGENCE_EVALUATION_AUTHORITY_REQUIRED", "Professional Evaluation authority is required."],
       intelligence_quick_quote_media_authority_required: [403, "INTELLIGENCE_QUICK_QUOTE_MEDIA_AUTHORITY_REQUIRED", "Professional Quick Quote media authority is required."],
+      intelligence_quick_quote_analysis_authority_required: [403, "INTELLIGENCE_QUICK_QUOTE_ANALYSIS_AUTHORITY_REQUIRED", "Professional Job Analysis authority is required."],
+      intelligence_quick_quote_analysis_session_unavailable: [404, "INTELLIGENCE_QUICK_QUOTE_ANALYSIS_SESSION_UNAVAILABLE", "The private Job Analysis session is unavailable."],
+      intelligence_quick_quote_analysis_evidence_stale: [409, "INTELLIGENCE_QUICK_QUOTE_ANALYSIS_EVIDENCE_STALE", "Job Analysis evidence changed before continuation."],
+      intelligence_quick_quote_analysis_prior_proposal_unavailable: [404, "INTELLIGENCE_QUICK_QUOTE_ANALYSIS_PRIOR_PROPOSAL_UNAVAILABLE", "The prior Job Analysis proposal is unavailable."],
       intelligence_evaluation_unavailable: [404, "INTELLIGENCE_EVALUATION_UNAVAILABLE", "The Evaluation is unavailable."],
       intelligence_invoice_unavailable: [404, "INTELLIGENCE_INVOICE_UNAVAILABLE", "The Invoice context is unavailable."],
     }[error?.code];

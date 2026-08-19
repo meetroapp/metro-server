@@ -438,7 +438,7 @@ test(
     const client = await pool.connect();
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 46);
+      assert.equal(migrations.length, 47);
       const applied = await runMigrationCollection(
         client,
         migrations,
