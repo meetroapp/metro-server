@@ -92,7 +92,7 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 45);
+      assert.equal(migrations.length, 46);
       const migrated = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(migrated.success, true);
       assert.equal(migrated.applied.length, 45);

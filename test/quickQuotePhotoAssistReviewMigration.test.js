@@ -27,10 +27,22 @@ test(
   () => {
     const migrations = getMigrationFiles();
 
-    assert.equal(migrations.length, 45);
+    assert.equal(migrations.length, 46);
+
+    const migrationIndex =
+      migrations.findIndex(
+        (migration) =>
+          migration.filename === migrationName
+      );
+
+    assert.ok(
+      migrationIndex >= 0,
+      "migration 45 must remain inventoried"
+    );
+
     assert.equal(
-      migrations.at(-1).filename,
-      migrationName
+      migrations[migrationIndex + 1]?.filename,
+      "202608190001_create_quick_quote_analysis_session_foundation.sql"
     );
 
     assert.match(

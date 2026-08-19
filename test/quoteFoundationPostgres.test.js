@@ -272,7 +272,7 @@ test("clean disposable PostgreSQL certifies canonical $920 Draft and issued Quot
   const suffix = randomUUID();
   try {
     const migrations = getMigrationFiles();
-    assert.equal(migrations.length, 45);
+    assert.equal(migrations.length, 46);
     const applied = await runMigrationCollection(pool, migrations, targetMetadata(cleanDatabaseUrl));
     assert.equal(applied.success, true);
     assert.equal(applied.applied.length, 45);

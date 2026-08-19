@@ -8,6 +8,12 @@ const {
 const quoteCompositionReviewService = require("./quoteCompositionReviewService");
 const workflowReviewService = require("./workflowReviewService");
 const workflowTranscriptionService = require("./workflowTranscriptionService");
+const {
+  isPlainObject,
+} = require("./intelligenceGatewayContracts");
+const {
+  canonicalQuickQuoteAnalysisSessionService,
+} = require("./quickQuoteAnalysisSessionService");
 
 const INTELLIGENCE_COMPANION_ROUTE = "/api/companion/ask";
 const QUOTE_COMPOSITION_FEEDBACK_ROUTE =
@@ -17,10 +23,98 @@ const WORKFLOW_REVIEW_ROUTE =
 const WORKFLOW_TRANSCRIPTION_ROUTE = "/api/intelligence/transcriptions";
 const INTELLIGENCE_PROVIDER_STATUS_ROUTE = "/api/intelligence/provider-status";
 
+const QUICK_QUOTE_ANALYSIS_SESSION_COLLECTION_ROUTE =
+  "/api/intelligence/quick-quote-analysis/sessions";
+
+const QUICK_QUOTE_ANALYSIS_SESSION_ROUTE =
+  "/api/intelligence/quick-quote-analysis/sessions/:sessionId";
+
+const QUICK_QUOTE_ANALYSIS_EVIDENCE_ROUTE =
+  "/api/intelligence/quick-quote-analysis/sessions/:sessionId/evidence";
+
 function setIntelligenceNoStore(_req, res, next) {
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("Pragma", "no-cache");
   next();
+}
+
+function normalizeQuickQuoteAnalysisEvidenceBody(body) {
+  if (!isPlainObject(body)) return null;
+
+  const allowed = new Set([
+    "professionalInput",
+    "photos",
+  ]);
+
+  const normalized = {};
+
+  for (const key of Reflect.ownKeys(body)) {
+    if (
+      typeof key !== "string" ||
+      !allowed.has(key)
+    ) {
+      return null;
+    }
+
+    const descriptor =
+      Object.getOwnPropertyDescriptor(
+        body,
+        key
+      );
+
+    if (
+      !descriptor ||
+      !descriptor.enumerable ||
+      !Object.hasOwn(
+        descriptor,
+        "value"
+      )
+    ) {
+      return null;
+    }
+
+    normalized[key] =
+      descriptor.value;
+  }
+
+  return normalized;
+}
+
+function quickQuoteAnalysisDiscardBodyIsEmpty(body) {
+  if (body == null) return true;
+
+  return (
+    isPlainObject(body) &&
+    Reflect.ownKeys(body).length === 0
+  );
+}
+
+function sendQuickQuoteAnalysisResult(
+  res,
+  result
+) {
+  const {
+    ok,
+    status,
+    ...payload
+  } = result;
+
+  return res
+    .status(status)
+    .json({
+      success: ok,
+      ...payload,
+    });
+}
+
+function sendQuickQuoteAnalysisRouteFailure(res) {
+  return res.status(500).json({
+    success: false,
+    code:
+      "QUICK_QUOTE_ANALYSIS_REQUEST_FAILED",
+    message:
+      "The private Job Analysis request could not be completed.",
+  });
 }
 
 function createIntelligenceGatewayHandler({
@@ -70,6 +164,8 @@ function registerIntelligenceRoutes({
   reviewService = quoteCompositionReviewService,
   workflowReview = workflowReviewService,
   transcriptionService = workflowTranscriptionService,
+  analysisSessionService =
+    canonicalQuickQuoteAnalysisSessionService,
   ...dependencies
 }) {
   if (!app || typeof app.post !== "function" || typeof authMiddleware !== "function") {
@@ -81,6 +177,179 @@ function registerIntelligenceRoutes({
     authMiddleware,
     createIntelligenceGatewayHandler({ getPool, ...dependencies })
   );
+
+  app.post(
+    QUICK_QUOTE_ANALYSIS_SESSION_COLLECTION_ROUTE,
+    setIntelligenceNoStore,
+    authMiddleware,
+    async (req, res) => {
+      const evidence =
+        normalizeQuickQuoteAnalysisEvidenceBody(
+          req.body
+        );
+
+      if (!evidence) {
+        return res.status(400).json({
+          success: false,
+          code:
+            "QUICK_QUOTE_ANALYSIS_REQUEST_INVALID",
+          message:
+            "The Job Analysis request is invalid.",
+        });
+      }
+
+      try {
+        const result =
+          await analysisSessionService
+            .createSession({
+              pool: getPool(req),
+              authenticatedActor:
+                req.user,
+              idempotencyKey:
+                req.headers?.[
+                  "idempotency-key"
+                ],
+              ...evidence,
+            });
+
+        return sendQuickQuoteAnalysisResult(
+          res,
+          result
+        );
+      } catch {
+        return sendQuickQuoteAnalysisRouteFailure(
+          res
+        );
+      }
+    }
+  );
+
+  app.post(
+    QUICK_QUOTE_ANALYSIS_EVIDENCE_ROUTE,
+    setIntelligenceNoStore,
+    authMiddleware,
+    async (req, res) => {
+      const evidence =
+        normalizeQuickQuoteAnalysisEvidenceBody(
+          req.body
+        );
+
+      if (!evidence) {
+        return res.status(400).json({
+          success: false,
+          code:
+            "QUICK_QUOTE_ANALYSIS_REQUEST_INVALID",
+          message:
+            "The Job Analysis request is invalid.",
+        });
+      }
+
+      try {
+        const result =
+          await analysisSessionService
+            .appendEvidence({
+              pool: getPool(req),
+              authenticatedActor:
+                req.user,
+              sessionId:
+                req.params.sessionId,
+              idempotencyKey:
+                req.headers?.[
+                  "idempotency-key"
+                ],
+              ...evidence,
+            });
+
+        return sendQuickQuoteAnalysisResult(
+          res,
+          result
+        );
+      } catch {
+        return sendQuickQuoteAnalysisRouteFailure(
+          res
+        );
+      }
+    }
+  );
+
+  if (typeof app.get === "function") {
+    app.get(
+      QUICK_QUOTE_ANALYSIS_SESSION_ROUTE,
+      setIntelligenceNoStore,
+      authMiddleware,
+      async (req, res) => {
+        try {
+          const result =
+            await analysisSessionService
+              .getSession({
+                pool: getPool(req),
+                authenticatedActor:
+                  req.user,
+                sessionId:
+                  req.params.sessionId,
+              });
+
+          return sendQuickQuoteAnalysisResult(
+            res,
+            result
+          );
+        } catch {
+          return sendQuickQuoteAnalysisRouteFailure(
+            res
+          );
+        }
+      }
+    );
+  }
+
+  if (typeof app.delete === "function") {
+    app.delete(
+      QUICK_QUOTE_ANALYSIS_SESSION_ROUTE,
+      setIntelligenceNoStore,
+      authMiddleware,
+      async (req, res) => {
+        if (
+          !quickQuoteAnalysisDiscardBodyIsEmpty(
+            req.body
+          )
+        ) {
+          return res.status(400).json({
+            success: false,
+            code:
+              "QUICK_QUOTE_ANALYSIS_REQUEST_INVALID",
+            message:
+              "The Job Analysis request is invalid.",
+          });
+        }
+
+        try {
+          const result =
+            await analysisSessionService
+              .discardSession({
+                pool: getPool(req),
+                authenticatedActor:
+                  req.user,
+                sessionId:
+                  req.params.sessionId,
+                idempotencyKey:
+                  req.headers?.[
+                    "idempotency-key"
+                  ],
+              });
+
+          return sendQuickQuoteAnalysisResult(
+            res,
+            result
+          );
+        } catch {
+          return sendQuickQuoteAnalysisRouteFailure(
+            res
+          );
+        }
+      }
+    );
+  }
+
   app.post(
     QUOTE_COMPOSITION_FEEDBACK_ROUTE,
     setIntelligenceNoStore,
@@ -198,6 +467,9 @@ function registerIntelligenceRoutes({
 module.exports = {
   INTELLIGENCE_COMPANION_ROUTE,
   INTELLIGENCE_PROVIDER_STATUS_ROUTE,
+  QUICK_QUOTE_ANALYSIS_EVIDENCE_ROUTE,
+  QUICK_QUOTE_ANALYSIS_SESSION_COLLECTION_ROUTE,
+  QUICK_QUOTE_ANALYSIS_SESSION_ROUTE,
   QUOTE_COMPOSITION_FEEDBACK_ROUTE,
   WORKFLOW_REVIEW_ROUTE,
   WORKFLOW_TRANSCRIPTION_ROUTE,
