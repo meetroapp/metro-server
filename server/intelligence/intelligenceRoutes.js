@@ -15,6 +15,9 @@ const {
   canonicalQuickQuoteAnalysisSessionService,
 } = require("./quickQuoteAnalysisSessionService");
 const {
+  canonicalQuickQuoteAnalysisReviewedResultService,
+} = require("./quickQuoteAnalysisReviewedResultService");
+const {
   canonicalQuickQuoteAnalysisContinuationService,
 } = require("./quickQuoteAnalysisContinuationService");
 
@@ -31,6 +34,9 @@ const QUICK_QUOTE_ANALYSIS_SESSION_COLLECTION_ROUTE =
 
 const QUICK_QUOTE_ANALYSIS_SESSION_ROUTE =
   "/api/intelligence/quick-quote-analysis/sessions/:sessionId";
+
+const QUICK_QUOTE_ANALYSIS_REVIEWED_RESULT_ROUTE =
+  "/api/intelligence/quick-quote-analysis/sessions/:sessionId/reviewed-result";
 
 const QUICK_QUOTE_ANALYSIS_EVIDENCE_ROUTE =
   "/api/intelligence/quick-quote-analysis/sessions/:sessionId/evidence";
@@ -256,6 +262,8 @@ function registerIntelligenceRoutes({
   transcriptionService = workflowTranscriptionService,
   analysisSessionService =
     canonicalQuickQuoteAnalysisSessionService,
+  analysisReviewedResultService =
+    canonicalQuickQuoteAnalysisReviewedResultService,
   analysisContinuationService =
     canonicalQuickQuoteAnalysisContinuationService,
   ...dependencies
@@ -374,6 +382,35 @@ function registerIntelligenceRoutes({
           const result =
             await analysisSessionService
               .getSession({
+                pool: getPool(req),
+                authenticatedActor:
+                  req.user,
+                sessionId:
+                  req.params.sessionId,
+              });
+
+          return sendQuickQuoteAnalysisResult(
+            res,
+            result
+          );
+        } catch {
+          return sendQuickQuoteAnalysisRouteFailure(
+            res
+          );
+        }
+      }
+    );
+
+
+    app.get(
+      QUICK_QUOTE_ANALYSIS_REVIEWED_RESULT_ROUTE,
+      setIntelligenceNoStore,
+      authMiddleware,
+      async (req, res) => {
+        try {
+          const result =
+            await analysisReviewedResultService
+              .getReviewedResult({
                 pool: getPool(req),
                 authenticatedActor:
                   req.user,
@@ -724,6 +761,7 @@ module.exports = {
   QUICK_QUOTE_ANALYSIS_EVIDENCE_ROUTE,
   QUICK_QUOTE_ANALYSIS_SESSION_COLLECTION_ROUTE,
   QUICK_QUOTE_ANALYSIS_SESSION_ROUTE,
+  QUICK_QUOTE_ANALYSIS_REVIEWED_RESULT_ROUTE,
   QUOTE_COMPOSITION_FEEDBACK_ROUTE,
   WORKFLOW_REVIEW_ROUTE,
   WORKFLOW_TRANSCRIPTION_ROUTE,
