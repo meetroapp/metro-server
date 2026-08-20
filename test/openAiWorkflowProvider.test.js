@@ -582,3 +582,669 @@ test("workflow provider returns out-of-band privacy-safe metadata with completed
   assert.equal(result.__providerMetadata.providerRequestId, "req_workflow_provider_metadata");
   assert.equal(result.__providerMetadata.configuredModel, "fixture-model");
 });
+
+test("Quote provider uses strict Structured Outputs aligned with canonical Quote semantics", async () => {
+  const calls = [];
+
+  const provider = createOpenAiWorkflowProvider({
+    apiKey: "fixture-secret",
+    model: "fixture-model",
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+
+      return response({
+        payload: {
+          output_text: JSON.stringify({
+            schemaVersion: 1,
+            summary: "Review Quote scope.",
+            scopeSections: [],
+            proposedScopeItems: [],
+            materials: [],
+            exclusions: [],
+            assumptions: [],
+            separateProposals: [],
+            commercialMissingInformation: [],
+            workflowConditions: [],
+            warnings: [],
+            confidence: {
+              score: 0.5,
+              rationale: "Professional review required.",
+            },
+          }),
+        },
+      });
+    },
+  });
+
+  await provider.complete({
+    operation: "quote.compose",
+    canonicalJobContext: {
+      job: {
+        id: "10000000-0000-4000-8000-000000000801",
+      },
+      professionalInput: {
+        pricingInputs: [],
+        materialInputs: [],
+        terms: {},
+      },
+    },
+  });
+
+  const body =
+    JSON.parse(
+      calls[0].options.body
+    );
+
+  const format =
+    body.text.format;
+
+  assert.equal(
+    format.type,
+    "json_schema"
+  );
+
+  assert.equal(
+    format.name,
+    "meetro_quote_compose"
+  );
+
+  assert.equal(
+    format.strict,
+    true
+  );
+
+  assert.equal(
+    format.schema.additionalProperties,
+    false
+  );
+
+  const scopeItem =
+    format.schema.properties
+      .proposedScopeItems.items;
+
+  assert.deepEqual(
+    scopeItem.properties
+      .classification.enum,
+    [
+      "MATERIAL",
+      "LABOR_SERVICE",
+    ]
+  );
+
+  assert.deepEqual(
+    scopeItem.properties
+      .scopeSemantic.enum,
+    [
+      "COMPLETED_BILLABLE_SERVICE",
+      "TEMPORARY_SERVICE",
+      "FUTURE_WORK",
+      "MATERIAL_INCLUDED",
+      "MATERIAL_EXCLUDED",
+      "CUSTOMER_SUPPLIED_MATERIAL",
+      "SEPARATE_PROPOSAL",
+    ]
+  );
+
+  assert.deepEqual(
+    scopeItem.properties
+      .materialResponsibility.enum,
+    [
+      "PROFESSIONAL_SUPPLIED",
+      "CUSTOMER_SUPPLIED",
+      "EXCLUDED",
+      "PENDING_SELECTION",
+      "NOT_APPLICABLE",
+    ]
+  );
+
+  assert.deepEqual(
+    scopeItem.properties
+      .workStatus.enum,
+    [
+      "DONE",
+      "DONE_TEMPORARY",
+      "OPEN",
+      "DEFERRED",
+      "FUTURE_WORK",
+      "SEPARATE_PROPOSAL",
+    ]
+  );
+
+  assert.deepEqual(
+    scopeItem.properties
+      .pricing.properties
+      .status.enum,
+    [
+      "PRICE_CONFIRMED_BY_PROFESSIONAL",
+      "PRICE_MISSING",
+      "PRICE_ADVISORY_ONLY",
+    ]
+  );
+
+  assert.equal(
+    scopeItem.properties
+      .pricing.properties
+      .inputKey.type.includes("null"),
+    true
+  );
+
+  assert.deepEqual(
+    format.schema.properties
+      .materials.items.properties
+      .responsibility.enum,
+    [
+      "PROFESSIONAL_SUPPLIED",
+      "CUSTOMER_SUPPLIED",
+      "EXCLUDED",
+      "PENDING_SELECTION",
+      "NOT_APPLICABLE",
+    ]
+  );
+});
+
+test("Quote Structured Outputs constrain pricing keys, references, and nested objects to governed context", async () => {
+  const calls = [];
+
+  const provider = createOpenAiWorkflowProvider({
+    apiKey: "fixture-secret",
+    model: "fixture-model",
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+
+      return response({
+        payload: {
+          output_text: JSON.stringify({
+            schemaVersion: 1,
+            summary: "Review Quote scope.",
+            scopeSections: [],
+            proposedScopeItems: [],
+            materials: [],
+            exclusions: [],
+            assumptions: [],
+            separateProposals: [],
+            commercialMissingInformation: [],
+            workflowConditions: [],
+            warnings: [],
+            confidence: {
+              score: 0.5,
+              rationale: "Professional review required.",
+            },
+          }),
+        },
+      });
+    },
+  });
+
+  await provider.complete({
+    operation: "quote.compose",
+    canonicalJobContext: {
+      canonical: {
+        reviewedFinding: {
+          sourceReferences: [
+            {
+              type: "FINDING",
+              id: "10000000-0000-4000-8000-000000000901",
+              version: 3,
+            },
+          ],
+        },
+      },
+      professionalInput: {
+        pricingInputs: [
+          {
+            key: "service_0",
+            classification: "LABOR_SERVICE",
+            amountMinor: 26000,
+            quantity: 1,
+            status: "PRICE_CONFIRMED_BY_PROFESSIONAL",
+            provenance: "PROFESSIONAL_INPUT",
+            sourceReferences: [
+              {
+                type: "PROFESSIONAL_INPUT",
+                id: "pricing:service_0",
+                version: 1,
+              },
+            ],
+          },
+        ],
+        materialInputs: [],
+        terms: {
+          provenance: "PROFESSIONAL_INPUT",
+          sourceReferences: [
+            {
+              type: "PROFESSIONAL_INPUT",
+              id: "terms",
+              version: 1,
+            },
+          ],
+        },
+      },
+    },
+  });
+
+  const format =
+    JSON.parse(
+      calls[0].options.body
+    ).text.format;
+
+  const schema =
+    format.schema;
+
+  const scopeItem =
+    schema.properties
+      .proposedScopeItems.items;
+
+  /*
+   * Pricing must be coupled to exact professional
+   * inputs. Arbitrary model-generated input keys are
+   * never authoritative.
+   */
+  const pricing =
+    scopeItem.properties.pricing;
+
+  assert.ok(
+    Array.isArray(pricing.anyOf)
+  );
+
+  const confirmedPricing =
+    pricing.anyOf.find(
+      (branch) =>
+        branch.properties
+          ?.status?.const ===
+        "PRICE_CONFIRMED_BY_PROFESSIONAL"
+    );
+
+  assert.ok(confirmedPricing);
+
+  assert.deepEqual(
+    confirmedPricing.properties
+      .inputKey.enum,
+    ["service_0"]
+  );
+
+  for (
+    const status of [
+      "PRICE_MISSING",
+      "PRICE_ADVISORY_ONLY",
+    ]
+  ) {
+    const branch =
+      pricing.anyOf.find(
+        (candidate) =>
+          candidate.properties
+            ?.status?.const ===
+          status
+      );
+
+    assert.ok(branch);
+
+    assert.deepEqual(
+      branch.properties
+        .inputKey.enum,
+      [null]
+    );
+  }
+
+  /*
+   * Every source-bearing collection must use the
+   * same exact authorized-reference contract.
+   */
+  const sourceCollections = [
+    schema.properties
+      .scopeSections.items,
+    schema.properties
+      .proposedScopeItems.items,
+    schema.properties
+      .materials.items,
+    schema.properties
+      .exclusions.items,
+    schema.properties
+      .assumptions.items,
+    schema.properties
+      .separateProposals.items,
+    schema.properties
+      .commercialMissingInformation.items,
+    schema.properties
+      .workflowConditions.items,
+  ];
+
+  for (
+    const itemSchema of
+      sourceCollections
+  ) {
+    assert.equal(
+      itemSchema.type,
+      "object"
+    );
+
+    assert.equal(
+      itemSchema.additionalProperties,
+      false
+    );
+
+    const references =
+      itemSchema.properties
+        .sourceReferences;
+
+    assert.equal(
+      references.type,
+      "array"
+    );
+
+    assert.ok(
+      Array.isArray(
+        references.items.anyOf
+      )
+    );
+
+    const serializedReferences =
+      JSON.stringify(
+        references.items.anyOf
+      );
+
+    assert.match(
+      serializedReferences,
+      /"type":\{"type":"string","const":"FINDING"\}/
+    );
+
+    assert.match(
+      serializedReferences,
+      /10000000-0000-4000-8000-000000000901/
+    );
+
+    assert.match(
+      serializedReferences,
+      /"const":"PROFESSIONAL_INPUT"/
+    );
+
+    assert.match(
+      serializedReferences,
+      /pricing:service_0/
+    );
+  }
+
+  /*
+   * Nested collections must match the parser instead
+   * of accepting unrestricted provider JSON.
+   */
+  for (
+    const collection of [
+      "exclusions",
+      "assumptions",
+      "separateProposals",
+    ]
+  ) {
+    const item =
+      schema.properties[
+        collection
+      ].items;
+
+    assert.deepEqual(
+      item.required,
+      [
+        "id",
+        "description",
+        "provenance",
+        "sourceReferences",
+      ]
+    );
+  }
+
+  assert.deepEqual(
+    schema.properties
+      .commercialMissingInformation
+      .items.required,
+    [
+      "id",
+      "code",
+      "description",
+      "provenance",
+      "sourceReferences",
+      "elementId",
+    ]
+  );
+
+  assert.deepEqual(
+    schema.properties
+      .workflowConditions
+      .items.required,
+    [
+      "id",
+      "type",
+      "description",
+      "state",
+      "provenance",
+      "sourceReferences",
+    ]
+  );
+});
+
+test("Quote Structured Outputs prohibit source references when governed context has none", async () => {
+  const calls = [];
+
+  const provider = createOpenAiWorkflowProvider({
+    apiKey: "fixture-secret",
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+
+      return response({
+        payload: {
+          output_text: JSON.stringify({
+            schemaVersion: 1,
+            summary: "Review Quote scope.",
+            scopeSections: [],
+            proposedScopeItems: [],
+            materials: [],
+            exclusions: [],
+            assumptions: [],
+            separateProposals: [],
+            commercialMissingInformation: [],
+            workflowConditions: [],
+            warnings: [],
+            confidence: {
+              score: 0.5,
+              rationale: "Professional review required.",
+            },
+          }),
+        },
+      });
+    },
+  });
+
+  await provider.complete({
+    operation: "quote.compose",
+    canonicalJobContext: {
+      canonical: {},
+      professionalInput: {
+        pricingInputs: [],
+        materialInputs: [],
+        terms: {},
+      },
+    },
+  });
+
+  const schema =
+    JSON.parse(
+      calls[0].options.body
+    ).text.format.schema;
+
+  for (
+    const itemSchema of [
+      schema.properties
+        .scopeSections.items,
+      schema.properties
+        .proposedScopeItems.items,
+      schema.properties
+        .materials.items,
+      schema.properties
+        .exclusions.items,
+      schema.properties
+        .assumptions.items,
+      schema.properties
+        .separateProposals.items,
+      schema.properties
+        .commercialMissingInformation
+        .items,
+      schema.properties
+        .workflowConditions.items,
+    ]
+  ) {
+    assert.equal(
+      itemSchema.properties
+        .sourceReferences
+        .maxItems,
+      0
+    );
+  }
+});
+
+test("Quote Structured Outputs preserve ESTIMATE_REVIEW lineage without creating pricing authority", async () => {
+  const calls = [];
+
+  const provider =
+    createOpenAiWorkflowProvider({
+      apiKey:
+        "fixture-secret",
+      model:
+        "fixture-model",
+
+      fetchImpl: async (
+        url,
+        options
+      ) => {
+        calls.push({
+          url,
+          options,
+        });
+
+        return response({
+          payload: {
+            output_text:
+              JSON.stringify({
+                schemaVersion: 1,
+                summary:
+                  "Professional Quote pricing required.",
+                scopeSections: [],
+                proposedScopeItems: [],
+                materials: [],
+                exclusions: [],
+                assumptions: [],
+                separateProposals: [],
+                commercialMissingInformation: [],
+                workflowConditions: [],
+                warnings: [],
+                confidence: {
+                  score: 0.8,
+                  rationale:
+                    "Reviewed scope only.",
+                },
+              }),
+          },
+        });
+      },
+    });
+
+  const estimateReference = {
+    type:
+      "ESTIMATE_REVIEW",
+    id:
+      "30000000-0000-4000-8000-000000001001:repair_labor",
+    version: 1,
+  };
+
+  await provider.complete({
+    operation:
+      "quote.compose",
+
+    canonicalJobContext: {
+      reviewedEstimate: {
+        authorityClassification:
+          "REVIEWED_INTERNAL_ESTIMATE_NON_CANONICAL",
+
+        pricingAuthority:
+          "PROFESSIONAL_INPUT_ONLY",
+
+        reviewedScope: {
+          labor: [
+            {
+              id:
+                "repair_labor",
+              description:
+                "Repair wall and relocate outlet",
+              provenance:
+                "AI_SUGGESTED",
+              sourceReferences: [
+                estimateReference,
+              ],
+            },
+          ],
+        },
+      },
+
+      professionalInput: {
+        /*
+         * Important: no professional Quote pricing.
+         */
+        pricingInputs: [],
+        materialInputs: [],
+        terms: {},
+      },
+    },
+  });
+
+  const schema =
+    JSON.parse(
+      calls[0].options.body
+    ).text.format.schema;
+
+  const referenceSchema =
+    schema.properties
+      .proposedScopeItems
+      .items
+      .properties
+      .sourceReferences;
+
+  const serialized =
+    JSON.stringify(
+      referenceSchema
+    );
+
+  assert.match(
+    serialized,
+    /ESTIMATE_REVIEW/
+  );
+
+  assert.match(
+    serialized,
+    /30000000-0000-4000-8000-000000001001:repair_labor/
+  );
+
+  const pricing =
+    schema.properties
+      .proposedScopeItems
+      .items
+      .properties
+      .pricing;
+
+  assert.equal(
+    pricing.anyOf.some(
+      (branch) =>
+        branch.properties
+          ?.status?.const ===
+        "PRICE_CONFIRMED_BY_PROFESSIONAL"
+    ),
+    false
+  );
+
+  assert.deepEqual(
+    pricing.anyOf.map(
+      (branch) =>
+        branch.properties
+          .status.const
+    ),
+    [
+      "PRICE_MISSING",
+      "PRICE_ADVISORY_ONLY",
+    ]
+  );
+});

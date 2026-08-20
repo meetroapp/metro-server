@@ -5,7 +5,12 @@ const { isPlainObject } = require("../intelligenceGatewayContracts");
 const {
   MATERIAL_RESPONSIBILITIES,
   assembleQuoteCompositionContext,
+  sourceContextFingerprint,
 } = require("../quoteCompositionContext");
+
+const {
+  canonicalEstimateSolutionReadyService,
+} = require("../estimateSolutionReadyService");
 
 const QUOTE_COMPOSE_OPERATION = "quote.compose";
 const QUOTE_COMPOSE_CAPABILITY = "quote.compose";
@@ -56,6 +61,7 @@ const REFERENCE_TYPES = new Set([
   "CUSTOMER_CONSTRAINT",
   "QUOTE_DRAFT",
   "PROFESSIONAL_INPUT",
+  "ESTIMATE_REVIEW",
 ]);
 const PROHIBITED_AUTHORITY_VALUES = new Set([
   "ISSUED",
@@ -718,6 +724,595 @@ const quoteComposeEngines = Object.freeze([
   }),
 ]);
 
+
+function quoteComposeContextError(
+  code,
+  message
+) {
+  return Object.assign(
+    new Error(message),
+    { code }
+  );
+}
+
+function estimateReviewReference(
+  proposalId,
+  elementId
+) {
+  return {
+    type: "ESTIMATE_REVIEW",
+    id:
+      `${proposalId}:${elementId}`,
+    version: 1,
+  };
+}
+
+function sanitizeReviewedEstimateForQuote(
+  reviewedEstimate
+) {
+  if (
+    !isPlainObject(
+      reviewedEstimate
+    ) ||
+    reviewedEstimate
+      .authorityClassification !==
+      "REVIEWED_INTERNAL_ESTIMATE_NON_CANONICAL" ||
+    reviewedEstimate
+      .canonicalMutationPerformed !==
+      false ||
+    reviewedEstimate
+      .humanToCanonicalBoundary
+      ?.directMutationAllowed !==
+      false ||
+    !isPlainObject(
+      reviewedEstimate.reviewed
+    )
+  ) {
+    return null;
+  }
+
+  const proposalId =
+    String(
+      reviewedEstimate.proposalId ||
+        ""
+    ).trim();
+
+  if (!proposalId) {
+    return null;
+  }
+
+  const safeId = (value) => {
+    const normalized =
+      typeof value === "string"
+        ? value.trim().toLowerCase()
+        : "";
+
+    return ELEMENT_ID_PATTERN.test(
+      normalized
+    )
+      ? normalized
+      : "";
+  };
+
+  const projectDescriptionItems = (
+    values,
+    {
+      includeMaterialDetails = false,
+    } = {}
+  ) => {
+    if (!Array.isArray(values)) {
+      return null;
+    }
+
+    const projected = [];
+
+    for (const value of values) {
+      if (!isPlainObject(value)) {
+        return null;
+      }
+
+      const id =
+        safeId(value.id);
+
+      const description =
+        typeof value.description ===
+          "string"
+          ? value.description.trim()
+          : "";
+
+      if (
+        !id ||
+        !description ||
+        description.length > 1000
+      ) {
+        return null;
+      }
+
+      const item = {
+        id,
+        description,
+        provenance:
+          "AI_SUGGESTED",
+        sourceReferences: [
+          estimateReviewReference(
+            proposalId,
+            id
+          ),
+        ],
+      };
+
+      if (includeMaterialDetails) {
+        const quantity =
+          Number(value.quantity);
+
+        if (
+          Number.isFinite(
+            quantity
+          ) &&
+          quantity > 0
+        ) {
+          item.quantity =
+            quantity;
+        }
+
+        if (
+          typeof value.unit ===
+            "string" &&
+          value.unit.trim()
+        ) {
+          item.unit =
+            value.unit
+              .trim()
+              .slice(0, 80);
+        }
+
+        if (
+          typeof value.assumption ===
+            "string" &&
+          value.assumption.trim()
+        ) {
+          item.assumption =
+            value.assumption
+              .trim()
+              .slice(0, 500);
+        }
+
+        item.needsVerification =
+          value.needsVerification ===
+            true;
+      } else if (
+        typeof value.assumption ===
+          "string" &&
+        value.assumption.trim()
+      ) {
+        item.assumption =
+          value.assumption
+            .trim()
+            .slice(0, 500);
+      }
+
+      projected.push(item);
+    }
+
+    return projected;
+  };
+
+  const materials =
+    projectDescriptionItems(
+      reviewedEstimate
+        .reviewed
+        .materials,
+      {
+        includeMaterialDetails:
+          true,
+      }
+    );
+
+  const labor =
+    projectDescriptionItems(
+      reviewedEstimate
+        .reviewed
+        .labor
+    );
+
+  if (
+    !materials ||
+    !labor
+  ) {
+    return null;
+  }
+
+  const assumptionsInput =
+    reviewedEstimate
+      .reviewed
+      .assumptions;
+
+  if (
+    !Array.isArray(
+      assumptionsInput
+    )
+  ) {
+    return null;
+  }
+
+  const assumptions = [];
+
+  for (
+    const value of
+      assumptionsInput
+  ) {
+    if (!isPlainObject(value)) {
+      return null;
+    }
+
+    const id =
+      safeId(value.id);
+
+    const text =
+      typeof value.text ===
+        "string"
+        ? value.text.trim()
+        : "";
+
+    if (
+      !id ||
+      !text ||
+      text.length > 1000
+    ) {
+      return null;
+    }
+
+    assumptions.push({
+      id,
+      text,
+      classification:
+        String(
+          value.classification ||
+            "NEEDS_VERIFICATION"
+        )
+          .trim()
+          .toUpperCase(),
+      provenance:
+        "AI_SUGGESTED",
+      sourceReferences: [
+        estimateReviewReference(
+          proposalId,
+          id
+        ),
+      ],
+    });
+  }
+
+  let customerQuoteDraft =
+    null;
+
+  const sourceDraft =
+    reviewedEstimate
+      .reviewed
+      .customerQuoteDraft;
+
+  if (sourceDraft != null) {
+    if (!isPlainObject(sourceDraft)) {
+      return null;
+    }
+
+    const id =
+      safeId(
+        sourceDraft.id
+      );
+
+    if (!id) {
+      return null;
+    }
+
+    const textField = (
+      key,
+      maximum
+    ) => {
+      const value =
+        sourceDraft[key];
+
+      if (
+        typeof value !==
+          "string"
+      ) {
+        return "";
+      }
+
+      return value
+        .trim()
+        .slice(
+          0,
+          maximum
+        );
+    };
+
+    const stringArray = (
+      key
+    ) => {
+      const values =
+        sourceDraft[key];
+
+      if (!Array.isArray(values)) {
+        return null;
+      }
+
+      return values
+        .filter(
+          (value) =>
+            typeof value ===
+              "string"
+        )
+        .map(
+          (value) =>
+            value
+              .trim()
+              .slice(
+                0,
+                1000
+              )
+        );
+    };
+
+    const conditions =
+      stringArray(
+        "conditions"
+      );
+
+    const exclusions =
+      stringArray(
+        "exclusions"
+      );
+
+    if (
+      !conditions ||
+      !exclusions
+    ) {
+      return null;
+    }
+
+    customerQuoteDraft = {
+      id,
+      scopeSummary:
+        textField(
+          "scopeSummary",
+          3000
+        ),
+      conditions,
+      exclusions,
+      durationGuidance:
+        textField(
+          "durationGuidance",
+          500
+        ),
+      customerWording:
+        textField(
+          "customerWording",
+          3000
+        ),
+      provenance:
+        "AI_SUGGESTED",
+      sourceReferences: [
+        estimateReviewReference(
+          proposalId,
+          id
+        ),
+      ],
+    };
+  }
+
+  return {
+    schemaVersion: 1,
+    proposalId,
+    authorityClassification:
+      "REVIEWED_INTERNAL_ESTIMATE_NON_CANONICAL",
+    sourceProposalAuthorityClassification:
+      reviewedEstimate
+        .sourceProposalAuthorityClassification,
+    pricingAuthority:
+      "PROFESSIONAL_INPUT_ONLY",
+    reviewedScope: {
+      materials,
+      labor,
+      assumptions,
+      customerQuoteDraft,
+    },
+    reviewedElementIds:
+      Array.isArray(
+        reviewedEstimate
+          .reviewedElementIds
+      )
+        ? [
+            ...reviewedEstimate
+              .reviewedElementIds,
+          ]
+        : [],
+    rejectedElementIds:
+      Array.isArray(
+        reviewedEstimate
+          .rejectedElementIds
+      )
+        ? [
+            ...reviewedEstimate
+              .rejectedElementIds,
+          ]
+        : [],
+    unreviewedElementIds:
+      Array.isArray(
+        reviewedEstimate
+          .unreviewedElementIds
+      )
+        ? [
+            ...reviewedEstimate
+              .unreviewedElementIds,
+          ]
+        : [],
+    humanToCanonicalBoundary: {
+      directMutationAllowed:
+        false,
+      quoteCompositionRequiresExplicitProfessionalAction:
+        true,
+    },
+    canonicalMutationPerformed:
+      false,
+  };
+}
+
+async function buildQuoteComposeContext({
+  context,
+  input,
+  runtimeContext,
+}) {
+  if (
+    !isPlainObject(input)
+  ) {
+    return assembleQuoteCompositionContext({
+      context,
+      input,
+      runtimeContext,
+    });
+  }
+
+  const hasEstimateProposal =
+    Object.hasOwn(
+      input,
+      "estimateProposalId"
+    );
+
+  const {
+    estimateProposalId,
+    ...baseInput
+  } = input;
+
+  const baseContext =
+    await assembleQuoteCompositionContext({
+      context,
+      input:
+        baseInput,
+      runtimeContext,
+    });
+
+  if (!hasEstimateProposal) {
+    return baseContext;
+  }
+
+  const normalizedProposalId =
+    typeof estimateProposalId ===
+      "string"
+      ? estimateProposalId
+          .trim()
+          .toLowerCase()
+      : "";
+
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+      .test(
+        normalizedProposalId
+      )
+  ) {
+    throw quoteComposeContextError(
+      "intelligence_estimate_solution_ready_invalid",
+      "A valid reviewed Internal Estimate is required."
+    );
+  }
+
+  const service =
+    runtimeContext
+      ?.estimateSolutionReadyService ||
+    canonicalEstimateSolutionReadyService;
+
+  if (
+    !service ||
+    typeof service
+      .prepareReviewedEstimate !==
+      "function"
+  ) {
+    throw quoteComposeContextError(
+      "required_engine_failure",
+      "Reviewed Internal Estimate authority is unavailable."
+    );
+  }
+
+  const prepared =
+    await service
+      .prepareReviewedEstimate({
+        pool:
+          runtimeContext?.pool,
+        authenticatedActor:
+          runtimeContext
+            ?.authenticatedActor,
+        proposalId:
+          normalizedProposalId,
+      });
+
+  if (
+    !prepared?.ok ||
+    !prepared.reviewedEstimate
+  ) {
+    const code =
+      prepared?.status === 403
+        ? "intelligence_quote_authority_required"
+        : prepared?.status === 404
+        ? "intelligence_estimate_solution_ready_unavailable"
+        : "intelligence_estimate_solution_ready_invalid";
+
+    throw quoteComposeContextError(
+      code,
+      prepared?.message ||
+        "The reviewed Internal Estimate is unavailable."
+    );
+  }
+
+  if (
+    String(
+      prepared
+        .reviewedEstimate
+        .jobId ||
+        ""
+    ) !==
+    String(
+      baseContext.job.id
+    )
+  ) {
+    throw quoteComposeContextError(
+      "intelligence_estimate_solution_ready_job_mismatch",
+      "The reviewed Internal Estimate does not belong to this Job."
+    );
+  }
+
+  const reviewedEstimate =
+    sanitizeReviewedEstimateForQuote(
+      prepared
+        .reviewedEstimate
+    );
+
+  if (!reviewedEstimate) {
+    throw quoteComposeContextError(
+      "intelligence_estimate_solution_ready_invalid",
+      "The reviewed Internal Estimate is invalid."
+    );
+  }
+
+  const {
+    sourceContextFingerprint:
+      _priorFingerprint,
+    ...base
+  } = baseContext;
+
+  const assembled = {
+    ...base,
+    reviewedEstimate,
+  };
+
+  return {
+    ...assembled,
+    sourceContextFingerprint:
+      sourceContextFingerprint(
+        assembled
+      ),
+  };
+}
+
 const quoteComposeOperationDefinition = Object.freeze({
   operation: QUOTE_COMPOSE_OPERATION,
   capability: QUOTE_COMPOSE_CAPABILITY,
@@ -725,7 +1320,7 @@ const quoteComposeOperationDefinition = Object.freeze({
   engineIds: QUOTE_COMPOSE_ENGINE_IDS,
   providerName: QUOTE_COMPOSE_PROVIDER,
   roleAuthorization: "context_builder",
-  buildContext: assembleQuoteCompositionContext,
+  buildContext: buildQuoteComposeContext,
   buildProviderRequest: buildQuoteComposeProviderRequest,
   parseResult: parseQuoteComposeResult,
 });
@@ -737,8 +1332,10 @@ module.exports = {
   QUOTE_COMPOSE_OPERATION,
   QUOTE_COMPOSE_PROVIDER,
   buildConfirmedCompositionPayload,
+  buildQuoteComposeContext,
   buildQuoteComposeProviderRequest,
   parseQuoteComposeResult,
+  sanitizeReviewedEstimateForQuote,
   quoteComposeEngines,
   quoteComposeOperationDefinition,
 };

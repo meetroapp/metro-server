@@ -355,6 +355,75 @@ function composeInput() {
   };
 }
 
+function solutionReadyGatewayPool({
+  proposalId,
+  proposalJobId = IDS.job,
+  proposalAvailable = true,
+} = {}) {
+  const calls = [];
+  const proposal = {
+    schemaVersion: 1,
+    proposalId,
+    authorityClassification: "INTERNAL_ESTIMATE_DRAFT_NON_CANONICAL",
+    jobId: proposalJobId,
+    sourceContextFingerprint: "f".repeat(64),
+    materials: [],
+    labor: [],
+    equipment: [],
+    assumptions: [],
+    internalCost: { customerVisible: false },
+    suggestedSellingRange: { authorityClassification: "ADVISORY" },
+    professionalSellingPriceMinor: null,
+    customerQuoteDraft: { id: "customer_quote_draft" },
+    reviewContract: { explicitProfessionalDecisionRequired: true },
+    humanToCanonicalBoundary: { directMutationAllowed: false },
+  };
+
+  async function query(sql, params = []) {
+    const text = String(sql);
+    calls.push(text);
+
+    if (/^(?:BEGIN|COMMIT|ROLLBACK)/i.test(text.trim())) {
+      return { rows: [] };
+    }
+    if (text.includes("estimate_solution_ready:proposal")) {
+      return { rows: proposalAvailable ? [{ result_payload: proposal }] : [] };
+    }
+    if (text.includes("estimate_solution_ready:reviews")) {
+      return { rows: [] };
+    }
+    if (text.includes("quote_composition:job_authority")) {
+      return { rows: [{
+        job_id: params[0],
+        job_request_id: 14,
+        lifecycle_contract_version: 2,
+        title: "Synthetic",
+        description: "Synthetic context",
+        request_category: "home_repair",
+        service_domain: "home_services",
+        service_specialty: "drywall",
+        homeowner_user_id: 8,
+        relationship_id: 3,
+        relationship_status: "active",
+        selected_professional_user_id: 65,
+        actor_account_type: "professional",
+        professional_participant_id: IDS.participant,
+        is_primary_professional: true,
+        active_quote_capabilities: ["quote.create", "quote.read", "quote.scope.manage"],
+      }] };
+    }
+    return { rows: [] };
+  }
+
+  return {
+    calls,
+    query,
+    async connect() {
+      return { query, release() {} };
+    },
+  };
+}
+
 test("server-owned context assembler excludes location/Communication and rejects wrong scope or missing grants", async () => {
   const pool = contextPool();
   const context = await assembleQuoteCompositionContext({
@@ -416,4 +485,1090 @@ test("canonical Gateway derives actor and Job truth before one deterministic pro
   assert.equal(providerCalls[0].canonicalJobContext.job.id, IDS.job);
   assert.equal(providerCalls[0].canonicalJobContext.privacy.exactLocationIncluded, false);
   assert.equal(result.result.authorityClassification, "ADVISORY_NON_CANONICAL");
+});
+
+test("reviewed Estimate lineage remains noncanonical and unpriced scope cannot become a canonical Quote candidate", () => {
+  const initial =
+    operationContext({
+      drywall: true,
+    });
+
+  const {
+    sourceContextFingerprint:
+      _oldFingerprint,
+    ...base
+  } = initial;
+
+  const estimateReference =
+    ref(
+      "ESTIMATE_REVIEW",
+      "30000000-0000-4000-8000-000000001001:repair_labor",
+      1
+    );
+
+  const context = {
+    ...base,
+
+    professionalInput: {
+      ...base.professionalInput,
+
+      /*
+       * No customer Quote price has been confirmed.
+       * Reviewed Estimate costs must not substitute.
+       */
+      pricingInputs: [],
+
+      terms: {
+        ...base.professionalInput
+          .terms,
+        depositPercent: null,
+        availability: null,
+        confirmedTotalMinor: null,
+      },
+    },
+
+    reviewedEstimate: {
+      schemaVersion: 1,
+      proposalId:
+        "30000000-0000-4000-8000-000000001001",
+
+      authorityClassification:
+        "REVIEWED_INTERNAL_ESTIMATE_NON_CANONICAL",
+
+      pricingAuthority:
+        "PROFESSIONAL_INPUT_ONLY",
+
+      reviewedScope: {
+        materials: [],
+        labor: [
+          {
+            id:
+              "repair_labor",
+            description:
+              "Repair wall and relocate outlet",
+            provenance:
+              "AI_SUGGESTED",
+            sourceReferences: [
+              estimateReference,
+            ],
+          },
+        ],
+        assumptions: [],
+        customerQuoteDraft: null,
+      },
+
+      canonicalMutationPerformed:
+        false,
+    },
+  };
+
+  context.sourceContextFingerprint =
+    sourceContextFingerprint(
+      context
+    );
+
+  const providerResult = {
+    schemaVersion: 1,
+    summary:
+      "Reviewed Estimate scope requires professional Quote pricing.",
+
+    scopeSections: [
+      {
+        id:
+          "reviewed_estimate_scope",
+        title:
+          "Reviewed work",
+        provenance:
+          "AI_SUGGESTED",
+        sourceReferences: [
+          estimateReference,
+        ],
+      },
+    ],
+
+    proposedScopeItems: [
+      {
+        id:
+          "reviewed_estimate_labor",
+        sectionId:
+          "reviewed_estimate_scope",
+        description:
+          "Repair wall and relocate outlet",
+        classification:
+          "LABOR_SERVICE",
+        scopeSemantic:
+          "FUTURE_WORK",
+        materialResponsibility:
+          "NOT_APPLICABLE",
+        workStatus:
+          "FUTURE_WORK",
+
+        pricing: {
+          status:
+            "PRICE_MISSING",
+          inputKey: null,
+        },
+
+        provenance:
+          "AI_SUGGESTED",
+
+        sourceReferences: [
+          estimateReference,
+        ],
+      },
+    ],
+
+    materials: [],
+    exclusions: [],
+    assumptions: [],
+    separateProposals: [],
+    commercialMissingInformation: [],
+    workflowConditions: [],
+    warnings: [],
+
+    confidence: {
+      score: 0.9,
+      rationale:
+        "Reviewed scope is available but professional Quote pricing is still required.",
+    },
+  };
+
+  const proposal =
+    parseQuoteComposeResult(
+      providerResult,
+      {
+        semanticInput:
+          semantic(context),
+        operationId:
+          randomUUID(),
+      }
+    );
+
+  const item =
+    proposal
+      .proposedScopeItems[0];
+
+  assert.equal(
+    item.sourceReferences[0]
+      .type,
+    "ESTIMATE_REVIEW"
+  );
+
+  assert.equal(
+    item.pricing.status,
+    "PRICE_MISSING"
+  );
+
+  assert.equal(
+    item.pricing.inputKey,
+    null
+  );
+
+  assert.equal(
+    item.canonicalCandidate,
+    null
+  );
+
+  assert.equal(
+    proposal.pricing.totalMinor,
+    0
+  );
+
+  assert.equal(
+    proposal.pricing
+      .professionalConfirmedTotalMinor,
+    null
+  );
+
+  assert.equal(
+    proposal.pricing.status,
+    "INCOMPLETE"
+  );
+
+  assert.equal(
+    proposal
+      .commercialMissingInformation
+      .some(
+        ({ code }) =>
+          code ===
+          "PROFESSIONAL_PRICE_MISSING"
+      ),
+    true
+  );
+
+  /*
+   * Accepting advisory Quote wording cannot make an
+   * unpriced reviewed-Estimate item canonical.
+   */
+  assert.throws(
+    () =>
+      buildConfirmedCompositionPayload(
+        proposal,
+        [
+          {
+            elementId:
+              "reviewed_estimate_labor",
+            action:
+              "ACCEPTED",
+          },
+        ]
+      ),
+    /canonical-command compatible/i
+  );
+});
+
+test("canonical Gateway performs Solution Ready handoff from estimateProposalId without promoting Estimate pricing", async () => {
+  const estimateProposalId =
+    "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+
+  const estimateProposal = {
+    schemaVersion: 1,
+    proposalId:
+      estimateProposalId,
+    authorityClassification:
+      "INTERNAL_ESTIMATE_DRAFT_NON_CANONICAL",
+    jobId:
+      IDS.job,
+    sourceContextFingerprint:
+      "e".repeat(64),
+    summary:
+      "Private Internal Estimate.",
+
+    materials: [
+      {
+        id:
+          "wall_material",
+        description:
+          "Drywall and finishing material",
+        quantity: 1,
+        unit: "lot",
+        wastePercent: 0,
+        professionalOverride: null,
+
+        retailerReference: {
+          id:
+            "private_retailer_reference",
+          retailer:
+            "HOME_DEPOT",
+          listedPriceMinor:
+            4000,
+          customerVisibleByDefault:
+            false,
+        },
+
+        effectiveUnitCostMinor:
+          4000,
+        estimatedCostMinor:
+          4000,
+        priceProvenance:
+          "RETAILER_REFERENCE",
+        assumption: "",
+        needsVerification:
+          false,
+        customerVisibleByDefault:
+          false,
+      },
+    ],
+
+    labor: [
+      {
+        id:
+          "repair_labor",
+        description:
+          "Repair wall and relocate outlet",
+        crewCount: 1,
+        hoursPerWorker: 4,
+
+        professionalOverride: {
+          key:
+            "private_labor_cost",
+          classification:
+            "LABOR",
+          description:
+            "Internal labor",
+          quantity: 1,
+          unitCostMinor:
+            26000,
+          provenance:
+            "PROFESSIONAL_OVERRIDE",
+        },
+
+        estimatedCostMinor:
+          104000,
+        assumption:
+          "Existing wiring remains serviceable.",
+        needsProfessionalAcceptance:
+          true,
+        customerVisibleByDefault:
+          false,
+      },
+    ],
+
+    equipment: [],
+
+    disposal: {
+      description: "",
+      professionalOverride: null,
+      estimatedCostMinor: null,
+      customerVisibleByDefault:
+        false,
+    },
+
+    contingency: {
+      percent: 0,
+      amountMinor: 0,
+    },
+
+    internalCost: {
+      currency:
+        "USD",
+      materialsMinor:
+        4000,
+      laborMinor:
+        104000,
+      equipmentMinor: 0,
+      disposalMinor: 0,
+      contingencyMinor: 0,
+      totalMinor:
+        108000,
+      customerVisible:
+        false,
+    },
+
+    suggestedSellingRange: {
+      minimumMinor:
+        35000,
+      maximumMinor:
+        45000,
+      rationale:
+        "AI advisory range.",
+      authorityClassification:
+        "ADVISORY",
+    },
+
+    professionalSellingPriceMinor:
+      42000,
+
+    assumptions: [],
+    missingInformation: [],
+    retailerReferences: [],
+
+    customerQuoteDraft: {
+      id:
+        "customer_quote_draft",
+      scopeSummary:
+        "Repair wall and relocate outlet.",
+      conditions: [],
+      exclusions: [],
+      durationGuidance:
+        "Approximately one working day.",
+      customerWording:
+        "Repair the wall, relocate the outlet, and install a new outlet plate.",
+    },
+
+    warnings: [],
+
+    reviewContract: {
+      actions: [
+        "ACCEPTED",
+        "EDITED",
+        "REJECTED",
+      ],
+      explicitProfessionalDecisionRequired:
+        true,
+    },
+
+    humanToCanonicalBoundary: {
+      directMutationAllowed:
+        false,
+      requiredCanonicalCommands: [
+        "quote.draft.create",
+        "quote.scope.add",
+      ],
+      prohibitedCanonicalCommands: [
+        "quote.issue",
+        "quote.customer.approve",
+        "quote.customer.decline",
+      ],
+    },
+  };
+
+  const estimateReviews = [
+    {
+      id:
+        randomUUID(),
+      proposal_element_id:
+        "wall_material",
+      action:
+        "ACCEPTED",
+      edited_value: null,
+      created_at:
+        new Date(
+          "2026-08-20T10:00:00Z"
+        ),
+    },
+    {
+      id:
+        randomUUID(),
+      proposal_element_id:
+        "repair_labor",
+      action:
+        "ACCEPTED",
+      edited_value: null,
+      created_at:
+        new Date(
+          "2026-08-20T10:00:01Z"
+        ),
+    },
+    {
+      id:
+        randomUUID(),
+      proposal_element_id:
+        "customer_quote_draft",
+      action:
+        "ACCEPTED",
+      edited_value: null,
+      created_at:
+        new Date(
+          "2026-08-20T10:00:02Z"
+        ),
+    },
+  ];
+
+  const basePool =
+    contextPool();
+
+  const sqlCalls =
+    [];
+
+  async function query(
+    sql,
+    params
+  ) {
+    const text =
+      String(sql);
+
+    sqlCalls.push(text);
+
+    if (
+      /^(?:BEGIN|COMMIT|ROLLBACK)/i
+        .test(
+          text.trim()
+        )
+    ) {
+      return {
+        rows: [],
+      };
+    }
+
+    if (
+      text.includes(
+        "estimate_solution_ready:proposal"
+      )
+    ) {
+      assert.deepEqual(
+        params,
+        [
+          estimateProposalId,
+          65,
+        ]
+      );
+
+      return {
+        rows: [
+          {
+            result_payload:
+              estimateProposal,
+          },
+        ],
+      };
+    }
+
+    if (
+      text.includes(
+        "estimate_solution_ready:reviews"
+      )
+    ) {
+      assert.deepEqual(
+        params,
+        [
+          estimateProposalId,
+          65,
+        ]
+      );
+
+      return {
+        rows:
+          estimateReviews,
+      };
+    }
+
+    return basePool.query(
+      sql,
+      params
+    );
+  }
+
+  const pool = {
+    query,
+
+    async connect() {
+      return {
+        query,
+
+        release() {},
+      };
+    },
+  };
+
+  const repository =
+    createIntelligenceOperationRepositoryFake();
+
+  const providerCalls =
+    [];
+
+  const result =
+    await executeIntelligenceGateway({
+      pool,
+
+      authenticatedActor: {
+        id: 65,
+        role:
+          "professional",
+      },
+
+      idempotencyKey:
+        randomUUID(),
+
+      body: {
+        operation:
+          "quote.compose",
+
+        capability:
+          "quote.compose",
+
+        locale:
+          "en-US",
+
+        context: {},
+
+        input: {
+          jobId:
+            IDS.job,
+
+          mode:
+            "ADVISORY",
+
+          /*
+           * This is the only Estimate handoff value
+           * supplied by the caller.
+           */
+          estimateProposalId,
+
+          professionalInstructions:
+            "Prepare the reviewed solution for Quote review.",
+
+          /*
+           * No customer Quote pricing is confirmed.
+           */
+          pricingInputs: [],
+          materialInputs: [],
+          terms: {},
+        },
+      },
+
+      operationRegistry:
+        canonicalIntelligenceOperationRegistry,
+
+      engineRegistry:
+        canonicalIntelligenceEngineRegistry,
+
+      providers: {
+        quote_composition: {
+          async complete(
+            request
+          ) {
+            providerCalls.push(
+              request
+            );
+
+            const reviewed =
+              request
+                .canonicalJobContext
+                .reviewedEstimate;
+
+            assert.ok(
+              reviewed
+            );
+
+            assert.equal(
+              reviewed
+                .authorityClassification,
+              "REVIEWED_INTERNAL_ESTIMATE_NON_CANONICAL"
+            );
+
+            assert.equal(
+              reviewed
+                .pricingAuthority,
+              "PROFESSIONAL_INPUT_ONLY"
+            );
+
+            assert.deepEqual(
+              request
+                .canonicalJobContext
+                .professionalInput
+                .pricingInputs,
+              []
+            );
+
+            const serialized =
+              JSON.stringify(
+                reviewed
+              );
+
+            assert.doesNotMatch(
+              serialized,
+              /internalCost/
+            );
+
+            assert.doesNotMatch(
+              serialized,
+              /suggestedSellingRange/
+            );
+
+            assert.doesNotMatch(
+              serialized,
+              /professionalSellingPriceMinor/
+            );
+
+            assert.doesNotMatch(
+              serialized,
+              /retailerReference/
+            );
+
+            assert.doesNotMatch(
+              serialized,
+              /effectiveUnitCostMinor/
+            );
+
+            assert.doesNotMatch(
+              serialized,
+              /estimatedCostMinor/
+            );
+
+            assert.doesNotMatch(
+              serialized,
+              /professionalOverride/
+            );
+
+            assert.doesNotMatch(
+              serialized,
+              /private_retailer_reference/
+            );
+
+            assert.doesNotMatch(
+              serialized,
+              /private_labor_cost/
+            );
+
+            const reference =
+              reviewed
+                .reviewedScope
+                .labor[0]
+                .sourceReferences[0];
+
+            assert.equal(
+              reference.type,
+              "ESTIMATE_REVIEW"
+            );
+
+            return {
+              schemaVersion: 1,
+
+              summary:
+                "Reviewed solution requires professional Quote pricing.",
+
+              scopeSections: [
+                {
+                  id:
+                    "reviewed_solution",
+                  title:
+                    "Reviewed solution",
+                  provenance:
+                    "AI_SUGGESTED",
+                  sourceReferences: [
+                    reference,
+                  ],
+                },
+              ],
+
+              proposedScopeItems: [
+                {
+                  id:
+                    "reviewed_repair_labor",
+                  sectionId:
+                    "reviewed_solution",
+                  description:
+                    reviewed
+                      .reviewedScope
+                      .labor[0]
+                      .description,
+
+                  classification:
+                    "LABOR_SERVICE",
+
+                  scopeSemantic:
+                    "FUTURE_WORK",
+
+                  materialResponsibility:
+                    "NOT_APPLICABLE",
+
+                  workStatus:
+                    "FUTURE_WORK",
+
+                  pricing: {
+                    status:
+                      "PRICE_MISSING",
+                    inputKey:
+                      null,
+                  },
+
+                  provenance:
+                    "AI_SUGGESTED",
+
+                  sourceReferences: [
+                    reference,
+                  ],
+                },
+              ],
+
+              materials: [],
+              exclusions: [],
+              assumptions: [],
+              separateProposals: [],
+              commercialMissingInformation: [],
+              workflowConditions: [],
+              warnings: [],
+
+              confidence: {
+                score: 0.9,
+                rationale:
+                  "Reviewed scope is available but professional Quote pricing remains required.",
+              },
+            };
+          },
+        },
+      },
+
+      repository,
+    });
+
+  assert.equal(
+    result.code,
+    "INTELLIGENCE_OPERATION_COMPLETED"
+  );
+
+  assert.equal(
+    providerCalls.length,
+    1
+  );
+
+  assert.equal(
+    sqlCalls.some(
+      (sql) =>
+        sql.includes(
+          "estimate_solution_ready:proposal"
+        )
+    ),
+    true
+  );
+
+  assert.equal(
+    sqlCalls.some(
+      (sql) =>
+        sql.includes(
+          "estimate_solution_ready:reviews"
+        )
+    ),
+    true
+  );
+
+  assert.equal(
+    result.result
+      .authorityClassification,
+    "ADVISORY_NON_CANONICAL"
+  );
+
+  assert.equal(
+    result.result
+      .proposedScopeItems[0]
+      .sourceReferences[0]
+      .type,
+    "ESTIMATE_REVIEW"
+  );
+
+  assert.equal(
+    result.result
+      .proposedScopeItems[0]
+      .pricing.status,
+    "PRICE_MISSING"
+  );
+
+  assert.equal(
+    result.result
+      .proposedScopeItems[0]
+      .canonicalCandidate,
+    null
+  );
+
+  assert.equal(
+    result.result
+      .pricing.totalMinor,
+    0
+  );
+
+  assert.equal(
+    result.result
+      .pricing
+      .professionalConfirmedTotalMinor,
+    null
+  );
+
+  assert.equal(
+    result.result
+      .pricing.status,
+    "INCOMPLETE"
+  );
+
+  assert.equal(
+    result.result
+      .commercialMissingInformation
+      .some(
+        ({ code }) =>
+          code ===
+          "PROFESSIONAL_PRICE_MISSING"
+      ),
+    true
+  );
+
+  assert.equal(
+    result.result
+      .humanToCanonicalBoundary
+      .directMutationAllowed,
+    false
+  );
+});
+
+test("Gateway fails governed when Solution Ready Estimate identity is invalid", async () => {
+  const repository =
+    createIntelligenceOperationRepositoryFake();
+
+  const pool =
+    contextPool();
+
+  let providerInvocations = 0;
+
+  const result =
+    await executeIntelligenceGateway({
+      pool,
+
+      authenticatedActor: {
+        id: 65,
+        role: "professional",
+      },
+
+      idempotencyKey:
+        randomUUID(),
+
+      body: {
+        operation:
+          "quote.compose",
+
+        capability:
+          "quote.compose",
+
+        locale:
+          "en-US",
+
+        context: {},
+
+        input: {
+          jobId:
+            IDS.job,
+
+          mode:
+            "ADVISORY",
+
+          estimateProposalId:
+            "not-a-valid-estimate-id",
+
+          professionalInstructions:
+            "Prepare reviewed scope.",
+
+          pricingInputs: [],
+          materialInputs: [],
+          terms: {},
+        },
+      },
+
+      providers: {
+        quote_composition: {
+          async complete() {
+            providerInvocations += 1;
+            return propertyProviderResult();
+          },
+        },
+      },
+
+      repository,
+    });
+
+  assert.equal(
+    result.ok,
+    false
+  );
+
+  assert.equal(
+    result.status,
+    400
+  );
+
+  assert.equal(
+    result.code,
+    "INTELLIGENCE_ESTIMATE_SOLUTION_READY_INVALID"
+  );
+
+  assert.equal(
+    providerInvocations,
+    0
+  );
+});
+
+test("Gateway fails governed when the actor-owned Solution Ready Estimate is unavailable", async () => {
+  const estimateProposalId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const repository = createIntelligenceOperationRepositoryFake();
+  const pool = solutionReadyGatewayPool({
+    proposalId: estimateProposalId,
+    proposalAvailable: false,
+  });
+  let providerInvocations = 0;
+
+  const result = await executeIntelligenceGateway({
+    pool,
+    authenticatedActor: { id: 65, role: "professional" },
+    idempotencyKey: randomUUID(),
+    body: {
+      operation: "quote.compose",
+      capability: "quote.compose",
+      locale: "en-US",
+      context: {},
+      input: {
+        ...composeInput(),
+        estimateProposalId,
+      },
+    },
+    providers: {
+      quote_composition: {
+        async complete() {
+          providerInvocations += 1;
+          return propertyProviderResult();
+        },
+      },
+    },
+    repository,
+  });
+
+  assert.deepEqual(
+    { ok: result.ok, status: result.status, code: result.code },
+    {
+      ok: false,
+      status: 404,
+      code: "INTELLIGENCE_ESTIMATE_SOLUTION_READY_UNAVAILABLE",
+    }
+  );
+  assert.equal(providerInvocations, 0);
+});
+
+test("Gateway fails governed when the Solution Ready Estimate belongs to another Job", async () => {
+  const estimateProposalId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const pool = solutionReadyGatewayPool({
+    proposalId: estimateProposalId,
+    proposalJobId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+  });
+  let providerInvocations = 0;
+
+  const result = await executeIntelligenceGateway({
+    pool,
+    authenticatedActor: { id: 65, role: "professional" },
+    idempotencyKey: randomUUID(),
+    body: {
+      operation: "quote.compose",
+      capability: "quote.compose",
+      locale: "en-US",
+      context: {},
+      input: {
+        ...composeInput(),
+        estimateProposalId,
+      },
+    },
+    providers: {
+      quote_composition: {
+        async complete() {
+          providerInvocations += 1;
+          return propertyProviderResult();
+        },
+      },
+    },
+    repository: createIntelligenceOperationRepositoryFake(),
+  });
+
+  assert.deepEqual(
+    { ok: result.ok, status: result.status, code: result.code },
+    {
+      ok: false,
+      status: 409,
+      code: "INTELLIGENCE_ESTIMATE_SOLUTION_READY_JOB_MISMATCH",
+    }
+  );
+  assert.equal(providerInvocations, 0);
+});
+
+test("Gateway preserves governed Quote authority failure before Solution Ready composition", async () => {
+  const estimateProposalId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  let providerInvocations = 0;
+
+  const result = await executeIntelligenceGateway({
+    pool: contextPool({ grants: false }),
+    authenticatedActor: { id: 65, role: "professional" },
+    idempotencyKey: randomUUID(),
+    body: {
+      operation: "quote.compose",
+      capability: "quote.compose",
+      locale: "en-US",
+      context: {},
+      input: {
+        ...composeInput(),
+        estimateProposalId,
+      },
+    },
+    providers: {
+      quote_composition: {
+        async complete() {
+          providerInvocations += 1;
+          return propertyProviderResult();
+        },
+      },
+    },
+    repository: createIntelligenceOperationRepositoryFake(),
+  });
+
+  assert.deepEqual(
+    { ok: result.ok, status: result.status, code: result.code },
+    {
+      ok: false,
+      status: 403,
+      code: "INTELLIGENCE_QUOTE_AUTHORITY_REQUIRED",
+    }
+  );
+  assert.equal(providerInvocations, 0);
 });

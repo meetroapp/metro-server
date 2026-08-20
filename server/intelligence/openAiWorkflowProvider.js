@@ -22,8 +22,8 @@ where assistanceItem is exactly {"id":"lowercase_stable_id","text":"string","cla
 {"schemaVersion":1,"summary":"string","materials":[{"id":"stable_id","description":"string","quantity":1,"unit":"string","wastePercent":0,"costInputKey":null,"retailerReferenceId":null,"assumption":"string","needsVerification":true}],"labor":[{"id":"stable_id","description":"string","crewCount":1,"hoursPerWorker":1,"costInputKey":null,"assumption":"string"}],"equipment":[{"id":"stable_id","description":"string","costInputKey":null}],"disposal":{"description":"string","costInputKey":null},"contingencyPercent":0,"assumptions":[{"id":"stable_id","text":"string"}],"missingInformation":["string"],"suggestedSellingRange":{"minimumMinor":0,"maximumMinor":0,"rationale":"string"},"customerQuoteDraft":{"scopeSummary":"string","conditions":["string"],"exclusions":["string"],"durationGuidance":"string","customerWording":"string"},"warnings":["string"]}
 Only use costInputKey and retailerReferenceId values present in the request. Never expose internal costs or retailer references in customerQuoteDraft.`,
   "quote.compose": `Return exactly this JSON object shape:
-{"schemaVersion":1,"summary":"string","scopeSections":[{"id":"stable_id","title":"string","provenance":"AI_SUGGESTED","sourceReferences":[]}],"proposedScopeItems":[{"id":"stable_id","sectionId":"existing section id","description":"string","classification":"MATERIAL or LABOR_SERVICE","scopeSemantic":"PERMANENT_WORK or TEMPORARY_SERVICE or SEPARATE_PROPOSAL","materialResponsibility":"PROFESSIONAL or CUSTOMER or PENDING_SELECTION","workStatus":"PLANNED or DONE_TEMPORARY or SEPARATE_PROPOSAL","pricing":{"status":"PRICE_MISSING or PRICE_CONFIRMED_BY_PROFESSIONAL","inputKey":null},"provenance":"AI_SUGGESTED","sourceReferences":[]}],"materials":[{"id":"stable_id","description":"string","responsibility":"PROFESSIONAL or CUSTOMER or PENDING_SELECTION","provenance":"AI_SUGGESTED","sourceReferences":[]}],"exclusions":[sourcedElement],"assumptions":[sourcedElement],"separateProposals":[sourcedElement],"commercialMissingInformation":[{"id":"stable_id","code":"UPPERCASE_CODE","description":"string","provenance":"MISSING_INFORMATION","sourceReferences":[],"elementId":null}],"workflowConditions":[{"id":"stable_id","type":"DEPOSIT or AVAILABILITY or OTHER","description":"string","state":"ADVISORY_NOT_SATISFIED or CONDITIONAL_NOT_SCHEDULED or REQUIRES_PROFESSIONAL_CONFIRMATION","provenance":"AI_SUGGESTED","sourceReferences":[]}],"warnings":[{"code":"lowercase_code","message":"string"}],"confidence":{"score":0.0,"rationale":"string"}}
-where sourcedElement is exactly {"id":"stable_id","description":"string","provenance":"AI_SUGGESTED or MISSING_INFORMATION","sourceReferences":[]}. Copy any non-AI provenance and source reference exactly from authorized request context.`,
+{"schemaVersion":1,"summary":"string","scopeSections":[{"id":"stable_id","title":"string","provenance":"authorized provenance","sourceReferences":[]}],"proposedScopeItems":[{"id":"stable_id","sectionId":"existing section id","description":"string","classification":"MATERIAL or LABOR_SERVICE","scopeSemantic":"COMPLETED_BILLABLE_SERVICE or TEMPORARY_SERVICE or FUTURE_WORK or MATERIAL_INCLUDED or MATERIAL_EXCLUDED or CUSTOMER_SUPPLIED_MATERIAL or SEPARATE_PROPOSAL","materialResponsibility":"PROFESSIONAL_SUPPLIED or CUSTOMER_SUPPLIED or EXCLUDED or PENDING_SELECTION or NOT_APPLICABLE","workStatus":"DONE or DONE_TEMPORARY or OPEN or DEFERRED or FUTURE_WORK or SEPARATE_PROPOSAL","pricing":{"status":"PRICE_CONFIRMED_BY_PROFESSIONAL or PRICE_MISSING or PRICE_ADVISORY_ONLY","inputKey":null},"provenance":"authorized provenance","sourceReferences":[]}],"materials":[{"id":"stable_id","description":"string","responsibility":"PROFESSIONAL_SUPPLIED or CUSTOMER_SUPPLIED or EXCLUDED or PENDING_SELECTION or NOT_APPLICABLE","provenance":"authorized provenance","sourceReferences":[]}],"exclusions":[sourcedElement],"assumptions":[sourcedElement],"separateProposals":[sourcedElement],"commercialMissingInformation":[{"id":"stable_id","code":"UPPERCASE_CODE","description":"string","provenance":"authorized provenance","sourceReferences":[],"elementId":null}],"workflowConditions":[{"id":"stable_id","type":"DEPOSIT or AVAILABILITY or OTHER","description":"string","state":"ADVISORY_NOT_SATISFIED or CONDITIONAL_NOT_SCHEDULED or REQUIRES_PROFESSIONAL_CONFIRMATION","provenance":"authorized provenance","sourceReferences":[]}],"warnings":[{"code":"lowercase_code","message":"string"}],"confidence":{"score":0.0,"rationale":"string"}}
+where authorized provenance is CANONICAL_CONFIRMED, PROFESSIONAL_INPUT, CUSTOMER_REPORTED, MEDIA_OBSERVED, AI_SUGGESTED, or MISSING_INFORMATION and sourcedElement is exactly {"id":"stable_id","description":"string","provenance":"authorized provenance","sourceReferences":[]}. Copy non-AI provenance and source references exactly from authorized request context. Use only professional pricing inputs as PRICE_CONFIRMED_BY_PROFESSIONAL.`,
   "invoice.assist": `Return exactly this JSON object shape:
 {"schemaVersion":1,"summary":"string","lineDescriptions":[{"id":"stable_id","text":"string"}],"customerNotes":"string","terms":"string","dueDateWording":"string","balanceExplanation":"string","warnings":["string"]}
 Draft wording only. Never calculate, alter, or assert payment, total, paid, balance, or status authority.`,
@@ -415,6 +415,312 @@ function quickQuoteAnalysisContinueOutputSchema(request) {
   return schema;
 }
 
+const QUOTE_COMPOSE_OUTPUT_SCHEMA = Object.freeze({
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "schemaVersion",
+    "summary",
+    "scopeSections",
+    "proposedScopeItems",
+    "materials",
+    "exclusions",
+    "assumptions",
+    "separateProposals",
+    "commercialMissingInformation",
+    "workflowConditions",
+    "warnings",
+    "confidence",
+  ],
+  properties: {
+    schemaVersion: {
+      type: "integer",
+      const: 1,
+    },
+    summary: {
+      type: "string",
+      minLength: 1,
+      maxLength: 1200,
+    },
+    scopeSections: {
+      type: "array",
+      maxItems: 80,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "id",
+          "title",
+          "provenance",
+          "sourceReferences",
+        ],
+        properties: {
+          id: {
+            type: "string",
+            pattern: "^[a-z][a-z0-9_-]{0,79}$",
+          },
+          title: {
+            type: "string",
+            minLength: 1,
+            maxLength: 200,
+          },
+          provenance: {
+            type: "string",
+            enum: [
+              "CANONICAL_CONFIRMED",
+              "PROFESSIONAL_INPUT",
+              "CUSTOMER_REPORTED",
+              "MEDIA_OBSERVED",
+              "AI_SUGGESTED",
+              "MISSING_INFORMATION",
+            ],
+          },
+          sourceReferences: {
+            type: "array",
+            maxItems: 12,
+            items: {},
+          },
+        },
+      },
+    },
+    proposedScopeItems: {
+      type: "array",
+      maxItems: 80,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "id",
+          "sectionId",
+          "description",
+          "classification",
+          "scopeSemantic",
+          "materialResponsibility",
+          "workStatus",
+          "pricing",
+          "provenance",
+          "sourceReferences",
+        ],
+        properties: {
+          id: {
+            type: "string",
+            pattern: "^[a-z][a-z0-9_-]{0,79}$",
+          },
+          sectionId: {
+            type: "string",
+            pattern: "^[a-z][a-z0-9_-]{0,79}$",
+          },
+          description: {
+            type: "string",
+            minLength: 1,
+            maxLength: 1000,
+          },
+          classification: {
+            type: "string",
+            enum: [
+              "MATERIAL",
+              "LABOR_SERVICE",
+            ],
+          },
+          scopeSemantic: {
+            type: "string",
+            enum: [
+              "COMPLETED_BILLABLE_SERVICE",
+              "TEMPORARY_SERVICE",
+              "FUTURE_WORK",
+              "MATERIAL_INCLUDED",
+              "MATERIAL_EXCLUDED",
+              "CUSTOMER_SUPPLIED_MATERIAL",
+              "SEPARATE_PROPOSAL",
+            ],
+          },
+          materialResponsibility: {
+            type: "string",
+            enum: [
+              "PROFESSIONAL_SUPPLIED",
+              "CUSTOMER_SUPPLIED",
+              "EXCLUDED",
+              "PENDING_SELECTION",
+              "NOT_APPLICABLE",
+            ],
+          },
+          workStatus: {
+            type: "string",
+            enum: [
+              "DONE",
+              "DONE_TEMPORARY",
+              "OPEN",
+              "DEFERRED",
+              "FUTURE_WORK",
+              "SEPARATE_PROPOSAL",
+            ],
+          },
+          pricing: {
+            type: "object",
+            additionalProperties: false,
+            required: [
+              "status",
+              "inputKey",
+            ],
+            properties: {
+              status: {
+                type: "string",
+                enum: [
+                  "PRICE_CONFIRMED_BY_PROFESSIONAL",
+                  "PRICE_MISSING",
+                  "PRICE_ADVISORY_ONLY",
+                ],
+              },
+              inputKey: {
+                type: [
+                  "string",
+                  "null",
+                ],
+              },
+            },
+          },
+          provenance: {
+            type: "string",
+            enum: [
+              "CANONICAL_CONFIRMED",
+              "PROFESSIONAL_INPUT",
+              "CUSTOMER_REPORTED",
+              "MEDIA_OBSERVED",
+              "AI_SUGGESTED",
+              "MISSING_INFORMATION",
+            ],
+          },
+          sourceReferences: {
+            type: "array",
+            maxItems: 12,
+            items: {},
+          },
+        },
+      },
+    },
+    materials: {
+      type: "array",
+      maxItems: 80,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "id",
+          "description",
+          "responsibility",
+          "provenance",
+          "sourceReferences",
+        ],
+        properties: {
+          id: {
+            type: "string",
+            pattern: "^[a-z][a-z0-9_-]{0,79}$",
+          },
+          description: {
+            type: "string",
+            minLength: 1,
+            maxLength: 500,
+          },
+          responsibility: {
+            type: "string",
+            enum: [
+              "PROFESSIONAL_SUPPLIED",
+              "CUSTOMER_SUPPLIED",
+              "EXCLUDED",
+              "PENDING_SELECTION",
+              "NOT_APPLICABLE",
+            ],
+          },
+          provenance: {
+            type: "string",
+            enum: [
+              "CANONICAL_CONFIRMED",
+              "PROFESSIONAL_INPUT",
+              "CUSTOMER_REPORTED",
+              "MEDIA_OBSERVED",
+              "AI_SUGGESTED",
+              "MISSING_INFORMATION",
+            ],
+          },
+          sourceReferences: {
+            type: "array",
+            maxItems: 12,
+            items: {},
+          },
+        },
+      },
+    },
+    exclusions: {
+      type: "array",
+      maxItems: 80,
+      items: {},
+    },
+    assumptions: {
+      type: "array",
+      maxItems: 80,
+      items: {},
+    },
+    separateProposals: {
+      type: "array",
+      maxItems: 80,
+      items: {},
+    },
+    commercialMissingInformation: {
+      type: "array",
+      maxItems: 80,
+      items: {},
+    },
+    workflowConditions: {
+      type: "array",
+      maxItems: 80,
+      items: {},
+    },
+    warnings: {
+      type: "array",
+      maxItems: 80,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "code",
+          "message",
+        ],
+        properties: {
+          code: {
+            type: "string",
+            pattern: "^[a-z][a-z0-9_]{2,79}$",
+          },
+          message: {
+            type: "string",
+            minLength: 1,
+            maxLength: 500,
+          },
+        },
+      },
+    },
+    confidence: {
+      type: "object",
+      additionalProperties: false,
+      required: [
+        "score",
+        "rationale",
+      ],
+      properties: {
+        score: {
+          type: "number",
+          minimum: 0,
+          maximum: 1,
+        },
+        rationale: {
+          type: "string",
+          minLength: 1,
+          maxLength: 500,
+        },
+      },
+    },
+  },
+});
+
 const ESTIMATE_COMPOSE_OUTPUT_SCHEMA = Object.freeze({
   type: "object",
   additionalProperties: false,
@@ -550,6 +856,499 @@ function estimateComposeOutputSchema(request) {
   return schema;
 }
 
+const QUOTE_COMPOSE_REFERENCE_TYPES =
+  new Set([
+    "CONCERN",
+    "CLARIFICATION",
+    "EVALUATION",
+    "FINDING",
+    "WORKSTREAM",
+    "WORK_ACTIVITY",
+    "WORKSTREAM_OBLIGATION",
+    "RECOMMENDATION",
+    "CUSTOMER_CONSTRAINT",
+    "QUOTE_DRAFT",
+    "PROFESSIONAL_INPUT",
+    "ESTIMATE_REVIEW",
+  ]);
+
+const QUOTE_COMPOSE_PROVENANCE =
+  [
+    "CANONICAL_CONFIRMED",
+    "PROFESSIONAL_INPUT",
+    "CUSTOMER_REPORTED",
+    "MEDIA_OBSERVED",
+    "AI_SUGGESTED",
+    "MISSING_INFORMATION",
+  ];
+
+function quoteComposeAuthorizedReferences(
+  request
+) {
+  const references = [];
+  const visited =
+    new Set();
+
+  const visit = (value) => {
+    if (
+      !value ||
+      typeof value !== "object" ||
+      visited.has(value)
+    ) {
+      return;
+    }
+
+    visited.add(value);
+
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+
+    if (
+      Array.isArray(
+        value.sourceReferences
+      )
+    ) {
+      for (
+        const reference of
+          value.sourceReferences
+      ) {
+        const type =
+          typeof reference?.type ===
+          "string"
+            ? reference.type
+                .trim()
+                .toUpperCase()
+            : "";
+
+        const id =
+          typeof reference?.id ===
+          "string"
+            ? reference.id.trim()
+            : "";
+
+        const version =
+          Number(
+            reference?.version
+          );
+
+        if (
+          QUOTE_COMPOSE_REFERENCE_TYPES
+            .has(type) &&
+          id &&
+          id.length <= 200 &&
+          Number.isInteger(
+            version
+          ) &&
+          version >= 1
+        ) {
+          references.push({
+            type,
+            id,
+            version,
+          });
+        }
+      }
+    }
+
+    Object.values(value)
+      .forEach(visit);
+  };
+
+  visit(
+    request?.canonicalJobContext ||
+      {}
+  );
+
+  return [
+    ...new Map(
+      references.map(
+        (reference) => [
+          `${reference.type}:${reference.id}:${reference.version}`,
+          reference,
+        ]
+      )
+    ).values(),
+  ];
+}
+
+function quoteComposeExactReferenceSchema(
+  reference
+) {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "type",
+      "id",
+      "version",
+    ],
+    properties: {
+      type: {
+        type: "string",
+        const:
+          reference.type,
+      },
+      id: {
+        type: "string",
+        const:
+          reference.id,
+      },
+      version: {
+        type: "integer",
+        const:
+          reference.version,
+      },
+    },
+  };
+}
+
+function quoteComposeSourceReferencesSchema(
+  references
+) {
+  if (
+    references.length === 0
+  ) {
+    return {
+      type: "array",
+      maxItems: 0,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "type",
+          "id",
+          "version",
+        ],
+        properties: {
+          type: {
+            type: "string",
+          },
+          id: {
+            type: "string",
+          },
+          version: {
+            type: "integer",
+            minimum: 1,
+          },
+        },
+      },
+    };
+  }
+
+  return {
+    type: "array",
+    maxItems:
+      Math.min(
+        12,
+        references.length
+      ),
+    items: {
+      anyOf:
+        references.map(
+          quoteComposeExactReferenceSchema
+        ),
+    },
+  };
+}
+
+function quoteComposeSourcedElementSchema(
+  sourceReferences,
+  {
+    maximumDescription = 2000,
+  } = {}
+) {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "id",
+      "description",
+      "provenance",
+      "sourceReferences",
+    ],
+    properties: {
+      id: {
+        type: "string",
+        pattern:
+          "^[a-z][a-z0-9_-]{0,79}$",
+      },
+      description: {
+        type: "string",
+        minLength: 1,
+        maxLength:
+          maximumDescription,
+      },
+      provenance: {
+        type: "string",
+        enum:
+          QUOTE_COMPOSE_PROVENANCE,
+      },
+      sourceReferences:
+        structuredClone(
+          sourceReferences
+        ),
+    },
+  };
+}
+
+function quoteComposeOutputSchema(
+  request
+) {
+  const context =
+    request?.canonicalJobContext ||
+    {};
+
+  const schema =
+    structuredClone(
+      QUOTE_COMPOSE_OUTPUT_SCHEMA
+    );
+
+  const references =
+    quoteComposeAuthorizedReferences(
+      request
+    );
+
+  const sourceReferences =
+    quoteComposeSourceReferencesSchema(
+      references
+    );
+
+  const pricingInputs =
+    Array.isArray(
+      context?.professionalInput
+        ?.pricingInputs
+    )
+      ? context
+          .professionalInput
+          .pricingInputs
+      : [];
+
+  const pricingKeys =
+    [
+      ...new Set(
+        pricingInputs
+          .map(
+            (item) =>
+              typeof item?.key ===
+              "string"
+                ? item.key
+                    .trim()
+                    .toLowerCase()
+                : ""
+          )
+          .filter(Boolean)
+      ),
+    ];
+
+  /*
+   * Preserve the general object shape for contract
+   * visibility while adding an anyOf that couples
+   * confirmed status to exact professional keys.
+   */
+  const pricing =
+    schema.properties
+      .proposedScopeItems
+      .items
+      .properties
+      .pricing;
+
+  pricing.anyOf = [];
+
+  if (
+    pricingKeys.length > 0
+  ) {
+    pricing.anyOf.push({
+      type: "object",
+      additionalProperties: false,
+      required: [
+        "status",
+        "inputKey",
+      ],
+      properties: {
+        status: {
+          type: "string",
+          const:
+            "PRICE_CONFIRMED_BY_PROFESSIONAL",
+        },
+        inputKey: {
+          type: "string",
+          enum:
+            pricingKeys,
+        },
+      },
+    });
+  }
+
+  for (
+    const status of [
+      "PRICE_MISSING",
+      "PRICE_ADVISORY_ONLY",
+    ]
+  ) {
+    pricing.anyOf.push({
+      type: "object",
+      additionalProperties: false,
+      required: [
+        "status",
+        "inputKey",
+      ],
+      properties: {
+        status: {
+          type: "string",
+          const: status,
+        },
+        inputKey: {
+          enum: [null],
+        },
+      },
+    });
+  }
+
+  /*
+   * Every source-bearing provider element uses the
+   * exact same server-authorized reference catalog.
+   */
+  for (
+    const itemSchema of [
+      schema.properties
+        .scopeSections.items,
+      schema.properties
+        .proposedScopeItems.items,
+      schema.properties
+        .materials.items,
+    ]
+  ) {
+    itemSchema.properties
+      .sourceReferences =
+      structuredClone(
+        sourceReferences
+      );
+  }
+
+  schema.properties
+    .exclusions.items =
+    quoteComposeSourcedElementSchema(
+      sourceReferences
+    );
+
+  schema.properties
+    .assumptions.items =
+    quoteComposeSourcedElementSchema(
+      sourceReferences
+    );
+
+  schema.properties
+    .separateProposals.items =
+    quoteComposeSourcedElementSchema(
+      sourceReferences
+    );
+
+  schema.properties
+    .commercialMissingInformation
+    .items = {
+      type: "object",
+      additionalProperties: false,
+      required: [
+        "id",
+        "code",
+        "description",
+        "provenance",
+        "sourceReferences",
+        "elementId",
+      ],
+      properties: {
+        id: {
+          type: "string",
+          pattern:
+            "^[a-z][a-z0-9_-]{0,79}$",
+        },
+        code: {
+          type: "string",
+          pattern:
+            "^[A-Z][A-Z0-9_]{2,79}$",
+        },
+        description: {
+          type: "string",
+          minLength: 1,
+          maxLength: 2000,
+        },
+        provenance: {
+          type: "string",
+          enum:
+            QUOTE_COMPOSE_PROVENANCE,
+        },
+        sourceReferences:
+          structuredClone(
+            sourceReferences
+          ),
+        elementId: {
+          type: [
+            "string",
+            "null",
+          ],
+          pattern:
+            "^[a-z][a-z0-9_-]{0,79}$",
+        },
+      },
+    };
+
+  schema.properties
+    .workflowConditions
+    .items = {
+      type: "object",
+      additionalProperties: false,
+      required: [
+        "id",
+        "type",
+        "description",
+        "state",
+        "provenance",
+        "sourceReferences",
+      ],
+      properties: {
+        id: {
+          type: "string",
+          pattern:
+            "^[a-z][a-z0-9_-]{0,79}$",
+        },
+        type: {
+          type: "string",
+          enum: [
+            "DEPOSIT",
+            "AVAILABILITY",
+            "OTHER",
+          ],
+        },
+        description: {
+          type: "string",
+          minLength: 1,
+          maxLength: 1000,
+        },
+        state: {
+          type: "string",
+          enum: [
+            "ADVISORY_NOT_SATISFIED",
+            "CONDITIONAL_NOT_SCHEDULED",
+            "REQUIRES_PROFESSIONAL_CONFIRMATION",
+          ],
+        },
+        provenance: {
+          type: "string",
+          enum:
+            QUOTE_COMPOSE_PROVENANCE,
+        },
+        sourceReferences:
+          structuredClone(
+            sourceReferences
+          ),
+      },
+    };
+
+  return schema;
+}
+
 function workflowResponseFormat(request) {
   if (
     request?.operation ===
@@ -573,6 +1372,18 @@ function workflowResponseFormat(request) {
       name: "meetro_estimate_compose",
       strict: true,
       schema: estimateComposeOutputSchema(request),
+    };
+  }
+
+  if (request?.operation === "quote.compose") {
+    return {
+      type: "json_schema",
+      name: "meetro_quote_compose",
+      strict: true,
+      schema:
+        quoteComposeOutputSchema(
+          request
+        ),
     };
   }
 
