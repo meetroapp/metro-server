@@ -857,6 +857,7 @@ registerIntelligenceRoutes({
   app,
   authMiddleware,
   getPool,
+  logger: console,
 });
 
 registerLifecycleRoutes({

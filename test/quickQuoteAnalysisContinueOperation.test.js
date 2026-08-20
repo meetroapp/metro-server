@@ -1039,7 +1039,38 @@ test(
               OPERATION_ID,
           }
         ),
-      /outside the authorized Job Analysis evidence/
+      (error) => {
+        assert.equal(
+          error?.code,
+          "malformed_operation_result"
+        );
+
+        assert.match(
+          error?.message || "",
+          /outside the authorized Job Analysis evidence/
+        );
+
+        assert.match(
+          error?.diagnosticCode || "",
+          /^[a-f0-9]{16}$/
+        );
+
+        assert.equal(
+          error.message.includes(
+            error.diagnosticCode
+          ),
+          false
+        );
+
+        assert.equal(
+          error.message.includes(
+            "foreign-photo"
+          ),
+          false
+        );
+
+        return true;
+      }
     );
   }
 );
