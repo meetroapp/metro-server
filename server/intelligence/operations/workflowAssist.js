@@ -66,6 +66,18 @@ function nullableText(value, maximum, errorFactory = contextError) {
   return text(value, maximum, { errorFactory });
 }
 
+function nullableProfessionalInstructions(value, maximum) {
+  if (value == null || value === "") return null;
+  if (typeof value !== "string" || value.length > maximum) {
+    throw contextError("Text does not match the operation bounds.");
+  }
+  const normalized = value.trim();
+  if (!normalized) {
+    throw contextError("Text does not match the operation bounds.");
+  }
+  return normalized;
+}
+
 function uuid(value, errorFactory = contextError) {
   const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
   if (!UUID.test(normalized)) throw errorFactory("A valid record identity is required.");
@@ -559,7 +571,10 @@ async function buildEstimateComposeContext({ context, input, runtimeContext }) {
     job: canonical.job,
     canonical: canonical.canonical,
     professionalInput: {
-      instructions: nullableText(input.professionalInstructions, 4000),
+      instructions: nullableProfessionalInstructions(
+        input.professionalInstructions,
+        4000
+      ),
       measurements: input.measurements.map(normalizeMeasurement),
       costInputs,
       professionalCategoryCosts,

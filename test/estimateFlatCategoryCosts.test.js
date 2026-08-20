@@ -5,9 +5,21 @@ const { randomUUID } = require("node:crypto");
 const test = require("node:test");
 
 const {
+  executeIntelligenceGateway,
+} = require("../server/intelligence/intelligenceGateway");
+const {
+  canonicalIntelligenceEngineRegistry,
+} = require("../server/intelligence/intelligenceEngineRegistry");
+const {
+  canonicalIntelligenceOperationRegistry,
+} = require("../server/intelligence/intelligenceOperationRegistry");
+const {
   buildEstimateComposeContext,
   parseEstimateComposeResult,
 } = require("../server/intelligence/operations/workflowAssist");
+const {
+  createIntelligenceOperationRepositoryFake,
+} = require("./helpers/intelligenceOperationFake");
 
 const JOB_ID = "11111111-1111-4111-8111-111111111111";
 const PARTICIPANT_ID = "22222222-2222-4222-8222-222222222222";
@@ -227,4 +239,60 @@ test("flat and itemized authority for one category fails closed instead of doubl
     professionalContext({ retailerQuery: "drywall material" }),
     /flat total.*retailer/i
   );
+});
+
+test("Gateway accepts the staging Quick Quote flat-total payload before one provider call", async () => {
+  const providerCalls = [];
+  const result = await executeIntelligenceGateway({
+    pool: contextPool(),
+    authenticatedActor: { id: 65, role: "professional" },
+    idempotencyKey: randomUUID(),
+    body: {
+      operation: "estimate.compose",
+      capability: "estimate.compose",
+      locale: "en-US",
+      context: {},
+      input: estimateInput({
+        professionalInstructions: [
+          "Purchase materials $40",
+          "Labor $260.00",
+          "Repair wall inside closet",
+          "Move outlet from closet to living room wall.",
+          "Install new outlet plate.",
+          "",
+        ].join("\n"),
+      }),
+    },
+    operationRegistry: canonicalIntelligenceOperationRegistry,
+    engineRegistry: canonicalIntelligenceEngineRegistry,
+    providers: {
+      workflow_assistance: {
+        async complete(request) {
+          providerCalls.push(request);
+          return providerResult();
+        },
+      },
+    },
+    repository: createIntelligenceOperationRepositoryFake(),
+  });
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.code, "INTELLIGENCE_OPERATION_COMPLETED");
+  assert.equal(providerCalls.length, 1);
+  assert.equal(
+    providerCalls[0].internalProfessionalContext.professionalInput.instructions,
+    [
+      "Purchase materials $40",
+      "Labor $260.00",
+      "Repair wall inside closet",
+      "Move outlet from closet to living room wall.",
+      "Install new outlet plate.",
+    ].join("\n")
+  );
+  assert.equal(result.result.authorityClassification, "INTERNAL_ESTIMATE_DRAFT_NON_CANONICAL");
+  assert.equal(result.result.professionalCategoryCosts.materials.amountMinor, 4000);
+  assert.equal(result.result.professionalCategoryCosts.labor.amountMinor, 26000);
+  assert.equal(result.result.internalCost.baseTotalMinor, 30000);
+  assert.equal(result.result.internalCost.totalMinor, 30000);
+  assert.equal(result.result.internalCost.customerVisible, false);
 });
