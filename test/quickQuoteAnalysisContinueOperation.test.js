@@ -1214,6 +1214,30 @@ test(
       false
     );
 
+    const analyzedReferenceIdsSchema =
+      format.schema
+        .properties
+        .photoAnalysis
+        .properties
+        .analyzedReferenceIds;
+
+    assert.equal(
+      analyzedReferenceIdsSchema
+        .maxItems,
+      1
+    );
+
+    assert.deepEqual(
+      analyzedReferenceIdsSchema
+        .items,
+      {
+        type: "string",
+        enum: [
+          PHOTO_ID,
+        ],
+      }
+    );
+
     assert.deepEqual(
       format.schema.required,
       [
@@ -1288,6 +1312,57 @@ test(
         )
         .length,
       1
+    );
+
+    await provider.complete({
+      schemaVersion: 1,
+
+      operation:
+        OPERATION,
+
+      capability:
+        OPERATION,
+
+      quickQuoteAnalysisContext: {
+        professionalInput:
+          "Repair wall inside closet.",
+
+        currentProfessionalMessage:
+          null,
+
+        photos:
+          [],
+      },
+
+      authorizedImageInputs:
+        [],
+    });
+
+    const noPhotoReferenceSchema =
+      sentBody.text.format
+        .schema
+        .properties
+        .photoAnalysis
+        .properties
+        .analyzedReferenceIds;
+
+    assert.equal(
+      noPhotoReferenceSchema
+        .maxItems,
+      0
+    );
+
+    assert.equal(
+      Object.hasOwn(
+        noPhotoReferenceSchema.items,
+        "enum"
+      ),
+      false
+    );
+
+    assert.equal(
+      typeof sentBody.input,
+      "string"
     );
   }
 );

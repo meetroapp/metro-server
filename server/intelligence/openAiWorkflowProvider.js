@@ -225,6 +225,63 @@ const QUICK_QUOTE_ANALYSIS_CONTINUE_OUTPUT_SCHEMA =
     },
   });
 
+function quickQuoteAnalysisContinueOutputSchema(request) {
+  const context =
+    request?.quickQuoteAnalysisContext ||
+    {};
+
+  const authorizedPhotoIds =
+    [
+      ...new Set(
+        (
+          Array.isArray(
+            context.photos
+          )
+            ? context.photos
+            : []
+        )
+          .map(
+            (photo) =>
+              typeof photo?.id ===
+              "string"
+                ? photo.id.trim()
+                : ""
+          )
+          .filter(Boolean)
+      ),
+    ];
+
+  const schema =
+    structuredClone(
+      QUICK_QUOTE_ANALYSIS_CONTINUE_OUTPUT_SCHEMA
+    );
+
+  const analyzedReferenceIds =
+    schema
+      .properties
+      .photoAnalysis
+      .properties
+      .analyzedReferenceIds;
+
+  analyzedReferenceIds.maxItems =
+    Math.min(
+      5,
+      authorizedPhotoIds.length
+    );
+
+  if (
+    authorizedPhotoIds.length > 0
+  ) {
+    analyzedReferenceIds.items = {
+      type: "string",
+      enum:
+        authorizedPhotoIds,
+    };
+  }
+
+  return schema;
+}
+
 const ESTIMATE_COMPOSE_OUTPUT_SCHEMA = Object.freeze({
   type: "object",
   additionalProperties: false,
@@ -371,8 +428,8 @@ function workflowResponseFormat(request) {
         "meetro_quick_quote_analysis_continue",
       strict: true,
       schema:
-        structuredClone(
-          QUICK_QUOTE_ANALYSIS_CONTINUE_OUTPUT_SCHEMA
+        quickQuoteAnalysisContinueOutputSchema(
+          request
         ),
     };
   }
