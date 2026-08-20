@@ -460,6 +460,25 @@ function normalizeCostInput(value) {
   };
 }
 
+function normalizeProfessionalCategoryCost(value) {
+  exact(value, ["classification", "totalCostMinor"], [], contextError);
+  const classification = String(value.classification || "").trim().toUpperCase();
+  const totalCostMinor = Number(value.totalCostMinor);
+  if (
+    !new Set(["MATERIAL", "LABOR"]).has(classification) ||
+    !Number.isSafeInteger(totalCostMinor) ||
+    totalCostMinor < 0
+  ) {
+    throw contextError("Professional category cost input is invalid.");
+  }
+  return {
+    classification,
+    totalCostMinor,
+    provenance: "PROFESSIONAL_INPUT",
+    basis: "FLAT_TOTAL",
+  };
+}
+
 function normalizeMeasurement(value) {
   exact(value, ["id", "label", "value", "unit", "source"], [], contextError);
   const numeric = Number(value.value);
@@ -479,11 +498,13 @@ async function buildEstimateComposeContext({ context, input, runtimeContext }) {
   exact(context, [], [], contextError);
   exact(input, [
     "jobId", "intent", "professionalInstructions", "measurements", "costInputs",
-    "sellingPriceMinor", "retailerQuery",
+    "professionalCategoryCosts", "sellingPriceMinor", "retailerQuery",
   ], [], contextError);
   if (!ESTIMATE_INTENTS.has(input.intent)) throw contextError("Estimate assistance intent is invalid.");
   if (!Array.isArray(input.measurements) || input.measurements.length > 50 ||
-      !Array.isArray(input.costInputs) || input.costInputs.length > 80) {
+      !Array.isArray(input.costInputs) || input.costInputs.length > 80 ||
+      (input.professionalCategoryCosts != null &&
+        (!Array.isArray(input.professionalCategoryCosts) || input.professionalCategoryCosts.length > 2))) {
     throw contextError("Estimate input collection is invalid.");
   }
   const jobId = uuid(input.jobId);
@@ -507,7 +528,25 @@ async function buildEstimateComposeContext({ context, input, runtimeContext }) {
   if (new Set(costInputs.map((item) => item.key)).size !== costInputs.length) {
     throw contextError("Professional estimate cost keys must be unique.");
   }
+  const professionalCategoryCosts = (input.professionalCategoryCosts || [])
+    .map(normalizeProfessionalCategoryCost);
+  const categoryClassifications = new Set(
+    professionalCategoryCosts.map((item) => item.classification)
+  );
+  if (categoryClassifications.size !== professionalCategoryCosts.length) {
+    throw contextError("Professional category cost classifications must be unique.");
+  }
+  if (costInputs.some((item) => categoryClassifications.has(item.classification))) {
+    throw contextError(
+      "A professional flat total cannot be combined with itemized costs for the same category."
+    );
+  }
   const retailerQuery = nullableText(input.retailerQuery, 500);
+  if (retailerQuery && categoryClassifications.has("MATERIAL")) {
+    throw contextError(
+      "A professional material flat total cannot be combined with retailer pricing references."
+    );
+  }
   const retailerReferences = retailerQuery
     ? await loadGovernedRetailerReferences({
         adapter: runtimeContext?.retailerReferenceAdapter,
@@ -523,6 +562,7 @@ async function buildEstimateComposeContext({ context, input, runtimeContext }) {
       instructions: nullableText(input.professionalInstructions, 4000),
       measurements: input.measurements.map(normalizeMeasurement),
       costInputs,
+      professionalCategoryCosts,
       sellingPriceMinor,
     },
     retailerReferences,
@@ -618,7 +658,7 @@ function parseEstimateComposeResult(providerResult, {
 
     const costInputs = new Map(context.professionalInput.costInputs.map((item) => [item.key, item]));
     const retailerReferences = new Map(context.retailerReferences.map((item) => [item.id, item]));
-    let materialsCostMinor = 0;
+    let itemizedMaterialsCostMinor = 0;
     const materials = payload.materials.map((value) => {
       exact(value, [
         "id", "description", "quantity", "unit", "wastePercent", "costInputKey",
@@ -663,7 +703,7 @@ function parseEstimateComposeResult(providerResult, {
       const estimatedCostMinor = effectiveUnitCostMinor == null
         ? null
         : Math.round(effectiveUnitCostMinor * effectiveQuantity);
-      if (estimatedCostMinor != null) materialsCostMinor += estimatedCostMinor;
+      if (estimatedCostMinor != null) itemizedMaterialsCostMinor += estimatedCostMinor;
       return {
         id: elementId(value.id),
         description: text(value.description, 500),
@@ -681,7 +721,7 @@ function parseEstimateComposeResult(providerResult, {
       };
     });
 
-    let laborCostMinor = 0;
+    let itemizedLaborCostMinor = 0;
     const labor = payload.labor.map((value) => {
       exact(value, ["id", "description", "crewCount", "hoursPerWorker", "costInputKey", "assumption"]);
       const crewCount = finitePositive(value.crewCount, "Crew count");
@@ -698,7 +738,7 @@ function parseEstimateComposeResult(providerResult, {
         });
       }
       const estimatedCostMinor = cost ? Math.round(cost.unitCostMinor * crewCount * hoursPerWorker) : null;
-      if (estimatedCostMinor != null) laborCostMinor += estimatedCostMinor;
+      if (estimatedCostMinor != null) itemizedLaborCostMinor += estimatedCostMinor;
       return {
         id: elementId(value.id),
         description: text(value.description, 500),
@@ -756,6 +796,25 @@ function parseEstimateComposeResult(providerResult, {
     };
     const equipmentCostMinor = equipment.reduce((sum, item) => sum + (item.estimatedCostMinor || 0), 0);
     const disposalCostMinor = disposal.estimatedCostMinor || 0;
+    const categoryCosts = new Map(
+      (context.professionalInput.professionalCategoryCosts || [])
+        .map((item) => [item.classification, item])
+    );
+    const materialCategoryCost = categoryCosts.get("MATERIAL") || null;
+    const laborCategoryCost = categoryCosts.get("LABOR") || null;
+    const projectCategoryCost = (value) => value ? {
+      classification: value.classification,
+      amountMinor: value.totalCostMinor,
+      provenance: "PROFESSIONAL_INPUT",
+      basis: "FLAT_TOTAL",
+      customerVisibleByDefault: false,
+    } : null;
+    const professionalCategoryCosts = {
+      materials: projectCategoryCost(materialCategoryCost),
+      labor: projectCategoryCost(laborCategoryCost),
+    };
+    const materialsCostMinor = materialCategoryCost?.totalCostMinor ?? itemizedMaterialsCostMinor;
+    const laborCostMinor = laborCategoryCost?.totalCostMinor ?? itemizedLaborCostMinor;
     const contingencyPercent = Number(payload.contingencyPercent);
     if (!Number.isFinite(contingencyPercent) || contingencyPercent < 0 || contingencyPercent > 50) {
       throw enrichEstimateParseError("Estimate contingency is invalid.", {
@@ -768,7 +827,12 @@ function parseEstimateComposeResult(providerResult, {
       });
     }
     const baseCostMinor = materialsCostMinor + laborCostMinor + equipmentCostMinor + disposalCostMinor;
-    const contingencyMinor = Math.round(baseCostMinor * contingencyPercent / 100);
+    const contingencyBaseMinor =
+      (materialCategoryCost ? 0 : itemizedMaterialsCostMinor) +
+      (laborCategoryCost ? 0 : itemizedLaborCostMinor) +
+      equipmentCostMinor +
+      disposalCostMinor;
+    const contingencyMinor = Math.round(contingencyBaseMinor * contingencyPercent / 100);
     exact(payload.suggestedSellingRange, ["minimumMinor", "maximumMinor", "rationale"]);
     const minimumMinor = Number(payload.suggestedSellingRange.minimumMinor);
     const maximumMinor = Number(payload.suggestedSellingRange.maximumMinor);
@@ -816,13 +880,20 @@ function parseEstimateComposeResult(providerResult, {
       labor,
       equipment,
       disposal,
-      contingency: { percent: contingencyPercent, amountMinor: contingencyMinor },
+      professionalCategoryCosts,
+      contingency: {
+        percent: contingencyPercent,
+        amountMinor: contingencyMinor,
+        authorityClassification: "ADVISORY",
+        appliedToProfessionalFlatTotals: false,
+      },
       internalCost: {
         currency: "USD",
         materialsMinor: materialsCostMinor,
         laborMinor: laborCostMinor,
         equipmentMinor: equipmentCostMinor,
         disposalMinor: disposalCostMinor,
+        baseTotalMinor: baseCostMinor,
         contingencyMinor,
         totalMinor: baseCostMinor + contingencyMinor,
         customerVisible: false,
@@ -866,11 +937,20 @@ function buildEstimateComposeProviderRequest({ semanticInput, engineContext }) {
       requirements: [
         "professional_measurements_outrank_visual_estimates",
         "professional_cost_overrides_outrank_retailer_references",
+        "professional_category_flat_totals_are_server_owned_and_must_not_be_allocated_to_items",
+        "professional_category_flat_totals_must_not_be_reconstructed_from_labor_hours_or_rates",
         "retailer_prices_are_references_not_guarantees",
         "keep_internal_cost_and_retailer_data_out_of_customer_quote_draft",
         "label_unverified_assumptions",
       ],
-      prohibitedActions: ["scrape_retailer", "create_or_issue_quote", "set_customer_decision", "schedule_or_complete_job"],
+      prohibitedActions: [
+        "invent_or_change_professional_category_costs",
+        "allocate_flat_totals_to_suggested_items",
+        "scrape_retailer",
+        "create_or_issue_quote",
+        "set_customer_decision",
+        "schedule_or_complete_job",
+      ],
     },
   };
 }

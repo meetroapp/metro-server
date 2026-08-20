@@ -162,6 +162,9 @@ const {
   registerProfessionalScheduleRoutes,
 } = require("./server/workflow/professionalSchedule");
 const {
+  registerProfessionalJobPickerRoutes,
+} = require("./server/workflow/professionalJobPicker");
+const {
   registerProfessionalQuotesRoutes,
 } = require("./server/authorization/professionalQuotes");
 const {
@@ -910,6 +913,13 @@ registerApprovedWorkVisitRoutes({
 });
 
 registerProfessionalScheduleRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerProfessionalJobPickerRoutes({
   app,
   authMiddleware,
   getPool,

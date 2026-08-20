@@ -49,6 +49,45 @@ function safeClone(value) {
   }
 }
 
+function normalizeProfessionalCategoryCosts(value) {
+  if (!isPlainObject(value)) {
+    return null;
+  }
+  const keys = Object.keys(value).sort();
+  if (
+    keys.length !== 2 ||
+    keys[0] !== "labor" ||
+    keys[1] !== "materials"
+  ) {
+    return null;
+  }
+
+  const normalize = (entry, classification) => {
+    if (entry == null) return null;
+    if (
+      !isPlainObject(entry) ||
+      Object.keys(entry).sort().join(",") !==
+        "amountMinor,basis,classification,customerVisibleByDefault,provenance" ||
+      entry.classification !== classification ||
+      !Number.isSafeInteger(entry.amountMinor) ||
+      entry.amountMinor < 0 ||
+      entry.provenance !== "PROFESSIONAL_INPUT" ||
+      entry.basis !== "FLAT_TOTAL" ||
+      entry.customerVisibleByDefault !== false
+    ) {
+      return undefined;
+    }
+    return safeClone(entry);
+  };
+
+  const materials = normalize(value.materials, "MATERIAL");
+  const labor = normalize(value.labor, "LABOR");
+  if (materials === undefined || labor === undefined) {
+    return null;
+  }
+  return { materials, labor };
+}
+
 function validProposal(proposal) {
   return Boolean(
     isPlainObject(proposal) &&
@@ -349,9 +388,20 @@ function buildReviewedEstimateProjection({
       proposal.suggestedSellingRange
     );
 
+  const professionalCategoryCosts =
+    proposal.professionalCategoryCosts == null
+      ? null
+      : normalizeProfessionalCategoryCosts(
+          proposal.professionalCategoryCosts
+        );
+
   if (
     !internalCost ||
-    !suggestedSellingRange
+    !suggestedSellingRange ||
+    (
+      proposal.professionalCategoryCosts != null &&
+      !professionalCategoryCosts
+    )
   ) {
     return null;
   }
@@ -375,6 +425,7 @@ function buildReviewedEstimateProjection({
     reviewDecisionCount:
       latest.size,
     internalCost,
+    professionalCategoryCosts,
     suggestedSellingRange,
     professionalSellingPriceMinor:
       proposal.professionalSellingPriceMinor ??

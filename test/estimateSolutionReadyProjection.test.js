@@ -82,6 +82,22 @@ function estimateProposal() {
       percent: 0,
       amountMinor: 0,
     },
+    professionalCategoryCosts: {
+      materials: {
+        classification: "MATERIAL",
+        amountMinor: 4000,
+        provenance: "PROFESSIONAL_INPUT",
+        basis: "FLAT_TOTAL",
+        customerVisibleByDefault: false,
+      },
+      labor: {
+        classification: "LABOR",
+        amountMinor: 26000,
+        provenance: "PROFESSIONAL_INPUT",
+        basis: "FLAT_TOTAL",
+        customerVisibleByDefault: false,
+      },
+    },
     internalCost: {
       currency: "USD",
       materialsMinor: 4000,
@@ -190,6 +206,11 @@ test(
     assert.equal(
       projection.canonicalMutationPerformed,
       false
+    );
+
+    assert.deepEqual(
+      projection.professionalCategoryCosts,
+      estimateProposal().professionalCategoryCosts
     );
 
     assert.deepEqual(

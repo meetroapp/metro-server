@@ -217,6 +217,23 @@ function reviewedEstimate() {
       customerVisible: false,
     },
 
+    professionalCategoryCosts: {
+      materials: {
+        classification: "MATERIAL",
+        amountMinor: 4000,
+        provenance: "PROFESSIONAL_INPUT",
+        basis: "FLAT_TOTAL",
+        customerVisibleByDefault: false,
+      },
+      labor: {
+        classification: "LABOR",
+        amountMinor: 26000,
+        provenance: "PROFESSIONAL_INPUT",
+        basis: "FLAT_TOTAL",
+        customerVisibleByDefault: false,
+      },
+    },
+
     suggestedSellingRange: {
       minimumMinor: 35000,
       maximumMinor: 45000,
@@ -425,6 +442,14 @@ test(
       false
     );
 
+    assert.equal(
+      Object.hasOwn(
+        context.reviewedEstimate,
+        "professionalCategoryCosts"
+      ),
+      false
+    );
+
     const serializedReviewed =
       JSON.stringify(
         context.reviewedEstimate
@@ -448,6 +473,11 @@ test(
     assert.doesNotMatch(
       serializedReviewed,
       /professionalOverride/
+    );
+
+    assert.doesNotMatch(
+      serializedReviewed,
+      /FLAT_TOTAL|amountMinor/
     );
 
     assert.doesNotMatch(
