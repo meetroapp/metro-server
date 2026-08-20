@@ -230,24 +230,66 @@ function quickQuoteAnalysisContinueOutputSchema(request) {
     request?.quickQuoteAnalysisContext ||
     {};
 
+  const authorizedPhotos =
+    (
+      Array.isArray(
+        context.photos
+      )
+        ? context.photos
+        : []
+    )
+      .map(
+        (photo) => {
+          const id =
+            typeof photo?.id ===
+            "string"
+              ? photo.id.trim()
+              : "";
+
+          const version =
+            Number(
+              photo?.version
+            );
+
+          if (
+            !id ||
+            !Number.isInteger(
+              version
+            ) ||
+            version < 1
+          ) {
+            return null;
+          }
+
+          return {
+            type:
+              "QUOTE_DRAFT_PHOTO",
+            id,
+            version,
+          };
+        }
+      )
+      .filter(Boolean);
+
+  const uniqueAuthorizedPhotos =
+    [
+      ...new Map(
+        authorizedPhotos.map(
+          (photo) => [
+            `${photo.type}:${photo.id}:${photo.version}`,
+            photo,
+          ]
+        )
+      ).values(),
+    ];
+
   const authorizedPhotoIds =
     [
       ...new Set(
-        (
-          Array.isArray(
-            context.photos
-          )
-            ? context.photos
-            : []
+        uniqueAuthorizedPhotos.map(
+          (photo) =>
+            photo.id
         )
-          .map(
-            (photo) =>
-              typeof photo?.id ===
-              "string"
-                ? photo.id.trim()
-                : ""
-          )
-          .filter(Boolean)
       ),
     ];
 
@@ -277,6 +319,97 @@ function quickQuoteAnalysisContinueOutputSchema(request) {
       enum:
         authorizedPhotoIds,
     };
+  }
+
+  const assistanceCollections = [
+    "observed",
+    "needsVerification",
+    "repairSuggestions",
+    "materialSuggestions",
+  ];
+
+  if (
+    uniqueAuthorizedPhotos.length ===
+    0
+  ) {
+    schema
+      .properties
+      .observed
+      .maxItems = 0;
+
+    for (
+      const collection of
+        assistanceCollections
+          .filter(
+            (name) =>
+              name !==
+              "observed"
+          )
+    ) {
+      schema
+        .properties[collection]
+        .items
+        .properties
+        .sourceReferences
+        .maxItems = 0;
+    }
+
+    return schema;
+  }
+
+  const exactReferenceSchemas =
+    uniqueAuthorizedPhotos.map(
+      (photo) => ({
+        type: "object",
+        additionalProperties:
+          false,
+        required: [
+          "type",
+          "id",
+          "version",
+        ],
+        properties: {
+          type: {
+            type: "string",
+            const:
+              "QUOTE_DRAFT_PHOTO",
+          },
+          id: {
+            type: "string",
+            const:
+              photo.id,
+          },
+          version: {
+            type: "integer",
+            const:
+              photo.version,
+          },
+        },
+      })
+    );
+
+  const exactReferenceSchema =
+    exactReferenceSchemas.length ===
+      1
+      ? exactReferenceSchemas[0]
+      : {
+          anyOf:
+            exactReferenceSchemas,
+        };
+
+  for (
+    const collection of
+      assistanceCollections
+  ) {
+    schema
+      .properties[collection]
+      .items
+      .properties
+      .sourceReferences
+      .items =
+        structuredClone(
+          exactReferenceSchema
+        );
   }
 
   return schema;

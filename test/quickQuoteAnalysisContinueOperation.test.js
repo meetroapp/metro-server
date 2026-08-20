@@ -1166,6 +1166,8 @@ test(
             {
               id:
                 PHOTO_ID,
+              version:
+                77,
             },
           ],
         },
@@ -1237,6 +1239,53 @@ test(
         ],
       }
     );
+
+    const expectedSourceReferenceSchema = {
+      type: "object",
+      additionalProperties:
+        false,
+      required: [
+        "type",
+        "id",
+        "version",
+      ],
+      properties: {
+        type: {
+          type: "string",
+          const:
+            "QUOTE_DRAFT_PHOTO",
+        },
+        id: {
+          type: "string",
+          const:
+            PHOTO_ID,
+        },
+        version: {
+          type: "integer",
+          const:
+            77,
+        },
+      },
+    };
+
+    for (
+      const collection of [
+        "observed",
+        "needsVerification",
+        "repairSuggestions",
+        "materialSuggestions",
+      ]
+    ) {
+      assert.deepEqual(
+        format.schema
+          .properties[collection]
+          .items
+          .properties
+          .sourceReferences
+          .items,
+        expectedSourceReferenceSchema
+      );
+    }
 
     assert.deepEqual(
       format.schema.required,
@@ -1359,6 +1408,34 @@ test(
       ),
       false
     );
+
+    assert.equal(
+      sentBody.text.format
+        .schema
+        .properties
+        .observed
+        .maxItems,
+      0
+    );
+
+    for (
+      const collection of [
+        "needsVerification",
+        "repairSuggestions",
+        "materialSuggestions",
+      ]
+    ) {
+      assert.equal(
+        sentBody.text.format
+          .schema
+          .properties[collection]
+          .items
+          .properties
+          .sourceReferences
+          .maxItems,
+        0
+      );
+    }
 
     assert.equal(
       typeof sentBody.input,
