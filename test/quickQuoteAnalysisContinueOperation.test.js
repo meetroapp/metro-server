@@ -1125,6 +1125,12 @@ test(
           OPERATION,
 
         quickQuoteAnalysisContext: {
+          professionalInput:
+            "Purchase materials $40\nLabor $260.00\nRepair wall inside closet\nMove outlet from closet to living room wall.\nInstall new outlet plate.",
+
+          currentProfessionalMessage:
+            null,
+
           photos: [
             {
               id:
@@ -1153,6 +1159,82 @@ test(
       sentBody.store,
       false
     );
+
+    const format =
+      sentBody.text.format;
+
+    assert.equal(
+      format.type,
+      "json_schema"
+    );
+
+    assert.equal(
+      format.name,
+      "meetro_quick_quote_analysis_continue"
+    );
+
+    assert.equal(
+      format.strict,
+      true
+    );
+
+    assert.equal(
+      format.schema.additionalProperties,
+      false
+    );
+
+    assert.deepEqual(
+      format.schema.required,
+      [
+        "schemaVersion",
+        "assistantMessage",
+        "summary",
+        "questionsForProfessional",
+        "observed",
+        "needsVerification",
+        "repairSuggestions",
+        "materialSuggestions",
+        "photoAnalysis",
+        "warnings",
+      ]
+    );
+
+    const serializedInput =
+      JSON.stringify(
+        sentBody.input
+      );
+
+    assert.match(
+      serializedInput,
+      /Purchase materials \$40/
+    );
+
+    assert.match(
+      serializedInput,
+      /Labor \$260\.00/
+    );
+
+    const serializedSchema =
+      JSON.stringify(
+        format.schema
+      );
+
+    for (
+      const prohibitedCommercialField of [
+        "pricing",
+        "unitCostMinor",
+        "amountMinor",
+        "sellingPrice",
+        "markup",
+      ]
+    ) {
+      assert.equal(
+        serializedSchema.includes(
+          prohibitedCommercialField
+        ),
+        false
+      );
+    }
 
     assert.match(
       sentBody.instructions,

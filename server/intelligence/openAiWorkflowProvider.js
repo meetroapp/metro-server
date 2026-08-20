@@ -29,6 +29,202 @@ where sourcedElement is exactly {"id":"stable_id","description":"string","proven
 Draft wording only. Never calculate, alter, or assert payment, total, paid, balance, or status authority.`,
 });
 
+
+function quickQuoteAnalysisAssistanceItemSchema(
+  classification,
+  {
+    requireSourceReference = false,
+  } = {}
+) {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "id",
+      "text",
+      "classification",
+      "sourceReferences",
+    ],
+    properties: {
+      id: {
+        type: "string",
+        pattern: "^[a-z][a-z0-9_.:-]{0,159}$",
+      },
+      text: {
+        type: "string",
+        minLength: 1,
+        maxLength: 3000,
+      },
+      classification: {
+        type: "string",
+        const: classification,
+      },
+      sourceReferences: {
+        type: "array",
+        minItems:
+          requireSourceReference
+            ? 1
+            : 0,
+        maxItems: 12,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: [
+            "type",
+            "id",
+            "version",
+          ],
+          properties: {
+            type: {
+              type: "string",
+              const: "QUOTE_DRAFT_PHOTO",
+            },
+            id: {
+              type: "string",
+              minLength: 1,
+              maxLength: 500,
+            },
+            version: {
+              type: "integer",
+              minimum: 1,
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
+const QUICK_QUOTE_ANALYSIS_CONTINUE_OUTPUT_SCHEMA =
+  Object.freeze({
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "schemaVersion",
+      "assistantMessage",
+      "summary",
+      "questionsForProfessional",
+      "observed",
+      "needsVerification",
+      "repairSuggestions",
+      "materialSuggestions",
+      "photoAnalysis",
+      "warnings",
+    ],
+    properties: {
+      schemaVersion: {
+        type: "integer",
+        const: 1,
+      },
+      assistantMessage: {
+        type: "string",
+        minLength: 1,
+        maxLength: 4000,
+      },
+      summary: {
+        type: "string",
+        minLength: 1,
+        maxLength: 1200,
+      },
+      questionsForProfessional: {
+        type: "array",
+        maxItems: 40,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: [
+            "id",
+            "text",
+          ],
+          properties: {
+            id: {
+              type: "string",
+              pattern: "^[a-z][a-z0-9_.:-]{0,159}$",
+            },
+            text: {
+              type: "string",
+              minLength: 1,
+              maxLength: 1200,
+            },
+          },
+        },
+      },
+      observed: {
+        type: "array",
+        maxItems: 40,
+        items:
+          quickQuoteAnalysisAssistanceItemSchema(
+            "OBSERVED",
+            {
+              requireSourceReference:
+                true,
+            }
+          ),
+      },
+      needsVerification: {
+        type: "array",
+        maxItems: 40,
+        items:
+          quickQuoteAnalysisAssistanceItemSchema(
+            "NEEDS_VERIFICATION"
+          ),
+      },
+      repairSuggestions: {
+        type: "array",
+        maxItems: 40,
+        items:
+          quickQuoteAnalysisAssistanceItemSchema(
+            "AI_SUGGESTED"
+          ),
+      },
+      materialSuggestions: {
+        type: "array",
+        maxItems: 40,
+        items:
+          quickQuoteAnalysisAssistanceItemSchema(
+            "AI_SUGGESTED"
+          ),
+      },
+      photoAnalysis: {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "analyzedReferenceIds",
+          "limitations",
+        ],
+        properties: {
+          analyzedReferenceIds: {
+            type: "array",
+            maxItems: 5,
+            items: {
+              type: "string",
+              minLength: 1,
+              maxLength: 500,
+            },
+          },
+          limitations: {
+            type: "array",
+            maxItems: 20,
+            items: {
+              type: "string",
+              minLength: 1,
+              maxLength: 500,
+            },
+          },
+        },
+      },
+      warnings: {
+        type: "array",
+        maxItems: 40,
+        items: {
+          type: "string",
+          minLength: 1,
+          maxLength: 500,
+        },
+      },
+    },
+  });
+
 const ESTIMATE_COMPOSE_OUTPUT_SCHEMA = Object.freeze({
   type: "object",
   additionalProperties: false,
@@ -165,6 +361,22 @@ function estimateComposeOutputSchema(request) {
 }
 
 function workflowResponseFormat(request) {
+  if (
+    request?.operation ===
+    "quick_quote.analysis.continue"
+  ) {
+    return {
+      type: "json_schema",
+      name:
+        "meetro_quick_quote_analysis_continue",
+      strict: true,
+      schema:
+        structuredClone(
+          QUICK_QUOTE_ANALYSIS_CONTINUE_OUTPUT_SCHEMA
+        ),
+    };
+  }
+
   if (request?.operation === "estimate.compose") {
     return {
       type: "json_schema",
@@ -173,6 +385,7 @@ function workflowResponseFormat(request) {
       schema: estimateComposeOutputSchema(request),
     };
   }
+
   return { type: "json_object" };
 }
 
