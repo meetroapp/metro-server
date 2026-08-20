@@ -1114,6 +1114,7 @@ const estimateComposeOperationDefinition = Object.freeze({
   operation: "estimate.compose", capability: "estimate.compose", supportedRoles: Object.freeze(["professional"]),
   roleAuthorization: "context_builder",
   engineIds: Object.freeze(["estimate_advisory_boundary"]), providerName: "workflow_assistance",
+  providerRequestMaxDepth: 9,
   buildContext: buildEstimateComposeContext, buildProviderRequest: buildEstimateComposeProviderRequest,
   parseResult: parseEstimateComposeResult,
 });

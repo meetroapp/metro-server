@@ -8,6 +8,9 @@ const {
   executeIntelligenceGateway,
 } = require("../server/intelligence/intelligenceGateway");
 const {
+  cloneBoundedJson,
+} = require("../server/intelligence/intelligenceGatewayContracts");
+const {
   canonicalIntelligenceEngineRegistry,
 } = require("../server/intelligence/intelligenceEngineRegistry");
 const {
@@ -24,7 +27,7 @@ const {
 const JOB_ID = "11111111-1111-4111-8111-111111111111";
 const PARTICIPANT_ID = "22222222-2222-4222-8222-222222222222";
 
-function contextPool() {
+function contextPool({ concerns = [] } = {}) {
   return {
     async query(sql) {
       const text = String(sql);
@@ -53,6 +56,9 @@ function contextPool() {
             ],
           }],
         };
+      }
+      if (text.includes("quote_composition:concerns")) {
+        return { rows: concerns };
       }
       if (text.includes("quote_composition:evaluation")) return { rows: [] };
       return { rows: [] };
@@ -244,7 +250,28 @@ test("flat and itemized authority for one category fails closed instead of doubl
 test("Gateway accepts the staging Quick Quote flat-total payload before one provider call", async () => {
   const providerCalls = [];
   const result = await executeIntelligenceGateway({
-    pool: contextPool(),
+    pool: contextPool({
+      concerns: [
+        {
+          id: "33333333-3333-4333-8333-333333333333",
+          original_text: "Customer-reported concern",
+          sequence: 1,
+          clarification_id: "44444444-4444-4444-8444-444444444444",
+          clarification_text: "Professional clarification one",
+          semantics: "SCOPE_DETAIL",
+          actor_user_id: 65,
+        },
+        {
+          id: "33333333-3333-4333-8333-333333333333",
+          original_text: "Customer-reported concern",
+          sequence: 1,
+          clarification_id: "55555555-5555-4555-8555-555555555555",
+          clarification_text: "Professional clarification two",
+          semantics: "SCOPE_DETAIL",
+          actor_user_id: 65,
+        },
+      ],
+    }),
     authenticatedActor: { id: 65, role: "professional" },
     idempotencyKey: randomUUID(),
     body: {
@@ -279,6 +306,33 @@ test("Gateway accepts the staging Quick Quote flat-total payload before one prov
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(result.code, "INTELLIGENCE_OPERATION_COMPLETED");
   assert.equal(providerCalls.length, 1);
+  assert.equal(
+    providerCalls[0]
+      .internalProfessionalContext
+      .canonical
+      .reportedConcerns[0]
+      .clarifications[0]
+      .sourceReferences[0]
+      .type,
+    "CLARIFICATION"
+  );
+  assert.throws(
+    () => cloneBoundedJson(providerCalls[0], {
+      maxBytes: 65536,
+      maxDepth: 8,
+      maxStringLength: 12000,
+      maxKeys: 1800,
+      maxArrayLength: 250,
+    }),
+    /exceeds the depth limit/i
+  );
+  assert.doesNotThrow(() => cloneBoundedJson(providerCalls[0], {
+    maxBytes: 65536,
+    maxDepth: 9,
+    maxStringLength: 12000,
+    maxKeys: 1800,
+    maxArrayLength: 250,
+  }));
   assert.equal(
     providerCalls[0].internalProfessionalContext.professionalInput.instructions,
     [

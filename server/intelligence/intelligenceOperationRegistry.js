@@ -30,6 +30,7 @@ function validateOperationDefinition(definition) {
     : [];
   const providerName = String(definition?.providerName || "default").trim().toLowerCase();
   const roleAuthorization = definition?.roleAuthorization || "registry";
+  const providerRequestMaxDepth = definition?.providerRequestMaxDepth ?? 8;
   const errors = [];
 
   if (!operation) errors.push("invalid_operation");
@@ -43,6 +44,13 @@ function validateOperationDefinition(definition) {
   if (!/^[a-z][a-z0-9_-]*$/.test(providerName)) errors.push("invalid_provider_name");
   if (!["registry", "context_builder"].includes(roleAuthorization)) {
     errors.push("invalid_role_authorization");
+  }
+  if (
+    !Number.isInteger(providerRequestMaxDepth) ||
+    providerRequestMaxDepth < 1 ||
+    providerRequestMaxDepth > 16
+  ) {
+    errors.push("invalid_provider_request_max_depth");
   }
   if (typeof definition?.buildContext !== "function") errors.push("missing_context_builder");
   if (typeof definition?.buildProviderRequest !== "function") {
@@ -62,6 +70,7 @@ function validateOperationDefinition(definition) {
           engineIds: Object.freeze(engineIds),
           providerName,
           roleAuthorization,
+          providerRequestMaxDepth,
           buildContext: definition.buildContext,
           buildProviderRequest: definition.buildProviderRequest,
           parseResult: definition.parseResult,
@@ -94,6 +103,7 @@ function createIntelligenceOperationRegistry(definitions = []) {
         buildProviderRequest,
         parseResult,
         roleAuthorization,
+        providerRequestMaxDepth,
         ...metadata
       }) => ({ ...metadata }));
     },

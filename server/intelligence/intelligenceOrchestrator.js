@@ -83,6 +83,7 @@ async function orchestrateIntelligenceOperation({
   }
   const providerRequest = cloneBoundedJson(providerRequestCandidate, {
     maxBytes: 65536,
+    maxDepth: definition.providerRequestMaxDepth,
     maxStringLength: 12000,
     maxKeys: 1800,
     maxArrayLength: 250,

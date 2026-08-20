@@ -168,6 +168,36 @@ test("operation registration requires explicit server-owned provider packaging",
   );
 });
 
+test("operation registration keeps provider-request depth finite and server-owned", () => {
+  const definition = {
+    operation: "test.depth",
+    capability: "test.depth",
+    supportedRoles: ["homeowner"],
+    engineIds: [],
+    providerName: "fixture",
+    providerRequestMaxDepth: 9,
+    buildContext: () => ({}),
+    buildProviderRequest: () => ({}),
+    parseResult: (result) => result,
+  };
+  const registry = createIntelligenceOperationRegistry([definition]);
+
+  assert.equal(registry.get("test.depth").providerRequestMaxDepth, 9);
+  assert.equal(
+    Object.hasOwn(registry.list()[0], "providerRequestMaxDepth"),
+    false
+  );
+  for (const providerRequestMaxDepth of [0, 17, 8.5, "9"]) {
+    assert.throws(
+      () => createIntelligenceOperationRegistry([{
+        ...definition,
+        providerRequestMaxDepth,
+      }]),
+      /invalid_provider_request_max_depth/
+    );
+  }
+});
+
 test("unknown operations and unauthorized capabilities fail before durable or provider work", async () => {
   const fixture = createFixture();
   const unknown = await executeIntelligenceGateway({
