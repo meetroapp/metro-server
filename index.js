@@ -179,6 +179,9 @@ const {
 const {
   registerInvoicePaymentRoutes,
 } = require("./server/finance/invoicePayments");
+const {
+  registerBusinessDocumentDraftRoutes,
+} = require("./server/documents/businessDocumentDrafts");
 
 
 const JWT_SECRET = resolveJwtSecret(process.env);
@@ -962,6 +965,13 @@ registerInvoicePaymentRoutes({
 });
 
 registerLiveJobRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerBusinessDocumentDraftRoutes({
   app,
   authMiddleware,
   getPool,

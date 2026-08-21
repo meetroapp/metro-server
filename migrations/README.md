@@ -65,12 +65,19 @@ Current inventory:
 45. `202608180001_expand_ask_meetro_workflow_review_operations.sql`
 46. `202608190001_create_quick_quote_analysis_session_foundation.sql`
 47. `202608190002_expand_ask_meetro_analysis_continuation_review.sql`
+48. `202608210001_create_business_document_working_drafts.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
 
 This inventory records migration source files, not applied database state.
 Migration creation and governed migration execution remain separate operations.
+
+`202608210001_create_business_document_working_drafts.sql` adds private,
+noncanonical Quote/Invoice working drafts, independently governed media role and
+customer visibility, optimistic versions, and exact create/update idempotency.
+It creates no canonical Quote, Invoice, Job, delivery, approval, Payment,
+completion, or lifecycle record and does not make saved media customer-visible.
 
 `202608150001_activate_customer_safe_efr.sql` adds explicit, conservative
 customer visibility to append-only Finding and Recommendation versions and

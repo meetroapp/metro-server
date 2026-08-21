@@ -81,16 +81,21 @@ test(
 
     assert.equal(
       migrations.length,
-      47
-    );
-
-    assert.equal(
-      migrations.at(-1)?.filename,
-      migrationName
+      48
     );
 
     assert.equal(
       migrations.at(-2)?.filename,
+      migrationName
+    );
+
+    assert.equal(
+      migrations.at(-1)?.filename,
+      "202608210001_create_business_document_working_drafts.sql"
+    );
+
+    assert.equal(
+      migrations.at(-3)?.filename,
       "202608190001_create_quick_quote_analysis_session_foundation.sql"
     );
 
