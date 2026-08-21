@@ -43,6 +43,15 @@ function text(value, maximum, { nullable = true } = {}) {
   return normalized.length <= maximum ? normalized : null;
 }
 
+function optionalTimestamp(value) {
+  if (value === undefined || value === null || value === "") return { valid: true, value: null };
+  if (typeof value !== "string") return { valid: false, value: null };
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime())
+    ? { valid: false, value: null }
+    : { valid: true, value: parsed.toISOString() };
+}
+
 function stable(value) {
   if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
   if (exactObject(value)) {
@@ -123,7 +132,9 @@ function normalizeContent(value, { partial = false } = {}) {
 
 function normalizeInstruction(value, documentType) {
   const allowed = new Set([
-    "id", "documentType", "text", "recognized", "revisions", "revisionHistory",
+    "id", "documentType", "originalText", "text", "responseText", "recognized",
+    "revisions", "revisionHistory", "privateReminder", "photoIntent", "createdAt",
+    "updatedAt",
   ]);
   if (!onlyKeys(value, allowed)) return null;
   const id = text(value.id, 160);
@@ -135,13 +146,30 @@ function normalizeInstruction(value, documentType) {
   if (!Array.isArray(history) || history.length > 100) return null;
   const revisionHistory = history.map((item) => text(item, 12000));
   if (revisionHistory.some((item) => item === null)) return null;
+  const originalText = text(value.originalText ?? revisionHistory[0] ?? instructionText, 12000);
+  const responseText = text(value.responseText, 12000);
+  const photoIntent = value.photoIntent == null || value.photoIntent === ""
+    ? null
+    : String(value.photoIntent).trim().toUpperCase();
+  const createdAt = optionalTimestamp(value.createdAt);
+  const updatedAt = optionalTimestamp(value.updatedAt);
+  if (!originalText || responseText === null ||
+      (Object.hasOwn(value, "privateReminder") && typeof value.privateReminder !== "boolean") ||
+      (photoIntent && !["BEFORE", "AFTER"].includes(photoIntent)) ||
+      !createdAt.valid || !updatedAt.valid) return null;
   return {
     id,
     documentType: type,
+    originalText,
     text: instructionText,
+    responseText,
     recognized: value.recognized === true,
     revisions,
     revisionHistory,
+    privateReminder: value.privateReminder === true,
+    photoIntent,
+    ...(createdAt.value ? { createdAt: createdAt.value } : {}),
+    ...(updatedAt.value ? { updatedAt: updatedAt.value } : {}),
   };
 }
 

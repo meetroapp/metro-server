@@ -57,10 +57,16 @@ function payload(overrides = {}) {
       instructions: [{
         id: "turn-1",
         documentType: "QUOTE",
+        originalText: "fan replacement for Jack Smith. fan cost 89.99 installation cost 180",
         text: "fan replacement for Jack Smith. fan cost 89.99 installation cost 180",
+        responseText: "Quote working draft updated. Review the live document.",
         recognized: true,
         revisions: 0,
         revisionHistory: [],
+        privateReminder: false,
+        photoIntent: null,
+        createdAt: "2026-08-21T11:59:00.000Z",
+        updatedAt: "2026-08-21T11:59:00.000Z",
       }],
       manualOverrides: {},
       privateReminders: [{ id: "private-1", text: "Bring a ladder" }],
@@ -72,6 +78,18 @@ function payload(overrides = {}) {
       role: "BEFORE",
       visibility: "PRIVATE_INTERNAL",
     }],
+    ...overrides,
+  };
+}
+
+function legacyInstruction(overrides = {}) {
+  return {
+    id: "legacy-turn-1",
+    documentType: "QUOTE",
+    text: "fan replacement for Jack Smith. fan cost 89.99 installation cost 180",
+    recognized: true,
+    revisions: 0,
+    revisionHistory: [],
     ...overrides,
   };
 }
@@ -189,6 +207,85 @@ test("create saves one private noncanonical Quote draft with nullable Job and go
   assert.equal(result.document.approval, undefined);
 });
 
+test("R2 backend accepts old-client create and update payloads and safely expands legacy turns", async () => {
+  const store = createMemoryStore();
+  const legacyCreate = payload({
+    workspace: {
+      ...payload().workspace,
+      instructions: [legacyInstruction()],
+    },
+  });
+  const created = await createBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, payload: legacyCreate,
+    idempotencyKey: KEY_ONE, store, normalizeMediaCollection,
+  });
+  assert.equal(created.status, 201);
+  assert.deepEqual(created.document.workspace.instructions[0], {
+    ...legacyInstruction(),
+    originalText: legacyInstruction().text,
+    responseText: "",
+    privateReminder: false,
+    photoIntent: null,
+  });
+  assert.equal(Object.hasOwn(created.document.workspace.instructions[0], "createdAt"), false);
+  assert.equal(Object.hasOwn(created.document.workspace.instructions[0], "updatedAt"), false);
+
+  const editedText = "fan replacement for Jack Smith. fan cost 89.99 installation cost 200";
+  const legacyUpdate = payload({
+    content: {
+      ...payload().content,
+      laborItems: [{ id: "install", description: "Installation", total: "200" }],
+    },
+    workspace: {
+      ...payload().workspace,
+      instructions: [legacyInstruction({
+        text: editedText,
+        revisions: 1,
+        revisionHistory: [legacyInstruction().text],
+      })],
+    },
+  });
+  const updated = await updateBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, draftId: created.document.id,
+    payload: { ...legacyUpdate, expectedVersion: created.document.version },
+    idempotencyKey: KEY_TWO, store, normalizeMediaCollection,
+  });
+  assert.equal(updated.status, 200);
+  assert.equal(updated.document.workspace.instructions[0].text, editedText);
+  assert.equal(updated.document.workspace.instructions[0].originalText, legacyInstruction().text);
+  assert.equal(updated.document.workspace.instructions[0].responseText, "");
+  assert.equal(updated.document.content.laborItems[0].total, "200");
+});
+
+test("supplied R2 conversation metadata remains strict while omitted metadata remains valid", async (t) => {
+  const invalidCases = [
+    ["originalText type", { originalText: 42 }],
+    ["empty originalText", { originalText: "" }],
+    ["responseText type", { responseText: {} }],
+    ["privateReminder type", { privateReminder: "false" }],
+    ["photoIntent value", { photoIntent: "GENERAL" }],
+    ["createdAt type", { createdAt: 0 }],
+    ["updatedAt value", { updatedAt: "not-a-timestamp" }],
+  ];
+  for (const [name, metadata] of invalidCases) {
+    await t.test(name, async () => {
+      const store = createMemoryStore();
+      const result = await createBusinessDocumentDraft({
+        pool: {}, authenticatedActor: { id: 1 },
+        payload: payload({
+          workspace: {
+            ...payload().workspace,
+            instructions: [{ ...payload().workspace.instructions[0], ...metadata }],
+          },
+        }),
+        idempotencyKey: KEY_ONE, store, normalizeMediaCollection,
+      });
+      assert.equal(result.status, 400);
+      assert.equal(result.code, "BUSINESS_DOCUMENT_INVALID");
+    });
+  }
+});
+
 test("create retry is idempotent and does not create a duplicate draft", async () => {
   const store = createMemoryStore();
   const input = { pool: {}, authenticatedActor: { id: 1 }, payload: payload(), idempotencyKey: KEY_ONE, store, normalizeMediaCollection };
@@ -205,7 +302,52 @@ test("get denies another business while the owner can reopen the exact workspace
   const owner = await getBusinessDocumentDraft({ pool: {}, authenticatedActor: { id: 1 }, draftId: created.document.id, store });
   const other = await getBusinessDocumentDraft({ pool: {}, authenticatedActor: { id: 2 }, draftId: created.document.id, store });
   assert.deepEqual(owner.document.workspace.instructions, created.document.workspace.instructions);
+  assert.equal(owner.document.workspace.instructions[0].responseText, "Quote working draft updated. Review the live document.");
+  assert.equal(owner.document.workspace.instructions[0].documentType, "QUOTE");
   assert.equal(other.status, 404);
+});
+
+test("edited working conversation and prior revision round-trip on update and reopen", async () => {
+  const store = createMemoryStore();
+  const created = await createBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, payload: payload(), idempotencyKey: KEY_ONE,
+    store, normalizeMediaCollection,
+  });
+  const editedText = "fan replacement for Jack Smith. fan cost 89.99 installation cost 200";
+  const changed = payload({
+    content: {
+      ...payload().content,
+      laborItems: [{ id: "install", description: "Installation", total: "200" }],
+    },
+    workspace: {
+      ...payload().workspace,
+      instructions: [{
+        ...payload().workspace.instructions[0],
+        text: editedText,
+        revisions: 1,
+        revisionHistory: [payload().workspace.instructions[0].text],
+        updatedAt: "2026-08-21T12:05:00.000Z",
+      }],
+    },
+  });
+  const updated = await updateBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, draftId: created.document.id,
+    payload: { ...changed, expectedVersion: created.document.version },
+    idempotencyKey: KEY_TWO, store, normalizeMediaCollection,
+  });
+  const reopened = await getBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, draftId: created.document.id, store,
+  });
+  assert.equal(updated.document.workspace.instructions[0].text, editedText);
+  assert.equal(reopened.document.workspace.instructions[0].text, editedText);
+  assert.equal(reopened.document.workspace.instructions[0].revisions, 1);
+  assert.deepEqual(reopened.document.workspace.instructions[0].revisionHistory, [
+    "fan replacement for Jack Smith. fan cost 89.99 installation cost 180",
+  ]);
+  assert.equal(reopened.document.workspace.instructions[0].originalText, "fan replacement for Jack Smith. fan cost 89.99 installation cost 180");
+  assert.equal(reopened.document.workspace.instructions[0].responseText, "Quote working draft updated. Review the live document.");
+  assert.equal(reopened.document.workspace.instructions[0].updatedAt, "2026-08-21T12:05:00.000Z");
+  assert.equal(reopened.document.content.laborItems[0].total, "200");
 });
 
 test("update changes the same draft, increments version, and rejects stale overwrite", async () => {
