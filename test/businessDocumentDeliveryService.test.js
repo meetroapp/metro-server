@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
   deliverBusinessDocument,
+  getBusinessDocumentCustomerPdf,
   listBusinessDocumentDeliveries,
 } = require("../server/documents/businessDocumentDeliveryService");
 
@@ -97,6 +98,12 @@ function deliveryInput(overrides = {}) {
     pool: {}, authenticatedActor: { id: 1 }, draftId: DRAFT_ID,
     expectedVersion: 2, idempotencyKey: EMAIL_KEY, channel: "EMAIL",
     recipientEmail: "jack@example.test", subject: "Your Quote", customerMessage: "Please review.",
+    pdfRenderer: async (customerPackage) => ({
+      buffer: Buffer.from("%PDF-professional"),
+      base64: Buffer.from("%PDF-professional").toString("base64"),
+      filename: `quote-${customerPackage.document.reference}-v${customerPackage.document.version}.pdf`,
+      contentType: "application/pdf",
+    }),
     ...overrides,
   };
 }
@@ -116,8 +123,26 @@ test("Email delivery sends one exact saved customer-safe version and retry repla
   assert.equal(providerCalls.length, 1);
   assert.equal(providerCalls[0].idempotencyKey, EMAIL_KEY);
   assert.equal(providerCalls[0].attachment.contentType, "application/pdf");
+  assert.equal(providerCalls[0].attachment.filename, "quote-WQ-FAN-v2.pdf");
+  assert.equal(Buffer.from(providerCalls[0].attachment.content, "base64").toString(), "%PDF-professional");
   assert.equal(store.events[0].snapshot.document.version, 2);
   assert.doesNotMatch(JSON.stringify(store.events[0].snapshot), /private\.jpg/);
+});
+
+test("PDF rendering failure is governed before provider invocation and cannot create false delivery-requested state", async () => {
+  const store = memoryStore();
+  let providerCalls = 0;
+  const result = await deliverBusinessDocument({
+    ...deliveryInput({ pdfRenderer: async () => { throw new Error("decode failed"); } }),
+    store,
+    emailDelivery: { async sendBusinessDocumentEmail() { providerCalls += 1; return { accepted: true }; } },
+  });
+  assert.equal(result.status, 422);
+  assert.equal(result.code, "BUSINESS_DOCUMENT_PDF_RENDER_FAILED");
+  assert.equal(result.delivery.state, "FAILED");
+  assert.equal(result.delivery.failureCode, "BUSINESS_DOCUMENT_PDF_RENDER_FAILED");
+  assert.equal(providerCalls, 0);
+  assert.equal(store.events.some((event) => event.delivery.state === "DELIVERY_REQUESTED"), false);
 });
 
 test("Email failure remains failed without acceptance, payment, lifecycle, or duplicate authority", async () => {
@@ -173,4 +198,41 @@ test("owner-scoped history preserves legitimate Email and Message attempts", asy
   const denied = await listBusinessDocumentDeliveries({ pool: {}, authenticatedActor: { id: 2 }, draftId: DRAFT_ID, store });
   assert.equal(history.deliveries.length, 2);
   assert.equal(denied.status, 404);
+});
+
+test("owner-scoped customer PDF retrieval enforces exact version for Quote and Invoice without mutation", async () => {
+  const store = memoryStore();
+  const before = structuredClone(store.source);
+  const pdfRenderer = async (customerPackage) => ({
+    buffer: Buffer.from("%PDF-saved"), base64: Buffer.from("%PDF-saved").toString("base64"),
+    filename: `${customerPackage.document.type.toLowerCase()}-${customerPackage.document.reference}-v${customerPackage.document.version}.pdf`,
+    contentType: "application/pdf",
+  });
+  const quote = await getBusinessDocumentCustomerPdf({
+    pool: {}, authenticatedActor: { id: 1 }, draftId: DRAFT_ID,
+    expectedVersion: 2, store, pdfRenderer,
+  });
+  assert.equal(quote.status, 200);
+  assert.equal(quote.pdf.contentType, "application/pdf");
+  assert.equal(quote.pdf.filename, "quote-WQ-FAN-v2.pdf");
+  const stale = await getBusinessDocumentCustomerPdf({
+    pool: {}, authenticatedActor: { id: 1 }, draftId: DRAFT_ID,
+    expectedVersion: 1, store, pdfRenderer,
+  });
+  const denied = await getBusinessDocumentCustomerPdf({
+    pool: {}, authenticatedActor: { id: 2 }, draftId: DRAFT_ID,
+    expectedVersion: 2, store, pdfRenderer,
+  });
+  assert.equal(stale.status, 409);
+  assert.equal(denied.status, 404);
+  store.source.document.documentType = "INVOICE";
+  store.source.document.reference = "WI-FAN";
+  const invoice = await getBusinessDocumentCustomerPdf({
+    pool: {}, authenticatedActor: { id: 1 }, draftId: DRAFT_ID,
+    expectedVersion: 2, store, pdfRenderer,
+  });
+  assert.equal(invoice.pdf.filename, "invoice-WI-FAN-v2.pdf");
+  store.source.document.documentType = before.document.documentType;
+  store.source.document.reference = before.document.reference;
+  assert.deepEqual(store.source, before);
 });

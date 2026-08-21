@@ -89,6 +89,8 @@ function normalizeRows(value) {
 const CONTENT_TEXT_LIMITS = Object.freeze({
   customerName: 240,
   customerEmail: 320,
+  customerPhone: 80,
+  customerAddress: 600,
   customerLocation: 600,
   serviceLocation: 600,
   projectTitle: 500,
@@ -96,11 +98,19 @@ const CONTENT_TEXT_LIMITS = Object.freeze({
   recommendedSolution: 12000,
   workPerformed: 12000,
   totalOverride: 80,
+  subtotal: 80,
+  discount: 80,
+  tax: 80,
+  fees: 80,
+  paidAmount: 80,
+  balanceDue: 80,
   terms: 8000,
   paymentTerms: 8000,
   estimatedDuration: 240,
   dueDate: 80,
   notes: 8000,
+  warrantyNotes: 8000,
+  customerMessage: 4000,
   quoteReference: 240,
   quoteNumber: 240,
   invoiceNumber: 240,
@@ -109,7 +119,7 @@ const CONTENT_TEXT_LIMITS = Object.freeze({
   currency: 12,
 });
 const CONTENT_KEYS = new Set([
-  ...Object.keys(CONTENT_TEXT_LIMITS), "lineItems", "materialItems", "laborItems", "agreement",
+  ...Object.keys(CONTENT_TEXT_LIMITS), "lineItems", "materialItems", "laborItems", "conditions", "exclusions", "agreement",
 ]);
 
 const AGREEMENT_TEXT_LIMITS = Object.freeze({
@@ -154,6 +164,13 @@ function normalizeContent(value, { partial = false } = {}) {
     const rows = normalizeRows(value[key]);
     if (rows === null) return null;
     result[key] = rows;
+  }
+  for (const key of ["conditions", "exclusions"]) {
+    if (!Object.hasOwn(value, key)) continue;
+    if (!Array.isArray(value[key]) || value[key].length > 100) return null;
+    const items = value[key].map((item) => text(item, 3000));
+    if (items.some((item) => item === null)) return null;
+    result[key] = items.filter(Boolean);
   }
   if (Object.hasOwn(value, "agreement")) {
     const agreement = normalizeAgreement(value.agreement);

@@ -15,6 +15,7 @@ function response() {
     setHeader(name, value) { this.headers[name] = value; },
     status(value) { this.statusCode = value; return this; },
     json(value) { this.body = value; return this; },
+    send(value) { this.body = value; return this; },
   };
 }
 
@@ -30,6 +31,7 @@ test("routes pass only authenticated actor, governed payload, version, and idemp
   const deliveryService = {
     async deliverBusinessDocument(input) { calls.push(["deliver", input]); return { ok: true, status: 202, code: "DELIVERY_REQUESTED", delivery: { id: "delivery" } }; },
     async listBusinessDocumentDeliveries(input) { calls.push(["deliveries", input]); return { ok: true, status: 200, code: "DELIVERIES", deliveries: [] }; },
+    async getBusinessDocumentCustomerPdf(input) { calls.push(["customerPdf", input]); return { ok: true, status: 200, code: "PDF", pdf: { buffer: Buffer.from("%PDF"), filename: "quote-WQ-1-v3.pdf" } }; },
   };
   const handlers = createBusinessDocumentDraftHandlers({
     getPool: () => ({ pool: true }),
@@ -62,6 +64,12 @@ test("routes pass only authenticated actor, governed payload, version, and idemp
   await handlers.deliveries(req, response());
   assert.equal(calls[5][1].emailDelivery.providerName, "test");
   assert.equal(calls[6][1].draftId, "draft-id");
+  const pdfRes = response();
+  await handlers.customerPdf({ ...req, query: { version: "3" } }, pdfRes);
+  assert.equal(pdfRes.statusCode, 200);
+  assert.equal(pdfRes.headers["Content-Type"], "application/pdf");
+  assert.equal(pdfRes.headers["Content-Disposition"], "inline; filename=\"quote-WQ-1-v3.pdf\"");
+  assert.equal(calls[7][1].expectedVersion, "3");
 });
 
 test("route registration exposes authenticated create/list/get/update/delete endpoints", () => {
@@ -76,12 +84,13 @@ test("route registration exposes authenticated create/list/get/update/delete end
     createBusinessDocumentDraft() {}, updateBusinessDocumentDraft() {}, deleteBusinessDocumentDraft() {},
     getBusinessDocumentDraft() {}, listBusinessDocumentDrafts() {},
   };
-  const deliveryService = { deliverBusinessDocument() {}, listBusinessDocumentDeliveries() {} };
+  const deliveryService = { deliverBusinessDocument() {}, listBusinessDocumentDeliveries() {}, getBusinessDocumentCustomerPdf() {} };
   registerBusinessDocumentDraftRoutes({ app, authMiddleware() {}, getPool() {}, sendPublicDatabaseError() {}, draftService, deliveryService });
   assert.deepEqual(routes, [
     ["POST", "/business-document-drafts", 2],
     ["GET", "/business-document-drafts", 2],
     ["GET", "/business-document-drafts/:draftId", 2],
+    ["GET", "/business-document-drafts/:draftId/customer-pdf", 2],
     ["PATCH", "/business-document-drafts/:draftId", 2],
     ["DELETE", "/business-document-drafts/:draftId", 2],
     ["GET", "/business-document-drafts/:draftId/deliveries", 2],

@@ -21,6 +21,15 @@ function sendResult(res, result) {
   return res.status(status).json(payload);
 }
 
+function sendPdfResult(res, result) {
+  if (result?.ok !== true || !result.pdf?.buffer) return sendResult(res, result);
+  res.setHeader?.("Cache-Control", "private, no-store");
+  res.setHeader?.("Content-Type", "application/pdf");
+  res.setHeader?.("Content-Disposition", `inline; filename="${result.pdf.filename}"`);
+  res.setHeader?.("X-Content-Type-Options", "nosniff");
+  return res.status(result.status || 200).send(result.pdf.buffer);
+}
+
 function createBusinessDocumentDraftHandlers({
   getPool,
   sendPublicDatabaseError,
@@ -116,6 +125,24 @@ function createBusinessDocumentDraftHandlers({
         draftId: req.params.draftId,
       })
     ),
+    customerPdf: async (req, res) => {
+      try {
+        return sendPdfResult(res, await deliveryService.getBusinessDocumentCustomerPdf({
+          pool: getPool(req),
+          authenticatedActor: req.user,
+          draftId: req.params.draftId,
+          expectedVersion: req.query?.version,
+        }));
+      } catch (error) {
+        return sendPublicDatabaseError({
+          res,
+          error,
+          operation: "get_business_document_customer_pdf",
+          code: "BUSINESS_DOCUMENT_FAILED",
+          message: "The customer PDF could not be prepared.",
+        });
+      }
+    },
   };
 }
 
@@ -142,6 +169,7 @@ function registerBusinessDocumentDraftRoutes({
   app.post("/business-document-drafts", authMiddleware, handlers.create);
   app.get("/business-document-drafts", authMiddleware, handlers.list);
   app.get("/business-document-drafts/:draftId", authMiddleware, handlers.get);
+  app.get("/business-document-drafts/:draftId/customer-pdf", authMiddleware, handlers.customerPdf);
   app.patch("/business-document-drafts/:draftId", authMiddleware, handlers.update);
   app.delete("/business-document-drafts/:draftId", authMiddleware, handlers.delete);
   app.get("/business-document-drafts/:draftId/deliveries", authMiddleware, handlers.deliveries);
@@ -153,4 +181,5 @@ module.exports = {
   createBusinessDocumentDraftHandlers,
   registerBusinessDocumentDraftRoutes,
   sendBusinessDocumentDraftResult: sendResult,
+  sendBusinessDocumentPdfResult: sendPdfResult,
 };

@@ -9,6 +9,9 @@ const {
   buildCustomerPackageEmail,
   customerPackageHash,
 } = require("./businessDocumentCustomerPackage");
+const {
+  renderBusinessDocumentCustomerPdf,
+} = require("./businessDocumentPdfRenderer");
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CHANNELS = Object.freeze(["EMAIL", "MEETRO_MESSAGE"]);
@@ -64,6 +67,7 @@ function validateDeliveryInput(input) {
   const allowed = new Set([
     "pool", "authenticatedActor", "draftId", "expectedVersion", "idempotencyKey",
     "channel", "recipientEmail", "subject", "customerMessage", "store", "emailDelivery",
+    "pdfRenderer", "fetchImpl",
   ]);
   if (!onlyKeys(input, allowed)) return { error: failure(400, "BUSINESS_DOCUMENT_DELIVERY_FIELD_REJECTED", "The delivery request is invalid.") };
   const id = actorId(input.authenticatedActor);
@@ -154,7 +158,8 @@ async function loadPhotos(client, documentId) {
 async function loadOwnedContext(client, actorUserId, draftId, { lock = false } = {}) {
   const result = await client.query(
     `/* business_document_delivery:load_owned */
-     SELECT drafts.*, profiles.business_name, profiles.phone,
+     SELECT drafts.*, profiles.business_name, profiles.phone, profiles.location,
+            profiles.image_url, profiles.profile_details,
             users.email AS business_email
      FROM business_document_working_drafts drafts
      INNER JOIN contractor_profiles profiles ON profiles.id = drafts.contractor_profile_id
@@ -420,9 +425,23 @@ async function deliverBusinessDocument(input = {}) {
       ? failure(502, "BUSINESS_DOCUMENT_EMAIL_FAILED", "The prior email delivery attempt failed. Choose Retry to create a new attempt.", { delivery: reservation.delivery })
       : { ok: true, status: 200, code: "BUSINESS_DOCUMENT_DELIVERY_REPLAYED", delivery: reservation.delivery };
   }
+  let pdfArtifact;
+  try {
+    const renderer = input.pdfRenderer || renderBusinessDocumentCustomerPdf;
+    pdfArtifact = await renderer(customerPackage, { fetchImpl: input.fetchImpl });
+  } catch {
+    const delivery = await store.completeEmail({
+      pool: input.pool, actorUserId: validated.actorId, eventId: reservation.eventId,
+      state: "FAILED", providerStatus: "pdf_render_failed",
+      providerReference: null, failureCode: "BUSINESS_DOCUMENT_PDF_RENDER_FAILED",
+    });
+    if (!delivery) throw new Error("Business document PDF failure evidence could not be completed.");
+    return failure(422, "BUSINESS_DOCUMENT_PDF_RENDER_FAILED", "The customer PDF could not be prepared. Nothing was sent and the saved document is unchanged.", { delivery });
+  }
   const emailPackage = buildCustomerPackageEmail(customerPackage, {
     subject: validated.subject,
     customerMessage: validated.customerMessage,
+    pdfArtifact,
   });
   let providerResult;
   try {
@@ -454,6 +473,36 @@ async function deliverBusinessDocument(input = {}) {
   };
 }
 
+async function getBusinessDocumentCustomerPdf(input = {}) {
+  const allowed = new Set([
+    "pool", "authenticatedActor", "draftId", "expectedVersion", "store",
+    "pdfRenderer", "fetchImpl",
+  ]);
+  if (!onlyKeys(input, allowed)) return failure(400, "BUSINESS_DOCUMENT_PDF_FIELD_REJECTED", "The customer PDF request is invalid.");
+  const id = actorId(input.authenticatedActor);
+  const draftId = uuid(input.draftId);
+  const expectedVersion = Number(input.expectedVersion);
+  if (!id) return failure(401, "AUTHENTICATION_REQUIRED", "Authentication is required.");
+  if (!draftId || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
+    return failure(400, "BUSINESS_DOCUMENT_PDF_INVALID", "A valid saved document and version are required.");
+  }
+  const store = input.store || sqlStore;
+  const context = await store.loadContext({ pool: input.pool, actorUserId: id, draftId });
+  if (!context) return failure(404, "BUSINESS_DOCUMENT_NOT_FOUND", "The saved working document was not found.");
+  if (context.document.version !== expectedVersion) {
+    return failure(409, "BUSINESS_DOCUMENT_PDF_VERSION_CONFLICT", "A different saved document version exists.", { currentVersion: context.document.version });
+  }
+  const customerPackage = buildBusinessDocumentCustomerPackage(context.document, context.business);
+  if (!customerPackage) return failure(409, "BUSINESS_DOCUMENT_DELIVERY_PACKAGE_INVALID", "A customer-safe saved document package could not be created.");
+  try {
+    const renderer = input.pdfRenderer || renderBusinessDocumentCustomerPdf;
+    const pdf = await renderer(customerPackage, { fetchImpl: input.fetchImpl });
+    return { ok: true, status: 200, code: "BUSINESS_DOCUMENT_CUSTOMER_PDF_READY", pdf };
+  } catch {
+    return failure(422, "BUSINESS_DOCUMENT_PDF_RENDER_FAILED", "The customer PDF could not be prepared. The saved document is unchanged.");
+  }
+}
+
 async function listBusinessDocumentDeliveries(input = {}) {
   const allowed = new Set(["pool", "authenticatedActor", "draftId", "store"]);
   if (!onlyKeys(input, allowed)) return failure(400, "BUSINESS_DOCUMENT_DELIVERY_FIELD_REJECTED", "The delivery-history request is invalid.");
@@ -472,6 +521,7 @@ async function listBusinessDocumentDeliveries(input = {}) {
 
 module.exports = {
   deliverBusinessDocument,
+  getBusinessDocumentCustomerPdf,
   listBusinessDocumentDeliveries,
   businessDocumentDeliveryInternals: {
     CHANNELS,
