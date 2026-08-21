@@ -290,6 +290,22 @@ function validateUpdateInput(input) {
   return { ...base, draftId, expectedVersion };
 }
 
+function validateDeleteInput(input) {
+  const allowedInput = new Set([
+    "pool", "authenticatedActor", "draftId", "expectedVersion", "store",
+  ]);
+  if (!onlyKeys(input, allowedInput)) return { error: failure(400, "BUSINESS_DOCUMENT_FIELD_REJECTED", "The working document request is invalid.") };
+  const id = actorId(input.authenticatedActor);
+  const draftId = uuid(input.draftId);
+  const expectedVersion = Number(input.expectedVersion);
+  if (!id) return { error: failure(401, "AUTHENTICATION_REQUIRED", "Authentication is required.") };
+  if (!draftId) return { error: failure(400, "BUSINESS_DOCUMENT_ID_INVALID", "A valid working document ID is required.") };
+  if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
+    return { error: failure(400, "BUSINESS_DOCUMENT_VERSION_REQUIRED", "The current saved version is required.") };
+  }
+  return { actorId: id, draftId, expectedVersion };
+}
+
 function publicProjection(row, photos = []) {
   return Object.freeze({
     id: String(row.id),
@@ -399,6 +415,7 @@ async function loadOwned(client, actorUserId, draftId, { lock = false } = {}) {
      INNER JOIN contractor_profiles profiles
        ON profiles.id = drafts.contractor_profile_id
      WHERE drafts.id = $1 AND profiles.user_id = $2
+       AND drafts.draft_status = 'WORKING_DRAFT'
      LIMIT 1 ${lock ? "FOR UPDATE OF drafts" : ""}`,
     [draftId, actorUserId]
   );
@@ -548,6 +565,32 @@ const sqlStore = Object.freeze({
       return { kind: "updated", document };
     });
   },
+  delete({ pool, actorUserId, contractorProfileId, draftId, expectedVersion }) {
+    return withTransaction(pool, async (client) => {
+      const current = await loadOwned(client, actorUserId, draftId, { lock: true });
+      if (!current) return { kind: "not_found" };
+      if (current.version !== expectedVersion) {
+        return { kind: "version_conflict", currentVersion: current.version };
+      }
+      await client.query(
+        `/* business_document:delete_photo_associations */
+         DELETE FROM business_document_draft_media
+         WHERE document_draft_id = $1 AND contractor_profile_id = $2`,
+        [draftId, contractorProfileId]
+      );
+      const deleted = await client.query(
+        `/* business_document:delete_working_draft */
+         DELETE FROM business_document_working_drafts
+         WHERE id = $1 AND contractor_profile_id = $2
+           AND draft_status = 'WORKING_DRAFT' AND version = $3
+         RETURNING id`,
+        [draftId, contractorProfileId, expectedVersion]
+      );
+      return deleted.rows[0]
+        ? { kind: "deleted", deletedDraftId: String(deleted.rows[0].id) }
+        : { kind: "not_found" };
+    });
+  },
   async get({ pool, actorUserId, draftId }) {
     return loadOwned(pool, actorUserId, draftId);
   },
@@ -670,6 +713,33 @@ async function updateBusinessDocumentDraft(input = {}) {
   return outcome(result, "BUSINESS_DOCUMENT_DRAFT_UPDATED", 200);
 }
 
+async function deleteBusinessDocumentDraft(input = {}) {
+  const validated = validateDeleteInput(input);
+  if (validated.error) return validated.error;
+  const store = input.store || sqlStore;
+  const context = await store.getProfessionalContext(input.pool, validated.actorId);
+  if (!context?.contractor_profile_id) return failure(403, "BUSINESS_DOCUMENT_AUTHORITY_REQUIRED", "A professional business profile is required.");
+  const result = await store.delete({
+    pool: input.pool,
+    actorUserId: validated.actorId,
+    contractorProfileId: Number(context.contractor_profile_id),
+    draftId: validated.draftId,
+    expectedVersion: validated.expectedVersion,
+  });
+  if (result.kind === "version_conflict") {
+    return failure(409, "BUSINESS_DOCUMENT_VERSION_CONFLICT", "A newer saved version exists.", { currentVersion: result.currentVersion });
+  }
+  if (result.kind !== "deleted") {
+    return failure(404, "BUSINESS_DOCUMENT_NOT_FOUND", "The working document was not found.");
+  }
+  return {
+    ok: true,
+    status: 200,
+    code: "BUSINESS_DOCUMENT_DRAFT_DELETED",
+    deletedDraftId: result.deletedDraftId,
+  };
+}
+
 async function getBusinessDocumentDraft(input = {}) {
   const allowed = new Set(["pool", "authenticatedActor", "draftId", "store"]);
   if (!onlyKeys(input, allowed)) return failure(400, "BUSINESS_DOCUMENT_FIELD_REJECTED", "The working document request is invalid.");
@@ -703,6 +773,7 @@ async function listBusinessDocumentDrafts(input = {}) {
 
 module.exports = {
   createBusinessDocumentDraft,
+  deleteBusinessDocumentDraft,
   getBusinessDocumentDraft,
   listBusinessDocumentDrafts,
   updateBusinessDocumentDraft,
@@ -718,6 +789,7 @@ module.exports = {
     requestHash,
     sqlStore,
     validateCreateInput,
+    validateDeleteInput,
     validateUpdateInput,
   },
 };

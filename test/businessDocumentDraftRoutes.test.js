@@ -23,6 +23,7 @@ test("routes pass only authenticated actor, governed payload, version, and idemp
   const draftService = {
     async createBusinessDocumentDraft(input) { calls.push(["create", input]); return { ok: true, status: 201, code: "CREATED", document: { id: "draft" } }; },
     async updateBusinessDocumentDraft(input) { calls.push(["update", input]); return { ok: false, status: 409, code: "BUSINESS_DOCUMENT_VERSION_CONFLICT", message: "conflict", currentVersion: 2 }; },
+    async deleteBusinessDocumentDraft(input) { calls.push(["delete", input]); return { ok: true, status: 200, code: "BUSINESS_DOCUMENT_DRAFT_DELETED", deletedDraftId: "draft-id" }; },
     async getBusinessDocumentDraft(input) { calls.push(["get", input]); return { ok: true, status: 200, code: "LOADED", document: { id: "draft" } }; },
     async listBusinessDocumentDrafts(input) { calls.push(["list", input]); return { ok: true, status: 200, code: "LISTED", documents: [] }; },
   };
@@ -43,21 +44,26 @@ test("routes pass only authenticated actor, governed payload, version, and idemp
   assert.equal(updateRes.body.currentVersion, 2);
   await handlers.get(req, response());
   await handlers.list(req, response());
+  const deleteRes = response();
+  await handlers.delete({ ...req, body: { expectedVersion: 3 } }, deleteRes);
   assert.equal(calls[0][1].authenticatedActor, req.user);
   assert.equal(calls[0][1].idempotencyKey, "key");
   assert.equal(calls[1][1].draftId, "draft-id");
   assert.deepEqual(calls[3][1].query, { search: "Jack", type: undefined, status: undefined, time: undefined });
+  assert.equal(calls[4][1].expectedVersion, 3);
+  assert.equal(deleteRes.body.deletedDraftId, "draft-id");
 });
 
-test("route registration exposes only authenticated create/list/get/update endpoints", () => {
+test("route registration exposes authenticated create/list/get/update/delete endpoints", () => {
   const routes = [];
   const app = {
     post(path, ...handlers) { routes.push(["POST", path, handlers.length]); },
     get(path, ...handlers) { routes.push(["GET", path, handlers.length]); },
     patch(path, ...handlers) { routes.push(["PATCH", path, handlers.length]); },
+    delete(path, ...handlers) { routes.push(["DELETE", path, handlers.length]); },
   };
   const draftService = {
-    createBusinessDocumentDraft() {}, updateBusinessDocumentDraft() {},
+    createBusinessDocumentDraft() {}, updateBusinessDocumentDraft() {}, deleteBusinessDocumentDraft() {},
     getBusinessDocumentDraft() {}, listBusinessDocumentDrafts() {},
   };
   registerBusinessDocumentDraftRoutes({ app, authMiddleware() {}, getPool() {}, sendPublicDatabaseError() {}, draftService });
@@ -66,5 +72,6 @@ test("route registration exposes only authenticated create/list/get/update endpo
     ["GET", "/business-document-drafts", 2],
     ["GET", "/business-document-drafts/:draftId", 2],
     ["PATCH", "/business-document-drafts/:draftId", 2],
+    ["DELETE", "/business-document-drafts/:draftId", 2],
   ]);
 });

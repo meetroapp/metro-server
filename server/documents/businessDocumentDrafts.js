@@ -11,6 +11,7 @@ function sendResult(res, result) {
   if (result?.message) payload.message = result.message;
   if (result?.document !== undefined) payload.document = result.document;
   if (result?.documents !== undefined) payload.documents = result.documents;
+  if (result?.deletedDraftId !== undefined) payload.deletedDraftId = result.deletedDraftId;
   if (result?.currentVersion !== undefined) payload.currentVersion = result.currentVersion;
   if (result?.replayed) payload.replayed = true;
   res.setHeader?.("Cache-Control", "private, no-store");
@@ -69,6 +70,14 @@ function createBusinessDocumentDraftHandlers({
         env,
       })
     ),
+    delete: handle("delete_business_document_draft", (req) =>
+      draftService.deleteBusinessDocumentDraft({
+        pool: getPool(req),
+        authenticatedActor: req.user,
+        draftId: req.params.draftId,
+        expectedVersion: req.body?.expectedVersion,
+      })
+    ),
     list: handle("list_business_document_drafts", (req) =>
       draftService.listBusinessDocumentDrafts({
         pool: getPool(req),
@@ -104,6 +113,7 @@ function registerBusinessDocumentDraftRoutes({
   app.get("/business-document-drafts", authMiddleware, handlers.list);
   app.get("/business-document-drafts/:draftId", authMiddleware, handlers.get);
   app.patch("/business-document-drafts/:draftId", authMiddleware, handlers.update);
+  app.delete("/business-document-drafts/:draftId", authMiddleware, handlers.delete);
   return handlers;
 }
 

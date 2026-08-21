@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
   createBusinessDocumentDraft,
+  deleteBusinessDocumentDraft,
   getBusinessDocumentDraft,
   listBusinessDocumentDrafts,
   updateBusinessDocumentDraft,
@@ -97,6 +98,8 @@ function legacyInstruction(overrides = {}) {
 function createMemoryStore() {
   const documents = new Map();
   const commands = new Map();
+  const physicalMedia = new Set();
+  const authorityRecords = { jobs: 1, customers: 1, quotes: 1, invoices: 1, payments: 1, lifecycleEvents: 1 };
   let clock = 0;
   const now = () => new Date(Date.UTC(2026, 7, 21, 12, clock++)).toISOString();
   function commandResult(command, build) {
@@ -144,6 +147,7 @@ function createMemoryStore() {
           })),
         };
         documents.set(draft.id, { actorUserId, contractorProfileId, document });
+        document.photos.forEach((photo) => physicalMedia.add(photo.media.public_id));
         return { kind: "created", document };
       });
     },
@@ -178,6 +182,17 @@ function createMemoryStore() {
       const current = documents.get(draftId);
       return current?.actorUserId === actorUserId ? current.document : null;
     },
+    async delete({ actorUserId, draftId, expectedVersion }) {
+      const current = documents.get(draftId);
+      if (!current || current.actorUserId !== actorUserId || current.document.status !== "WORKING_DRAFT") {
+        return { kind: "not_found" };
+      }
+      if (current.document.version !== expectedVersion) {
+        return { kind: "version_conflict", currentVersion: current.document.version };
+      }
+      documents.delete(draftId);
+      return { kind: "deleted", deletedDraftId: draftId };
+    },
     async list({ actorUserId, query }) {
       return [...documents.values()]
         .filter((item) => item.actorUserId === actorUserId)
@@ -185,6 +200,8 @@ function createMemoryStore() {
         .filter((document) => !query.type || document.documentType === query.type)
         .filter((document) => !query.search || JSON.stringify(document).toLowerCase().includes(query.search.toLowerCase()));
     },
+    physicalMedia,
+    authorityRecords,
   };
 }
 
@@ -417,4 +434,85 @@ test("photo role and visibility remain independent", async () => {
     assert.equal(result.document.photos[0].role, role);
     assert.equal(result.document.photos[0].visibility, "PRIVATE_INTERNAL");
   }
+});
+
+test("owner deletes only the private working draft and association while governed authority remains untouched", async () => {
+  const store = createMemoryStore();
+  const created = await createBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, payload: payload(), idempotencyKey: KEY_ONE,
+    store, normalizeMediaCollection,
+  });
+  const authorityBefore = structuredClone(store.authorityRecords);
+  const result = await deleteBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, draftId: created.document.id,
+    expectedVersion: 1, store,
+  });
+  assert.equal(result.status, 200);
+  assert.equal(result.deletedDraftId, created.document.id);
+  assert.equal(store.documents.has(created.document.id), false);
+  assert.equal(store.physicalMedia.has(media().public_id), true);
+  assert.deepEqual(store.authorityRecords, authorityBefore);
+});
+
+test("delete fails closed for invalid, unknown, and another business draft", async () => {
+  const store = createMemoryStore();
+  const created = await createBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, payload: payload(), idempotencyKey: KEY_ONE,
+    store, normalizeMediaCollection,
+  });
+  const invalid = await deleteBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, draftId: "not-a-draft",
+    expectedVersion: 1, store,
+  });
+  const other = await deleteBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 2 }, draftId: created.document.id,
+    expectedVersion: 1, store,
+  });
+  const unknown = await deleteBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, draftId: "33333333-3333-4333-8333-333333333333",
+    expectedVersion: 1, store,
+  });
+  assert.equal(invalid.status, 400);
+  assert.equal(other.status, 404);
+  assert.equal(unknown.status, 404);
+  assert.equal(other.code, unknown.code);
+  assert.equal(store.documents.has(created.document.id), true);
+  store.documents.get(created.document.id).document.status = "ISSUED";
+  const nonWorking = await deleteBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, draftId: created.document.id,
+    expectedVersion: 1, store,
+  });
+  assert.equal(nonWorking.status, 404);
+  assert.equal(store.documents.has(created.document.id), true);
+  const noProfessionalProfile = await deleteBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 3 }, draftId: created.document.id,
+    expectedVersion: 1, store,
+  });
+  assert.equal(noProfessionalProfile.status, 403);
+});
+
+test("delete requires the current version and a repeated delete remains safely absent", async () => {
+  const store = createMemoryStore();
+  const created = await createBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, payload: payload(), idempotencyKey: KEY_ONE,
+    store, normalizeMediaCollection,
+  });
+  const stale = await deleteBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, draftId: created.document.id,
+    expectedVersion: 2, store,
+  });
+  assert.equal(stale.status, 409);
+  assert.equal(stale.currentVersion, 1);
+  assert.equal(store.documents.has(created.document.id), true);
+  const deleted = await deleteBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, draftId: created.document.id,
+    expectedVersion: 1, store,
+  });
+  const retry = await deleteBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, draftId: created.document.id,
+    expectedVersion: 1, store,
+  });
+  assert.equal(deleted.status, 200);
+  assert.equal(retry.status, 404);
+  assert.equal(store.documents.size, 0);
 });
