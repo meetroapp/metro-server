@@ -7,6 +7,9 @@ const {
   getBusinessDocumentCustomerPdf,
   listBusinessDocumentDeliveries,
 } = require("../server/documents/businessDocumentDeliveryService");
+const {
+  renderBusinessDocumentCustomerPdf,
+} = require("../server/documents/businessDocumentPdfRenderer");
 
 const DRAFT_ID = "11111111-1111-4111-8111-111111111111";
 const EMAIL_KEY = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -141,6 +144,27 @@ test("PDF rendering failure is governed before provider invocation and cannot cr
   assert.equal(result.code, "BUSINESS_DOCUMENT_PDF_RENDER_FAILED");
   assert.equal(result.delivery.state, "FAILED");
   assert.equal(result.delivery.failureCode, "BUSINESS_DOCUMENT_PDF_RENDER_FAILED");
+  assert.equal(providerCalls, 0);
+  assert.equal(store.events.some((event) => event.delivery.state === "DELIVERY_REQUESTED"), false);
+});
+
+test("customer photo timeout fails closed before the Email provider is invoked", async () => {
+  const store = memoryStore();
+  let providerCalls = 0;
+  const result = await deliverBusinessDocument({
+    ...deliveryInput({
+      pdfRenderer: (customerPackage) => renderBusinessDocumentCustomerPdf(customerPackage, {
+        timeoutMs: 5,
+        fetchImpl: async (_url, { signal }) => new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+        }),
+      }),
+    }),
+    store,
+    emailDelivery: { async sendBusinessDocumentEmail() { providerCalls += 1; return { accepted: true }; } },
+  });
+  assert.equal(result.status, 422);
+  assert.equal(result.code, "BUSINESS_DOCUMENT_PDF_RENDER_FAILED");
   assert.equal(providerCalls, 0);
   assert.equal(store.events.some((event) => event.delivery.state === "DELIVERY_REQUESTED"), false);
 });

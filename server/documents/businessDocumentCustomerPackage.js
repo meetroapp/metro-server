@@ -106,6 +106,14 @@ function businessLogo(business = {}) {
 function buildBusinessDocumentCustomerPackage(document, business = {}) {
   if (!document || !["QUOTE", "INVOICE"].includes(document.documentType)) return null;
   const content = document.content || {};
+  const isQuote = document.documentType === "QUOTE";
+  const projectObservation = isQuote ? cleanText(content.projectDescription, 12000) : "";
+  const projectScope = cleanText(
+    isQuote
+      ? content.recommendedSolution || content.projectDescription
+      : content.workPerformed || content.projectDescription,
+    12000
+  );
   const lineItems = safeRows(content);
   const computedSubtotalMinor = lineItems.reduce((sum, item) => sum + item.lineTotalMinor, 0);
   const subtotalMinor = optionalAmountMinor(content.subtotal) ?? computedSubtotalMinor;
@@ -149,7 +157,10 @@ function buildBusinessDocumentCustomerPackage(document, business = {}) {
     }),
     project: Object.freeze({
       title: cleanText(content.projectTitle, 500) || null,
-      scope: cleanText(content.recommendedSolution || content.projectDescription || content.workPerformed, 12000) || null,
+      scope: projectScope || null,
+      observation: projectObservation && projectObservation !== projectScope
+        ? projectObservation
+        : null,
     }),
     lineItems: Object.freeze(lineItems.map(Object.freeze)),
     subtotalMinor,
@@ -199,6 +210,7 @@ function customerPackageLines(customerPackage, customerMessage = "") {
     customerPackage.customer.name ? `Customer: ${customerPackage.customer.name}` : null,
     customerPackage.project.title ? `Project: ${customerPackage.project.title}` : null,
     customerPackage.project.scope ? `Scope of Work\n${customerPackage.project.scope}` : null,
+    customerPackage.project.observation ? `Observation\n${customerPackage.project.observation}` : null,
     ...customerPackage.lineItems.map((item) => `${item.description}: ${formatMoney(item.lineTotalMinor, customerPackage.currency)}`),
     `${customerPackage.document.type === "QUOTE" ? "Project Price" : "Total Due"}: ${formatMoney(customerPackage.totalMinor, customerPackage.currency)}`,
     customerPackage.paymentTerms ? `Deposit / Payment Terms\n${customerPackage.paymentTerms}` : null,

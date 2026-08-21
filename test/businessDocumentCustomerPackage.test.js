@@ -18,6 +18,7 @@ function document() {
       customerName: "Jack Smith",
       customerEmail: "jack@example.test",
       projectTitle: "Fan replacement",
+      projectDescription: "Existing fan housing shows visible wear.",
       recommendedSolution: "Replace the fan.",
       materialItems: [{ name: "Fan", total: "89.99" }],
       laborItems: [{ description: "Installation", total: "180" }],
@@ -45,6 +46,8 @@ test("customer package binds exact saved Quote agreement and excludes every priv
   assert.deepEqual(customerPackage.agreement.exclusions, ["Painting"]);
   assert.equal(customerPackage.photos.length, 1);
   assert.equal(customerPackage.photos[0].mediaId, "public-before");
+  assert.equal(customerPackage.project.observation, "Existing fan housing shows visible wear.");
+  assert.equal(customerPackage.project.scope, "Replace the fan.");
   assert.deepEqual(customerPackage.lineItems.map((item) => [item.description, item.lineTotalMinor]), [["Fan", 8999], ["Installation", 18000]]);
   assert.match(customerPackageHash(customerPackage), /^[0-9a-f]{64}$/);
   assert.doesNotMatch(JSON.stringify(customerPackage), /margin is private|private conversation|private-after/);

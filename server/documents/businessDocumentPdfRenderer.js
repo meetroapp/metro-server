@@ -1,6 +1,7 @@
 "use strict";
 
 const { jsPDF } = require("jspdf");
+const sharp = require("sharp");
 
 const PAGE = Object.freeze({ width: 612, height: 792, margin: 48, footerY: 766 });
 const COLOR = Object.freeze({
@@ -10,6 +11,8 @@ const COLOR = Object.freeze({
 const MAX_CUSTOMER_PHOTOS = 12;
 const MAX_IMAGE_BYTES = 12_000_000;
 const MAX_TOTAL_IMAGE_BYTES = 30_000_000;
+const MAX_IMAGE_PIXELS = 40_000_000;
+const MAX_NORMALIZED_DIMENSION = 2400;
 const IMAGE_TIMEOUT_MS = 8_000;
 const IMAGE_CONCURRENCY = 3;
 const IMAGE_MIME = new Set(["image/jpeg", "image/png", "image/webp"]);
@@ -41,6 +44,51 @@ function imageKind(bytes) {
   if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "JPEG";
   if (bytes.length >= 12 && Buffer.from(bytes.subarray(0, 4)).toString("ascii") === "RIFF" && Buffer.from(bytes.subarray(8, 12)).toString("ascii") === "WEBP") return "WEBP";
   return null;
+}
+
+async function normalizeCustomerImage(bytes, {
+  maximumBytes = MAX_IMAGE_BYTES,
+  maximumPixels = MAX_IMAGE_PIXELS,
+  maximumDimension = MAX_NORMALIZED_DIMENSION,
+} = {}) {
+  try {
+    const source = Buffer.from(bytes);
+    const metadata = await sharp(source, {
+      failOn: "error",
+      limitInputPixels: maximumPixels,
+      sequentialRead: true,
+    }).metadata();
+    const normalized = await sharp(source, {
+      failOn: "error",
+      limitInputPixels: maximumPixels,
+      sequentialRead: true,
+    })
+      .autoOrient()
+      .resize({
+        width: maximumDimension,
+        height: maximumDimension,
+        fit: "inside",
+        withoutEnlargement: true,
+      })
+      .flatten({ background: "#ffffff" })
+      .jpeg({ quality: 86, progressive: false, chromaSubsampling: "4:4:4" })
+      .toBuffer({ resolveWithObject: true });
+    if (normalized.data.byteLength > maximumBytes) {
+      throw new BusinessDocumentPdfRenderError("A normalized customer-visible photo is too large.", "image_too_large");
+    }
+    return Object.freeze({
+      bytes: new Uint8Array(normalized.data),
+      format: "JPEG",
+      mime: "image/jpeg",
+      width: normalized.info.width,
+      height: normalized.info.height,
+      sourceOrientation: Number(metadata.orientation || 1),
+      sourceByteLength: source.byteLength,
+    });
+  } catch (error) {
+    if (error instanceof BusinessDocumentPdfRenderError) throw error;
+    throw new BusinessDocumentPdfRenderError("A customer-visible photo could not be decoded safely.", "image_decode_invalid");
+  }
 }
 
 async function boundedBody(response, maximum) {
@@ -103,11 +151,11 @@ async function fetchCustomerImage(photo, {
     if (!format || (mime === "image/png" && format !== "PNG") || (mime === "image/jpeg" && format !== "JPEG") || (mime === "image/webp" && format !== "WEBP")) {
       throw new BusinessDocumentPdfRenderError("A customer-visible photo could not be decoded safely.", "image_decode_invalid");
     }
+    const normalized = await normalizeCustomerImage(bytes, { maximumBytes });
     return Object.freeze({
       ...photo,
-      bytes,
-      format,
-      dataUrl: `data:${mime};base64,${Buffer.from(bytes).toString("base64")}`,
+      ...normalized,
+      dataUrl: `data:${normalized.mime};base64,${Buffer.from(normalized.bytes).toString("base64")}`,
     });
   } catch (error) {
     if (error instanceof BusinessDocumentPdfRenderError) throw error;
@@ -135,8 +183,10 @@ async function prepareCustomerPhotos(customerPackage, options = {}) {
   const photos = customerPackage.photos || [];
   if (photos.length > MAX_CUSTOMER_PHOTOS) throw new BusinessDocumentPdfRenderError("Too many customer-visible photos were selected.", "image_count_exceeded");
   const prepared = await mapBounded(photos, options.concurrency || IMAGE_CONCURRENCY, (photo) => fetchCustomerImage(photo, options));
-  const totalBytes = prepared.reduce((sum, photo) => sum + photo.bytes.byteLength, 0);
-  if (totalBytes > (options.maximumTotalBytes || MAX_TOTAL_IMAGE_BYTES)) {
+  const maximumTotalBytes = options.maximumTotalBytes || MAX_TOTAL_IMAGE_BYTES;
+  const totalSourceBytes = prepared.reduce((sum, photo) => sum + photo.sourceByteLength, 0);
+  const totalNormalizedBytes = prepared.reduce((sum, photo) => sum + photo.bytes.byteLength, 0);
+  if (totalSourceBytes > maximumTotalBytes || totalNormalizedBytes > maximumTotalBytes) {
     throw new BusinessDocumentPdfRenderError("Customer-visible photos exceed the PDF preparation limit.", "image_total_exceeded");
   }
   return prepared;
@@ -162,62 +212,128 @@ function safeFilename(customerPackage) {
   return `${kind}-${reference}-v${customerPackage.document.version}.pdf`;
 }
 
-function renderPreparedCustomerPdf(customerPackage, photos, logo = null) {
-  const doc = new jsPDF({ unit: "pt", format: "letter", compress: false });
+function renderPreparedCustomerPdf(customerPackage, photos, logo = null, options = {}) {
+  const Pdf = options.jsPDFImpl || jsPDF;
+  const doc = new Pdf({ unit: "pt", format: "letter", compress: false });
   const contentWidth = PAGE.width - PAGE.margin * 2;
-  let y = PAGE.margin;
   const footerReserve = 44;
+  const contentBottom = PAGE.footerY - footerReserve;
+  const usablePageHeight = contentBottom - 60;
+  const layout = [];
+  let y = PAGE.margin;
 
+  function pageNumber() {
+    return doc.getCurrentPageInfo().pageNumber;
+  }
+  function record(name, page, start, end) {
+    layout.push(Object.freeze({ name, page, start, end }));
+  }
   function page() {
     doc.addPage();
-    y = PAGE.margin;
+    y = 34;
+    addText(doc, customerPackage.business.displayName, PAGE.margin, y, { size: 9, color: COLOR.muted, style: "bold" });
+    addText(doc, customerPackage.document.type, PAGE.width - PAGE.margin, y, { size: 9, color: COLOR.muted, style: "bold", align: "right" });
+    doc.setDrawColor(...COLOR.line);
+    doc.line(PAGE.margin, 42, PAGE.width - PAGE.margin, 42);
+    y = 60;
   }
   function ensureSpace(height) {
-    if (y + height > PAGE.footerY - footerReserve) page();
+    if (y + height <= contentBottom) return false;
+    page();
+    return true;
   }
   function section(title, body) {
     if (!body) return;
     const lines = doc.splitTextToSize(String(body), contentWidth);
-    ensureSpace(28 + lines.length * 12);
+    ensureSpace(28 + Math.min(lines.length, 2) * 12);
+    const startPage = pageNumber();
+    const startY = y;
     y = addText(doc, title, PAGE.margin, y, { size: 12, color: COLOR.ink, style: "bold" });
-    y = addText(doc, body, PAGE.margin, y + 3, { size: 9.5, maxWidth: contentWidth });
+    y += 3;
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(9.5);
+    doc.setTextColor(...COLOR.text);
+    for (const line of lines) {
+      ensureSpace(13);
+      doc.text(String(line), PAGE.margin, y);
+      y += 12;
+    }
     y += 8;
+    record(title, startPage, startY, y);
   }
   function bulletSection(title, values) {
     const present = (values || []).filter(Boolean);
     if (!present.length) return;
-    ensureSpace(34);
+    ensureSpace(46);
     y = addText(doc, title, PAGE.margin, y, { size: 12, color: COLOR.ink, style: "bold" });
     for (const value of present) {
       const lines = doc.splitTextToSize(String(value), contentWidth - 16);
-      ensureSpace(lines.length * 12 + 5);
+      ensureSpace(Math.min(lines.length, 2) * 12 + 5);
       addText(doc, "-", PAGE.margin + 4, y + 3, { size: 9.5 });
-      y = addText(doc, value, PAGE.margin + 16, y + 3, { size: 9.5, maxWidth: contentWidth - 16 });
+      for (const line of lines) {
+        ensureSpace(13);
+        addText(doc, line, PAGE.margin + 16, y + 3, { size: 9.5 });
+        y += 12;
+      }
     }
     y += 8;
   }
   function photoSection(title, role) {
     const group = photos.filter((photo) => photo.role === role);
     if (!group.length) return;
-    ensureSpace(138);
+    ensureSpace(88);
+    const startPage = pageNumber();
+    const startY = y;
     y = addText(doc, title, PAGE.margin, y, { size: 12, color: COLOR.ink, style: "bold" });
     y += 5;
     const gap = 10;
     const columns = 3;
     const width = (contentWidth - gap * (columns - 1)) / columns;
-    const height = 96;
+    const height = 52;
     for (let index = 0; index < group.length; index += columns) {
       ensureSpace(height + 12);
       group.slice(index, index + columns).forEach((photo, column) => {
-        const properties = doc.getImageProperties(photo.dataUrl);
-        const scale = Math.min(width / properties.width, height / properties.height);
-        const renderedWidth = properties.width * scale;
-        const renderedHeight = properties.height * scale;
+        const scale = Math.min(width / photo.width, height / photo.height);
+        const renderedWidth = photo.width * scale;
+        const renderedHeight = photo.height * scale;
         doc.addImage(photo.dataUrl, photo.format, PAGE.margin + column * (width + gap) + (width - renderedWidth) / 2, y + (height - renderedHeight) / 2, renderedWidth, renderedHeight, undefined, "FAST");
       });
       y += height + 10;
     }
     y += 4;
+    record(title, startPage, startY, y);
+  }
+  function summaryRows(entries, columns = 3) {
+    const width = contentWidth / columns;
+    const rows = [];
+    for (let index = 0; index < entries.length; index += columns) {
+      const cells = entries.slice(index, index + columns);
+      const height = Math.max(48, ...cells.map(([, value]) => 30 + doc.splitTextToSize(String(value), width - 16).length * 10));
+      rows.push({ cells, height, width });
+    }
+    return rows;
+  }
+  function summaryGrid(entries, columns = 3) {
+    if (!entries.length) return;
+    const rows = summaryRows(entries, columns);
+    const totalHeight = rows.reduce((sum, row) => sum + row.height, 0) + 8;
+    if (totalHeight <= usablePageHeight) ensureSpace(totalHeight);
+    const startPage = pageNumber();
+    const startY = y;
+    for (const row of rows) {
+      ensureSpace(row.height);
+      row.cells.forEach(([label, value], column) => {
+        const x = PAGE.margin + column * row.width;
+        doc.setDrawColor(...COLOR.line);
+        doc.setFillColor(...COLOR.fill);
+        doc.rect(x, y, row.width, row.height, "FD");
+        addText(doc, label, x + 8, y + 14, { size: 7, color: COLOR.muted, style: "bold" });
+        addText(doc, value, x + 8, y + 30, { size: 8.5, maxWidth: row.width - 16 });
+      });
+      y += row.height;
+    }
+    y += 8;
+    record("Customer footer summary", startPage, startY, y);
   }
 
   if (logo?.dataUrl) doc.addImage(logo.dataUrl, logo.format, PAGE.margin, y - 10, 34, 34, undefined, "FAST");
@@ -252,29 +368,72 @@ function renderPreparedCustomerPdf(customerPackage, photos, logo = null) {
   });
   y += metaHeight + 14;
 
+  section("Observation", customerPackage.project.observation);
   section(customerPackage.document.type === "QUOTE" ? "Scope of Work" : "Work Performed", customerPackage.project.scope);
   photoSection("Project Photos / Evidence", "GENERAL_EVIDENCE");
   photoSection("Before Photos", "BEFORE");
   photoSection("After Photos", "AFTER");
 
+  const financialRows = [
+    ["Subtotal", customerPackage.subtotalMinor],
+    customerPackage.discountMinor ? ["Discount", -customerPackage.discountMinor] : null,
+    customerPackage.taxMinor ? ["Tax", customerPackage.taxMinor] : null,
+    customerPackage.feesMinor ? ["Fees", customerPackage.feesMinor] : null,
+    customerPackage.document.type === "INVOICE" && customerPackage.paidMinor != null ? ["Amount paid", customerPackage.paidMinor] : null,
+  ].filter(Boolean);
+  const savedStatus = customerPackage.document.type === "QUOTE"
+    ? "Saved Draft - Not Issued"
+    : "Saved Draft - Not Issued or Paid";
+  const summaryEntries = customerPackage.document.type === "QUOTE"
+    ? [
+        ["Payment Terms", customerPackage.paymentTerms || "Confirm terms before delivery."],
+        ["Estimated Duration", customerPackage.estimatedDuration || "Not confirmed."],
+        ["Acceptance / Status", savedStatus],
+      ]
+    : [
+        ["Payment Terms", customerPackage.paymentTerms || "Not confirmed."],
+        ["Due Date", customerPackage.document.dueDate || "Not confirmed."],
+        ["Status", savedStatus],
+        ["Amount Paid", money(customerPackage.paidMinor || 0, customerPackage.currency)],
+        ["Balance Due", money(customerPackage.balanceMinor, customerPackage.currency)],
+      ];
+  const summaryCellWidth = contentWidth / 3;
+  const compactSummaryEntries = summaryEntries.filter(([, value]) =>
+    doc.splitTextToSize(String(value), summaryCellWidth - 16).length <= 4
+  );
+  const longSummaryEntries = summaryEntries.filter(([, value]) =>
+    doc.splitTextToSize(String(value), summaryCellWidth - 16).length > 4
+  );
+  const summaryColumns = Math.min(3, compactSummaryEntries.length || 1);
+  const summaryHeight = compactSummaryEntries.length
+    ? summaryRows(compactSummaryEntries, summaryColumns).reduce((sum, row) => sum + row.height, 0) + 8
+    : 0;
+  const pricingTailHeight = 62 + financialRows.length * 16 + 4 + summaryHeight;
+
   if (customerPackage.lineItems.length) {
-    ensureSpace(68);
     const showUnits = customerPackage.lineItems.some((item) => item.pricingPresentation !== "flat");
     const x = { description: PAGE.margin, quantity: 376, unit: 430, amount: 512 };
     const descriptionWidth = showUnits ? 300 : 420;
-    doc.setFillColor(...COLOR.fill);
-    doc.rect(PAGE.margin, y + 3, contentWidth, 22, "F");
-    addText(doc, "Description", x.description + 7, y + 17, { size: 7.5, color: COLOR.muted, style: "bold" });
-    if (showUnits) {
-      addText(doc, "Qty", x.quantity, y + 17, { size: 7.5, color: COLOR.muted, style: "bold" });
-      addText(doc, "Unit", x.unit, y + 17, { size: 7.5, color: COLOR.muted, style: "bold" });
+    const rowHeights = customerPackage.lineItems.map((item) => Math.max(22, doc.splitTextToSize(item.description, descriptionWidth).length * 12 + 8));
+    const allPricingHeight = 31 + rowHeights.reduce((sum, height) => sum + height + 3, 0) + 5 + pricingTailHeight;
+    if (allPricingHeight <= usablePageHeight) ensureSpace(allPricingHeight);
+    function tableHeader() {
+      doc.setFillColor(...COLOR.fill);
+      doc.rect(PAGE.margin, y + 3, contentWidth, 22, "F");
+      addText(doc, "Description", x.description + 7, y + 17, { size: 7.5, color: COLOR.muted, style: "bold" });
+      if (showUnits) {
+        addText(doc, "Qty", x.quantity, y + 17, { size: 7.5, color: COLOR.muted, style: "bold" });
+        addText(doc, "Unit", x.unit, y + 17, { size: 7.5, color: COLOR.muted, style: "bold" });
+      }
+      addText(doc, "Amount", x.amount, y + 17, { size: 7.5, color: COLOR.muted, style: "bold" });
+      y += 31;
     }
-    addText(doc, "Amount", x.amount, y + 17, { size: 7.5, color: COLOR.muted, style: "bold" });
-    y += 31;
-    for (const item of customerPackage.lineItems) {
-      const descriptionLines = doc.splitTextToSize(item.description, descriptionWidth);
-      const rowHeight = Math.max(22, descriptionLines.length * 12 + 8);
-      ensureSpace(rowHeight + 4);
+    tableHeader();
+    for (let index = 0; index < customerPackage.lineItems.length; index += 1) {
+      const item = customerPackage.lineItems[index];
+      const rowHeight = rowHeights[index];
+      const lastRow = index === customerPackage.lineItems.length - 1;
+      if (ensureSpace(rowHeight + 4 + (lastRow ? pricingTailHeight : 0))) tableHeader();
       addText(doc, item.description, x.description + 7, y + 10, { size: 8.8, maxWidth: descriptionWidth });
       if (item.pricingPresentation !== "flat") {
         addText(doc, String(item.quantity), x.quantity, y + 10, { size: 8.8 });
@@ -288,30 +447,25 @@ function renderPreparedCustomerPdf(customerPackage, photos, logo = null) {
     y += 5;
   }
 
-  ensureSpace(86);
+  ensureSpace(pricingTailHeight);
+  const pricingPage = pageNumber();
+  const pricingStart = y;
   doc.setDrawColor(...COLOR.ink);
   doc.setFillColor(...COLOR.fill);
   doc.rect(PAGE.margin, y, contentWidth, 48, "FD");
   addText(doc, customerPackage.document.type === "QUOTE" ? "PROJECT PRICE" : "TOTAL DUE", PAGE.margin + 28, y + 29, { size: 11, color: COLOR.ink, style: "bold" });
   addText(doc, money(customerPackage.document.type === "INVOICE" ? customerPackage.balanceMinor : customerPackage.totalMinor, customerPackage.currency), PAGE.width - PAGE.margin - 28, y + 31, { size: 22, color: COLOR.ink, style: "bold", align: "right" });
   y += 62;
-  const financialRows = [
-    ["Subtotal", customerPackage.subtotalMinor],
-    customerPackage.discountMinor ? ["Discount", -customerPackage.discountMinor] : null,
-    customerPackage.taxMinor ? ["Tax", customerPackage.taxMinor] : null,
-    customerPackage.feesMinor ? ["Fees", customerPackage.feesMinor] : null,
-    customerPackage.document.type === "INVOICE" && customerPackage.paidMinor != null ? ["Amount paid", customerPackage.paidMinor] : null,
-  ].filter(Boolean);
   for (const [label, amount] of financialRows) {
-    ensureSpace(18);
     addText(doc, label, PAGE.margin + 300, y, { size: 8.5, color: COLOR.muted });
     addText(doc, money(amount, customerPackage.currency), PAGE.width - PAGE.margin, y, { size: 8.5, style: "bold", align: "right" });
     y += 16;
   }
   y += 4;
+  record("Pricing totals", pricingPage, pricingStart, y);
+  summaryGrid(compactSummaryEntries, summaryColumns);
+  for (const [label, value] of longSummaryEntries) section(label, value);
 
-  section("Payment Terms", customerPackage.paymentTerms);
-  section("Estimated Duration", customerPackage.estimatedDuration);
   bulletSection("Project Conditions", customerPackage.conditions);
   const agreement = customerPackage.agreement || {};
   bulletSection("Not Included / Exclusions", [...new Set([...(customerPackage.exclusions || []), ...(agreement.exclusions || [])])]);
@@ -325,7 +479,6 @@ function renderPreparedCustomerPdf(customerPackage, photos, logo = null) {
   section("Acceptance Terms", agreement.acceptanceTerms);
   section("Notes", customerPackage.notes);
   section("Customer Message", customerPackage.customerMessage);
-  section("Acceptance / Status", customerPackage.document.type === "QUOTE" ? "Saved Draft - Not Issued" : "Saved Draft - Not Issued or Paid");
 
   const pages = doc.getNumberOfPages();
   for (let pageNumber = 1; pageNumber <= pages; pageNumber += 1) {
@@ -341,7 +494,11 @@ function renderPreparedCustomerPdf(customerPackage, photos, logo = null) {
     author: customerPackage.business.displayName,
     creator: "Meetro",
   });
-  return Buffer.from(doc.output("arraybuffer"));
+  return Object.freeze({
+    buffer: Buffer.from(doc.output("arraybuffer")),
+    pageCount: pages,
+    layout: Object.freeze(layout),
+  });
 }
 
 async function renderBusinessDocumentCustomerPdf(customerPackage, options = {}) {
@@ -356,7 +513,8 @@ async function renderBusinessDocumentCustomerPdf(customerPackage, options = {}) 
         logo = await fetchCustomerImage({ imageUrl: customerPackage.business.logoUrl }, { ...options, maximumBytes: 2_000_000 });
       } catch { /* business name remains the safe branding fallback */ }
     }
-    const buffer = renderPreparedCustomerPdf(customerPackage, photos, logo);
+    const rendered = renderPreparedCustomerPdf(customerPackage, photos, logo, options);
+    const buffer = rendered.buffer;
     return Object.freeze({
       buffer,
       base64: buffer.toString("base64"),
@@ -365,6 +523,7 @@ async function renderBusinessDocumentCustomerPdf(customerPackage, options = {}) 
       documentId: customerPackage.document.id,
       documentVersion: customerPackage.document.version,
       photoCount: photos.length,
+      pageCount: rendered.pageCount,
     });
   } catch (error) {
     if (error instanceof BusinessDocumentPdfRenderError) throw error;
@@ -380,9 +539,12 @@ module.exports = {
     IMAGE_TIMEOUT_MS,
     MAX_CUSTOMER_PHOTOS,
     MAX_IMAGE_BYTES,
+    MAX_IMAGE_PIXELS,
+    MAX_NORMALIZED_DIMENSION,
     MAX_TOTAL_IMAGE_BYTES,
     fetchCustomerImage,
     imageKind,
+    normalizeCustomerImage,
     prepareCustomerPhotos,
     renderPreparedCustomerPdf,
     safeFilename,
