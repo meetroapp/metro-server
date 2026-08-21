@@ -66,6 +66,7 @@ Current inventory:
 46. `202608190001_create_quick_quote_analysis_session_foundation.sql`
 47. `202608190002_expand_ask_meetro_analysis_continuation_review.sql`
 48. `202608210001_create_business_document_working_drafts.sql`
+49. `202608210002_create_business_document_delivery_foundation.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -78,6 +79,11 @@ noncanonical Quote/Invoice working drafts, independently governed media role and
 customer visibility, optimistic versions, and exact create/update idempotency.
 It creates no canonical Quote, Invoice, Job, delivery, approval, Payment,
 completion, or lifecycle record and does not make saved media customer-visible.
+
+`202608210002_create_business_document_delivery_foundation.sql` adds
+noncanonical, version-bound business-document delivery evidence for Email and
+governed Meetro Message channels. It does not issue, accept, pay, or close a
+canonical Quote, Invoice, or Job.
 
 `202608150001_activate_customer_safe_efr.sql` adds explicit, conservative
 customer visibility to append-only Finding and Recommendation versions and

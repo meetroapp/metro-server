@@ -94,6 +94,29 @@ test("verification email builder rejects invalid codes and never adds sensitive 
   assert.doesNotMatch(`${email.text}${email.html}`, /authorization|bearer|database|server error/i);
 });
 
+test("configured Resend delivery accepts a governed business-document PDF with provider idempotency", async () => {
+  let request;
+  const provider = createResendEmailProvider({
+    apiKey: "private-key",
+    from: "documents@example.test",
+    fetchImpl: async (_url, options) => {
+      request = { headers: options.headers, body: JSON.parse(options.body) };
+      return { ok: true, async json() { return { id: "resend-document-1" }; } };
+    },
+  });
+  const result = await provider.sendBusinessDocumentEmail({
+    recipientEmail: "jack@example.test",
+    subject: "Quote WQ-FAN",
+    text: "Customer-safe Quote",
+    html: "<p>Customer-safe Quote</p>",
+    idempotencyKey: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    attachment: { filename: "quote.pdf", content: "JVBERi0xLjQ=", contentType: "application/pdf" },
+  });
+  assert.equal(result.providerReference, "resend-document-1");
+  assert.equal(request.headers["Idempotency-Key"], "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+  assert.deepEqual(request.body.attachments, [{ filename: "quote.pdf", content: "JVBERi0xLjQ=", content_type: "application/pdf" }]);
+});
+
 test("Resend provider normalizes rejection, network failure, and timeout without raw details", async () => {
   const rejected = createResendEmailProvider({
     apiKey: "private-key",

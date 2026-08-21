@@ -88,6 +88,7 @@ function normalizeRows(value) {
 
 const CONTENT_TEXT_LIMITS = Object.freeze({
   customerName: 240,
+  customerEmail: 320,
   customerLocation: 600,
   serviceLocation: 600,
   projectTitle: 500,
@@ -108,8 +109,36 @@ const CONTENT_TEXT_LIMITS = Object.freeze({
   currency: 12,
 });
 const CONTENT_KEYS = new Set([
-  ...Object.keys(CONTENT_TEXT_LIMITS), "lineItems", "materialItems", "laborItems",
+  ...Object.keys(CONTENT_TEXT_LIMITS), "lineItems", "materialItems", "laborItems", "agreement",
 ]);
+
+const AGREEMENT_TEXT_LIMITS = Object.freeze({
+  additionalWorkTerms: 8000,
+  hiddenConditionsTerms: 8000,
+  diagnosticTerms: 8000,
+  customerResponsibilities: 8000,
+  warrantyTerms: 8000,
+  cancellationTerms: 8000,
+  acceptanceTerms: 8000,
+  preauthorizedAdditionalWorkLimit: 240,
+});
+const AGREEMENT_KEYS = new Set(["exclusions", ...Object.keys(AGREEMENT_TEXT_LIMITS)]);
+
+function normalizeAgreement(value) {
+  if (!onlyKeys(value, AGREEMENT_KEYS)) return null;
+  const exclusions = value.exclusions ?? [];
+  if (!Array.isArray(exclusions) || exclusions.length > 100) return null;
+  const normalizedExclusions = exclusions.map((item) => text(item, 3000));
+  if (normalizedExclusions.some((item) => item === null)) return null;
+  const agreement = { exclusions: normalizedExclusions.filter(Boolean) };
+  for (const [key, maximum] of Object.entries(AGREEMENT_TEXT_LIMITS)) {
+    if (!Object.hasOwn(value, key)) continue;
+    const normalized = text(value[key], maximum);
+    if (normalized === null) return null;
+    agreement[key] = normalized;
+  }
+  return agreement;
+}
 
 function normalizeContent(value, { partial = false } = {}) {
   if (!onlyKeys(value, CONTENT_KEYS)) return null;
@@ -125,6 +154,11 @@ function normalizeContent(value, { partial = false } = {}) {
     const rows = normalizeRows(value[key]);
     if (rows === null) return null;
     result[key] = rows;
+  }
+  if (Object.hasOwn(value, "agreement")) {
+    const agreement = normalizeAgreement(value.agreement);
+    if (!agreement) return null;
+    result.agreement = agreement;
   }
   if (!partial && JSON.stringify(result).length > 180000) return null;
   return result;
@@ -783,6 +817,7 @@ module.exports = {
     PHOTO_ROLES,
     PHOTO_VISIBILITIES,
     normalizeContent,
+    normalizeAgreement,
     normalizePhotos,
     normalizeWorkspace,
     publicProjection,

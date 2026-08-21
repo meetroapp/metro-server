@@ -1,6 +1,7 @@
 "use strict";
 
 const service = require("./businessDocumentDraftService");
+const deliveryServiceDefault = require("./businessDocumentDeliveryService");
 
 function sendResult(res, result) {
   const status = result?.status || 500;
@@ -11,6 +12,8 @@ function sendResult(res, result) {
   if (result?.message) payload.message = result.message;
   if (result?.document !== undefined) payload.document = result.document;
   if (result?.documents !== undefined) payload.documents = result.documents;
+  if (result?.delivery !== undefined) payload.delivery = result.delivery;
+  if (result?.deliveries !== undefined) payload.deliveries = result.deliveries;
   if (result?.deletedDraftId !== undefined) payload.deletedDraftId = result.deletedDraftId;
   if (result?.currentVersion !== undefined) payload.currentVersion = result.currentVersion;
   if (result?.replayed) payload.replayed = true;
@@ -22,6 +25,8 @@ function createBusinessDocumentDraftHandlers({
   getPool,
   sendPublicDatabaseError,
   draftService = service,
+  deliveryService = deliveryServiceDefault,
+  emailDelivery = null,
   env = process.env,
 } = {}) {
   if (typeof getPool !== "function") throw new TypeError("getPool must be a function.");
@@ -90,6 +95,27 @@ function createBusinessDocumentDraftHandlers({
         },
       })
     ),
+    deliver: handle("deliver_business_document_draft", (req) =>
+      deliveryService.deliverBusinessDocument({
+        pool: getPool(req),
+        authenticatedActor: req.user,
+        draftId: req.params.draftId,
+        expectedVersion: req.body?.expectedVersion,
+        idempotencyKey: req.headers?.["idempotency-key"],
+        channel: req.body?.channel,
+        recipientEmail: req.body?.recipientEmail,
+        subject: req.body?.subject,
+        customerMessage: req.body?.customerMessage,
+        emailDelivery: req.app?.locals?.emailDelivery || emailDelivery,
+      })
+    ),
+    deliveries: handle("list_business_document_deliveries", (req) =>
+      deliveryService.listBusinessDocumentDeliveries({
+        pool: getPool(req),
+        authenticatedActor: req.user,
+        draftId: req.params.draftId,
+      })
+    ),
   };
 }
 
@@ -99,6 +125,8 @@ function registerBusinessDocumentDraftRoutes({
   getPool,
   sendPublicDatabaseError,
   draftService = service,
+  deliveryService = deliveryServiceDefault,
+  emailDelivery = null,
   env = process.env,
 } = {}) {
   if (!app) throw new TypeError("An Express application is required.");
@@ -107,6 +135,8 @@ function registerBusinessDocumentDraftRoutes({
     getPool,
     sendPublicDatabaseError,
     draftService,
+    deliveryService,
+    emailDelivery,
     env,
   });
   app.post("/business-document-drafts", authMiddleware, handlers.create);
@@ -114,6 +144,8 @@ function registerBusinessDocumentDraftRoutes({
   app.get("/business-document-drafts/:draftId", authMiddleware, handlers.get);
   app.patch("/business-document-drafts/:draftId", authMiddleware, handlers.update);
   app.delete("/business-document-drafts/:draftId", authMiddleware, handlers.delete);
+  app.get("/business-document-drafts/:draftId/deliveries", authMiddleware, handlers.deliveries);
+  app.post("/business-document-drafts/:draftId/deliveries", authMiddleware, handlers.deliver);
   return handlers;
 }
 

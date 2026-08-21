@@ -27,10 +27,16 @@ test("routes pass only authenticated actor, governed payload, version, and idemp
     async getBusinessDocumentDraft(input) { calls.push(["get", input]); return { ok: true, status: 200, code: "LOADED", document: { id: "draft" } }; },
     async listBusinessDocumentDrafts(input) { calls.push(["list", input]); return { ok: true, status: 200, code: "LISTED", documents: [] }; },
   };
+  const deliveryService = {
+    async deliverBusinessDocument(input) { calls.push(["deliver", input]); return { ok: true, status: 202, code: "DELIVERY_REQUESTED", delivery: { id: "delivery" } }; },
+    async listBusinessDocumentDeliveries(input) { calls.push(["deliveries", input]); return { ok: true, status: 200, code: "DELIVERIES", deliveries: [] }; },
+  };
   const handlers = createBusinessDocumentDraftHandlers({
     getPool: () => ({ pool: true }),
     sendPublicDatabaseError: () => { throw new Error("unexpected"); },
     draftService,
+    deliveryService,
+    emailDelivery: { providerName: "test" },
     env: { marker: true },
   });
   const req = { user: { id: 7 }, body: { content: {} }, params: { draftId: "draft-id" }, query: { search: "Jack" }, headers: { "idempotency-key": "key" } };
@@ -52,6 +58,10 @@ test("routes pass only authenticated actor, governed payload, version, and idemp
   assert.deepEqual(calls[3][1].query, { search: "Jack", type: undefined, status: undefined, time: undefined });
   assert.equal(calls[4][1].expectedVersion, 3);
   assert.equal(deleteRes.body.deletedDraftId, "draft-id");
+  await handlers.deliver({ ...req, body: { expectedVersion: 3, channel: "EMAIL", recipientEmail: "jack@example.test" }, app: { locals: {} } }, response());
+  await handlers.deliveries(req, response());
+  assert.equal(calls[5][1].emailDelivery.providerName, "test");
+  assert.equal(calls[6][1].draftId, "draft-id");
 });
 
 test("route registration exposes authenticated create/list/get/update/delete endpoints", () => {
@@ -66,12 +76,15 @@ test("route registration exposes authenticated create/list/get/update/delete end
     createBusinessDocumentDraft() {}, updateBusinessDocumentDraft() {}, deleteBusinessDocumentDraft() {},
     getBusinessDocumentDraft() {}, listBusinessDocumentDrafts() {},
   };
-  registerBusinessDocumentDraftRoutes({ app, authMiddleware() {}, getPool() {}, sendPublicDatabaseError() {}, draftService });
+  const deliveryService = { deliverBusinessDocument() {}, listBusinessDocumentDeliveries() {} };
+  registerBusinessDocumentDraftRoutes({ app, authMiddleware() {}, getPool() {}, sendPublicDatabaseError() {}, draftService, deliveryService });
   assert.deepEqual(routes, [
     ["POST", "/business-document-drafts", 2],
     ["GET", "/business-document-drafts", 2],
     ["GET", "/business-document-drafts/:draftId", 2],
     ["PATCH", "/business-document-drafts/:draftId", 2],
     ["DELETE", "/business-document-drafts/:draftId", 2],
+    ["GET", "/business-document-drafts/:draftId/deliveries", 2],
+    ["POST", "/business-document-drafts/:draftId/deliveries", 2],
   ]);
 });

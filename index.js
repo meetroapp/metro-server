@@ -976,6 +976,7 @@ registerBusinessDocumentDraftRoutes({
   authMiddleware,
   getPool,
   sendPublicDatabaseError,
+  emailDelivery,
 });
 
 app.get("/health", (req, res) => {

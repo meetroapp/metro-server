@@ -43,6 +43,7 @@ function payload(overrides = {}) {
     jobId: null,
     content: {
       customerName: "Jack Smith",
+      customerEmail: "jack@example.test",
       projectTitle: "Fan replacement",
       projectDescription: "Replace the existing fan.",
       lineItems: [],
@@ -52,6 +53,17 @@ function payload(overrides = {}) {
       terms: "",
       estimatedDuration: "",
       notes: "",
+      agreement: {
+        exclusions: ["Painting"],
+        additionalWorkTerms: "Extra work requires additional authorization.",
+        hiddenConditionsTerms: "Hidden conditions are outside the original price.",
+        diagnosticTerms: "Diagnostic time remains billable.",
+        customerResponsibilities: "Provide safe access.",
+        warrantyTerms: "Workmanship warranty as stated here.",
+        cancellationTerms: "Rescheduling requires notice.",
+        acceptanceTerms: "Acceptance applies to this scope and version.",
+        preauthorizedAdditionalWorkLimit: "$150",
+      },
     },
     workspace: {
       activeDocument: "QUOTE",
@@ -215,6 +227,7 @@ test("create saves one private noncanonical Quote draft with nullable Job and go
   assert.equal(result.document.status, "WORKING_DRAFT");
   assert.equal(result.document.jobId, null);
   assert.equal(result.document.content.customerName, "Jack Smith");
+  assert.deepEqual(result.document.content.agreement.exclusions, ["Painting"]);
   assert.equal(result.document.workspace.privateReminders[0].text, "Bring a ladder");
   assert.equal(result.document.photos[0].role, "BEFORE");
   assert.equal(result.document.photos[0].visibility, "PRIVATE_INTERNAL");
@@ -222,6 +235,33 @@ test("create saves one private noncanonical Quote draft with nullable Job and go
   assert.equal(result.document.photos[0].media.customer_visible_by_default, false);
   assert.equal(result.document.issuedAt, undefined);
   assert.equal(result.document.approval, undefined);
+});
+
+test("Quote agreement terms persist as professional-controlled working-draft content and bind to each saved version", async () => {
+  const store = createMemoryStore();
+  const created = await createBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, payload: payload(), idempotencyKey: KEY_ONE,
+    store, normalizeMediaCollection,
+  });
+  assert.equal(created.document.version, 1);
+  assert.equal(created.document.content.agreement.hiddenConditionsTerms, "Hidden conditions are outside the original price.");
+  const revisedPayload = payload({
+    content: {
+      ...payload().content,
+      agreement: {
+        ...payload().content.agreement,
+        hiddenConditionsTerms: "Concealed wiring requires separate authorization.",
+      },
+    },
+  });
+  const revised = await updateBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, draftId: created.document.id,
+    payload: { ...revisedPayload, expectedVersion: 1 }, idempotencyKey: KEY_TWO,
+    store, normalizeMediaCollection,
+  });
+  assert.equal(revised.document.version, 2);
+  assert.equal(revised.document.content.agreement.hiddenConditionsTerms, "Concealed wiring requires separate authorization.");
+  assert.equal(created.document.content.agreement.hiddenConditionsTerms, "Hidden conditions are outside the original price.");
 });
 
 test("R2 backend accepts old-client create and update payloads and safely expands legacy turns", async () => {
