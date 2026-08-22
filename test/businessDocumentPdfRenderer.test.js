@@ -72,7 +72,7 @@ test("professional saved Quote PDF renders the deterministic parity fixture with
   assert.equal(artifact.contentType, "application/pdf");
   assert.equal(artifact.filename, "quote-WQ-TEST-PARITY-v10.pdf");
   assert.equal(artifact.photoCount, 3);
-  for (const value of ["Handyman LLC", "WQ-TEST-PARITY", "Jack Smith", "Ceiling Fan Replacement", "Observation", "Existing fan shows visible wear", "Scope of Work", "Project Photos / Evidence", "Before Photos", "After Photos", "Payment Terms", "Confirm terms before delivery", "Estimated Duration", "Not confirmed", "Additional Work / Change Orders", "Saved Draft - Not Issued"]) {
+  for (const value of ["Handyman LLC", "WQ-TEST-PARITY", "Jack Smith", "Ceiling Fan Replacement", "Observation", "Existing fan shows visible wear", "Scope of Work", "Project Photos / Evidence", "Before Photos", "After Photos", "Payment Terms", "Confirm terms before delivery", "Estimated Duration", "Not confirmed", "Additional Work / Change Orders", "Ready for Customer Review"]) {
     assert.match(pdfText, new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
   assert.doesNotMatch(pdfText, /Labor|\$0\.00|res\.cloudinary\.com|private margin|private conversation|private\.png/);
@@ -92,7 +92,7 @@ test("professional saved Invoice PDF preserves due and not-paid truth", async ()
   for (const value of ["Payment Terms", "Due Date", "Amount Paid", "Balance Due", "Not confirmed"] ) {
     assert.match(pdfText, new RegExp(value));
   }
-  assert.match(pdfText, /Not Issued or Paid/);
+  assert.match(pdfText, /Ready for Customer Review/);
 });
 
 async function orientedJpeg(orientation) {
@@ -197,7 +197,7 @@ test("pricing totals and footer summary remain together without clipping while l
   const longPackage = buildBusinessDocumentCustomerPackage(long, { business_name: "Handyman LLC" });
   const longArtifact = await renderBusinessDocumentCustomerPdf(longPackage);
   assert.equal(longArtifact.pageCount > 1, true);
-  assert.match(longArtifact.buffer.toString("latin1"), /Saved Draft - Not Issued/);
+  assert.match(longArtifact.buffer.toString("latin1"), /Ready for Customer Review/);
 });
 
 test("zero, one, three, and many customer photos paginate deterministically without clipping pricing or the footer", async () => {
@@ -215,7 +215,7 @@ test("zero, one, three, and many customer photos paginate deterministically with
     assert.equal(artifact.photoCount, count);
     assert.equal(artifact.pageCount >= 1, true);
     assert.match(artifact.buffer.toString("latin1"), /PROJECT PRICE/);
-    assert.match(artifact.buffer.toString("latin1"), /Saved Draft - Not Issued/);
+    assert.match(artifact.buffer.toString("latin1"), /Ready for Customer Review/);
   }
 
   const excessive = fixture();

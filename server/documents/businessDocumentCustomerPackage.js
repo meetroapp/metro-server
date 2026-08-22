@@ -206,7 +206,7 @@ function customerPackageLines(customerPackage, customerMessage = "") {
   const sections = [
     customerPackage.business.displayName,
     `${customerPackage.document.type === "QUOTE" ? "QUOTE + SERVICE AGREEMENT" : "INVOICE"} ${customerPackage.document.reference}`,
-    `Saved document version ${customerPackage.document.version} · Not issued`,
+    `Ready for customer review · Version ${customerPackage.document.version}`,
     customerPackage.customer.name ? `Customer: ${customerPackage.customer.name}` : null,
     customerPackage.project.title ? `Project: ${customerPackage.project.title}` : null,
     customerPackage.project.scope ? `Scope of Work\n${customerPackage.project.scope}` : null,

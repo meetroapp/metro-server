@@ -342,7 +342,7 @@ function renderPreparedCustomerPdf(customerPackage, photos, logo = null, options
   y += 30;
   const contact = [customerPackage.business.phone, customerPackage.business.email, customerPackage.business.website, customerPackage.business.location].filter(Boolean).join("  |  ");
   if (contact) y = addText(doc, contact, PAGE.margin, y, { size: 8.5, color: COLOR.muted, maxWidth: contentWidth });
-  addText(doc, `SAVED DRAFT  |  VERSION ${customerPackage.document.version}`, PAGE.width - PAGE.margin, y, { size: 9, color: COLOR.accent, style: "bold", align: "right" });
+  addText(doc, `READY FOR CUSTOMER REVIEW  |  VERSION ${customerPackage.document.version}`, PAGE.width - PAGE.margin, y, { size: 9, color: COLOR.accent, style: "bold", align: "right" });
   y += 8;
   doc.setDrawColor(...COLOR.ink);
   doc.setLineWidth(1.2);
@@ -381,9 +381,7 @@ function renderPreparedCustomerPdf(customerPackage, photos, logo = null, options
     customerPackage.feesMinor ? ["Fees", customerPackage.feesMinor] : null,
     customerPackage.document.type === "INVOICE" && customerPackage.paidMinor != null ? ["Amount paid", customerPackage.paidMinor] : null,
   ].filter(Boolean);
-  const savedStatus = customerPackage.document.type === "QUOTE"
-    ? "Saved Draft - Not Issued"
-    : "Saved Draft - Not Issued or Paid";
+  const savedStatus = "Ready for Customer Review";
   const summaryEntries = customerPackage.document.type === "QUOTE"
     ? [
         ["Payment Terms", customerPackage.paymentTerms || "Confirm terms before delivery."],
@@ -490,7 +488,7 @@ function renderPreparedCustomerPdf(customerPackage, photos, logo = null, options
   }
   doc.setProperties({
     title: `${customerPackage.document.type} ${customerPackage.document.reference}`,
-    subject: `Saved document version ${customerPackage.document.version} - Not issued`,
+    subject: `Ready for customer review - version ${customerPackage.document.version}`,
     author: customerPackage.business.displayName,
     creator: "Meetro",
   });
