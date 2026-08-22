@@ -225,7 +225,7 @@ function normalizeInstruction(value, documentType) {
 }
 
 function normalizeWorkspace(value, documentType) {
-  const allowed = new Set(["instructions", "manualOverrides", "privateReminders", "activeDocument"]);
+  const allowed = new Set(["instructions", "manualOverrides", "privateReminders", "activeDocument", "jobAnalysisSessionId"]);
   if (!onlyKeys(value, allowed)) return null;
   const instructions = value.instructions ?? [];
   if (!Array.isArray(instructions) || instructions.length > MAX_INSTRUCTIONS) return null;
@@ -242,11 +242,23 @@ function normalizeWorkspace(value, documentType) {
     return id && reminder ? { id, text: reminder } : null;
   });
   if (privateReminders.some((item) => !item)) return null;
+
+  const hasJobAnalysisSessionId =
+    value.jobAnalysisSessionId !== undefined &&
+    value.jobAnalysisSessionId !== null &&
+    String(value.jobAnalysisSessionId).trim() !== "";
+  const jobAnalysisSessionId = hasJobAnalysisSessionId
+    ? uuid(value.jobAnalysisSessionId)
+    : null;
+
+  if (hasJobAnalysisSessionId && !jobAnalysisSessionId) return null;
+
   return {
     activeDocument: documentType,
     instructions: normalizedInstructions,
     manualOverrides,
     privateReminders,
+    ...(jobAnalysisSessionId ? { jobAnalysisSessionId } : {}),
   };
 }
 
@@ -445,6 +457,20 @@ async function jobAssociationAllowed(client, actorUserId, jobId) {
   return Boolean(result.rows[0]);
 }
 
+async function jobAnalysisSessionOwned(client, actorUserId, sessionId) {
+  if (!sessionId) return true;
+  const result = await client.query(
+    `/* business_document:job_analysis_session_authority */
+     SELECT id
+     FROM quick_quote_analysis_sessions
+     WHERE id = $1
+       AND actor_user_id = $2
+     LIMIT 1`,
+    [sessionId, actorUserId]
+  );
+  return Boolean(result.rows[0]);
+}
+
 async function loadPhotos(client, documentId) {
   const result = await client.query(
     `/* business_document:load_photos */
@@ -559,6 +585,9 @@ const sqlStore = Object.freeze({
   validateJobAssociation(pool, actorUserId, jobId) {
     return jobAssociationAllowed(pool, actorUserId, jobId);
   },
+  validateJobAnalysisSessionOwnership(pool, actorUserId, sessionId) {
+    return jobAnalysisSessionOwned(pool, actorUserId, sessionId);
+  },
   create({ pool, actorUserId, contractorProfileId, command, draft }) {
     return withTransaction(pool, async (client) => {
       const reserved = await reserveCommand(client, command);
@@ -568,6 +597,14 @@ const sqlStore = Object.freeze({
       if (!(await jobAssociationAllowed(client, actorUserId, draft.jobId))) {
         await cancelCommand(client, reserved.id);
         return { kind: "job_unavailable" };
+      }
+      if (!(await jobAnalysisSessionOwned(
+        client,
+        actorUserId,
+        draft.workspace.jobAnalysisSessionId
+      ))) {
+        await cancelCommand(client, reserved.id);
+        return { kind: "analysis_unavailable" };
       }
       await client.query(
         `/* business_document:create */
@@ -598,9 +635,21 @@ const sqlStore = Object.freeze({
         await cancelCommand(client, reserved.id);
         return { kind: "version_conflict", currentVersion: current.version };
       }
-      if (current.documentType !== draft.documentType || !(await jobAssociationAllowed(client, actorUserId, draft.jobId))) {
+      if (current.documentType !== draft.documentType) {
         await cancelCommand(client, reserved.id);
-        return { kind: current.documentType !== draft.documentType ? "type_conflict" : "job_unavailable" };
+        return { kind: "type_conflict" };
+      }
+      if (!(await jobAssociationAllowed(client, actorUserId, draft.jobId))) {
+        await cancelCommand(client, reserved.id);
+        return { kind: "job_unavailable" };
+      }
+      if (!(await jobAnalysisSessionOwned(
+        client,
+        actorUserId,
+        draft.workspace.jobAnalysisSessionId
+      ))) {
+        await cancelCommand(client, reserved.id);
+        return { kind: "analysis_unavailable" };
       }
       await client.query(
         `/* business_document:update */
@@ -677,6 +726,7 @@ function outcome(result, successCode, successStatus) {
   if (result.kind === "version_conflict") return failure(409, "BUSINESS_DOCUMENT_VERSION_CONFLICT", "A newer saved version exists.", { currentVersion: result.currentVersion });
   if (result.kind === "type_conflict") return failure(409, "BUSINESS_DOCUMENT_TYPE_CONFLICT", "The saved document type cannot be changed.");
   if (result.kind === "job_unavailable") return failure(409, "BUSINESS_DOCUMENT_JOB_CONFLICT", "The selected Job is no longer available for this document.");
+  if (result.kind === "analysis_unavailable") return failure(409, "BUSINESS_DOCUMENT_JOB_ANALYSIS_CONFLICT", "The selected private Job Analysis session is unavailable.");
   if (result.kind === "not_found") return failure(404, "BUSINESS_DOCUMENT_NOT_FOUND", "The working document was not found.");
   return {
     ok: true,
@@ -695,6 +745,19 @@ async function createBusinessDocumentDraft(input = {}) {
   if (!context?.contractor_profile_id) return failure(403, "BUSINESS_DOCUMENT_AUTHORITY_REQUIRED", "A professional business profile is required.");
   if (!(await store.validateJobAssociation(input.pool, validated.actorId, validated.jobId))) {
     return failure(409, "BUSINESS_DOCUMENT_JOB_CONFLICT", "The selected Job is not available to this professional.");
+  }
+  if (
+    validated.workspace.jobAnalysisSessionId &&
+    (
+      typeof store.validateJobAnalysisSessionOwnership !== "function" ||
+      !(await store.validateJobAnalysisSessionOwnership(
+        input.pool,
+        validated.actorId,
+        validated.workspace.jobAnalysisSessionId
+      ))
+    )
+  ) {
+    return failure(409, "BUSINESS_DOCUMENT_JOB_ANALYSIS_CONFLICT", "The selected private Job Analysis session is unavailable.");
   }
   const photos = normalizePhotos(validated.rawPhotos, {
     env: input.env,
@@ -737,6 +800,19 @@ async function updateBusinessDocumentDraft(input = {}) {
   if (!context?.contractor_profile_id) return failure(403, "BUSINESS_DOCUMENT_AUTHORITY_REQUIRED", "A professional business profile is required.");
   if (!(await store.validateJobAssociation(input.pool, validated.actorId, validated.jobId))) {
     return failure(409, "BUSINESS_DOCUMENT_JOB_CONFLICT", "The selected Job is not available to this professional.");
+  }
+  if (
+    validated.workspace.jobAnalysisSessionId &&
+    (
+      typeof store.validateJobAnalysisSessionOwnership !== "function" ||
+      !(await store.validateJobAnalysisSessionOwnership(
+        input.pool,
+        validated.actorId,
+        validated.workspace.jobAnalysisSessionId
+      ))
+    )
+  ) {
+    return failure(409, "BUSINESS_DOCUMENT_JOB_ANALYSIS_CONFLICT", "The selected private Job Analysis session is unavailable.");
   }
   const photos = normalizePhotos(validated.rawPhotos, {
     env: input.env,

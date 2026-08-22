@@ -15,6 +15,9 @@ const JOB_TWO = "22222222-2222-4222-8222-222222222222";
 const KEY_ONE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const KEY_TWO = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const KEY_THREE = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const SESSION_ONE = "33333333-3333-4333-8333-333333333333";
+const SESSION_TWO = "44444444-4444-4444-8444-444444444444";
+const SESSION_MISSING = "55555555-5555-4555-8555-555555555555";
 
 function media(publicId = "meetro/businesses/10/quote-drafts/fan") {
   return {
@@ -111,6 +114,10 @@ function createMemoryStore() {
   const documents = new Map();
   const commands = new Map();
   const physicalMedia = new Set();
+  const analysisSessions = new Map([
+    [SESSION_ONE, 1],
+    [SESSION_TWO, 2],
+  ]);
   const authorityRecords = { jobs: 1, customers: 1, quotes: 1, invoices: 1, payments: 1, lifecycleEvents: 1 };
   let clock = 0;
   const now = () => new Date(Date.UTC(2026, 7, 21, 12, clock++)).toISOString();
@@ -133,6 +140,9 @@ function createMemoryStore() {
     },
     async validateJobAssociation(_pool, actorUserId, jobId) {
       return !jobId || (actorUserId === 1 && jobId === JOB_ONE) || (actorUserId === 2 && jobId === JOB_TWO);
+    },
+    async validateJobAnalysisSessionOwnership(_pool, actorUserId, sessionId) {
+      return !sessionId || analysisSessions.get(sessionId) === actorUserId;
     },
     async create({ actorUserId, contractorProfileId, command, draft }) {
       return commandResult(command, () => {
@@ -461,6 +471,150 @@ test("canonical Job association is nullable but a mismatched Job fails governed"
   assert.equal(associated.document.jobId, JOB_ONE);
   assert.equal(mismatched.status, 409);
   assert.equal(mismatched.code, "BUSINESS_DOCUMENT_JOB_CONFLICT");
+});
+
+test("owned private Job Analysis session round-trips with the working document", async () => {
+  const store = createMemoryStore();
+  const source = payload({
+    photos: [],
+    workspace: {
+      ...payload().workspace,
+      jobAnalysisSessionId: SESSION_ONE,
+    },
+  });
+
+  const created = await createBusinessDocumentDraft({
+    pool: {},
+    authenticatedActor: { id: 1 },
+    payload: source,
+    idempotencyKey: KEY_ONE,
+    store,
+    normalizeMediaCollection,
+  });
+
+  assert.equal(created.status, 201);
+  assert.equal(
+    created.document.workspace.jobAnalysisSessionId,
+    SESSION_ONE
+  );
+
+  const reopened = await getBusinessDocumentDraft({
+    pool: {},
+    authenticatedActor: { id: 1 },
+    draftId: created.document.id,
+    store,
+  });
+
+  assert.equal(
+    reopened.document.workspace.jobAnalysisSessionId,
+    SESSION_ONE
+  );
+  assert.equal(reopened.document.jobId, null);
+});
+
+test("foreign or missing private Job Analysis sessions fail closed before document persistence", async () => {
+  for (const sessionId of [SESSION_TWO, SESSION_MISSING]) {
+    const store = createMemoryStore();
+
+    const result = await createBusinessDocumentDraft({
+      pool: {},
+      authenticatedActor: { id: 1 },
+      payload: payload({
+        photos: [],
+        workspace: {
+          ...payload().workspace,
+          jobAnalysisSessionId: sessionId,
+        },
+      }),
+      idempotencyKey: KEY_ONE,
+      store,
+      normalizeMediaCollection,
+    });
+
+    assert.equal(result.status, 409);
+    assert.equal(
+      result.code,
+      "BUSINESS_DOCUMENT_JOB_ANALYSIS_CONFLICT"
+    );
+    assert.equal(store.documents.size, 0);
+  }
+
+  const store = createMemoryStore();
+  const created = await createBusinessDocumentDraft({
+    pool: {},
+    authenticatedActor: { id: 1 },
+    payload: payload({
+      photos: [],
+      workspace: {
+        ...payload().workspace,
+        jobAnalysisSessionId: SESSION_ONE,
+      },
+    }),
+    idempotencyKey: KEY_ONE,
+    store,
+    normalizeMediaCollection,
+  });
+
+  const rejected = await updateBusinessDocumentDraft({
+    pool: {},
+    authenticatedActor: { id: 1 },
+    draftId: created.document.id,
+    payload: {
+      ...payload({
+        photos: [],
+        workspace: {
+          ...payload().workspace,
+          jobAnalysisSessionId: SESSION_TWO,
+        },
+      }),
+      expectedVersion: created.document.version,
+    },
+    idempotencyKey: KEY_TWO,
+    store,
+    normalizeMediaCollection,
+  });
+
+  assert.equal(rejected.status, 409);
+  assert.equal(
+    rejected.code,
+    "BUSINESS_DOCUMENT_JOB_ANALYSIS_CONFLICT"
+  );
+
+  const reopened = await getBusinessDocumentDraft({
+    pool: {},
+    authenticatedActor: { id: 1 },
+    draftId: created.document.id,
+    store,
+  });
+
+  assert.equal(reopened.document.version, 1);
+  assert.equal(
+    reopened.document.workspace.jobAnalysisSessionId,
+    SESSION_ONE
+  );
+});
+
+test("malformed Job Analysis session identity is rejected as an invalid workspace", async () => {
+  const store = createMemoryStore();
+
+  const result = await createBusinessDocumentDraft({
+    pool: {},
+    authenticatedActor: { id: 1 },
+    payload: payload({
+      photos: [],
+      workspace: {
+        ...payload().workspace,
+        jobAnalysisSessionId: "not-a-session-id",
+      },
+    }),
+    idempotencyKey: KEY_ONE,
+    store,
+    normalizeMediaCollection,
+  });
+
+  assert.equal(result.status, 400);
+  assert.equal(result.code, "BUSINESS_DOCUMENT_INVALID");
+  assert.equal(store.documents.size, 0);
 });
 
 test("photo role and visibility remain independent", async () => {
