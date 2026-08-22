@@ -68,6 +68,43 @@ test("customer package binds exact saved Quote agreement and excludes every priv
   assert.match(Buffer.from(email.attachment.content, "base64").toString("utf8"), /^%PDF-professional/);
 });
 
+test("customer email orders visible photos as General Evidence, Before, then After", () => {
+  const source = document();
+  source.photos = [
+    { id: "public-after", name: "after.jpg", role: "AFTER", visibility: "CUSTOMER_VISIBLE", media: { secure_url: "https://res.cloudinary.com/demo/after.jpg" } },
+    { id: "public-general", name: "general.jpg", role: "GENERAL_EVIDENCE", visibility: "CUSTOMER_VISIBLE", media: { secure_url: "https://res.cloudinary.com/demo/general.jpg" } },
+    { id: "public-before", name: "before.jpg", role: "BEFORE", visibility: "CUSTOMER_VISIBLE", media: { secure_url: "https://res.cloudinary.com/demo/before.jpg" } },
+  ];
+
+  const customerPackage = buildBusinessDocumentCustomerPackage(
+    source,
+    { business_name: "Handyman LLC" }
+  );
+
+  const email = buildCustomerPackageEmail(customerPackage, {
+    customerMessage: "Please review.",
+    pdfArtifact: {
+      filename: "quote-WQ-FAN-v3.pdf",
+      base64: Buffer.from("%PDF-professional").toString("base64"),
+      contentType: "application/pdf",
+    },
+  });
+
+  const generalIndex = email.html.indexOf("general.jpg");
+  const beforeIndex = email.html.indexOf("before.jpg");
+  const afterIndex = email.html.indexOf("after.jpg");
+
+  assert.ok(generalIndex >= 0);
+  assert.ok(beforeIndex >= 0);
+  assert.ok(afterIndex >= 0);
+  assert.ok(generalIndex < beforeIndex);
+  assert.ok(beforeIndex < afterIndex);
+
+  assert.match(email.html, /GENERAL EVIDENCE/);
+  assert.match(email.html, /BEFORE/);
+  assert.match(email.html, /AFTER/);
+});
+
 test("customer package excludes synthetic zero-dollar pricing rows", () => {
   const source = document();
   source.content.laborItems.unshift({ description: "Labor", total: "0" });

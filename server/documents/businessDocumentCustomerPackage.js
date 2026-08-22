@@ -244,9 +244,18 @@ function buildCustomerPackageEmail(customerPackage, { subject, customerMessage, 
     throw new TypeError("A rendered saved-version PDF artifact is required.");
   }
   const lines = customerPackageLines(customerPackage, customerMessage);
-  const imageHtml = customerPackage.photos.map((photo) =>
-    `<figure><img src="${escapeHtml(photo.imageUrl)}" alt="${escapeHtml(photo.role.replaceAll("_", " "))} project evidence" style="max-width:240px;height:auto"><figcaption>${escapeHtml(photo.role.replaceAll("_", " "))}</figcaption></figure>`
-  ).join("");
+  const photoRoleOrder = Object.freeze({
+    GENERAL_EVIDENCE: 0,
+    BEFORE: 1,
+    AFTER: 2,
+  });
+  const imageHtml = [...customerPackage.photos]
+    .sort((left, right) =>
+      (photoRoleOrder[left.role] ?? 99) - (photoRoleOrder[right.role] ?? 99)
+    )
+    .map((photo) =>
+      `<figure><img src="${escapeHtml(photo.imageUrl)}" alt="${escapeHtml(photo.role.replaceAll("_", " "))} project evidence" style="max-width:240px;height:auto"><figcaption>${escapeHtml(photo.role.replaceAll("_", " "))}</figcaption></figure>`
+    ).join("");
   return Object.freeze({
     subject: cleanText(subject, 240) || `${customerPackage.document.type === "QUOTE" ? "Quote" : "Invoice"} ${customerPackage.document.reference}`,
     text: lines.join("\n\n"),
