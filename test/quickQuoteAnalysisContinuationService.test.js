@@ -7,6 +7,7 @@ const test =
   require("node:test");
 
 const {
+  QUICK_QUOTE_ANALYSIS_PROVIDER_TIMEOUT_MS,
   createQuickQuoteAnalysisContinuationService,
   internalOperationRegistry,
 } = require(
@@ -435,6 +436,11 @@ test(
     );
 
     assert.equal(
+      calls[0].providerTimeoutMs,
+      QUICK_QUOTE_ANALYSIS_PROVIDER_TIMEOUT_MS
+    );
+
+    assert.equal(
       persistence
         .state
         .turns
@@ -753,6 +759,96 @@ test(
         .commands
         .size,
       0
+    );
+  }
+);
+
+test(
+  "timed-out initial analysis retries against the same durable evidence without duplicate turns",
+  async () => {
+    const persistence =
+      fakePersistence();
+
+    let executions = 0;
+
+    const service =
+      createQuickQuoteAnalysisContinuationService({
+        persistence,
+
+        async gateway(input) {
+          executions += 1;
+
+          assert.equal(
+            input.providerTimeoutMs,
+            QUICK_QUOTE_ANALYSIS_PROVIDER_TIMEOUT_MS
+          );
+
+          if (executions === 1) {
+            return {
+              ok: false,
+              status: 504,
+              code:
+                "INTELLIGENCE_PROVIDER_TIMEOUT",
+              message:
+                "The Intelligence provider timed out.",
+            };
+          }
+
+          return {
+            ok: true,
+            status: 201,
+            replayed: false,
+            result: proposal(),
+          };
+        },
+      });
+
+    const baseInput = {
+      pool: POOL,
+      authenticatedActor: {
+        id: 41,
+        role: "professional",
+      },
+      sessionId: SESSION_ID,
+      locale: "en",
+    };
+
+    const timedOut =
+      await service.analyzeSession({
+        ...baseInput,
+        idempotencyKey: KEY,
+      });
+
+    assert.equal(
+      timedOut.code,
+      "INTELLIGENCE_PROVIDER_TIMEOUT"
+    );
+    assert.equal(
+      persistence.state.evidenceVersion,
+      3
+    );
+    assert.equal(
+      persistence.state.turns.length,
+      0
+    );
+
+    const retried =
+      await service.analyzeSession({
+        ...baseInput,
+        idempotencyKey: KEY_2,
+      });
+
+    assert.equal(retried.ok, true);
+    assert.equal(executions, 2);
+    assert.equal(
+      persistence.state.evidenceVersion,
+      3
+    );
+    assert.deepEqual(
+      persistence.state.turns.map(
+        (turn) => turn.role
+      ),
+      ["MEETRO"]
     );
   }
 );

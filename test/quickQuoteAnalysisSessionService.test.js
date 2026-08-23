@@ -36,6 +36,12 @@ const KEYS = Object.freeze({
     "40000000-0000-4000-8000-000000000006",
   discard:
     "40000000-0000-4000-8000-000000000007",
+  freshText:
+    "40000000-0000-4000-8000-000000000008",
+  freshPhoto:
+    "40000000-0000-4000-8000-000000000009",
+  freshPhotos:
+    "40000000-0000-4000-8000-000000000010",
 });
 
 function now() {
@@ -656,6 +662,97 @@ test(
     assert.equal(
       first.canonicalMutationPerformed,
       false
+    );
+  }
+);
+
+test(
+  "fresh text, one-photo, and multi-photo requests durably create one bounded evidence version each",
+  async () => {
+    const {
+      persistence,
+      service,
+    } = serviceFixture();
+
+    const photo = (index) => ({
+      public_id:
+        `meetro/test/photo-${index}`,
+      secure_url:
+        `https://res.cloudinary.com/test/image/upload/v1/meetro/test/photo-${index}.jpg`,
+      version: 1,
+      format: "jpg",
+      width: 4032,
+      height: 3024,
+    });
+
+    const cases = [
+      {
+        key: KEYS.freshText,
+        professionalInput:
+          "Analyze this job",
+        photos: [],
+      },
+      {
+        key: KEYS.freshPhoto,
+        professionalInput:
+          "Analyze this photo",
+        photos: [photo(1)],
+      },
+      {
+        key: KEYS.freshPhotos,
+        professionalInput:
+          "Inspect photos for damage",
+        photos: Array.from(
+          { length: 5 },
+          (_, index) =>
+            photo(index + 2)
+        ),
+      },
+    ];
+
+    for (const fixture of cases) {
+      const result =
+        await service.createSession({
+          pool,
+          authenticatedActor: ACTOR,
+          idempotencyKey:
+            fixture.key,
+          professionalInput:
+            fixture.professionalInput,
+          photos: fixture.photos,
+        });
+
+      assert.equal(result.ok, true);
+      assert.equal(
+        result.session
+          .latestEvidenceVersion,
+        1
+      );
+      assert.equal(
+        result.session
+          .evidenceVersions[0]
+          .professionalInput,
+        fixture.professionalInput
+      );
+      assert.equal(
+        result.session
+          .evidenceVersions[0]
+          .photoReferences.length,
+        fixture.photos.length
+      );
+      assert.equal(
+        result.canonicalMutationPerformed,
+        false
+      );
+    }
+
+    assert.equal(
+      persistence.state.sessions.size,
+      3
+    );
+    assert.equal(
+      persistence.state.evidence.size,
+      3
     );
   }
 );

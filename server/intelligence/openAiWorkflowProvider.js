@@ -5,6 +5,8 @@ const OPENAI_TRANSCRIPTIONS_URL = "https://api.openai.com/v1/audio/transcription
 const DEFAULT_WORKFLOW_MODEL = "gpt-5.4-mini";
 const DEFAULT_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe";
 const RESPONSES_ENDPOINT_FAMILY = "responses";
+const QUICK_QUOTE_ANALYSIS_IMAGE_TRANSFORMATION =
+  "c_limit,w_1600,h_1600,q_auto:good";
 
 const OUTPUT_CONTRACTS = Object.freeze({
   "job_request.interpret": `Return exactly this JSON object shape:
@@ -1516,6 +1518,91 @@ function governedCloudinaryImageUrl(value) {
   }
 }
 
+function governedQuickQuoteAnalysisImageUrl(
+  value,
+  canonicalPhoto
+) {
+  const candidate =
+    governedCloudinaryImageUrl(value);
+
+  const mediaId =
+    typeof canonicalPhoto?.id === "string"
+      ? canonicalPhoto.id.trim()
+      : "";
+
+  const version =
+    Number(canonicalPhoto?.version);
+
+  const format =
+    typeof canonicalPhoto?.format === "string"
+      ? canonicalPhoto.format.trim().toLowerCase()
+      : "";
+
+  if (
+    !candidate ||
+    !mediaId ||
+    !Number.isInteger(version) ||
+    version < 1 ||
+    !["jpg", "jpeg", "png", "webp"].includes(format)
+  ) {
+    return null;
+  }
+
+  const parsed = new URL(candidate);
+  const uploadMarker = "/image/upload/";
+  const uploadIndex =
+    parsed.pathname.indexOf(uploadMarker);
+  const versionMarker =
+    `v${version}/`;
+  const versionIndex =
+    parsed.pathname.indexOf(
+      versionMarker,
+      uploadIndex + uploadMarker.length
+    );
+
+  if (
+    uploadIndex < 0 ||
+    versionIndex < 0
+  ) {
+    return null;
+  }
+
+  let assetPath;
+
+  try {
+    assetPath = decodeURIComponent(
+      parsed.pathname.slice(
+        versionIndex + versionMarker.length
+      )
+    );
+  } catch {
+    return null;
+  }
+
+  const allowedAssetPaths =
+    format === "jpeg"
+      ? new Set([
+          `${mediaId}.jpeg`,
+          `${mediaId}.jpg`,
+        ])
+      : new Set([
+          `${mediaId}.${format}`,
+        ]);
+
+  if (!allowedAssetPaths.has(assetPath)) {
+    return null;
+  }
+
+  parsed.pathname =
+    `${parsed.pathname.slice(
+      0,
+      uploadIndex + uploadMarker.length
+    )}${QUICK_QUOTE_ANALYSIS_IMAGE_TRANSFORMATION}/` +
+    `${parsed.pathname.slice(versionIndex)}`;
+
+  return parsed.href;
+}
+
 function workflowProviderInput(request) {
   const imageInputs = Array.isArray(request?.authorizedImageInputs)
     ? request.authorizedImageInputs
@@ -1574,6 +1661,21 @@ function workflowProviderInput(request) {
       .filter(Boolean)
   );
 
+  const canonicalPhotosById = new Map(
+    (Array.isArray(canonicalPhotos)
+      ? canonicalPhotos
+      : [])
+      .filter(
+        (photo) =>
+          typeof photo?.id === "string" &&
+          photo.id.trim()
+      )
+      .map((photo) => [
+        photo.id.trim(),
+        photo,
+      ])
+  );
+
   const content = [
     {
       type: "input_text",
@@ -1587,10 +1689,18 @@ function workflowProviderInput(request) {
         ? image.mediaId.trim()
         : "";
 
+    const canonicalPhoto =
+      canonicalPhotosById.get(mediaId);
+
     const imageUrl =
-      governedCloudinaryImageUrl(
-        image?.imageUrl
-      );
+      quickQuoteAnalysisContinuationRequested
+        ? governedQuickQuoteAnalysisImageUrl(
+            image?.imageUrl,
+            canonicalPhoto
+          )
+        : governedCloudinaryImageUrl(
+            image?.imageUrl
+          );
 
     if (
       !mediaId ||
@@ -1625,7 +1735,12 @@ function createOpenAiWorkflowProvider({
     return null;
   }
 
-  async function createResponse(body) {
+  async function createResponse(
+    body,
+    {
+      signal,
+    } = {}
+  ) {
     let response;
     try {
       response = await fetchImpl(OPENAI_RESPONSES_URL, {
@@ -1639,8 +1754,19 @@ function createOpenAiWorkflowProvider({
           store: false,
           ...body,
         }),
+        ...(signal
+          ? { signal }
+          : {}),
       });
     } catch (error) {
+      if (
+        signal?.aborted &&
+        signal.reason?.code ===
+          "provider_timeout"
+      ) {
+        throw signal.reason;
+      }
+
       logProviderDiagnostic(
         logger,
         "error",
@@ -1670,12 +1796,17 @@ function createOpenAiWorkflowProvider({
     name: "workflow_assistance",
     provider: "openai",
     model: normalizedModel,
-    async complete(request) {
+    async complete(
+      request,
+      {
+        signal,
+      } = {}
+    ) {
       const { response, payload } = await createResponse({
         instructions: workflowInstructions(request),
         input: workflowProviderInput(request),
         text: { format: workflowResponseFormat(request) },
-      });
+      }, { signal });
       const output = responseOutputText(payload);
       if (!output) {
         logProviderDiagnostic(

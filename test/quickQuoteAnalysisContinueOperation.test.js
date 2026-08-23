@@ -1168,6 +1168,8 @@ test(
                 PHOTO_ID,
               version:
                 77,
+              format:
+                "jpg",
             },
           ],
         },
@@ -1361,6 +1363,80 @@ test(
         )
         .length,
       1
+    );
+
+    const imageInput =
+      sentBody.input[0]
+        .content.find(
+          (item) =>
+            item.type ===
+            "input_image"
+        );
+
+    assert.equal(
+      imageInput.image_url,
+      `https://res.cloudinary.com/test/image/upload/c_limit,w_1600,h_1600,q_auto:good/v77/${PHOTO_ID}.jpg`
+    );
+
+    assert.equal(
+      imageInput.detail,
+      "auto"
+    );
+
+    const multiplePhotos =
+      Array.from(
+        { length: 5 },
+        (_, index) => ({
+          id: `${PHOTO_ID}-${index + 1}`,
+          version: 77 + index,
+          format: "jpg",
+        })
+      );
+
+    await provider.complete({
+      schemaVersion: 1,
+      operation: OPERATION,
+      capability: OPERATION,
+      quickQuoteAnalysisContext: {
+        professionalInput:
+          "Inspect photos for damage",
+        currentProfessionalMessage:
+          null,
+        photos: multiplePhotos,
+      },
+      authorizedImageInputs:
+        multiplePhotos.map(
+          (photo) => ({
+            mediaId: photo.id,
+            imageUrl:
+              `https://res.cloudinary.com/test/image/upload/v${photo.version}/${photo.id}.jpg`,
+          })
+        ),
+    });
+
+    const multipleImageInputs =
+      sentBody.input[0]
+        .content.filter(
+          (item) =>
+            item.type ===
+            "input_image"
+        );
+
+    assert.equal(
+      multipleImageInputs.length,
+      5
+    );
+
+    multipleImageInputs.forEach(
+      (item, index) => {
+        const photo =
+          multiplePhotos[index];
+
+        assert.equal(
+          item.image_url,
+          `https://res.cloudinary.com/test/image/upload/c_limit,w_1600,h_1600,q_auto:good/v${photo.version}/${photo.id}.jpg`
+        );
+      }
     );
 
     await provider.complete({

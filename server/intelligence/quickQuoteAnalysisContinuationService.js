@@ -45,6 +45,12 @@ const {
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+// Multimodal Job Analysis routinely approaches the generic 15-second
+// provider budget. Keep its allowance operation-scoped and within the
+// provider adapter's existing 30-second hard ceiling.
+const QUICK_QUOTE_ANALYSIS_PROVIDER_TIMEOUT_MS =
+  30000;
+
 const internalOperationRegistry =
   createIntelligenceOperationRegistry([
     quickQuoteAnalysisContinueOperationDefinition,
@@ -865,7 +871,8 @@ function createQuickQuoteAnalysisContinuationService({
 
         providerTimeoutMs:
           input
-            .providerTimeoutMs,
+            .providerTimeoutMs ??
+          QUICK_QUOTE_ANALYSIS_PROVIDER_TIMEOUT_MS,
 
         logger:
           input.logger,
@@ -997,6 +1004,7 @@ const canonicalQuickQuoteAnalysisContinuationService =
   createQuickQuoteAnalysisContinuationService();
 
 module.exports = {
+  QUICK_QUOTE_ANALYSIS_PROVIDER_TIMEOUT_MS,
   canonicalQuickQuoteAnalysisContinuationService,
   createQuickQuoteAnalysisContinuationService,
   deriveTurnIdempotencyKey,

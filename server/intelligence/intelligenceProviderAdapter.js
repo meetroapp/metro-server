@@ -31,17 +31,35 @@ async function invokeIntelligenceProvider({
     );
   }
 
+  const timeoutController =
+    typeof AbortController === "function"
+      ? new AbortController()
+      : null;
+
   let timeoutId;
   const timeout = new Promise((_, reject) => {
     timeoutId = setTimeout(
-      () => reject(providerFailure("provider_timeout", "The Intelligence provider timed out.")),
+      () => {
+        const error = providerFailure(
+          "provider_timeout",
+          "The Intelligence provider timed out."
+        );
+
+        reject(error);
+        timeoutController?.abort(error);
+      },
       Math.max(1, Math.min(Number(timeoutMs) || 15000, 30000))
     );
   });
 
   try {
     onInvoke?.();
-    return await Promise.race([provider.complete(request), timeout]);
+    return await Promise.race([
+      provider.complete(request, {
+        signal: timeoutController?.signal,
+      }),
+      timeout,
+    ]);
   } catch (error) {
     if (error?.code) throw error;
     throw providerFailure("provider_failure", "The Intelligence provider failed.");

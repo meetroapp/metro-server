@@ -58,10 +58,10 @@ function createFixture({ providerComplete, parseResult, buildContext } = {}) {
   const providers = {
     fixture: {
       name: "fixture",
-      async complete(request) {
+      async complete(request, options) {
         providerRequests.push(request);
         return providerComplete
-          ? providerComplete(request)
+          ? providerComplete(request, options)
           : { answer: "bounded fixture result" };
       },
     },
@@ -377,6 +377,36 @@ test("provider failures and unsafe normalized results do not leak or become succ
   assert.equal(JSON.stringify(rejected).includes("private transport"), false);
   assert.equal(failing.providerRequests.length, 1);
   assert.equal(unsafe.providerRequests.length, 1);
+});
+
+test("provider timeout aborts the in-flight provider request and remains a governed failure", async () => {
+  let providerSignal = null;
+
+  const fixture = createFixture({
+    providerComplete(_request, { signal } = {}) {
+      providerSignal = signal;
+
+      return new Promise((resolve, reject) => {
+        signal.addEventListener(
+          "abort",
+          () => reject(signal.reason),
+          { once: true }
+        );
+      });
+    },
+  });
+
+  const result = await fixture.run({
+    providerTimeoutMs: 5,
+  });
+
+  assert.equal(
+    result.code,
+    "INTELLIGENCE_PROVIDER_TIMEOUT"
+  );
+  assert.equal(result.status, 504);
+  assert.equal(providerSignal.aborted, true);
+  assert.equal(fixture.providerRequests.length, 1);
 });
 
 test("parser rejection logs only a non-secret diagnostic fingerprint", async () => {
