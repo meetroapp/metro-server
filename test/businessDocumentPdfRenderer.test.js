@@ -28,6 +28,7 @@ function fixture(type = "QUOTE") {
     id: "11111111-1111-4111-8111-111111111111",
     documentType: type,
     reference: type === "QUOTE" ? "WQ-TEST-PARITY" : "WI-TEST-PARITY",
+    documentNumber: type === "QUOTE" ? "Q-0001020" : "INV-0000457",
     version: 10,
     content: {
       customerName: "Jack Smith",
@@ -70,9 +71,9 @@ test("professional saved Quote PDF renders the deterministic parity fixture with
   const pdfText = artifact.buffer.toString("latin1");
   assert.match(pdfText, /^%PDF-/);
   assert.equal(artifact.contentType, "application/pdf");
-  assert.equal(artifact.filename, "quote-WQ-TEST-PARITY-v10.pdf");
+  assert.equal(artifact.filename, "quote-Q-0001020-v10.pdf");
   assert.equal(artifact.photoCount, 3);
-  for (const value of ["Handyman LLC", "WQ-TEST-PARITY", "Jack Smith", "Ceiling Fan Replacement", "Observation", "Existing fan shows visible wear", "Scope of Work", "Project Photos / Evidence", "Before Photos", "After Photos", "Payment Terms", "Confirm terms before delivery", "Estimated Duration", "Not confirmed", "Additional Work / Change Orders", "Ready for Customer Review"]) {
+  for (const value of ["Handyman LLC", "Q-0001020", "Jack Smith", "Ceiling Fan Replacement", "Observation", "Existing fan shows visible wear", "Scope of Work", "Project Photos / Evidence", "Before Photos", "After Photos", "Payment Terms", "Confirm terms before delivery", "Estimated Duration", "Not confirmed", "Additional Work / Change Orders", "Ready for Customer Review"]) {
     assert.match(pdfText, new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
   assert.doesNotMatch(pdfText, /Labor|\$0\.00|res\.cloudinary\.com|private margin|private conversation|private\.png/);
@@ -85,7 +86,7 @@ test("professional saved Invoice PDF preserves due and not-paid truth", async ()
   const customerPackage = buildBusinessDocumentCustomerPackage(fixture("INVOICE"), { business_name: "Handyman LLC" });
   const artifact = await renderBusinessDocumentCustomerPdf(customerPackage, { fetchImpl: async () => imageResponse() });
   const pdfText = artifact.buffer.toString("latin1");
-  assert.equal(artifact.filename, "invoice-WI-TEST-PARITY-v10.pdf");
+  assert.equal(artifact.filename, "invoice-INV-0000457-v10.pdf");
   assert.match(pdfText, /INVOICE/);
   assert.match(pdfText, /Work Performed/);
   assert.match(pdfText, /TOTAL DUE/);

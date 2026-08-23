@@ -134,7 +134,7 @@ function buildBusinessDocumentCustomerPackage(document, business = {}) {
     document: Object.freeze({
       id: String(document.id),
       type: document.documentType,
-      reference: cleanText(document.reference, 240),
+      reference: cleanText(document.documentNumber || document.reference, 240),
       version: Number(document.version),
       status: "SAVED_DRAFT_NOT_ISSUED",
       date: cleanText(document.documentType === "QUOTE" ? content.quoteDate : content.invoiceDate, 80) || null,

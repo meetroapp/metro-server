@@ -2,6 +2,7 @@
 
 const service = require("./businessDocumentDraftService");
 const deliveryServiceDefault = require("./businessDocumentDeliveryService");
+const numberingServiceDefault = require("./businessDocumentNumberingService");
 
 function sendResult(res, result) {
   const status = result?.status || 500;
@@ -14,6 +15,7 @@ function sendResult(res, result) {
   if (result?.documents !== undefined) payload.documents = result.documents;
   if (result?.delivery !== undefined) payload.delivery = result.delivery;
   if (result?.deliveries !== undefined) payload.deliveries = result.deliveries;
+  if (result?.numbering !== undefined) payload.numbering = result.numbering;
   if (result?.deletedDraftId !== undefined) payload.deletedDraftId = result.deletedDraftId;
   if (result?.currentVersion !== undefined) payload.currentVersion = result.currentVersion;
   if (result?.replayed) payload.replayed = true;
@@ -35,6 +37,7 @@ function createBusinessDocumentDraftHandlers({
   sendPublicDatabaseError,
   draftService = service,
   deliveryService = deliveryServiceDefault,
+  numberingService = numberingServiceDefault,
   emailDelivery = null,
   env = process.env,
 } = {}) {
@@ -58,6 +61,23 @@ function createBusinessDocumentDraftHandlers({
   }
 
   return {
+    numbering: handle("get_business_document_numbering", (req) =>
+      numberingService.getBusinessDocumentNumbering({
+        pool: getPool(req),
+        authenticatedActor: req.user,
+        query: {
+          documentType: req.query?.documentType,
+          jobId: req.query?.jobId,
+        },
+      })
+    ),
+    initializeNumbering: handle("initialize_business_document_numbering", (req) =>
+      numberingService.initializeBusinessDocumentNumbering({
+        pool: getPool(req),
+        authenticatedActor: req.user,
+        payload: req.body,
+      })
+    ),
     create: handle("create_business_document_draft", (req) =>
       draftService.createBusinessDocumentDraft({
         pool: getPool(req),
@@ -153,6 +173,7 @@ function registerBusinessDocumentDraftRoutes({
   sendPublicDatabaseError,
   draftService = service,
   deliveryService = deliveryServiceDefault,
+  numberingService = numberingServiceDefault,
   emailDelivery = null,
   env = process.env,
 } = {}) {
@@ -163,9 +184,12 @@ function registerBusinessDocumentDraftRoutes({
     sendPublicDatabaseError,
     draftService,
     deliveryService,
+    numberingService,
     emailDelivery,
     env,
   });
+  app.get("/business-document-numbering", authMiddleware, handlers.numbering);
+  app.post("/business-document-numbering", authMiddleware, handlers.initializeNumbering);
   app.post("/business-document-drafts", authMiddleware, handlers.create);
   app.get("/business-document-drafts", authMiddleware, handlers.list);
   app.get("/business-document-drafts/:draftId", authMiddleware, handlers.get);

@@ -98,6 +98,7 @@ function deliveryProjection(row, { replayed = false } = {}) {
     documentId: String(row.source_document_id),
     documentType: row.document_type,
     documentReference: row.document_reference,
+    documentNumber: row.document_reference,
     documentVersion: Number(row.document_version),
     channel: row.channel,
     state: row.delivery_state,
@@ -178,6 +179,7 @@ async function loadOwnedContext(client, actorUserId, draftId, { lock = false } =
       id: String(row.id),
       documentType: row.document_type,
       reference: row.draft_reference,
+      documentNumber: row.document_number || null,
       jobId: row.job_id || null,
       version: Number(row.version),
       content: exactObject(row.content) ? row.content : {},
@@ -392,7 +394,8 @@ async function deliverBusinessDocument(input = {}) {
     contractorProfileId: context.contractorProfileId,
     draftId: validated.draftId,
     documentType: context.document.documentType,
-    documentReference: context.document.reference,
+    documentReference:
+      context.document.documentNumber || context.document.reference,
     documentVersion: validated.expectedVersion,
     channel: validated.channel,
     recipientEmail: validated.recipientEmail,
@@ -511,11 +514,22 @@ async function listBusinessDocumentDeliveries(input = {}) {
   if (!id) return failure(401, "AUTHENTICATION_REQUIRED", "Authentication is required.");
   if (!draftId) return failure(400, "BUSINESS_DOCUMENT_ID_INVALID", "A valid working document ID is required.");
   const store = input.store || sqlStore;
-  const context = await store.loadContext({ pool: input.pool, actorUserId: id, draftId });
-  if (!context) return failure(404, "BUSINESS_DOCUMENT_NOT_FOUND", "The saved working document was not found.");
+  const deliveries = await store.list({
+    pool: input.pool,
+    actorUserId: id,
+    draftId,
+  });
+  if (deliveries.length === 0) {
+    const context = await store.loadContext({
+      pool: input.pool,
+      actorUserId: id,
+      draftId,
+    });
+    if (!context) return failure(404, "BUSINESS_DOCUMENT_NOT_FOUND", "The saved working document was not found.");
+  }
   return {
     ok: true, status: 200, code: "BUSINESS_DOCUMENT_DELIVERIES_LOADED",
-    deliveries: await store.list({ pool: input.pool, actorUserId: id, draftId }),
+    deliveries,
   };
 }
 
@@ -526,6 +540,7 @@ module.exports = {
   businessDocumentDeliveryInternals: {
     CHANNELS,
     deliveryProjection,
+    listSql,
     requestHash,
     sqlStore,
     validateDeliveryInput,

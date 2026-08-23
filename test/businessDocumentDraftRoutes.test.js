@@ -72,7 +72,7 @@ test("routes pass only authenticated actor, governed payload, version, and idemp
   assert.equal(calls[7][1].expectedVersion, "3");
 });
 
-test("route registration exposes authenticated create/list/get/update/delete endpoints", () => {
+test("route registration preserves draft/delivery routes and adds authenticated numbering endpoints", () => {
   const routes = [];
   const app = {
     post(path, ...handlers) { routes.push(["POST", path, handlers.length]); },
@@ -87,6 +87,8 @@ test("route registration exposes authenticated create/list/get/update/delete end
   const deliveryService = { deliverBusinessDocument() {}, listBusinessDocumentDeliveries() {}, getBusinessDocumentCustomerPdf() {} };
   registerBusinessDocumentDraftRoutes({ app, authMiddleware() {}, getPool() {}, sendPublicDatabaseError() {}, draftService, deliveryService });
   assert.deepEqual(routes, [
+    ["GET", "/business-document-numbering", 2],
+    ["POST", "/business-document-numbering", 2],
     ["POST", "/business-document-drafts", 2],
     ["GET", "/business-document-drafts", 2],
     ["GET", "/business-document-drafts/:draftId", 2],
@@ -96,4 +98,112 @@ test("route registration exposes authenticated create/list/get/update/delete end
     ["GET", "/business-document-drafts/:draftId/deliveries", 2],
     ["POST", "/business-document-drafts/:draftId/deliveries", 2],
   ]);
+});
+
+test("numbering GET/POST handlers pass governed inputs and serialize private numbering state and errors", async () => {
+  const calls = [];
+  const numberingService = {
+    async getBusinessDocumentNumbering(input) {
+      calls.push(["getNumbering", input]);
+      if (input.query.documentType === "BAD") {
+        return {
+          ok: false,
+          status: 409,
+          code: "BUSINESS_DOCUMENT_PROFILE_AMBIGUOUS",
+          message: "Select a Job to identify the business.",
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        code: "BUSINESS_DOCUMENT_NUMBERING_LOADED",
+        numbering: {
+          initialized: true,
+          documentType: input.query.documentType,
+          prefix: "Q",
+          width: 7,
+          lastNumber: 0,
+          nextNumberPreview: "Q-0000001",
+          initializationMode: "START_NEW",
+        },
+      };
+    },
+    async initializeBusinessDocumentNumbering(input) {
+      calls.push(["initializeNumbering", input]);
+      const continued = input.payload.mode === "CONTINUE_EXISTING";
+      return {
+        ok: true,
+        status: 201,
+        code: "BUSINESS_DOCUMENT_NUMBERING_INITIALIZED",
+        numbering: {
+          initialized: true,
+          documentType: input.payload.documentType,
+          prefix: continued ? "BG" : "INV",
+          width: 7,
+          lastNumber: continued ? 1019 : 0,
+          nextNumberPreview: continued ? "BG-0001020" : "INV-0000001",
+          initializationMode: input.payload.mode,
+        },
+      };
+    },
+  };
+  const pool = { pool: true };
+  const handlers = createBusinessDocumentDraftHandlers({
+    getPool: () => pool,
+    sendPublicDatabaseError: () => { throw new Error("unexpected"); },
+    numberingService,
+  });
+  const actor = { id: 7 };
+  const jobId = "11111111-1111-4111-8111-111111111111";
+  const getResponse = response();
+  await handlers.numbering({
+    user: actor,
+    query: { documentType: "QUOTE", jobId },
+  }, getResponse);
+  assert.equal(getResponse.statusCode, 200);
+  assert.equal(getResponse.headers["Cache-Control"], "private, no-store");
+  assert.equal(getResponse.body.success, true);
+  assert.equal(getResponse.body.numbering.nextNumberPreview, "Q-0000001");
+  assert.deepEqual(calls[0][1], {
+    pool,
+    authenticatedActor: actor,
+    query: { documentType: "QUOTE", jobId },
+  });
+
+  const startNewBody = {
+    documentType: "INVOICE",
+    jobId: null,
+    mode: "START_NEW",
+  };
+  const startNewResponse = response();
+  await handlers.initializeNumbering({ user: actor, body: startNewBody }, startNewResponse);
+  assert.strictEqual(calls[1][1].payload, startNewBody);
+  assert.equal(startNewResponse.statusCode, 201);
+  assert.equal(startNewResponse.headers["Cache-Control"], "private, no-store");
+  assert.equal(startNewResponse.body.numbering.nextNumberPreview, "INV-0000001");
+
+  const continueBody = {
+    documentType: "QUOTE",
+    jobId: null,
+    mode: "CONTINUE_EXISTING",
+    previousDocumentNumber: "BG-0001019",
+  };
+  const continueResponse = response();
+  await handlers.initializeNumbering({ user: actor, body: continueBody }, continueResponse);
+  assert.strictEqual(calls[2][1].payload, continueBody);
+  assert.equal(continueResponse.body.numbering.prefix, "BG");
+  assert.equal(continueResponse.body.numbering.nextNumberPreview, "BG-0001020");
+
+  const errorResponse = response();
+  await handlers.numbering({
+    user: actor,
+    query: { documentType: "BAD" },
+  }, errorResponse);
+  assert.equal(errorResponse.statusCode, 409);
+  assert.deepEqual(errorResponse.body, {
+    success: false,
+    code: "BUSINESS_DOCUMENT_PROFILE_AMBIGUOUS",
+    message: "Select a Job to identify the business.",
+  });
+  assert.equal(errorResponse.headers["Cache-Control"], "private, no-store");
 });

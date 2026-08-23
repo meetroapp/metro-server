@@ -6,6 +6,10 @@ const {
   deliverBusinessDocument,
   getBusinessDocumentCustomerPdf,
   listBusinessDocumentDeliveries,
+  businessDocumentDeliveryInternals: {
+    deliveryProjection,
+    listSql,
+  },
 } = require("../server/documents/businessDocumentDeliveryService");
 const {
   renderBusinessDocumentCustomerPdf,
@@ -24,6 +28,7 @@ function context({ owner = 1, jobId = "22222222-2222-4222-8222-222222222222", ve
       id: DRAFT_ID,
       documentType: "QUOTE",
       reference: "WQ-FAN",
+      documentNumber: "Q-0001020",
       jobId,
       version,
       content: {
@@ -61,7 +66,8 @@ function memoryStore({ conversation = true } = {}) {
         : { kind: "idempotency_conflict" };
       const delivery = {
         id: `email-${events.length + 1}`, documentId: DRAFT_ID, documentType: values.documentType,
-        documentReference: values.documentReference, documentVersion: values.documentVersion,
+        documentReference: values.documentReference, documentNumber: values.documentReference,
+        documentVersion: values.documentVersion,
         channel: "EMAIL", state: "REQUESTING", recipientEmail: values.recipientEmail,
         subject: values.subject, customerMessage: values.customerMessage,
       };
@@ -82,7 +88,8 @@ function memoryStore({ conversation = true } = {}) {
         : { kind: "idempotency_conflict" };
       const delivery = {
         id: `message-${events.length + 1}`, documentId: DRAFT_ID, documentType: values.documentType,
-        documentReference: values.documentReference, documentVersion: values.documentVersion,
+        documentReference: values.documentReference, documentNumber: values.documentReference,
+        documentVersion: values.documentVersion,
         channel: "MEETRO_MESSAGE", state: "SENT", recipientUserId: 8,
         conversationId: 50, messageId: 70, sentAt: "2026-08-21T16:20:00.000Z",
       };
@@ -123,13 +130,40 @@ test("Email delivery sends one exact saved customer-safe version and retry repla
   assert.equal(first.status, 202);
   assert.equal(first.delivery.state, "DELIVERY_REQUESTED");
   assert.equal(replay.delivery.replayed, true);
+  assert.equal(first.delivery.documentReference, "Q-0001020");
+  assert.equal(first.delivery.documentNumber, "Q-0001020");
+  assert.equal(replay.delivery.documentReference, first.delivery.documentReference);
+  assert.equal(replay.delivery.documentNumber, first.delivery.documentNumber);
   assert.equal(providerCalls.length, 1);
   assert.equal(providerCalls[0].idempotencyKey, EMAIL_KEY);
   assert.equal(providerCalls[0].attachment.contentType, "application/pdf");
-  assert.equal(providerCalls[0].attachment.filename, "quote-WQ-FAN-v2.pdf");
+  assert.equal(providerCalls[0].attachment.filename, "quote-Q-0001020-v2.pdf");
   assert.equal(Buffer.from(providerCalls[0].attachment.content, "base64").toString(), "%PDF-professional");
   assert.equal(store.events[0].snapshot.document.version, 2);
+  assert.equal(store.events[0].delivery.documentReference, "Q-0001020");
   assert.doesNotMatch(JSON.stringify(store.events[0].snapshot), /private\.jpg/);
+});
+
+test("new numbered Invoice delivery freezes its business-facing number", async () => {
+  const store = memoryStore();
+  store.source.document.documentType = "INVOICE";
+  store.source.document.reference = "WI-FAN";
+  store.source.document.documentNumber = "INV-0000457";
+  const result = await deliverBusinessDocument({
+    ...deliveryInput({ subject: "Your Invoice" }),
+    store,
+    emailDelivery: {
+      providerName: "resend",
+      async sendBusinessDocumentEmail() {
+        return { accepted: true, status: "accepted", providerReference: "invoice-1" };
+      },
+    },
+  });
+  assert.equal(result.status, 202);
+  assert.equal(result.delivery.documentReference, "INV-0000457");
+  assert.equal(result.delivery.documentNumber, "INV-0000457");
+  assert.equal(store.events[0].delivery.documentReference, "INV-0000457");
+  assert.equal(store.events[0].snapshot.document.reference, "INV-0000457");
 });
 
 test("PDF rendering failure is governed before provider invocation and cannot create false delivery-requested state", async () => {
@@ -224,6 +258,90 @@ test("owner-scoped history preserves legitimate Email and Message attempts", asy
   assert.equal(denied.status, 404);
 });
 
+test("historical projection always uses the event-frozen reference, never a hypothetical current draft number", () => {
+  const projected = deliveryProjection({
+    id: "33333333-3333-4333-8333-333333333333",
+    source_document_id: DRAFT_ID,
+    document_type: "QUOTE",
+    document_reference: "WQ-LEGACY",
+    document_number: "Q-0001020",
+    document_version: 1,
+    channel: "EMAIL",
+    delivery_state: "SENT",
+    recipient_email: "jack@example.test",
+    requested_at: "2026-08-20T12:00:00.000Z",
+    sent_at: "2026-08-20T12:01:00.000Z",
+  });
+  assert.equal(projected.documentReference, "WQ-LEGACY");
+  assert.equal(projected.documentNumber, "WQ-LEGACY");
+});
+
+test("historical list SQL reads frozen events without requiring the current working draft", async () => {
+  const calls = [];
+  const deliveries = await listSql({
+    pool: {
+      async query(sql, values) {
+        calls.push({ sql, values });
+        return {
+          rows: [{
+            id: "33333333-3333-4333-8333-333333333333",
+            contractor_profile_id: 10,
+            source_document_id: DRAFT_ID,
+            document_type: "QUOTE",
+            document_reference: "WQ-LEGACY",
+            document_version: 1,
+            channel: "EMAIL",
+            delivery_state: "SENT",
+            recipient_email: "jack@example.test",
+            requested_at: "2026-08-20T12:00:00.000Z",
+            sent_at: "2026-08-20T12:01:00.000Z",
+          }],
+        };
+      },
+    },
+    actorUserId: 1,
+    draftId: DRAFT_ID,
+  });
+  assert.equal(deliveries[0].documentReference, "WQ-LEGACY");
+  assert.equal(deliveries[0].documentNumber, "WQ-LEGACY");
+  assert.doesNotMatch(calls[0].sql, /business_document_working_drafts/);
+  assert.match(calls[0].sql, /events\.contractor_profile_id/);
+  assert.match(calls[0].sql, /profiles\.user_id = \$1/);
+  assert.match(calls[0].sql, /events\.source_document_id = \$2/);
+  assert.deepEqual(calls[0].values, [1, DRAFT_ID]);
+});
+
+test("deleted-draft history remains readable when event ownership is valid", async () => {
+  let contextLoads = 0;
+  const frozen = {
+    id: "delivery-legacy",
+    documentId: DRAFT_ID,
+    documentType: "QUOTE",
+    documentReference: "WQ-LEGACY",
+    documentNumber: "WQ-LEGACY",
+    documentVersion: 1,
+    channel: "EMAIL",
+    state: "SENT",
+  };
+  const result = await listBusinessDocumentDeliveries({
+    pool: {},
+    authenticatedActor: { id: 1 },
+    draftId: DRAFT_ID,
+    store: {
+      async list({ actorUserId, draftId }) {
+        return actorUserId === 1 && draftId === DRAFT_ID ? [frozen] : [];
+      },
+      async loadContext() {
+        contextLoads += 1;
+        return null;
+      },
+    },
+  });
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.deliveries, [frozen]);
+  assert.equal(contextLoads, 0);
+});
+
 test("owner-scoped customer PDF retrieval enforces exact version for Quote and Invoice without mutation", async () => {
   const store = memoryStore();
   const before = structuredClone(store.source);
@@ -238,7 +356,7 @@ test("owner-scoped customer PDF retrieval enforces exact version for Quote and I
   });
   assert.equal(quote.status, 200);
   assert.equal(quote.pdf.contentType, "application/pdf");
-  assert.equal(quote.pdf.filename, "quote-WQ-FAN-v2.pdf");
+  assert.equal(quote.pdf.filename, "quote-Q-0001020-v2.pdf");
   const stale = await getBusinessDocumentCustomerPdf({
     pool: {}, authenticatedActor: { id: 1 }, draftId: DRAFT_ID,
     expectedVersion: 1, store, pdfRenderer,
@@ -251,12 +369,14 @@ test("owner-scoped customer PDF retrieval enforces exact version for Quote and I
   assert.equal(denied.status, 404);
   store.source.document.documentType = "INVOICE";
   store.source.document.reference = "WI-FAN";
+  store.source.document.documentNumber = "INV-0000457";
   const invoice = await getBusinessDocumentCustomerPdf({
     pool: {}, authenticatedActor: { id: 1 }, draftId: DRAFT_ID,
     expectedVersion: 2, store, pdfRenderer,
   });
-  assert.equal(invoice.pdf.filename, "invoice-WI-FAN-v2.pdf");
+  assert.equal(invoice.pdf.filename, "invoice-INV-0000457-v2.pdf");
   store.source.document.documentType = before.document.documentType;
   store.source.document.reference = before.document.reference;
+  store.source.document.documentNumber = before.document.documentNumber;
   assert.deepEqual(store.source, before);
 });

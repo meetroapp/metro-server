@@ -12,9 +12,13 @@ const {
 
 const JOB_ONE = "11111111-1111-4111-8111-111111111111";
 const JOB_TWO = "22222222-2222-4222-8222-222222222222";
+const JOB_THREE = "77777777-7777-4777-8777-777777777777";
+const LEGACY_DRAFT = "88888888-8888-4888-8888-888888888888";
 const KEY_ONE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const KEY_TWO = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const KEY_THREE = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const KEY_FOUR = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+const KEY_FIVE = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 const SESSION_ONE = "33333333-3333-4333-8333-333333333333";
 const SESSION_TWO = "44444444-4444-4444-8444-444444444444";
 const SESSION_MISSING = "55555555-5555-4555-8555-555555555555";
@@ -110,7 +114,7 @@ function legacyInstruction(overrides = {}) {
   };
 }
 
-function createMemoryStore() {
+function createMemoryStore({ initializeSequences = true } = {}) {
   const documents = new Map();
   const commands = new Map();
   const physicalMedia = new Set();
@@ -119,8 +123,84 @@ function createMemoryStore() {
     [SESSION_TWO, 2],
   ]);
   const authorityRecords = { jobs: 1, customers: 1, quotes: 1, invoices: 1, payments: 1, lifecycleEvents: 1 };
+  const profilesByActor = new Map([
+    [1, [10]],
+    [2, [20]],
+  ]);
+  const jobOwners = new Map([
+    [JOB_ONE, { actorUserId: 1, contractorProfileId: 10 }],
+    [JOB_TWO, { actorUserId: 2, contractorProfileId: 20 }],
+    [JOB_THREE, { actorUserId: 1, contractorProfileId: 11 }],
+  ]);
+  const documentNumbers = new Map();
+  const allocationCounts = new Map();
+  function initializeSequence(
+    contractorProfileId,
+    documentType,
+    { prefix, width = 7, lastNumber = 0 } = {}
+  ) {
+    documentNumbers.set(`${contractorProfileId}:${documentType}`, {
+      prefix: prefix || (documentType === "QUOTE" ? "Q" : "INV"),
+      width,
+      lastNumber,
+    });
+  }
+  if (initializeSequences) {
+    for (const contractorProfileId of [10, 20]) {
+      initializeSequence(contractorProfileId, "QUOTE");
+      initializeSequence(contractorProfileId, "INVOICE");
+    }
+  }
+  function allocateNumber(contractorProfileId, documentType) {
+    const key = `${contractorProfileId}:${documentType}`;
+    const sequence = documentNumbers.get(key);
+    if (!sequence) return { kind: "numbering_setup_required" };
+    sequence.lastNumber += 1;
+    allocationCounts.set(key, (allocationCounts.get(key) || 0) + 1);
+    return {
+      kind: "allocated",
+      documentNumber: `${sequence.prefix}-${String(sequence.lastNumber).padStart(sequence.width, "0")}`,
+    };
+  }
   let clock = 0;
   const now = () => new Date(Date.UTC(2026, 7, 21, 12, clock++)).toISOString();
+  function insertLegacyDocument({
+    id = LEGACY_DRAFT,
+    actorUserId = 1,
+    contractorProfileId = 10,
+    documentType = "QUOTE",
+  } = {}) {
+    const timestamp = now();
+    const source = payload({
+      documentType,
+      jobId: null,
+      photos: [],
+      workspace: {
+        ...payload().workspace,
+        activeDocument: documentType,
+        instructions: [],
+      },
+    });
+    documents.set(id, {
+      actorUserId,
+      contractorProfileId,
+      document: {
+        id,
+        documentType,
+        status: "WORKING_DRAFT",
+        reference: `${documentType === "QUOTE" ? "WQ" : "WI"}-LEGACY`,
+        documentNumber: null,
+        jobId: null,
+        version: 1,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        content: source.content,
+        workspace: source.workspace,
+        photos: [],
+      },
+    });
+    return id;
+  }
   function commandResult(command, build) {
     const identity = `${command.actorUserId}:${command.operation}:${command.key}`;
     const existing = commands.get(identity);
@@ -133,13 +213,33 @@ function createMemoryStore() {
   }
   return {
     documents,
-    async getProfessionalContext(_pool, actorUserId) {
-      return actorUserId === 1 || actorUserId === 2
-        ? { contractor_profile_id: actorUserId * 10 }
-        : null;
+    async resolveBusinessOwner(_pool, actorUserId, jobId) {
+      if (jobId) {
+        const owner = jobOwners.get(jobId);
+        return owner?.actorUserId === actorUserId
+          ? { kind: "resolved", contractorProfileId: owner.contractorProfileId }
+          : { kind: "job_unavailable" };
+      }
+      const profiles = profilesByActor.get(actorUserId) || [];
+      if (profiles.length === 0) return { kind: "profile_required" };
+      if (profiles.length > 1) return { kind: "profile_ambiguous" };
+      return { kind: "resolved", contractorProfileId: profiles[0] };
     },
-    async validateJobAssociation(_pool, actorUserId, jobId) {
-      return !jobId || (actorUserId === 1 && jobId === JOB_ONE) || (actorUserId === 2 && jobId === JOB_TWO);
+    async getOwnedBusinessContext(_pool, actorUserId, draftId) {
+      const current = documents.get(draftId);
+      if (!current || current.actorUserId !== actorUserId) return null;
+      return {
+        contractor_profile_id: current.contractorProfileId,
+        document_type: current.document.documentType,
+        document_number: current.document.documentNumber,
+        version: current.document.version,
+      };
+    },
+    async validateJobAssociation(_pool, actorUserId, jobId, contractorProfileId) {
+      if (!jobId) return true;
+      const owner = jobOwners.get(jobId);
+      return owner?.actorUserId === actorUserId &&
+        owner.contractorProfileId === contractorProfileId;
     },
     async validateJobAnalysisSessionOwnership(_pool, actorUserId, sessionId) {
       return !sessionId || analysisSessions.get(sessionId) === actorUserId;
@@ -147,11 +247,14 @@ function createMemoryStore() {
     async create({ actorUserId, contractorProfileId, command, draft }) {
       return commandResult(command, () => {
         const timestamp = now();
+        const allocation = allocateNumber(contractorProfileId, draft.documentType);
+        if (allocation.kind !== "allocated") return allocation;
         const document = {
           id: draft.id,
           documentType: draft.documentType,
           status: "WORKING_DRAFT",
           reference: draft.reference,
+          documentNumber: allocation.documentNumber,
           jobId: draft.jobId,
           version: 1,
           createdAt: timestamp,
@@ -179,8 +282,23 @@ function createMemoryStore() {
         if (!current || current.actorUserId !== actorUserId) return { kind: "not_found" };
         if (current.document.version !== expectedVersion) return { kind: "version_conflict", currentVersion: current.document.version };
         if (current.document.documentType !== draft.documentType) return { kind: "type_conflict" };
+        const jobOwner = draft.jobId ? jobOwners.get(draft.jobId) : null;
+        if (draft.jobId && (
+          jobOwner?.actorUserId !== actorUserId ||
+          jobOwner.contractorProfileId !== current.contractorProfileId
+        )) return { kind: "job_unavailable" };
+        let documentNumber = current.document.documentNumber;
+        if (!documentNumber) {
+          const allocation = allocateNumber(
+            current.contractorProfileId,
+            draft.documentType
+          );
+          if (allocation.kind !== "allocated") return allocation;
+          documentNumber = allocation.documentNumber;
+        }
         const document = {
           ...current.document,
+          documentNumber,
           jobId: draft.jobId,
           version: current.document.version + 1,
           updatedAt: now(),
@@ -224,6 +342,12 @@ function createMemoryStore() {
     },
     physicalMedia,
     authorityRecords,
+    documentNumbers,
+    allocationCounts,
+    initializeSequence,
+    insertLegacyDocument,
+    jobOwners,
+    profilesByActor,
   };
 }
 
@@ -235,6 +359,7 @@ test("create saves one private noncanonical Quote draft with nullable Job and go
   });
   assert.equal(result.status, 201);
   assert.equal(result.document.status, "WORKING_DRAFT");
+  assert.equal(result.document.documentNumber, "Q-0000001");
   assert.equal(result.document.jobId, null);
   assert.equal(result.document.content.customerName, "Jack Smith");
   assert.deepEqual(result.document.content.agreement.exclusions, ["Painting"]);
@@ -245,6 +370,248 @@ test("create saves one private noncanonical Quote draft with nullable Job and go
   assert.equal(result.document.photos[0].media.customer_visible_by_default, false);
   assert.equal(result.document.issuedAt, undefined);
   assert.equal(result.document.approval, undefined);
+});
+
+test("server-owned Quote and Invoice numbers are atomic, business-scoped, independent, and immutable", async () => {
+  const store = createMemoryStore();
+  const quoteInput = (idempotencyKey, actorId = 1) => createBusinessDocumentDraft({
+    pool: {},
+    authenticatedActor: { id: actorId },
+    payload: payload({ photos: [] }),
+    idempotencyKey,
+    store,
+    normalizeMediaCollection,
+  });
+
+  const [firstQuote, secondQuote] = await Promise.all([
+    quoteInput(KEY_ONE),
+    quoteInput(KEY_TWO),
+  ]);
+  assert.deepEqual(
+    new Set([firstQuote.document.documentNumber, secondQuote.document.documentNumber]),
+    new Set(["Q-0000001", "Q-0000002"])
+  );
+
+  const invoicePayload = payload({
+    documentType: "INVOICE",
+    photos: [],
+    workspace: {
+      ...payload().workspace,
+      activeDocument: "INVOICE",
+      instructions: [],
+    },
+  });
+  const invoice = await createBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, payload: invoicePayload,
+    idempotencyKey: KEY_THREE, store, normalizeMediaCollection,
+  });
+  const otherBusinessQuote = await quoteInput(KEY_FOUR, 2);
+  assert.equal(invoice.document.documentNumber, "INV-0000001");
+  assert.equal(otherBusinessQuote.document.documentNumber, "Q-0000001");
+
+  const updated = await updateBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, draftId: firstQuote.document.id,
+    payload: { ...payload({ photos: [] }), expectedVersion: 1 },
+    idempotencyKey: KEY_FIVE, store, normalizeMediaCollection,
+  });
+  assert.equal(updated.document.documentNumber, firstQuote.document.documentNumber);
+
+  const reopened = await getBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, draftId: firstQuote.document.id, store,
+  });
+  assert.equal(reopened.document.documentNumber, firstQuote.document.documentNumber);
+});
+
+test("continued business sequence preserves prefix and width supplied by the shared allocator", async () => {
+  const store = createMemoryStore({ initializeSequences: false });
+  store.initializeSequence(10, "QUOTE", {
+    prefix: "BG",
+    width: 7,
+    lastNumber: 1019,
+  });
+  const result = await createBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, payload: payload({ photos: [] }),
+    idempotencyKey: KEY_ONE, store, normalizeMediaCollection,
+  });
+  assert.equal(result.status, 201);
+  assert.equal(result.document.documentNumber, "BG-0001020");
+});
+
+test("missing numbering setup fails governed without document, number, or stale idempotency reservation", async () => {
+  const store = createMemoryStore({ initializeSequences: false });
+  const input = {
+    pool: {}, authenticatedActor: { id: 1 }, payload: payload({ photos: [] }),
+    idempotencyKey: KEY_ONE, store, normalizeMediaCollection,
+  };
+  const missing = await createBusinessDocumentDraft(input);
+  assert.equal(missing.status, 409);
+  assert.equal(missing.code, "BUSINESS_DOCUMENT_NUMBERING_SETUP_REQUIRED");
+  assert.equal(store.documents.size, 0);
+  assert.equal(store.allocationCounts.size, 0);
+
+  store.initializeSequence(10, "QUOTE");
+  const retried = await createBusinessDocumentDraft(input);
+  assert.equal(retried.status, 201);
+  assert.equal(retried.document.documentNumber, "Q-0000001");
+});
+
+test("create resolves exact Job business and rejects ambiguous or missing Job-less ownership", async () => {
+  const jobStore = createMemoryStore();
+  jobStore.profilesByActor.set(1, [10, 11]);
+  const jobLinked = await createBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 },
+    payload: payload({ jobId: JOB_ONE, photos: [] }),
+    idempotencyKey: KEY_ONE, store: jobStore, normalizeMediaCollection,
+  });
+  assert.equal(jobLinked.status, 201);
+  assert.equal(
+    jobStore.documents.get(jobLinked.document.id).contractorProfileId,
+    10
+  );
+
+  const ambiguousStore = createMemoryStore();
+  ambiguousStore.profilesByActor.set(1, [10, 11]);
+  const ambiguous = await createBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, payload: payload({ photos: [] }),
+    idempotencyKey: KEY_TWO, store: ambiguousStore, normalizeMediaCollection,
+  });
+  assert.equal(ambiguous.status, 409);
+  assert.equal(ambiguous.code, "BUSINESS_DOCUMENT_PROFILE_AMBIGUOUS");
+  assert.equal(ambiguousStore.documents.size, 0);
+
+  const missingStore = createMemoryStore();
+  missingStore.profilesByActor.delete(1);
+  const missing = await createBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, payload: payload({ photos: [] }),
+    idempotencyKey: KEY_THREE, store: missingStore, normalizeMediaCollection,
+  });
+  assert.equal(missing.status, 403);
+  assert.equal(missing.code, "BUSINESS_DOCUMENT_AUTHORITY_REQUIRED");
+});
+
+test("legacy unnumbered update allocates once and later updates preserve the assigned number", async () => {
+  const store = createMemoryStore({ initializeSequences: false });
+  store.initializeSequence(10, "QUOTE", {
+    prefix: "BG",
+    width: 7,
+    lastNumber: 1019,
+  });
+  store.insertLegacyDocument();
+
+  const first = await updateBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, draftId: LEGACY_DRAFT,
+    payload: { ...payload({ photos: [] }), expectedVersion: 1 },
+    idempotencyKey: KEY_ONE, store, normalizeMediaCollection,
+  });
+  assert.equal(first.status, 200);
+  assert.equal(first.document.documentNumber, "BG-0001020");
+  assert.equal(store.allocationCounts.get("10:QUOTE"), 1);
+
+  const second = await updateBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, draftId: LEGACY_DRAFT,
+    payload: { ...payload({ photos: [] }), expectedVersion: 2 },
+    idempotencyKey: KEY_TWO, store, normalizeMediaCollection,
+  });
+  assert.equal(second.status, 200);
+  assert.equal(second.document.documentNumber, "BG-0001020");
+  assert.equal(store.allocationCounts.get("10:QUOTE"), 1);
+});
+
+test("legacy unnumbered update without setup changes nothing and can retry after initialization", async () => {
+  const store = createMemoryStore({ initializeSequences: false });
+  store.insertLegacyDocument();
+  const input = {
+    pool: {}, authenticatedActor: { id: 1 }, draftId: LEGACY_DRAFT,
+    payload: { ...payload({ photos: [] }), expectedVersion: 1 },
+    idempotencyKey: KEY_ONE, store, normalizeMediaCollection,
+  };
+
+  const missing = await updateBusinessDocumentDraft(input);
+  assert.equal(missing.status, 409);
+  assert.equal(missing.code, "BUSINESS_DOCUMENT_NUMBERING_SETUP_REQUIRED");
+  assert.equal(store.documents.get(LEGACY_DRAFT).document.version, 1);
+  assert.equal(store.documents.get(LEGACY_DRAFT).document.documentNumber, null);
+  assert.equal(store.allocationCounts.size, 0);
+
+  store.initializeSequence(10, "QUOTE");
+  const retried = await updateBusinessDocumentDraft(input);
+  assert.equal(retried.status, 200);
+  assert.equal(retried.document.version, 2);
+  assert.equal(retried.document.documentNumber, "Q-0000001");
+});
+
+test("update and delete use saved draft owner while cross-business Job reassociation fails", async () => {
+  const store = createMemoryStore();
+  const created = await createBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, payload: payload({ photos: [] }),
+    idempotencyKey: KEY_ONE, store, normalizeMediaCollection,
+  });
+  store.profilesByActor.set(1, [99]);
+
+  const updated = await updateBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, draftId: created.document.id,
+    payload: { ...payload({ photos: [] }), expectedVersion: 1 },
+    idempotencyKey: KEY_TWO, store, normalizeMediaCollection,
+  });
+  assert.equal(updated.status, 200);
+  assert.equal(updated.document.documentNumber, "Q-0000001");
+  assert.equal(
+    store.documents.get(created.document.id).contractorProfileId,
+    10
+  );
+
+  const crossBusiness = await updateBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, draftId: created.document.id,
+    payload: { ...payload({ jobId: JOB_THREE, photos: [] }), expectedVersion: 2 },
+    idempotencyKey: KEY_THREE, store, normalizeMediaCollection,
+  });
+  assert.equal(crossBusiness.status, 409);
+  assert.equal(crossBusiness.code, "BUSINESS_DOCUMENT_JOB_CONFLICT");
+  assert.equal(store.documents.get(created.document.id).document.jobId, null);
+
+  const deleted = await deleteBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, draftId: created.document.id,
+    expectedVersion: 2, store,
+  });
+  assert.equal(deleted.status, 200);
+  assert.equal(store.documents.has(created.document.id), false);
+});
+
+test("deleting a numbered draft does not rewind or reuse the consumed number", async () => {
+  const store = createMemoryStore();
+  const first = await createBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, payload: payload({ photos: [] }),
+    idempotencyKey: KEY_ONE, store, normalizeMediaCollection,
+  });
+  await deleteBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, draftId: first.document.id,
+    expectedVersion: 1, store,
+  });
+  const second = await createBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, payload: payload({ photos: [] }),
+    idempotencyKey: KEY_TWO, store, normalizeMediaCollection,
+  });
+  assert.equal(first.document.documentNumber, "Q-0000001");
+  assert.equal(second.document.documentNumber, "Q-0000002");
+});
+
+test("caller-supplied Quote and Invoice numbers cannot overwrite server identity", async () => {
+  const store = createMemoryStore();
+  const source = payload({
+    photos: [],
+    content: {
+      ...payload().content,
+      quoteNumber: "BG-0001020",
+      invoiceNumber: "INV-9999999",
+    },
+  });
+  const result = await createBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, payload: source,
+    idempotencyKey: KEY_ONE, store, normalizeMediaCollection,
+  });
+  assert.equal(result.document.documentNumber, "Q-0000001");
+  assert.equal(result.document.content.quoteNumber, "");
+  assert.equal(result.document.content.invoiceNumber, "");
 });
 
 test("Quote agreement terms persist as professional-controlled working-draft content and bind to each saved version", async () => {
@@ -678,11 +1045,12 @@ test("delete fails closed for invalid, unknown, and another business draft", asy
   });
   assert.equal(nonWorking.status, 404);
   assert.equal(store.documents.has(created.document.id), true);
-  const noProfessionalProfile = await deleteBusinessDocumentDraft({
+  const unrelatedActor = await deleteBusinessDocumentDraft({
     pool: {}, authenticatedActor: { id: 3 }, draftId: created.document.id,
     expectedVersion: 1, store,
   });
-  assert.equal(noProfessionalProfile.status, 403);
+  assert.equal(unrelatedActor.status, 404);
+  assert.equal(unrelatedActor.code, "BUSINESS_DOCUMENT_NOT_FOUND");
 });
 
 test("delete requires the current version and a repeated delete remains safely absent", async () => {

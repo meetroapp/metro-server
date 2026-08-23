@@ -67,6 +67,7 @@ Current inventory:
 47. `202608190002_expand_ask_meetro_analysis_continuation_review.sql`
 48. `202608210001_create_business_document_working_drafts.sql`
 49. `202608210002_create_business_document_delivery_foundation.sql`
+50. `202608230001_add_business_document_numbers.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -84,6 +85,12 @@ completion, or lifecycle record and does not make saved media customer-visible.
 noncanonical, version-bound business-document delivery evidence for Email and
 governed Meetro Message channels. It does not issue, accept, pay, or close a
 canonical Quote, Invoice, or Job.
+
+`202608230001_add_business_document_numbers.sql` adds explicitly initialized,
+auditable, immutable, business-scoped Quote and Invoice number sequences.
+Legacy working drafts remain nullable and receive no guessed historical number;
+the numbers remain separate from internal IDs and draft/lifecycle status. The
+migration grants no issuance, approval, payment, or Job lifecycle authority.
 
 `202608150001_activate_customer_safe_efr.sql` adds explicit, conservative
 customer visibility to append-only Finding and Recommendation versions and

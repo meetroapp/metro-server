@@ -4,6 +4,12 @@ const { createHash, randomUUID } = require("node:crypto");
 const {
   normalizeQuoteDraftPhotoCollection,
 } = require("../media/quoteDraftPhoto");
+const {
+  businessDocumentNumberingInternals: {
+    allocateDocumentNumber,
+    resolveBusinessDocumentOwner,
+  },
+} = require("./businessDocumentNumberingService");
 
 const DOCUMENT_TYPES = Object.freeze(["QUOTE", "INVOICE"]);
 const PHOTO_ROLES = Object.freeze(["UNCLASSIFIED", "GENERAL_EVIDENCE", "BEFORE", "AFTER"]);
@@ -155,6 +161,10 @@ function normalizeContent(value, { partial = false } = {}) {
   const result = {};
   for (const [key, maximum] of Object.entries(CONTENT_TEXT_LIMITS)) {
     if (!Object.hasOwn(value, key)) continue;
+    if (["quoteNumber", "invoiceNumber"].includes(key)) {
+      result[key] = "";
+      continue;
+    }
     const normalized = text(value[key], maximum);
     if (normalized === null) return null;
     result[key] = normalized;
@@ -375,6 +385,7 @@ function publicProjection(row, photos = []) {
     documentType: row.document_type,
     status: DRAFT_STATUS,
     reference: row.draft_reference,
+    documentNumber: row.document_number || null,
     jobId: row.job_id || null,
     version: Number(row.version),
     createdAt: new Date(row.created_at).toISOString(),
@@ -414,47 +425,16 @@ async function withTransaction(pool, action) {
   }
 }
 
-async function professionalContext(client, actorUserId) {
-  const result = await client.query(
-    `/* business_document:professional_context */
-     SELECT profiles.id AS contractor_profile_id
-     FROM users
-     INNER JOIN contractor_profiles profiles ON profiles.user_id = users.id
-     WHERE users.id = $1 AND users.account_type = 'professional'
-     ORDER BY profiles.created_at ASC, profiles.id ASC
-     LIMIT 1`,
-    [actorUserId]
-  );
-  return result.rows[0] || null;
-}
-
-async function jobAssociationAllowed(client, actorUserId, jobId) {
+async function jobAssociationAllowed(
+  client,
+  actorUserId,
+  jobId,
+  contractorProfileId
+) {
   if (!jobId) return true;
-  const result = await client.query(
-    `/* business_document:job_authority */
-     SELECT jobs.id
-     FROM jobs
-     INNER JOIN request_relationships relationships
-       ON relationships.id = jobs.source_request_relationship_id
-      AND relationships.professional_user_id = $1
-      AND relationships.status = 'active'
-     INNER JOIN relationship_participants participants
-       ON participants.job_id = jobs.id
-      AND participants.request_relationship_id = relationships.id
-      AND participants.user_id = $1
-     INNER JOIN participant_role_assignments roles
-       ON roles.participant_id = participants.id
-      AND roles.job_id = jobs.id
-      AND roles.role = 'PRIMARY_PROFESSIONAL'
-      AND roles.valid_from <= CURRENT_TIMESTAMP
-      AND (roles.valid_until IS NULL OR roles.valid_until > CURRENT_TIMESTAMP)
-     LEFT JOIN participant_role_revocations revocations
-       ON revocations.role_assignment_id = roles.id
-     WHERE jobs.id = $2 AND revocations.id IS NULL
-     LIMIT 1`,
-    [actorUserId, jobId]
-  );
-  return Boolean(result.rows[0]);
+  const owner = await resolveBusinessDocumentOwner(client, actorUserId, jobId);
+  return owner.kind === "resolved" &&
+    owner.contractorProfileId === Number(contractorProfileId);
 }
 
 async function jobAnalysisSessionOwned(client, actorUserId, sessionId) {
@@ -498,6 +478,28 @@ async function loadOwned(client, actorUserId, draftId, { lock = false } = {}) {
   );
   const row = result.rows[0];
   return row ? publicProjection(row, await loadPhotos(client, row.id)) : null;
+}
+
+async function loadOwnedBusinessContext(
+  client,
+  actorUserId,
+  draftId,
+  { lock = false } = {}
+) {
+  const result = await client.query(
+    `/* business_document:load_owned_business_context */
+     SELECT drafts.contractor_profile_id, drafts.document_type,
+            drafts.document_number, drafts.version
+     FROM business_document_working_drafts drafts
+     INNER JOIN contractor_profiles profiles
+       ON profiles.id = drafts.contractor_profile_id
+     WHERE drafts.id = $1
+       AND profiles.user_id = $2
+       AND drafts.draft_status = 'WORKING_DRAFT'
+     LIMIT 1 ${lock ? "FOR UPDATE OF drafts" : ""}`,
+    [draftId, actorUserId]
+  );
+  return result.rows[0] || null;
 }
 
 async function syncPhotos(client, { draftId, contractorProfileId, actorUserId, photos }) {
@@ -579,14 +581,22 @@ async function cancelCommand(client, commandId) {
 }
 
 const sqlStore = Object.freeze({
-  getProfessionalContext(pool, actorUserId) {
-    return professionalContext(pool, actorUserId);
+  resolveBusinessOwner(pool, actorUserId, jobId) {
+    return resolveBusinessDocumentOwner(pool, actorUserId, jobId);
   },
-  validateJobAssociation(pool, actorUserId, jobId) {
-    return jobAssociationAllowed(pool, actorUserId, jobId);
+  validateJobAssociation(pool, actorUserId, jobId, contractorProfileId) {
+    return jobAssociationAllowed(
+      pool,
+      actorUserId,
+      jobId,
+      contractorProfileId
+    );
   },
   validateJobAnalysisSessionOwnership(pool, actorUserId, sessionId) {
     return jobAnalysisSessionOwned(pool, actorUserId, sessionId);
+  },
+  getOwnedBusinessContext(pool, actorUserId, draftId) {
+    return loadOwnedBusinessContext(pool, actorUserId, draftId);
   },
   create({ pool, actorUserId, contractorProfileId, command, draft }) {
     return withTransaction(pool, async (client) => {
@@ -594,8 +604,18 @@ const sqlStore = Object.freeze({
       if (reserved.conflict) return { kind: "idempotency_conflict" };
       if (reserved.pending) return { kind: "in_progress" };
       if (reserved.replay) return { kind: "replay", document: reserved.replay };
-      if (!(await jobAssociationAllowed(client, actorUserId, draft.jobId))) {
+      const owner = await resolveBusinessDocumentOwner(
+        client,
+        actorUserId,
+        draft.jobId
+      );
+      if (
+        owner.kind !== "resolved" ||
+        owner.contractorProfileId !== contractorProfileId
+      ) {
         await cancelCommand(client, reserved.id);
+        if (owner.kind === "profile_required") return { kind: "authority_required" };
+        if (owner.kind === "profile_ambiguous") return { kind: "profile_ambiguous" };
         return { kind: "job_unavailable" };
       }
       if (!(await jobAnalysisSessionOwned(
@@ -606,13 +626,26 @@ const sqlStore = Object.freeze({
         await cancelCommand(client, reserved.id);
         return { kind: "analysis_unavailable" };
       }
+      const allocation = await allocateDocumentNumber(
+        client,
+        contractorProfileId,
+        draft.documentType
+      );
+      if (allocation.kind !== "allocated") {
+        await cancelCommand(client, reserved.id);
+        return {
+          kind: allocation.kind === "setup_required"
+            ? "numbering_setup_required"
+            : "numbering_exhausted",
+        };
+      }
       await client.query(
         `/* business_document:create */
          INSERT INTO business_document_working_drafts (
            id, contractor_profile_id, created_by_user_id, job_id, document_type,
-           draft_reference, content, workspace_context
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb)`,
-        [draft.id, contractorProfileId, actorUserId, draft.jobId, draft.documentType, draft.reference, JSON.stringify(draft.content), JSON.stringify(draft.workspace)]
+           draft_reference, document_number, content, workspace_context
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb)`,
+        [draft.id, contractorProfileId, actorUserId, draft.jobId, draft.documentType, draft.reference, allocation.documentNumber, JSON.stringify(draft.content), JSON.stringify(draft.workspace)]
       );
       await syncPhotos(client, { draftId: draft.id, contractorProfileId, actorUserId, photos: draft.photos });
       const document = await loadOwned(client, actorUserId, draft.id);
@@ -620,26 +653,37 @@ const sqlStore = Object.freeze({
       return { kind: "created", document };
     });
   },
-  update({ pool, actorUserId, contractorProfileId, command, draftId, expectedVersion, draft }) {
+  update({ pool, actorUserId, command, draftId, expectedVersion, draft }) {
     return withTransaction(pool, async (client) => {
       const reserved = await reserveCommand(client, command);
       if (reserved.conflict) return { kind: "idempotency_conflict" };
       if (reserved.pending) return { kind: "in_progress" };
       if (reserved.replay) return { kind: "replay", document: reserved.replay };
-      const current = await loadOwned(client, actorUserId, draftId, { lock: true });
+      const current = await loadOwnedBusinessContext(
+        client,
+        actorUserId,
+        draftId,
+        { lock: true }
+      );
       if (!current) {
         await cancelCommand(client, reserved.id);
         return { kind: "not_found" };
       }
-      if (current.version !== expectedVersion) {
+      const contractorProfileId = Number(current.contractor_profile_id);
+      if (Number(current.version) !== expectedVersion) {
         await cancelCommand(client, reserved.id);
-        return { kind: "version_conflict", currentVersion: current.version };
+        return { kind: "version_conflict", currentVersion: Number(current.version) };
       }
-      if (current.documentType !== draft.documentType) {
+      if (current.document_type !== draft.documentType) {
         await cancelCommand(client, reserved.id);
         return { kind: "type_conflict" };
       }
-      if (!(await jobAssociationAllowed(client, actorUserId, draft.jobId))) {
+      if (!(await jobAssociationAllowed(
+        client,
+        actorUserId,
+        draft.jobId,
+        contractorProfileId
+      ))) {
         await cancelCommand(client, reserved.id);
         return { kind: "job_unavailable" };
       }
@@ -651,13 +695,31 @@ const sqlStore = Object.freeze({
         await cancelCommand(client, reserved.id);
         return { kind: "analysis_unavailable" };
       }
+      let documentNumber = current.document_number || null;
+      if (!documentNumber) {
+        const allocation = await allocateDocumentNumber(
+          client,
+          contractorProfileId,
+          draft.documentType
+        );
+        if (allocation.kind !== "allocated") {
+          await cancelCommand(client, reserved.id);
+          return {
+            kind: allocation.kind === "setup_required"
+              ? "numbering_setup_required"
+              : "numbering_exhausted",
+          };
+        }
+        documentNumber = allocation.documentNumber;
+      }
       await client.query(
         `/* business_document:update */
          UPDATE business_document_working_drafts
          SET job_id = $3, content = $4::jsonb, workspace_context = $5::jsonb,
+             document_number = COALESCE(document_number, $6),
              version = version + 1, updated_at = CURRENT_TIMESTAMP
          WHERE id = $1 AND contractor_profile_id = $2`,
-        [draftId, contractorProfileId, draft.jobId, JSON.stringify(draft.content), JSON.stringify(draft.workspace)]
+        [draftId, contractorProfileId, draft.jobId, JSON.stringify(draft.content), JSON.stringify(draft.workspace), documentNumber]
       );
       await syncPhotos(client, { draftId, contractorProfileId, actorUserId, photos: draft.photos });
       const document = await loadOwned(client, actorUserId, draftId);
@@ -665,12 +727,18 @@ const sqlStore = Object.freeze({
       return { kind: "updated", document };
     });
   },
-  delete({ pool, actorUserId, contractorProfileId, draftId, expectedVersion }) {
+  delete({ pool, actorUserId, draftId, expectedVersion }) {
     return withTransaction(pool, async (client) => {
-      const current = await loadOwned(client, actorUserId, draftId, { lock: true });
+      const current = await loadOwnedBusinessContext(
+        client,
+        actorUserId,
+        draftId,
+        { lock: true }
+      );
       if (!current) return { kind: "not_found" };
-      if (current.version !== expectedVersion) {
-        return { kind: "version_conflict", currentVersion: current.version };
+      const contractorProfileId = Number(current.contractor_profile_id);
+      if (Number(current.version) !== expectedVersion) {
+        return { kind: "version_conflict", currentVersion: Number(current.version) };
       }
       await client.query(
         `/* business_document:delete_photo_associations */
@@ -706,6 +774,7 @@ const sqlStore = Object.freeze({
          AND ($3::text IS NULL OR drafts.updated_at >= CURRENT_TIMESTAMP - $3::interval)
          AND ($4::text IS NULL OR
            drafts.draft_reference ILIKE $4 OR
+           drafts.document_number ILIKE $4 OR
            COALESCE(drafts.content->>'customerName', '') ILIKE $4 OR
            COALESCE(drafts.content->>'projectTitle', '') ILIKE $4 OR
            COALESCE(drafts.content->>'customerLocation', '') ILIKE $4 OR
@@ -727,6 +796,10 @@ function outcome(result, successCode, successStatus) {
   if (result.kind === "type_conflict") return failure(409, "BUSINESS_DOCUMENT_TYPE_CONFLICT", "The saved document type cannot be changed.");
   if (result.kind === "job_unavailable") return failure(409, "BUSINESS_DOCUMENT_JOB_CONFLICT", "The selected Job is no longer available for this document.");
   if (result.kind === "analysis_unavailable") return failure(409, "BUSINESS_DOCUMENT_JOB_ANALYSIS_CONFLICT", "The selected private Job Analysis session is unavailable.");
+  if (result.kind === "authority_required") return failure(403, "BUSINESS_DOCUMENT_AUTHORITY_REQUIRED", "A professional business profile is required.");
+  if (result.kind === "profile_ambiguous") return failure(409, "BUSINESS_DOCUMENT_PROFILE_AMBIGUOUS", "Select a Job to identify which business owns this document.");
+  if (result.kind === "numbering_setup_required") return failure(409, "BUSINESS_DOCUMENT_NUMBERING_SETUP_REQUIRED", "Quote or Invoice numbering must be set up before the first save.");
+  if (result.kind === "numbering_exhausted") return failure(409, "BUSINESS_DOCUMENT_NUMBERING_EXHAUSTED", "This business-document number sequence is exhausted.");
   if (result.kind === "not_found") return failure(404, "BUSINESS_DOCUMENT_NOT_FOUND", "The working document was not found.");
   return {
     ok: true,
@@ -741,11 +814,14 @@ async function createBusinessDocumentDraft(input = {}) {
   const validated = validateCreateInput(input);
   if (validated.error) return validated.error;
   const store = input.store || sqlStore;
-  const context = await store.getProfessionalContext(input.pool, validated.actorId);
-  if (!context?.contractor_profile_id) return failure(403, "BUSINESS_DOCUMENT_AUTHORITY_REQUIRED", "A professional business profile is required.");
-  if (!(await store.validateJobAssociation(input.pool, validated.actorId, validated.jobId))) {
-    return failure(409, "BUSINESS_DOCUMENT_JOB_CONFLICT", "The selected Job is not available to this professional.");
-  }
+  const owner = await store.resolveBusinessOwner(
+    input.pool,
+    validated.actorId,
+    validated.jobId
+  );
+  if (owner.kind === "profile_required") return failure(403, "BUSINESS_DOCUMENT_AUTHORITY_REQUIRED", "A professional business profile is required.");
+  if (owner.kind === "profile_ambiguous") return failure(409, "BUSINESS_DOCUMENT_PROFILE_AMBIGUOUS", "Select a Job to identify which business owns this document.");
+  if (owner.kind !== "resolved") return failure(409, "BUSINESS_DOCUMENT_JOB_CONFLICT", "The selected Job is not available to this professional.");
   if (
     validated.workspace.jobAnalysisSessionId &&
     (
@@ -761,7 +837,7 @@ async function createBusinessDocumentDraft(input = {}) {
   }
   const photos = normalizePhotos(validated.rawPhotos, {
     env: input.env,
-    contractorProfileId: Number(context.contractor_profile_id),
+    contractorProfileId: owner.contractorProfileId,
     normalizeMediaCollection: input.normalizeMediaCollection,
   });
   if (!photos) return failure(400, "BUSINESS_DOCUMENT_PHOTOS_INVALID", "One or more document photos are invalid.");
@@ -785,7 +861,7 @@ async function createBusinessDocumentDraft(input = {}) {
   const result = await store.create({
     pool: input.pool,
     actorUserId: validated.actorId,
-    contractorProfileId: Number(context.contractor_profile_id),
+    contractorProfileId: owner.contractorProfileId,
     command: { actorUserId: validated.actorId, operation: "CREATE", key: validated.idempotencyKey, hash },
     draft,
   });
@@ -796,9 +872,18 @@ async function updateBusinessDocumentDraft(input = {}) {
   const validated = validateUpdateInput(input);
   if (validated.error) return validated.error;
   const store = input.store || sqlStore;
-  const context = await store.getProfessionalContext(input.pool, validated.actorId);
-  if (!context?.contractor_profile_id) return failure(403, "BUSINESS_DOCUMENT_AUTHORITY_REQUIRED", "A professional business profile is required.");
-  if (!(await store.validateJobAssociation(input.pool, validated.actorId, validated.jobId))) {
+  const context = await store.getOwnedBusinessContext(
+    input.pool,
+    validated.actorId,
+    validated.draftId
+  );
+  if (!context?.contractor_profile_id) return failure(404, "BUSINESS_DOCUMENT_NOT_FOUND", "The working document was not found.");
+  if (!(await store.validateJobAssociation(
+    input.pool,
+    validated.actorId,
+    validated.jobId,
+    Number(context.contractor_profile_id)
+  ))) {
     return failure(409, "BUSINESS_DOCUMENT_JOB_CONFLICT", "The selected Job is not available to this professional.");
   }
   if (
@@ -844,12 +929,9 @@ async function deleteBusinessDocumentDraft(input = {}) {
   const validated = validateDeleteInput(input);
   if (validated.error) return validated.error;
   const store = input.store || sqlStore;
-  const context = await store.getProfessionalContext(input.pool, validated.actorId);
-  if (!context?.contractor_profile_id) return failure(403, "BUSINESS_DOCUMENT_AUTHORITY_REQUIRED", "A professional business profile is required.");
   const result = await store.delete({
     pool: input.pool,
     actorUserId: validated.actorId,
-    contractorProfileId: Number(context.contractor_profile_id),
     draftId: validated.draftId,
     expectedVersion: validated.expectedVersion,
   });
@@ -914,6 +996,9 @@ module.exports = {
     normalizePhotos,
     normalizeWorkspace,
     publicProjection,
+    allocateDocumentNumber,
+    jobAssociationAllowed,
+    loadOwnedBusinessContext,
     requestHash,
     sqlStore,
     validateCreateInput,

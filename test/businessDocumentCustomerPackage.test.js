@@ -13,6 +13,7 @@ function document() {
     id: "11111111-1111-4111-8111-111111111111",
     documentType: "QUOTE",
     reference: "WQ-FAN",
+    documentNumber: "Q-0001020",
     version: 3,
     content: {
       customerName: "Jack Smith",
@@ -42,6 +43,7 @@ function document() {
 test("customer package binds exact saved Quote agreement and excludes every private workspace field", () => {
   const customerPackage = buildBusinessDocumentCustomerPackage(document(), { business_name: "Handyman LLC" });
   assert.equal(customerPackage.document.version, 3);
+  assert.equal(customerPackage.document.reference, "Q-0001020");
   assert.equal(customerPackage.totalMinor, 26999);
   assert.deepEqual(customerPackage.agreement.exclusions, ["Painting"]);
   assert.equal(customerPackage.photos.length, 1);
