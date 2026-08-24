@@ -16,6 +16,13 @@ const {
     normalizeContent: normalizeBusinessDocumentContent,
   },
 } = require("../documents/businessDocumentDraftService");
+const {
+  customerPartyInternals: {
+    customerPartyProjection,
+    insertCanonicalQuoteCustomerParty,
+    loadOwnedCustomerParty,
+  },
+} = require("../relationships/customerPartyService");
 
 const {
   completeIdempotency,
@@ -505,6 +512,7 @@ function businessDocumentSourceFingerprint({
   jobId,
   documentNumber,
   conversion,
+  customerParty = null,
 }) {
   return fingerprint({
     schemaVersion: 1,
@@ -525,6 +533,10 @@ function businessDocumentSourceFingerprint({
       source: item.source,
     })),
     customerTermsSnapshot: conversion.customerTermsSnapshot,
+    ...(customerParty ? { customerParty: {
+      businessContactId: customerParty.businessContactId,
+      customerRelationshipId: customerParty.customerRelationshipId,
+    } } : {}),
   });
 }
 
@@ -738,6 +750,9 @@ async function loadJobContext(client, jobId, actorUserId, { lock = false } = {})
       relationships.professional_user_id AS selected_professional_user_id,
       participants.id AS actor_participant_id,
       participants.user_id AS actor_user_id,
+      customer_parties.contractor_profile_id AS customer_party_contractor_profile_id,
+      customer_parties.business_contact_id,
+      customer_parties.business_customer_relationship_id,
       EXISTS (
         SELECT 1
         FROM participant_role_assignments roles
@@ -762,6 +777,8 @@ async function loadJobContext(client, jobId, actorUserId, { lock = false } = {})
       ON participants.job_id = jobs.id
       AND participants.request_relationship_id = relationships.id
       AND participants.user_id = $2
+    LEFT JOIN job_customer_parties customer_parties
+      ON customer_parties.job_id = jobs.id
     WHERE jobs.id = $1
     LIMIT 1
     ${lock ? "FOR UPDATE OF jobs" : ""}
@@ -783,6 +800,9 @@ async function loadQuoteContext(client, quoteId, actorUserId, { lock = false } =
       relationships.professional_user_id AS selected_professional_user_id,
       participants.id AS actor_participant_id,
       participants.user_id AS actor_user_id,
+      customer_parties.contractor_profile_id AS customer_party_contractor_profile_id,
+      customer_parties.business_contact_id,
+      customer_parties.business_customer_relationship_id,
       EXISTS (
         SELECT 1
         FROM participant_role_assignments roles
@@ -810,6 +830,9 @@ async function loadQuoteContext(client, quoteId, actorUserId, { lock = false } =
       ON participants.job_id = quotes.job_id
       AND participants.request_relationship_id = quotes.relationship_id
       AND participants.user_id = $2
+    LEFT JOIN canonical_quote_customer_parties customer_parties
+      ON customer_parties.quote_id = quotes.id
+      AND customer_parties.job_id = quotes.job_id
     WHERE quotes.id = $1
     LIMIT 1
     ${lock ? "FOR UPDATE OF quotes, aggregates" : ""}
@@ -1490,7 +1513,10 @@ async function loadQuoteProjection(client, quoteId) {
       decisions.decided_at AS customer_decided_at,
       business_sources.document_number AS business_document_number,
       business_sources.source_document_id AS business_source_document_id,
-      business_sources.source_document_version AS business_source_document_version
+      business_sources.source_document_version AS business_source_document_version,
+      customer_parties.contractor_profile_id AS customer_party_contractor_profile_id,
+      customer_parties.business_contact_id,
+      customer_parties.business_customer_relationship_id
     FROM canonical_quotes quotes
     INNER JOIN commercial_authority_aggregates aggregates
       ON aggregates.id = quotes.id
@@ -1503,6 +1529,9 @@ async function loadQuoteProjection(client, quoteId) {
       ON decisions.quote_id = quotes.id
     LEFT JOIN canonical_quote_business_document_sources business_sources
       ON business_sources.quote_id = quotes.id
+    LEFT JOIN canonical_quote_customer_parties customer_parties
+      ON customer_parties.quote_id = quotes.id
+      AND customer_parties.job_id = quotes.job_id
     WHERE quotes.id = $1
     LIMIT 1
     `,
@@ -1574,6 +1603,14 @@ async function loadQuoteProjection(client, quoteId) {
           documentId: identity.business_source_document_id,
           documentVersion: Number(identity.business_source_document_version),
         }
+      : null,
+    customerParty: identity.business_contact_id
+      ? customerPartyProjection({
+          contractor_profile_id: identity.customer_party_contractor_profile_id,
+          business_contact_id: identity.business_contact_id,
+          business_customer_relationship_id:
+            identity.business_customer_relationship_id,
+        })
       : null,
   };
 }
@@ -1690,7 +1727,8 @@ async function loadOwnedBusinessDocumentQuoteSource(
     `/* quote_business_document:load_owned_source */
      SELECT drafts.id, drafts.contractor_profile_id, drafts.job_id,
        drafts.document_type, drafts.draft_status, drafts.document_number,
-       drafts.content, drafts.version
+       drafts.content, drafts.version, drafts.business_contact_id,
+       drafts.business_customer_relationship_id
      FROM business_document_working_drafts drafts
      INNER JOIN contractor_profiles profiles
        ON profiles.id = drafts.contractor_profile_id
@@ -1797,8 +1835,29 @@ async function importBusinessDocumentDraftQuote(input = {}) {
     if (authorityError) return { abort: authorityError };
 
     let conversion = null;
+    let sourceCustomerParty = null;
     let sourceHash = mapping?.source_snapshot_integrity_hash || null;
     if (!mapping) {
+      const hasContact = Boolean(source.business_contact_id);
+      const hasRelationship = Boolean(source.business_customer_relationship_id);
+      if (hasContact !== hasRelationship) {
+        return {
+          abort: failure(409, "BUSINESS_DOCUMENT_CUSTOMER_PARTY_INVALID", "The working Quote customer linkage is invalid."),
+        };
+      }
+      if (hasContact) {
+        sourceCustomerParty = await loadOwnedCustomerParty(client, {
+          actorUserId: validated.actorId,
+          contractorProfileId: Number(source.contractor_profile_id),
+          businessContactId: source.business_contact_id,
+          customerRelationshipId: source.business_customer_relationship_id,
+        }, { lock: true });
+        if (!sourceCustomerParty) {
+          return {
+            abort: failure(404, "BUSINESS_DOCUMENT_CUSTOMER_PARTY_UNAVAILABLE", "The working Quote Contact and Customer Relationship are unavailable."),
+          };
+        }
+      }
       conversion = workingQuoteConversion(source.content);
       if (conversion.error) {
         return {
@@ -1815,6 +1874,7 @@ async function importBusinessDocumentDraftQuote(input = {}) {
         jobId,
         documentNumber: source.document_number,
         conversion,
+        customerParty: sourceCustomerParty,
       });
     }
 
@@ -1910,6 +1970,14 @@ async function importBusinessDocumentDraftQuote(input = {}) {
       ]
     );
     if (!quoteIdentity.rows[0]) throw new Error("Canonical Quote identity creation failed.");
+    if (sourceCustomerParty) {
+      await insertCanonicalQuoteCustomerParty(client, {
+        quoteId,
+        jobId,
+        actorUserId: validated.actorId,
+        party: sourceCustomerParty,
+      });
+    }
 
     const snapshots = conversion.items.map((item, index) => ({
       scopeItemId: randomUUID(),
@@ -2104,6 +2172,20 @@ async function createDraftQuote(input = {}) {
       ]
     );
     if (!quoteResultRow.rows[0]) throw new Error("Canonical Quote identity creation failed.");
+    if (context.business_contact_id) {
+      await insertCanonicalQuoteCustomerParty(client, {
+        quoteId,
+        jobId: validated.jobId,
+        actorUserId: validated.actorId,
+        party: {
+          contractorProfileId:
+            Number(context.customer_party_contractor_profile_id),
+          businessContactId: context.business_contact_id,
+          customerRelationshipId:
+            context.business_customer_relationship_id,
+        },
+      });
+    }
     const version = await insertQuoteVersion({
       client,
       quoteId,
@@ -3034,6 +3116,20 @@ async function createDerivedDraftQuote(input = {}) {
         context.currency,
       ]
     );
+    if (context.business_contact_id) {
+      await insertCanonicalQuoteCustomerParty(client, {
+        quoteId,
+        jobId: context.job_id,
+        actorUserId: validated.actorId,
+        party: {
+          contractorProfileId:
+            Number(context.customer_party_contractor_profile_id),
+          businessContactId: context.business_contact_id,
+          customerRelationshipId:
+            context.business_customer_relationship_id,
+        },
+      });
+    }
     const version = await insertQuoteVersion({
       client,
       quoteId,

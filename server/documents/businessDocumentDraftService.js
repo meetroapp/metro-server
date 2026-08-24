@@ -10,6 +10,13 @@ const {
     resolveBusinessDocumentOwner,
   },
 } = require("./businessDocumentNumberingService");
+const {
+  customerPartyInternals: {
+    customerPartyProjection,
+    loadOwnedCustomerParty,
+    normalizeCustomerParty,
+  },
+} = require("../relationships/customerPartyService");
 
 const DOCUMENT_TYPES = Object.freeze(["QUOTE", "INVOICE"]);
 const PHOTO_ROLES = Object.freeze(["UNCLASSIFIED", "GENERAL_EVIDENCE", "BEFORE", "AFTER"]);
@@ -320,16 +327,29 @@ function validateCreateInput(input) {
   if (!id) return { error: failure(401, "AUTHENTICATION_REQUIRED", "Authentication is required.") };
   const key = uuid(input.idempotencyKey);
   if (!key) return { error: failure(400, "BUSINESS_DOCUMENT_IDEMPOTENCY_REQUIRED", "A valid save identity is required.") };
-  const allowedPayload = new Set(["documentType", "jobId", "content", "workspace", "photos"]);
+  const allowedPayload = new Set([
+    "documentType", "jobId", "content", "workspace", "photos", "customerParty",
+  ]);
   if (!onlyKeys(input.payload, allowedPayload)) return { error: failure(400, "BUSINESS_DOCUMENT_FIELD_REJECTED", "Server-owned document fields cannot be supplied.") };
   const documentType = String(input.payload.documentType || "").trim().toUpperCase();
   const jobId = input.payload.jobId == null || input.payload.jobId === "" ? null : uuid(input.payload.jobId);
   const content = normalizeContent(input.payload.content);
   const workspace = normalizeWorkspace(input.payload.workspace, documentType);
-  if (!DOCUMENT_TYPES.includes(documentType) || (input.payload.jobId && !jobId) || !content || !workspace || !Array.isArray(input.payload.photos)) {
+  const customerParty = normalizeCustomerParty(input.payload.customerParty);
+  if (!DOCUMENT_TYPES.includes(documentType) || (input.payload.jobId && !jobId) || !content || !workspace || !Array.isArray(input.payload.photos) || !customerParty) {
     return { error: failure(400, "BUSINESS_DOCUMENT_INVALID", "The working document is invalid.") };
   }
-  return { actorId: id, idempotencyKey: key, documentType, jobId, content, workspace, rawPhotos: input.payload.photos };
+  return {
+    actorId: id,
+    idempotencyKey: key,
+    documentType,
+    jobId,
+    content,
+    workspace,
+    rawPhotos: input.payload.photos,
+    customerPartyMode: customerParty.mode,
+    customerParty: customerParty.party,
+  };
 }
 
 function validateUpdateInput(input) {
@@ -347,6 +367,7 @@ function validateUpdateInput(input) {
       content: input.payload?.content,
       workspace: input.payload?.workspace,
       photos: input.payload?.photos,
+      customerParty: input.payload?.customerParty,
     },
     idempotencyKey: input.idempotencyKey,
     env: input.env,
@@ -356,11 +377,25 @@ function validateUpdateInput(input) {
   if (base.error) return base;
   const draftId = uuid(input.draftId);
   const expectedVersion = Number(input.payload?.expectedVersion);
-  const allowedPayload = new Set(["expectedVersion", "documentType", "jobId", "content", "workspace", "photos"]);
+  const allowedPayload = new Set([
+    "expectedVersion", "documentType", "jobId", "content", "workspace", "photos", "customerParty",
+  ]);
   if (!draftId || !onlyKeys(input.payload, allowedPayload) || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
     return { error: failure(400, "BUSINESS_DOCUMENT_VERSION_REQUIRED", "The current saved version is required.") };
   }
-  return { ...base, draftId, expectedVersion };
+  const customerParty = normalizeCustomerParty(input.payload.customerParty, {
+    allowOmitted: !Object.hasOwn(input.payload, "customerParty"),
+  });
+  if (!customerParty) {
+    return { error: failure(400, "BUSINESS_DOCUMENT_INVALID", "The working document is invalid.") };
+  }
+  return {
+    ...base,
+    draftId,
+    expectedVersion,
+    customerPartyMode: customerParty.mode,
+    customerParty: customerParty.party,
+  };
 }
 
 function validateDeleteInput(input) {
@@ -387,6 +422,7 @@ function publicProjection(row, photos = []) {
     reference: row.draft_reference,
     documentNumber: row.document_number || null,
     jobId: row.job_id || null,
+    customerParty: customerPartyProjection(row),
     version: Number(row.version),
     createdAt: new Date(row.created_at).toISOString(),
     updatedAt: new Date(row.updated_at).toISOString(),
@@ -489,7 +525,9 @@ async function loadOwnedBusinessContext(
   const result = await client.query(
     `/* business_document:load_owned_business_context */
      SELECT drafts.contractor_profile_id, drafts.document_type,
-            drafts.document_number, drafts.version
+            drafts.document_number, drafts.version,
+            drafts.business_contact_id,
+            drafts.business_customer_relationship_id
      FROM business_document_working_drafts drafts
      INNER JOIN contractor_profiles profiles
        ON profiles.id = drafts.contractor_profile_id
@@ -626,6 +664,19 @@ const sqlStore = Object.freeze({
         await cancelCommand(client, reserved.id);
         return { kind: "analysis_unavailable" };
       }
+      let customerParty = null;
+      if (draft.customerParty) {
+        customerParty = await loadOwnedCustomerParty(client, {
+          actorUserId,
+          contractorProfileId,
+          businessContactId: draft.customerParty.businessContactId,
+          customerRelationshipId: draft.customerParty.customerRelationshipId,
+        }, { lock: true });
+        if (!customerParty) {
+          await cancelCommand(client, reserved.id);
+          return { kind: "customer_party_unavailable" };
+        }
+      }
       const allocation = await allocateDocumentNumber(
         client,
         contractorProfileId,
@@ -643,9 +694,22 @@ const sqlStore = Object.freeze({
         `/* business_document:create */
          INSERT INTO business_document_working_drafts (
            id, contractor_profile_id, created_by_user_id, job_id, document_type,
-           draft_reference, document_number, content, workspace_context
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb)`,
-        [draft.id, contractorProfileId, actorUserId, draft.jobId, draft.documentType, draft.reference, allocation.documentNumber, JSON.stringify(draft.content), JSON.stringify(draft.workspace)]
+           draft_reference, document_number, content, workspace_context,
+           business_contact_id, business_customer_relationship_id
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11)`,
+        [
+          draft.id,
+          contractorProfileId,
+          actorUserId,
+          draft.jobId,
+          draft.documentType,
+          draft.reference,
+          allocation.documentNumber,
+          JSON.stringify(draft.content),
+          JSON.stringify(draft.workspace),
+          customerParty?.businessContactId || null,
+          customerParty?.customerRelationshipId || null,
+        ]
       );
       await syncPhotos(client, { draftId: draft.id, contractorProfileId, actorUserId, photos: draft.photos });
       const document = await loadOwned(client, actorUserId, draft.id);
@@ -695,6 +759,21 @@ const sqlStore = Object.freeze({
         await cancelCommand(client, reserved.id);
         return { kind: "analysis_unavailable" };
       }
+      let customerParty = draft.customerPartyMode === "PRESERVE"
+        ? customerPartyProjection(current)
+        : draft.customerParty;
+      if (customerParty) {
+        customerParty = await loadOwnedCustomerParty(client, {
+          actorUserId,
+          contractorProfileId,
+          businessContactId: customerParty.businessContactId,
+          customerRelationshipId: customerParty.customerRelationshipId,
+        }, { lock: true });
+        if (!customerParty) {
+          await cancelCommand(client, reserved.id);
+          return { kind: "customer_party_unavailable" };
+        }
+      }
       let documentNumber = current.document_number || null;
       if (!documentNumber) {
         const allocation = await allocateDocumentNumber(
@@ -717,9 +796,20 @@ const sqlStore = Object.freeze({
          UPDATE business_document_working_drafts
          SET job_id = $3, content = $4::jsonb, workspace_context = $5::jsonb,
              document_number = COALESCE(document_number, $6),
+             business_contact_id = $7,
+             business_customer_relationship_id = $8,
              version = version + 1, updated_at = CURRENT_TIMESTAMP
          WHERE id = $1 AND contractor_profile_id = $2`,
-        [draftId, contractorProfileId, draft.jobId, JSON.stringify(draft.content), JSON.stringify(draft.workspace), documentNumber]
+        [
+          draftId,
+          contractorProfileId,
+          draft.jobId,
+          JSON.stringify(draft.content),
+          JSON.stringify(draft.workspace),
+          documentNumber,
+          customerParty?.businessContactId || null,
+          customerParty?.customerRelationshipId || null,
+        ]
       );
       await syncPhotos(client, { draftId, contractorProfileId, actorUserId, photos: draft.photos });
       const document = await loadOwned(client, actorUserId, draftId);
@@ -796,6 +886,7 @@ function outcome(result, successCode, successStatus) {
   if (result.kind === "type_conflict") return failure(409, "BUSINESS_DOCUMENT_TYPE_CONFLICT", "The saved document type cannot be changed.");
   if (result.kind === "job_unavailable") return failure(409, "BUSINESS_DOCUMENT_JOB_CONFLICT", "The selected Job is no longer available for this document.");
   if (result.kind === "analysis_unavailable") return failure(409, "BUSINESS_DOCUMENT_JOB_ANALYSIS_CONFLICT", "The selected private Job Analysis session is unavailable.");
+  if (result.kind === "customer_party_unavailable") return failure(404, "BUSINESS_DOCUMENT_CUSTOMER_PARTY_UNAVAILABLE", "The selected Contact and Customer Relationship are unavailable.");
   if (result.kind === "authority_required") return failure(403, "BUSINESS_DOCUMENT_AUTHORITY_REQUIRED", "A professional business profile is required.");
   if (result.kind === "profile_ambiguous") return failure(409, "BUSINESS_DOCUMENT_PROFILE_AMBIGUOUS", "Select a Job to identify which business owns this document.");
   if (result.kind === "numbering_setup_required") return failure(409, "BUSINESS_DOCUMENT_NUMBERING_SETUP_REQUIRED", "Quote or Invoice numbering must be set up before the first save.");
@@ -850,6 +941,8 @@ async function createBusinessDocumentDraft(input = {}) {
     content: validated.content,
     workspace: validated.workspace,
     photos,
+    customerPartyMode: validated.customerPartyMode,
+    customerParty: validated.customerParty,
   };
   const hash = requestHash({
     documentType: draft.documentType,
@@ -857,6 +950,7 @@ async function createBusinessDocumentDraft(input = {}) {
     content: draft.content,
     workspace: draft.workspace,
     photos: draft.photos,
+    ...(draft.customerParty ? { customerParty: draft.customerParty } : {}),
   });
   const result = await store.create({
     pool: input.pool,
@@ -911,8 +1005,26 @@ async function updateBusinessDocumentDraft(input = {}) {
     content: validated.content,
     workspace: validated.workspace,
     photos,
+    customerPartyMode: validated.customerPartyMode,
+    customerParty: validated.customerParty,
   };
-  const hash = requestHash({ draftId: validated.draftId, expectedVersion: validated.expectedVersion, ...draft });
+  const hashDraft = {
+    documentType: draft.documentType,
+    jobId: draft.jobId,
+    content: draft.content,
+    workspace: draft.workspace,
+    photos: draft.photos,
+    ...(draft.customerPartyMode === "LINK"
+      ? { customerParty: draft.customerParty }
+      : draft.customerPartyMode === "CLEAR"
+        ? { customerParty: null }
+        : {}),
+  };
+  const hash = requestHash({
+    draftId: validated.draftId,
+    expectedVersion: validated.expectedVersion,
+    ...hashDraft,
+  });
   const result = await store.update({
     pool: input.pool,
     actorUserId: validated.actorId,

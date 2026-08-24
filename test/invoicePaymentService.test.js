@@ -1,6 +1,8 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const { readFileSync } = require("node:fs");
+const { join } = require("node:path");
 const test = require("node:test");
 const {
   invoicePaymentInternals,
@@ -73,6 +75,56 @@ test("professional Invoice projection exposes only bounded command safety state"
   assert.equal(projected.actions.canRecordPayment, true);
   assert.equal(projected.actions.canShareExternal, true);
   assert.equal(projected.lineItems[0].sourceQuoteId, line.source_quote_id);
+});
+
+test("professional Invoice resolves durable customer identity without changing historical customer snapshot", () => {
+  const row = invoiceRow({
+    customer_name: "Historical Customer Snapshot",
+    customer_party_contractor_profile_id: 10,
+    business_contact_id: "55555555-5555-4555-8555-555555555555",
+    business_customer_relationship_id:
+      "66666666-6666-4666-8666-666666666666",
+  });
+  const professional = invoicePaymentInternals.invoiceProjection(
+    row,
+    [line],
+    [],
+    "professional"
+  );
+  assert.equal(professional.customer.displayName, "Historical Customer Snapshot");
+  assert.deepEqual(professional.customerParty, {
+    contractorProfileId: 10,
+    businessContactId: "55555555-5555-4555-8555-555555555555",
+    customerRelationshipId: "66666666-6666-4666-8666-666666666666",
+  });
+  const customer = invoicePaymentInternals.invoiceProjection(
+    row,
+    [line],
+    [],
+    "customer"
+  );
+  assert.equal(customer.customer.displayName, "Historical Customer Snapshot");
+  assert.equal("customerParty" in customer, false);
+});
+
+test("Invoice creation resolves governed Job and approved-Quote links before immutable insertion", () => {
+  const source = readFileSync(
+    join(__dirname, "..", "server", "finance", "invoicePaymentService.js"),
+    "utf8"
+  );
+  const createStart = source.indexOf("async function createInvoice");
+  const createEnd = source.indexOf("function invoiceMessageSnapshot", createStart);
+  const createSource = source.slice(createStart, createEnd);
+  assert.ok(createStart >= 0 && createEnd > createStart);
+  assert.ok(createSource.indexOf("loadJobCustomerParty") >= 0);
+  assert.ok(createSource.indexOf("resolveInvoiceCustomerParty") >= 0);
+  assert.ok(createSource.indexOf("INVOICE_CUSTOMER_PARTY_CONFLICT") >= 0);
+  assert.ok(
+    createSource.indexOf("INVOICE_CUSTOMER_PARTY_CONFLICT") <
+      createSource.indexOf("INSERT INTO canonical_invoices")
+  );
+  assert.ok(createSource.indexOf("insertCanonicalInvoiceCustomerParty") >= 0);
+  assert.doesNotMatch(createSource, /\bcustomerName\b|email_normalized|phone_normalized/);
 });
 
 test("Invoice Conversation snapshot is customer-safe and exact-identity bound", () => {

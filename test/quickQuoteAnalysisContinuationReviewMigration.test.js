@@ -81,41 +81,41 @@ test(
 
     assert.equal(
       migrations.length,
-      54
-    );
-
-    assert.equal(
-      migrations.at(-8)?.filename,
-      migrationName
-    );
-
-    assert.equal(
-      migrations.at(-7)?.filename,
-      "202608210001_create_business_document_working_drafts.sql"
+      55
     );
 
     assert.equal(
       migrations.at(-9)?.filename,
+      migrationName
+    );
+
+    assert.equal(
+      migrations.at(-8)?.filename,
+      "202608210001_create_business_document_working_drafts.sql"
+    );
+
+    assert.equal(
+      migrations.at(-10)?.filename,
       "202608190001_create_quick_quote_analysis_session_foundation.sql"
     );
 
     assert.equal(
-      migrations.at(-6)?.filename,
+      migrations.at(-7)?.filename,
       "202608210002_create_business_document_delivery_foundation.sql"
     );
 
     assert.equal(
-      migrations.at(-5)?.filename,
+      migrations.at(-6)?.filename,
       "202608230001_add_business_document_numbers.sql"
     );
 
     assert.equal(
-      migrations.at(-4)?.filename,
+      migrations.at(-5)?.filename,
       "202608230002_add_canonical_quote_customer_terms_snapshot.sql"
     );
 
     assert.equal(
-      migrations.at(-3)?.filename,
+      migrations.at(-4)?.filename,
       "202608230003_create_canonical_quote_business_document_sources.sql"
     );
 

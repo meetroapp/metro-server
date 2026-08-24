@@ -188,6 +188,9 @@ const {
 const {
   registerBusinessCustomerRelationshipRoutes,
 } = require("./server/relationships/businessCustomerRelationships");
+const {
+  registerCustomerPartyRoutes,
+} = require("./server/relationships/customerParties");
 
 
 const JWT_SECRET = resolveJwtSecret(process.env);
@@ -993,6 +996,13 @@ registerBusinessContactRoutes({
 });
 
 registerBusinessCustomerRelationshipRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerCustomerPartyRoutes({
   app,
   authMiddleware,
   getPool,

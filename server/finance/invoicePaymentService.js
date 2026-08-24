@@ -13,6 +13,14 @@ const {
   getCommunicationAttentionWindowWithClient,
   resolveCommunicationRecipient,
 } = require("../alerts/communicationAlertService");
+const {
+  customerPartyInternals: {
+    customerPartyProjection,
+    insertCanonicalInvoiceCustomerParty,
+    loadJobCustomerParty,
+    resolveInvoiceCustomerParty,
+  },
+} = require("../relationships/customerPartyService");
 
 const {
   databaseClient,
@@ -208,6 +216,9 @@ async function loadApprovedBillingLines(client, jobId) {
     `SELECT quotes.id AS quote_id,
       decisions.issued_quote_version AS quote_version,
       versions.currency,
+      customer_parties.contractor_profile_id AS customer_party_contractor_profile_id,
+      customer_parties.business_contact_id,
+      customer_parties.business_customer_relationship_id,
       CASE
         WHEN quotes.parent_quote_id IS NULL THEN 'ORIGINAL'
         WHEN quotes.lineage_type = 'REVISED_QUOTE' THEN 'REVISED'
@@ -231,6 +242,9 @@ async function loadApprovedBillingLines(client, jobId) {
       AND snapshots.job_id = quotes.job_id
       AND snapshots.quote_version = decisions.issued_quote_version
       AND snapshots.included_in_total = TRUE
+    LEFT JOIN canonical_quote_customer_parties customer_parties
+      ON customer_parties.quote_id = quotes.id
+      AND customer_parties.job_id = quotes.job_id
     WHERE quotes.job_id = $1
       AND NOT EXISTS (
         SELECT 1
@@ -271,6 +285,9 @@ async function loadInvoiceContext(client, invoiceId, actorId, { lock = false } =
       current.customer_notes, current.terms,
       current.integrity_hash, current.created_at AS version_created_at,
       issuances.issued_at,
+      customer_parties.contractor_profile_id AS customer_party_contractor_profile_id,
+      customer_parties.business_contact_id,
+      customer_parties.business_customer_relationship_id,
       EXISTS (
         SELECT 1 FROM participant_role_assignments roles
         LEFT JOIN participant_role_revocations revocations
@@ -305,6 +322,9 @@ async function loadInvoiceContext(client, invoiceId, actorId, { lock = false } =
       ORDER BY versions.version DESC LIMIT 1
     ) current ON TRUE
     LEFT JOIN canonical_invoice_issuances issuances ON issuances.invoice_id = invoices.id
+    LEFT JOIN canonical_invoice_customer_parties customer_parties
+      ON customer_parties.invoice_id = invoices.id
+      AND customer_parties.job_id = invoices.job_id
     WHERE invoices.id = $1
     LIMIT 1
     ${lock ? "FOR UPDATE OF invoices, relationships" : ""}`,
@@ -452,7 +472,15 @@ function invoiceProjection(row, lines, payments, audience) {
         }
       : { canReview: true, canPayOnline: false },
   };
-  if (professional) value.currentVersion = Number(row.version);
+  if (professional) {
+    value.currentVersion = Number(row.version);
+    value.customerParty = customerPartyProjection({
+      contractor_profile_id: row.customer_party_contractor_profile_id,
+      business_contact_id: row.business_contact_id,
+      business_customer_relationship_id:
+        row.business_customer_relationship_id,
+    });
+  }
   return value;
 }
 
@@ -573,6 +601,34 @@ async function createInvoice(input = {}) {
     if (!billingLines.length || currencies.size !== 1 || totalMinor <= 0 || !Number.isSafeInteger(totalMinor)) {
       return { abort: failure(409, "INVOICE_BILLING_BASIS_UNAVAILABLE", "Approved billing details are unavailable.") };
     }
+    const jobParty = await loadJobCustomerParty(
+      client,
+      validated.jobId,
+      validated.actorId,
+      { lock: true }
+    );
+    const invoiceCustomerParty = resolveInvoiceCustomerParty({
+      jobParty,
+      quoteParties: billingLines.map((line) => ({
+        sourceQuoteId: line.quote_id,
+        party: customerPartyProjection({
+          contractor_profile_id:
+            line.customer_party_contractor_profile_id,
+          business_contact_id: line.business_contact_id,
+          business_customer_relationship_id:
+            line.business_customer_relationship_id,
+        }),
+      })),
+    });
+    if (invoiceCustomerParty.error) {
+      return {
+        abort: failure(
+          409,
+          "INVOICE_CUSTOMER_PARTY_CONFLICT",
+          "The approved Quote and Job customer links do not agree."
+        ),
+      };
+    }
     const invoiceId = randomUUID();
     const invoiceNumber = `INV-${invoiceId.replace(/-/g, "").slice(0, 12).toUpperCase()}`;
     const invoiceDate = today();
@@ -590,6 +646,12 @@ async function createInvoice(input = {}) {
       [invoiceId, validated.jobId, context.job_request_id, context.relationship_id,
         context.professional_participant_id, invoiceNumber]
     );
+    await insertCanonicalInvoiceCustomerParty(client, {
+      invoiceId,
+      jobId: validated.jobId,
+      actorUserId: validated.actorId,
+      source: invoiceCustomerParty,
+    });
     await client.query(
       `INSERT INTO canonical_invoice_versions (
         invoice_id, version, job_id, status, currency,

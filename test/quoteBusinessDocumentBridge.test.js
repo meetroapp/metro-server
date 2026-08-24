@@ -10,6 +10,8 @@ const { quoteDraftServiceInternals: internals } = service;
 
 const draftId = "11111111-1111-4111-8111-111111111111";
 const jobId = "22222222-2222-4222-8222-222222222222";
+const contactId = "77777777-7777-4777-8777-777777777777";
+const customerRelationshipId = "88888888-8888-4888-8888-888888888888";
 
 function content(overrides = {}) {
   return {
@@ -125,6 +127,23 @@ test("source fingerprint preserves exact inherited numbers and excludes private 
     ...input,
     documentNumber: "Q-0000001",
   }));
+  const linked = internals.businessDocumentSourceFingerprint({
+    ...input,
+    customerParty: {
+      contractorProfileId: 10,
+      businessContactId: contactId,
+      customerRelationshipId,
+    },
+  });
+  assert.notEqual(linked, first);
+  assert.notEqual(linked, internals.businessDocumentSourceFingerprint({
+    ...input,
+    customerParty: {
+      contractorProfileId: 10,
+      businessContactId: "99999999-9999-4999-8999-999999999999",
+      customerRelationshipId,
+    },
+  }));
   assert.equal(JSON.stringify(input).includes("privateReminders"), false);
 });
 
@@ -201,6 +220,7 @@ function createBridgePool({
   sourceJobId = jobId,
   sourceVersion = 4,
   existingRoot = false,
+  customerParty = null,
 } = {}) {
   const participantId = "33333333-3333-4333-8333-333333333333";
   const state = {
@@ -213,6 +233,9 @@ function createBridgePool({
       document_number: documentNumber,
       content: content(),
       version: sourceVersion,
+      business_contact_id: customerParty?.businessContactId || null,
+      business_customer_relationship_id:
+        customerParty?.customerRelationshipId || null,
     },
     mapping: null,
     idempotency: new Map(),
@@ -221,6 +244,8 @@ function createBridgePool({
     snapshots: [],
     evidenceWrites: 0,
     sourceWrites: 0,
+    quoteCustomerParty: null,
+    customerPartyWrites: 0,
   };
   const pool = {
     state,
@@ -232,6 +257,18 @@ function createBridgePool({
       }
       if (sql.includes("/* quote_business_document:load_owned_source */")) {
         return { rows: state.source && Number(values[1]) === 1 ? [state.source] : [] };
+      }
+      if (sql.includes("/* customer_party:load_owned */")) {
+        const valid = customerParty &&
+          Number(values[0]) === 1 && Number(values[1]) === 10 &&
+          values[2] === customerParty.businessContactId &&
+          values[3] === customerParty.customerRelationshipId;
+        return { rows: valid ? [{
+          contractor_profile_id: 10,
+          business_contact_id: customerParty.businessContactId,
+          business_customer_relationship_id:
+            customerParty.customerRelationshipId,
+        }] : [] };
       }
       if (sql.includes("FROM jobs") && sql.includes("INNER JOIN posts")) {
         return { rows: [{
@@ -281,6 +318,19 @@ function createBridgePool({
       }
       if (sql.startsWith("INSERT INTO canonical_quotes")) {
         return { rows: [{ id: values[0], status: "DRAFT" }] };
+      }
+      if (sql.includes("/* customer_party:insert_canonical_quote */")) {
+        state.customerPartyWrites += 1;
+        state.quoteCustomerParty = {
+          quote_id: values[0],
+          job_id: values[1],
+          contractor_profile_id: values[2],
+          business_contact_id: values[3],
+          business_customer_relationship_id: values[4],
+          linked_by_user_id: values[5],
+          created_at: "2026-08-24T12:00:00.000Z",
+        };
+        return { rows: [state.quoteCustomerParty] };
       }
       if (sql.startsWith("INSERT INTO canonical_quote_scope_items")) return { rows: [] };
       if (sql.startsWith("INSERT INTO canonical_quote_versions")) {
@@ -379,6 +429,12 @@ function createBridgePool({
           business_document_number: state.mapping.document_number,
           business_source_document_id: state.mapping.source_document_id,
           business_source_document_version: state.mapping.source_document_version,
+          customer_party_contractor_profile_id:
+            state.quoteCustomerParty?.contractor_profile_id || null,
+          business_contact_id:
+            state.quoteCustomerParty?.business_contact_id || null,
+          business_customer_relationship_id:
+            state.quoteCustomerParty?.business_customer_relationship_id || null,
           created_at: version.created_at,
           updated_at: version.created_at,
         }] };
@@ -454,6 +510,39 @@ test("governed bridge inherits the exact number, creates one Draft, and replays 
     assert.equal(afterSourceEdit.quote.sourceBusinessDocument.documentVersion, 4);
     assert.equal(pool.state.sourceWrites, 1);
   }
+});
+
+test("governed bridge preserves an explicit source customer party once without changing the Quote snapshot", async () => {
+  const pool = createBridgePool({
+    customerParty: {
+      businessContactId: contactId,
+      customerRelationshipId,
+    },
+  });
+  const command = {
+    pool,
+    authenticatedActor: { id: 1 },
+    draftId,
+    expectedDocumentVersion: 4,
+    idempotencyKey: "bridge-linked-customer-party",
+    logger: { info() {}, warn() {} },
+  };
+  const created = await service.importBusinessDocumentDraftQuote(command);
+  assert.equal(created.ok, true);
+  assert.deepEqual(created.quote.customerParty, {
+    contractorProfileId: 10,
+    businessContactId: contactId,
+    customerRelationshipId,
+  });
+  assert.equal(created.quote.totalMinor, 26999);
+  assert.equal(pool.state.source.content.customerName, "External Customer Display Name");
+  assert.equal(pool.state.customerPartyWrites, 1);
+
+  const replay = await service.importBusinessDocumentDraftQuote(command);
+  assert.equal(replay.replayed, true);
+  assert.equal(pool.state.customerPartyWrites, 1);
+  assert.equal(replay.quote.customerParty.businessContactId, contactId);
+  assert.equal(replay.quote.totalMinor, 26999);
 });
 
 test("bridge fails closed for unnumbered, Invoice, missing-Job, wrong-owner, stale, and root-conflict sources", async () => {

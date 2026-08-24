@@ -22,6 +22,8 @@ const KEY_FIVE = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 const SESSION_ONE = "33333333-3333-4333-8333-333333333333";
 const SESSION_TWO = "44444444-4444-4444-8444-444444444444";
 const SESSION_MISSING = "55555555-5555-4555-8555-555555555555";
+const CONTACT_ONE = "99999999-9999-4999-8999-999999999999";
+const RELATIONSHIP_ONE = "99999999-9999-4999-8999-111111111111";
 
 function media(publicId = "meetro/businesses/10/quote-drafts/fan") {
   return {
@@ -134,6 +136,19 @@ function createMemoryStore({ initializeSequences = true } = {}) {
   ]);
   const documentNumbers = new Map();
   const allocationCounts = new Map();
+  const customerParties = new Map([
+    [`10:${CONTACT_ONE}:${RELATIONSHIP_ONE}`, {
+      contractorProfileId: 10,
+      businessContactId: CONTACT_ONE,
+      customerRelationshipId: RELATIONSHIP_ONE,
+    }],
+  ]);
+  function ownedCustomerParty(contractorProfileId, candidate) {
+    if (!candidate) return null;
+    return customerParties.get(
+      `${contractorProfileId}:${candidate.businessContactId}:${candidate.customerRelationshipId}`
+    ) || null;
+  }
   function initializeSequence(
     contractorProfileId,
     documentType,
@@ -233,6 +248,10 @@ function createMemoryStore({ initializeSequences = true } = {}) {
         document_type: current.document.documentType,
         document_number: current.document.documentNumber,
         version: current.document.version,
+        business_contact_id:
+          current.document.customerParty?.businessContactId || null,
+        business_customer_relationship_id:
+          current.document.customerParty?.customerRelationshipId || null,
       };
     },
     async validateJobAssociation(_pool, actorUserId, jobId, contractorProfileId) {
@@ -246,6 +265,12 @@ function createMemoryStore({ initializeSequences = true } = {}) {
     },
     async create({ actorUserId, contractorProfileId, command, draft }) {
       return commandResult(command, () => {
+        const customerParty = draft.customerParty
+          ? ownedCustomerParty(contractorProfileId, draft.customerParty)
+          : null;
+        if (draft.customerParty && !customerParty) {
+          return { kind: "customer_party_unavailable" };
+        }
         const timestamp = now();
         const allocation = allocateNumber(contractorProfileId, draft.documentType);
         if (allocation.kind !== "allocated") return allocation;
@@ -261,6 +286,7 @@ function createMemoryStore({ initializeSequences = true } = {}) {
           updatedAt: timestamp,
           content: draft.content,
           workspace: draft.workspace,
+          customerParty,
           photos: draft.photos.map((photo) => ({
             id: photo.publicId,
             name: photo.name,
@@ -287,6 +313,15 @@ function createMemoryStore({ initializeSequences = true } = {}) {
           jobOwner?.actorUserId !== actorUserId ||
           jobOwner.contractorProfileId !== current.contractorProfileId
         )) return { kind: "job_unavailable" };
+        const requestedCustomerParty = draft.customerPartyMode === "PRESERVE"
+          ? current.document.customerParty
+          : draft.customerParty;
+        const customerParty = requestedCustomerParty
+          ? ownedCustomerParty(current.contractorProfileId, requestedCustomerParty)
+          : null;
+        if (requestedCustomerParty && !customerParty) {
+          return { kind: "customer_party_unavailable" };
+        }
         let documentNumber = current.document.documentNumber;
         if (!documentNumber) {
           const allocation = allocateNumber(
@@ -304,6 +339,7 @@ function createMemoryStore({ initializeSequences = true } = {}) {
           updatedAt: now(),
           content: draft.content,
           workspace: draft.workspace,
+          customerParty,
           photos: draft.photos.map((photo) => ({
             id: photo.publicId,
             name: photo.name,
@@ -348,6 +384,7 @@ function createMemoryStore({ initializeSequences = true } = {}) {
     insertLegacyDocument,
     jobOwners,
     profilesByActor,
+    customerParties,
   };
 }
 
@@ -370,6 +407,119 @@ test("create saves one private noncanonical Quote draft with nullable Job and go
   assert.equal(result.document.photos[0].media.customer_visible_by_default, false);
   assert.equal(result.document.issuedAt, undefined);
   assert.equal(result.document.approval, undefined);
+});
+
+test("working Quote and Invoice linkage uses explicit durable IDs without overwriting customer snapshots", async () => {
+  for (const documentType of ["QUOTE", "INVOICE"]) {
+    const store = createMemoryStore();
+    const source = payload({
+      documentType,
+      content: {
+        ...payload().content,
+        customerName: "Historical Jack Smith",
+        customerEmail: "historical@example.test",
+        customerLocation: "1 Original Address",
+      },
+      workspace: {
+        ...payload().workspace,
+        activeDocument: documentType,
+        instructions: payload().workspace.instructions.map((instruction) => ({
+          ...instruction,
+          documentType,
+        })),
+      },
+      customerParty: {
+        businessContactId: CONTACT_ONE,
+        customerRelationshipId: RELATIONSHIP_ONE,
+      },
+    });
+    const created = await createBusinessDocumentDraft({
+      pool: {},
+      authenticatedActor: { id: 1 },
+      payload: source,
+      idempotencyKey: KEY_ONE,
+      store,
+      normalizeMediaCollection,
+    });
+    assert.equal(created.status, 201, JSON.stringify(created));
+    assert.deepEqual(created.document.customerParty, {
+      contractorProfileId: 10,
+      businessContactId: CONTACT_ONE,
+      customerRelationshipId: RELATIONSHIP_ONE,
+    });
+    assert.equal(created.document.content.customerName, "Historical Jack Smith");
+    assert.equal(created.document.content.customerEmail, "historical@example.test");
+    assert.equal(created.document.content.customerLocation, "1 Original Address");
+  }
+});
+
+test("working-document customer linkage follows existing version and idempotency authority", async () => {
+  const store = createMemoryStore();
+  const created = await createBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, payload: payload({ photos: [] }),
+    idempotencyKey: KEY_ONE, store, normalizeMediaCollection,
+  });
+  const linkedPayload = {
+    ...payload({ photos: [] }),
+    expectedVersion: 1,
+    customerParty: {
+      businessContactId: CONTACT_ONE,
+      customerRelationshipId: RELATIONSHIP_ONE,
+    },
+  };
+  const linked = await updateBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, draftId: created.document.id,
+    payload: linkedPayload, idempotencyKey: KEY_TWO, store,
+    normalizeMediaCollection,
+  });
+  assert.equal(linked.document.version, 2);
+  assert.equal(linked.document.customerParty.businessContactId, CONTACT_ONE);
+
+  const replay = await updateBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, draftId: created.document.id,
+    payload: linkedPayload, idempotencyKey: KEY_TWO, store,
+    normalizeMediaCollection,
+  });
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.document.version, 2);
+
+  const preserved = await updateBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, draftId: created.document.id,
+    payload: { ...payload({ photos: [] }), expectedVersion: 2 },
+    idempotencyKey: KEY_THREE, store, normalizeMediaCollection,
+  });
+  assert.equal(preserved.document.customerParty.businessContactId, CONTACT_ONE);
+
+  const stale = await updateBusinessDocumentDraft({
+    pool: {}, authenticatedActor: { id: 1 }, draftId: created.document.id,
+    payload: { ...payload({ photos: [] }), expectedVersion: 2, customerParty: null },
+    idempotencyKey: KEY_FOUR, store, normalizeMediaCollection,
+  });
+  assert.equal(stale.status, 409);
+  assert.equal(stale.currentVersion, 3);
+  assert.equal(store.documents.get(created.document.id).document.customerParty.businessContactId, CONTACT_ONE);
+});
+
+test("working-document linkage rejects unknown or mismatched IDs without creating Contact authority", async () => {
+  const store = createMemoryStore();
+  const authorityBefore = structuredClone(store.authorityRecords);
+  const result = await createBusinessDocumentDraft({
+    pool: {},
+    authenticatedActor: { id: 1 },
+    payload: payload({
+      photos: [],
+      customerParty: {
+        businessContactId: CONTACT_ONE,
+        customerRelationshipId: "88888888-8888-4888-8888-888888888888",
+      },
+    }),
+    idempotencyKey: KEY_ONE,
+    store,
+    normalizeMediaCollection,
+  });
+  assert.equal(result.status, 404);
+  assert.equal(store.documents.size, 0);
+  assert.deepEqual(store.authorityRecords, authorityBefore);
 });
 
 test("server-owned Quote and Invoice numbers are atomic, business-scoped, independent, and immutable", async () => {
