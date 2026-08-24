@@ -34,6 +34,7 @@ test("Quote routes register bounded Draft, issue, customer decision, and lineage
   });
   assert.deepEqual(routes, [
     ["POST", "/jobs/:jobId/quotes"],
+    ["POST", "/business-document-drafts/:draftId/canonical-quote"],
     ["GET", "/jobs/:jobId/quotes"],
     ["GET", "/quotes/:quoteId"],
     ["POST", "/quotes/:quoteId/scope-items"],
@@ -51,6 +52,7 @@ test("handlers forward only governed Draft inputs and idempotency", async () => 
   const calls = [];
   const result = { ok: true, status: 200, code: "OK", quote: { id: "quote" } };
   const service = {
+    async importBusinessDocumentDraftQuote(input) { calls.push(["import", input]); return { ...result, status: 201 }; },
     async createDraftQuote(input) { calls.push(["create", input]); return { ...result, status: 201 }; },
     async listDraftQuotesByJob(input) { calls.push(["list", input]); return { ...result, quotes: [] }; },
     async getDraftQuote(input) { calls.push(["get", input]); return result; },
@@ -69,7 +71,7 @@ test("handlers forward only governed Draft inputs and idempotency", async () => 
   });
   const req = {
     user: { id: 7 },
-    params: { jobId: "job", quoteId: "quote", scopeItemId: "scope" },
+    params: { jobId: "job", quoteId: "quote", scopeItemId: "scope", draftId: "draft" },
     headers: { "idempotency-key": "key" },
     body: {
       currency: "USD",
@@ -78,6 +80,7 @@ test("handlers forward only governed Draft inputs and idempotency", async () => 
         agreement: {},
       },
       expectedVersion: 1,
+      expectedDocumentVersion: 3,
       expectedIssuedVersion: 2,
       lineageType: "SUPPLEMENTAL_QUOTE",
       reasonCategory: "SUPPLEMENTAL_WORK",
@@ -96,6 +99,7 @@ test("handlers forward only governed Draft inputs and idempotency", async () => 
     "approveIssuedQuote",
     "declineIssuedQuote",
     "createDerivedDraftQuote",
+    "importBusinessDocumentDraftQuote",
   ]) {
     const res = response();
     await handlers[name](req, res);
@@ -114,6 +118,10 @@ test("handlers forward only governed Draft inputs and idempotency", async () => 
   assert.equal(calls[9][1].lineageType, "SUPPLEMENTAL_QUOTE");
   assert.equal(calls[9][1].reasonCategory, "SUPPLEMENTAL_WORK");
   assert.equal(calls[9][1].totalMinor, undefined);
+  assert.equal(calls[10][0], "import");
+  assert.equal(calls[10][1].draftId, "draft");
+  assert.equal(calls[10][1].expectedDocumentVersion, 3);
+  assert.equal(calls[10][1].totalMinor, undefined);
 });
 
 test("customer Quote detail is private and no-store", async () => {

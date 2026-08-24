@@ -211,7 +211,8 @@ test("terms snapshot adds no competing decision, numbering, lifecycle, or AI aut
     "utf8"
   );
   assert.doesNotMatch(serviceSource, /canonical_quote_(?:approvals|acceptances)/i);
-  assert.doesNotMatch(serviceSource, /business_document_number|document_number/i);
+  assert.doesNotMatch(serviceSource, /allocateDocumentNumber|business_document_number_sequences/i);
+  assert.match(serviceSource, /canonical_quote_business_document_sources/);
   for (const source of [quoteComposeSource, workflowAssistSource]) {
     assert.match(source, /prohibitedCanonicalCommands[\s\S]*quote\.customer\.approve[\s\S]*quote\.customer\.decline/i);
   }

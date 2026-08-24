@@ -69,6 +69,7 @@ Current inventory:
 49. `202608210002_create_business_document_delivery_foundation.sql`
 50. `202608230001_add_business_document_numbers.sql`
 51. `202608230002_add_canonical_quote_customer_terms_snapshot.sql`
+52. `202608230003_create_canonical_quote_business_document_sources.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -98,6 +99,12 @@ normalized customer-facing terms snapshot to immutable canonical Quote versions.
 Legacy v1 integrity hashes remain unchanged; terms-bearing versions use integrity
 v2, and the existing issuance and sole APPROVED/DECLINED customer-decision chain
 continues to bind to the exact resulting hash.
+
+`202608230003_create_canonical_quote_business_document_sources.sql` adds an
+append-only one-to-one provenance bridge from one exact saved, numbered working
+Quote version to one canonical Draft Quote. The inherited number is never
+allocated again, private workspace state is excluded, and the bridge creates no
+issuance, customer decision, payment, scheduling, or Job lifecycle authority.
 
 `202608150001_activate_customer_safe_efr.sql` adds explicit, conservative
 customer visibility to append-only Finding and Recommendation versions and

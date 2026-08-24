@@ -11,6 +11,11 @@ const {
 const {
   hasActiveLifecycleGrant,
 } = require("./lifecycleAuthorityService");
+const {
+  businessDocumentDraftInternals: {
+    normalizeContent: normalizeBusinessDocumentContent,
+  },
+} = require("../documents/businessDocumentDraftService");
 
 const {
   completeIdempotency,
@@ -39,6 +44,7 @@ const QUOTE_CAPABILITIES = Object.freeze({
 });
 const QUOTE_COMMANDS = Object.freeze({
   CREATE: "quote.draft.create",
+  IMPORT_BUSINESS_DOCUMENT: "quote.draft.import_business_document",
   SCOPE_ADD: "quote.scope.add",
   SCOPE_REMOVE: "quote.scope.remove",
   ISSUE: "quote.issue",
@@ -92,6 +98,7 @@ const SOURCE_TYPES = Object.freeze([
 ]);
 const MAX_MINOR_AMOUNT = 9_000_000_000_000;
 const MAX_QUANTITY = 10_000;
+const BUSINESS_DOCUMENT_NUMBER_PATTERN = /^[A-Z]{1,8}-[0-9]{1,12}$/;
 const QUOTE_INTEGRITY_VERSION_V1 = 1;
 const QUOTE_INTEGRITY_VERSION_V2 = 2;
 const CUSTOMER_TERMS_SCHEMA_VERSION = 1;
@@ -234,6 +241,291 @@ function normalizeCustomerTermsSnapshot(value) {
     normalized.agreement[key] = text;
   }
   return { snapshot: normalized };
+}
+
+function parseWorkingMoney(value) {
+  if (value === undefined || value === null || value === "") {
+    return { empty: true, minor: null };
+  }
+  if (typeof value !== "string") return { error: "INVALID_WORKING_QUOTE_AMOUNT" };
+  const normalized = value.trim();
+  if (!normalized) return { empty: true, minor: null };
+  const match = normalized.match(
+    /^\$?(?:(?:0|[1-9]\d*)|(?:[1-9]\d{0,2}(?:,\d{3})+))(?:\.(\d{1,2}))?$/
+  );
+  if (!match) return { error: "INVALID_WORKING_QUOTE_AMOUNT" };
+  const numeric = normalized.replace(/^\$/, "").replaceAll(",", "");
+  const [whole, fraction = ""] = numeric.split(".");
+  const minor = Number(whole) * 100 + Number(fraction.padEnd(2, "0"));
+  return Number.isSafeInteger(minor) && minor <= MAX_MINOR_AMOUNT
+    ? { minor }
+    : { error: "INVALID_WORKING_QUOTE_AMOUNT" };
+}
+
+function parsePositiveWorkingInteger(value) {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string" || !/^[1-9]\d*$/.test(value.trim())) return false;
+  const parsed = Number(value.trim());
+  return Number.isSafeInteger(parsed) && parsed <= MAX_QUANTITY ? parsed : false;
+}
+
+function multiplyWorkingRate(rateMinor, multiplier) {
+  if (typeof multiplier !== "string" || !/^(?:0|[1-9]\d*)(?:\.\d{1,4})?$/.test(multiplier.trim())) {
+    return null;
+  }
+  const [whole, fraction = ""] = multiplier.trim().split(".");
+  const denominator = 10 ** fraction.length;
+  const numerator = Number(whole) * denominator + Number(fraction || 0);
+  const product = rateMinor * numerator;
+  if (!Number.isSafeInteger(product) || product % denominator !== 0) return null;
+  const minor = product / denominator;
+  return Number.isSafeInteger(minor) && minor <= MAX_MINOR_AMOUNT ? minor : null;
+}
+
+function matchingWorkingMoney(row, keys) {
+  const supplied = [];
+  for (const key of keys) {
+    const parsed = parseWorkingMoney(row[key]);
+    if (parsed.error) return { error: parsed.error };
+    if (!parsed.empty) supplied.push(parsed.minor);
+  }
+  if (new Set(supplied).size > 1) return { error: "AMBIGUOUS_WORKING_QUOTE_AMOUNT" };
+  return { minor: supplied[0] ?? null };
+}
+
+function workingRowDescription(row) {
+  const description = row.description || row.name || "";
+  return boundedText(description, 1000);
+}
+
+function convertWorkingRow(row, classification) {
+  const description = workingRowDescription(row);
+  if (!description) return { error: "INVALID_WORKING_QUOTE_ROW" };
+  const direct = matchingWorkingMoney(row, ["total", "amount"]);
+  if (direct.error) return direct;
+
+  let calculatedMinor = null;
+  let quantity = 1;
+  if (classification === "MATERIAL") {
+    const suppliedQuantity = parsePositiveWorkingInteger(row.quantity);
+    if (suppliedQuantity === false) return { error: "INVALID_WORKING_QUOTE_QUANTITY" };
+    const unit = parseWorkingMoney(row.unitPrice);
+    if (unit.error) return unit;
+    if (!unit.empty) {
+      quantity = suppliedQuantity || 1;
+      calculatedMinor = unit.minor * quantity;
+      if (!Number.isSafeInteger(calculatedMinor) || calculatedMinor > MAX_MINOR_AMOUNT) {
+        return { error: "INVALID_WORKING_QUOTE_AMOUNT" };
+      }
+    }
+  } else if (classification === "LABOR_SERVICE") {
+    const hasHours = typeof row.hours === "string" && row.hours.trim() !== "";
+    const rate = parseWorkingMoney(row.rate);
+    if (rate.error) return rate;
+    if (hasHours !== !rate.empty) return { error: "INCOMPLETE_WORKING_QUOTE_LABOR_RATE" };
+    if (hasHours) {
+      calculatedMinor = multiplyWorkingRate(rate.minor, row.hours);
+      if (calculatedMinor == null) return { error: "INVALID_WORKING_QUOTE_LABOR_RATE" };
+    }
+  } else {
+    const suppliedQuantity = parsePositiveWorkingInteger(row.quantity);
+    if (suppliedQuantity === false) return { error: "INVALID_WORKING_QUOTE_QUANTITY" };
+    const unit = parseWorkingMoney(row.unitPrice);
+    if (unit.error) return unit;
+    if (!unit.empty) {
+      quantity = suppliedQuantity || 1;
+      calculatedMinor = unit.minor * quantity;
+      if (!Number.isSafeInteger(calculatedMinor) || calculatedMinor > MAX_MINOR_AMOUNT) {
+        return { error: "INVALID_WORKING_QUOTE_AMOUNT" };
+      }
+    }
+  }
+
+  if (
+    direct.minor != null &&
+    calculatedMinor != null &&
+    direct.minor !== calculatedMinor
+  ) {
+    return { error: "WORKING_QUOTE_ROW_TOTAL_MISMATCH" };
+  }
+  const amountMinor = direct.minor ?? calculatedMinor;
+  if (amountMinor == null) return { error: "WORKING_QUOTE_ROW_PRICE_REQUIRED" };
+
+  const validated = validateScopeItem({
+    classification: classification === "MATERIAL" ? "MATERIAL" : "LABOR_SERVICE",
+    scopeSemantic: classification === "MATERIAL" ? "MATERIAL_INCLUDED" : "FUTURE_WORK",
+    materialResponsibility: classification === "MATERIAL"
+      ? "PROFESSIONAL_SUPPLIED"
+      : "NOT_APPLICABLE",
+    description,
+    quantity: calculatedMinor != null && classification !== "LABOR_SERVICE" ? quantity : 1,
+    unitAmountMinor:
+      calculatedMinor != null && classification !== "LABOR_SERVICE"
+        ? amountMinor / quantity
+        : amountMinor,
+    source: { type: "MANUAL_PROFESSIONAL" },
+  });
+  return validated.error ? { error: "INVALID_WORKING_QUOTE_ROW" } : { item: validated.item };
+}
+
+function buildWorkingQuoteTerms(content) {
+  const agreement = isPlainObject(content.agreement) ? content.agreement : {};
+  const paymentTerms = content.paymentTerms || content.terms || "";
+  if (content.paymentTerms && content.terms && content.paymentTerms !== content.terms) {
+    return { error: "AMBIGUOUS_WORKING_QUOTE_TERMS" };
+  }
+  const warrantyTerms = agreement.warrantyTerms || content.warrantyNotes || "";
+  if (
+    agreement.warrantyTerms &&
+    content.warrantyNotes &&
+    agreement.warrantyTerms !== content.warrantyNotes
+  ) {
+    return { error: "AMBIGUOUS_WORKING_QUOTE_TERMS" };
+  }
+  const exclusions = [];
+  for (const exclusion of [
+    ...(Array.isArray(agreement.exclusions) ? agreement.exclusions : []),
+    ...(Array.isArray(content.exclusions) ? content.exclusions : []),
+  ]) {
+    if (!exclusions.includes(exclusion)) exclusions.push(exclusion);
+  }
+  const raw = {
+    schemaVersion: CUSTOMER_TERMS_SCHEMA_VERSION,
+    paymentTerms,
+    estimatedDuration: content.estimatedDuration || "",
+    customerNotes: content.notes || "",
+    agreement: {
+      exclusions,
+      additionalWorkTerms: agreement.additionalWorkTerms || "",
+      hiddenConditionsTerms: agreement.hiddenConditionsTerms || "",
+      diagnosticTerms: agreement.diagnosticTerms || "",
+      customerResponsibilities: agreement.customerResponsibilities || "",
+      warrantyTerms,
+      cancellationTerms: agreement.cancellationTerms || "",
+      acceptanceTerms: agreement.acceptanceTerms || "",
+      preauthorizedAdditionalWorkLimit:
+        agreement.preauthorizedAdditionalWorkLimit || "",
+    },
+  };
+  const normalized = normalizeCustomerTermsSnapshot(raw);
+  if (normalized.error) return { error: normalized.error };
+  const material = [
+    normalized.snapshot.paymentTerms,
+    normalized.snapshot.estimatedDuration,
+    normalized.snapshot.customerNotes,
+    ...normalized.snapshot.agreement.exclusions,
+    ...Object.entries(normalized.snapshot.agreement)
+      .filter(([key]) => key !== "exclusions")
+      .map(([, value]) => value),
+  ].some(Boolean);
+  return { snapshot: material ? normalized.snapshot : null };
+}
+
+function workingQuoteConversion(rawContent) {
+  const source = typeof rawContent === "string" ? (() => {
+    try { return JSON.parse(rawContent); } catch { return null; }
+  })() : rawContent;
+  const content = normalizeBusinessDocumentContent(source);
+  if (!content) return { error: "INVALID_WORKING_QUOTE_CONTENT" };
+  if (
+    (Array.isArray(content.conditions) && content.conditions.length > 0) ||
+    ["paidAmount", "balanceDue"].some((key) => Boolean(content[key]))
+  ) {
+    return { error: "UNREPRESENTABLE_WORKING_QUOTE_AUTHORITY" };
+  }
+  for (const field of ["discount", "tax", "fees"]) {
+    const adjustment = parseWorkingMoney(content[field]);
+    if (adjustment.error || (!adjustment.empty && adjustment.minor !== 0)) {
+      return { error: "UNREPRESENTABLE_WORKING_QUOTE_ADJUSTMENT" };
+    }
+  }
+
+  const terms = buildWorkingQuoteTerms(content);
+  if (terms.error) return terms;
+  const currency = validateCurrency(content.currency || "USD");
+  if (!currency) return { error: "INVALID_WORKING_QUOTE_CURRENCY" };
+
+  const override = parseWorkingMoney(content.totalOverride);
+  if (override.error) return override;
+  let items = [];
+  if (!override.empty) {
+    const description = boundedText(
+      content.projectTitle || content.projectDescription || content.recommendedSolution || "",
+      1000
+    );
+    if (!description) return { error: "WORKING_QUOTE_SCOPE_REQUIRED" };
+    const validated = validateScopeItem({
+      classification: "LABOR_SERVICE",
+      scopeSemantic: "FUTURE_WORK",
+      materialResponsibility: "NOT_APPLICABLE",
+      description,
+      quantity: 1,
+      unitAmountMinor: override.minor,
+      source: { type: "MANUAL_PROFESSIONAL" },
+    });
+    if (validated.error) return { error: "INVALID_WORKING_QUOTE_TOTAL" };
+    items = [validated.item];
+  } else {
+    const groups = [
+      [content.materialItems || [], "MATERIAL"],
+      [content.laborItems || [], "LABOR_SERVICE"],
+      [content.lineItems || [], "LINE_ITEM"],
+    ];
+    for (const [rows, classification] of groups) {
+      for (const row of rows) {
+        const converted = convertWorkingRow(row, classification);
+        if (converted.error) return converted;
+        items.push(converted.item);
+      }
+    }
+    if (items.length === 0) return { error: "WORKING_QUOTE_SCOPE_REQUIRED" };
+  }
+
+  const totals = calculateTotals(items);
+  if (totals.error) return { error: "INVALID_WORKING_QUOTE_TOTAL" };
+  const subtotal = parseWorkingMoney(content.subtotal);
+  if (
+    subtotal.error ||
+    (override.empty && !subtotal.empty && subtotal.minor !== totals.totalMinor)
+  ) {
+    return { error: "WORKING_QUOTE_TOTAL_MISMATCH" };
+  }
+  return {
+    content,
+    currency,
+    items,
+    totals,
+    customerTermsSnapshot: terms.snapshot,
+  };
+}
+
+function businessDocumentSourceFingerprint({
+  draftId,
+  documentVersion,
+  jobId,
+  documentNumber,
+  conversion,
+}) {
+  return fingerprint({
+    schemaVersion: 1,
+    sourceDocumentId: draftId,
+    sourceDocumentVersion: documentVersion,
+    jobId,
+    documentNumber,
+    currency: conversion.currency,
+    scopeItems: conversion.items.map((item) => ({
+      classification: item.classification,
+      scopeSemantic: item.scopeSemantic,
+      materialResponsibility: item.materialResponsibility,
+      description: item.description,
+      quantity: item.quantity,
+      unitAmountMinor: item.unitAmountMinor,
+      lineTotalMinor: item.lineTotalMinor,
+      includedInTotal: item.includedInTotal,
+      source: item.source,
+    })),
+    customerTermsSnapshot: conversion.customerTermsSnapshot,
+  });
 }
 
 function quoteIntegrityContract(integrityVersion, customerTermsSnapshot) {
@@ -1195,7 +1487,10 @@ async function loadQuoteProjection(client, quoteId) {
       versions.created_at AS version_created_at,
       decisions.decision AS customer_decision,
       decisions.issued_quote_version AS customer_decision_quote_version,
-      decisions.decided_at AS customer_decided_at
+      decisions.decided_at AS customer_decided_at,
+      business_sources.document_number AS business_document_number,
+      business_sources.source_document_id AS business_source_document_id,
+      business_sources.source_document_version AS business_source_document_version
     FROM canonical_quotes quotes
     INNER JOIN commercial_authority_aggregates aggregates
       ON aggregates.id = quotes.id
@@ -1206,6 +1501,8 @@ async function loadQuoteProjection(client, quoteId) {
       AND versions.version = aggregates.current_version
     LEFT JOIN canonical_quote_customer_decisions decisions
       ON decisions.quote_id = quotes.id
+    LEFT JOIN canonical_quote_business_document_sources business_sources
+      ON business_sources.quote_id = quotes.id
     WHERE quotes.id = $1
     LIMIT 1
     `,
@@ -1271,6 +1568,13 @@ async function loadQuoteProjection(client, quoteId) {
       ? null
       : Number(identity.customer_decision_quote_version),
     decidedAt: identity.customer_decided_at || null,
+    documentNumber: identity.business_document_number || null,
+    sourceBusinessDocument: identity.business_source_document_id
+      ? {
+          documentId: identity.business_source_document_id,
+          documentVersion: Number(identity.business_source_document_version),
+        }
+      : null,
   };
 }
 
@@ -1374,6 +1678,329 @@ function customerQuoteDetailProjection(
     projection.customerTermsSnapshot = normalized.snapshot;
   }
   return projection;
+}
+
+async function loadOwnedBusinessDocumentQuoteSource(
+  client,
+  draftId,
+  actorUserId,
+  { lock = false } = {}
+) {
+  const result = await client.query(
+    `/* quote_business_document:load_owned_source */
+     SELECT drafts.id, drafts.contractor_profile_id, drafts.job_id,
+       drafts.document_type, drafts.draft_status, drafts.document_number,
+       drafts.content, drafts.version
+     FROM business_document_working_drafts drafts
+     INNER JOIN contractor_profiles profiles
+       ON profiles.id = drafts.contractor_profile_id
+     WHERE drafts.id = $1
+       AND profiles.user_id = $2
+       AND drafts.draft_status = 'WORKING_DRAFT'
+     LIMIT 1 ${lock ? "FOR UPDATE OF drafts" : ""}`,
+    [draftId, actorUserId]
+  );
+  return result.rows[0] || null;
+}
+
+async function loadOwnedBusinessDocumentQuoteMapping(client, draftId, actorUserId) {
+  const result = await client.query(
+    `/* quote_business_document:load_owned_mapping */
+     SELECT sources.*
+     FROM canonical_quote_business_document_sources sources
+     INNER JOIN contractor_profiles profiles
+       ON profiles.id = sources.contractor_profile_id
+     WHERE sources.source_document_id = $1
+       AND profiles.user_id = $2
+     LIMIT 1`,
+    [draftId, actorUserId]
+  );
+  return result.rows[0] || null;
+}
+
+function validateBusinessDocumentQuoteSource(source) {
+  if (!source) {
+    return failure(404, "BUSINESS_DOCUMENT_QUOTE_UNAVAILABLE", "The working Quote is unavailable.");
+  }
+  if (source.document_type !== "QUOTE") {
+    return failure(409, "BUSINESS_DOCUMENT_QUOTE_REQUIRED", "A saved working Quote is required.");
+  }
+  if (!normalizedUuid(source.job_id)) {
+    return failure(409, "BUSINESS_DOCUMENT_QUOTE_JOB_REQUIRED", "The working Quote must be connected to a Job.");
+  }
+  if (!BUSINESS_DOCUMENT_NUMBER_PATTERN.test(String(source.document_number || ""))) {
+    return failure(409, "BUSINESS_DOCUMENT_QUOTE_NUMBER_REQUIRED", "The working Quote must have a server-assigned Quote number.");
+  }
+  return null;
+}
+
+async function completeExistingBusinessDocumentQuoteMapping({
+  client,
+  mapping,
+  idempotency,
+}) {
+  const quote = await loadQuoteProjection(client, mapping.quote_id);
+  if (!quote) throw new Error("Canonical working-Quote mapping is invalid.");
+  const result = quoteResult(
+    "BUSINESS_DOCUMENT_QUOTE_ALREADY_CANONICALIZED",
+    200,
+    quote
+  );
+  if (!(await completeIdempotency(client, idempotency.reservation.id, quote.id, result))) {
+    throw new Error("Canonical working-Quote idempotency completion failed.");
+  }
+  return result;
+}
+
+async function importBusinessDocumentDraftQuote(input = {}) {
+  const validated = validateCommand(input, ["draftId", "expectedDocumentVersion"]);
+  if (validated.error) return validated.error;
+  const draftId = normalizedUuid(input.draftId);
+  const expectedDocumentVersion = positiveInteger(input.expectedDocumentVersion);
+  if (!draftId || !expectedDocumentVersion) {
+    return failure(400, "INVALID_BUSINESS_DOCUMENT_QUOTE_IMPORT", "The working Quote import is invalid.");
+  }
+  const logger = safeLogger(input.logger);
+
+  return runTransaction(input.pool, async (client) => {
+    let mapping = await loadOwnedBusinessDocumentQuoteMapping(
+      client,
+      draftId,
+      validated.actorId
+    );
+    const source = mapping
+      ? null
+      : await loadOwnedBusinessDocumentQuoteSource(
+          client,
+          draftId,
+          validated.actorId,
+          { lock: true }
+        );
+    if (!mapping) {
+      const sourceError = validateBusinessDocumentQuoteSource(source);
+      if (sourceError) return { abort: sourceError };
+    }
+
+    const jobId = normalizedUuid(mapping?.job_id || source?.job_id);
+    if (!jobId) {
+      return {
+        abort: failure(409, "BUSINESS_DOCUMENT_QUOTE_JOB_REQUIRED", "The working Quote must be connected to a Job."),
+      };
+    }
+    const context = await loadJobContext(client, jobId, validated.actorId, { lock: true });
+    const authorityError = await requireQuoteAuthority({
+      client,
+      context,
+      capability: QUOTE_CAPABILITIES.CREATE,
+      logger,
+    });
+    if (authorityError) return { abort: authorityError };
+
+    let conversion = null;
+    let sourceHash = mapping?.source_snapshot_integrity_hash || null;
+    if (!mapping) {
+      conversion = workingQuoteConversion(source.content);
+      if (conversion.error) {
+        return {
+          abort: failure(
+            409,
+            conversion.error,
+            "The saved working Quote cannot be represented as a canonical Draft Quote."
+          ),
+        };
+      }
+      sourceHash = businessDocumentSourceFingerprint({
+        draftId,
+        documentVersion: Number(source.version),
+        jobId,
+        documentNumber: source.document_number,
+        conversion,
+      });
+    }
+
+    const requestFingerprint = fingerprint({
+      command: QUOTE_COMMANDS.IMPORT_BUSINESS_DOCUMENT,
+      draftId,
+      expectedDocumentVersion,
+      sourceSnapshotIntegrityHash: sourceHash,
+    });
+    const idempotency = await reserveIdempotency({
+      client,
+      actorUserId: validated.actorId,
+      commandName: QUOTE_COMMANDS.IMPORT_BUSINESS_DOCUMENT,
+      commandScope: `business-document:${draftId}:canonical-quote`,
+      idempotencyKey: validated.idempotencyKey,
+      requestFingerprint,
+    });
+    if (idempotency.error) return { abort: idempotency.error };
+    if (idempotency.replay) {
+      return {
+        result: { ...idempotency.replay, replayed: true },
+        afterCommit: () => logger.info("Working Quote import replayed", {
+          code: "BUSINESS_DOCUMENT_QUOTE_IMPORT_REPLAYED",
+          draftId,
+          jobId,
+        }),
+      };
+    }
+
+    mapping = mapping || await loadOwnedBusinessDocumentQuoteMapping(
+      client,
+      draftId,
+      validated.actorId
+    );
+    if (mapping) {
+      return {
+        result: await completeExistingBusinessDocumentQuoteMapping({
+          client,
+          mapping,
+          idempotency,
+        }),
+      };
+    }
+    if (Number(source.version) !== expectedDocumentVersion) {
+      return {
+        abort: failure(409, "STALE_BUSINESS_DOCUMENT_VERSION", "The working Quote version is stale."),
+      };
+    }
+
+    const existing = await client.query(
+      `SELECT id FROM canonical_quotes
+       WHERE job_id = $1 AND parent_quote_id IS NULL
+       LIMIT 1 FOR UPDATE`,
+      [jobId]
+    );
+    if (existing.rows[0]) {
+      return {
+        abort: failure(409, "ROOT_QUOTE_ALREADY_EXISTS", "A different canonical Quote already exists for this Job."),
+      };
+    }
+
+    const quoteId = randomUUID();
+    const aggregateResult = await client.query(
+      `INSERT INTO commercial_authority_aggregates (
+        id, aggregate_type, owning_engine, source_context_type,
+        ordinary_request_id, emergency_request_id, relationship_id,
+        source_owner_user_id, created_by_user_id, current_version
+      ) VALUES ($1, 'quote', $2, 'ordinary_request', $3, NULL, $4, $5, $6, 1)
+      RETURNING *`,
+      [
+        quoteId,
+        OWNING_ENGINE,
+        Number(context.job_request_id),
+        Number(context.relationship_id),
+        Number(context.homeowner_user_id),
+        validated.actorId,
+      ]
+    );
+    if (!aggregateResult.rows[0]) throw new Error("Canonical Quote aggregate creation failed.");
+    const quoteIdentity = await client.query(
+      `INSERT INTO canonical_quotes (
+        id, job_id, job_request_id, relationship_id,
+        issuer_participant_id, currency, status
+      ) VALUES ($1, $2, $3, $4, $5, $6, 'DRAFT')
+      RETURNING *`,
+      [
+        quoteId,
+        jobId,
+        Number(context.job_request_id),
+        Number(context.relationship_id),
+        context.actor_participant_id,
+        conversion.currency,
+      ]
+    );
+    if (!quoteIdentity.rows[0]) throw new Error("Canonical Quote identity creation failed.");
+
+    const snapshots = conversion.items.map((item, index) => ({
+      scopeItemId: randomUUID(),
+      scopeItemRevision: 1,
+      sequence: index + 1,
+      ...item,
+      createdAt: null,
+    }));
+    for (const snapshot of snapshots) {
+      await client.query(
+        `INSERT INTO canonical_quote_scope_items
+          (id, quote_id, job_id, created_by_participant_id)
+         VALUES ($1, $2, $3, $4)`,
+        [snapshot.scopeItemId, quoteId, jobId, context.actor_participant_id]
+      );
+    }
+    const version = await insertQuoteVersion({
+      client,
+      quoteId,
+      version: 1,
+      jobId,
+      currency: conversion.currency,
+      actorParticipantId: context.actor_participant_id,
+      snapshots,
+      customerTermsSnapshot: conversion.customerTermsSnapshot,
+    });
+    if (version.error || !version.row) {
+      return { abort: version.error || failure(409, "WORKING_QUOTE_IMPORT_FAILED", "The Draft Quote could not be created.") };
+    }
+    if (version.totals.totalMinor !== conversion.totals.totalMinor) {
+      throw new Error("Canonical working-Quote total invariant failed.");
+    }
+    for (const snapshot of snapshots) {
+      await insertSnapshot(
+        client,
+        quoteId,
+        1,
+        jobId,
+        context.actor_participant_id,
+        snapshot
+      );
+    }
+    const provenance = await client.query(
+      `INSERT INTO canonical_quote_business_document_sources (
+        quote_id, job_id, contractor_profile_id, source_document_id,
+        source_document_version, document_number,
+        source_snapshot_integrity_hash, created_by_user_id
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      RETURNING quote_id`,
+      [
+        quoteId,
+        jobId,
+        Number(source.contractor_profile_id),
+        draftId,
+        expectedDocumentVersion,
+        source.document_number,
+        sourceHash,
+        validated.actorId,
+      ]
+    );
+    if (!provenance.rows[0]) throw new Error("Canonical working-Quote provenance creation failed.");
+    const evidence = await insertQuoteEvidence({
+      client,
+      quoteId,
+      relationshipId: Number(context.relationship_id),
+      actorUserId: validated.actorId,
+      idempotencyId: idempotency.reservation.id,
+      evidenceType: QUOTE_EVIDENCE_TYPES.CREATED,
+      commandName: QUOTE_COMMANDS.IMPORT_BUSINESS_DOCUMENT,
+      previousVersion: 0,
+      resultingVersion: 1,
+      totals: version.totals,
+      scopeItemCount: snapshots.length,
+    });
+    if (!evidence) throw new Error("Canonical working-Quote evidence creation failed.");
+    await invokeFailure(input.failureInjector, "after_write");
+    const quote = await loadQuoteProjection(client, quoteId);
+    const result = quoteResult("BUSINESS_DOCUMENT_DRAFT_QUOTE_IMPORTED", 201, quote);
+    if (!(await completeIdempotency(client, idempotency.reservation.id, quoteId, result))) {
+      throw new Error("Canonical working-Quote idempotency completion failed.");
+    }
+    return {
+      result,
+      afterCommit: () => logger.info("Working Quote imported as canonical Draft", {
+        code: "BUSINESS_DOCUMENT_DRAFT_QUOTE_IMPORTED",
+        quoteId,
+        draftId,
+        jobId,
+      }),
+    };
+  });
 }
 
 async function createDraftQuote(input = {}) {
@@ -2524,6 +3151,7 @@ module.exports = {
   declineIssuedQuote,
   getCustomerIssuedQuote,
   getDraftQuote,
+  importBusinessDocumentDraftQuote,
   issueQuote,
   listDraftQuotesByJob,
   removeDraftScopeItem,
@@ -2535,11 +3163,14 @@ module.exports = {
     customerQuoteDetailProjection,
     deriveCommercialSnapshots,
     integrityHash,
+    businessDocumentSourceFingerprint,
+    buildWorkingQuoteTerms,
     loadQuoteContext,
     loadQuoteProjection,
     persistedSnapshotIsValid,
     normalizeCustomerTermsSnapshot,
     quoteIntegrityContract,
     requireQuoteAuthority,
+    workingQuoteConversion,
   }),
 };

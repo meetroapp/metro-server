@@ -28,6 +28,7 @@ const {
   declineIssuedQuote,
   getCustomerIssuedQuote,
   getDraftQuote,
+  importBusinessDocumentDraftQuote,
   issueQuote,
   listDraftQuotesByJob,
   removeDraftScopeItem,
@@ -297,19 +298,205 @@ test("clean disposable PostgreSQL certifies canonical $920 Draft and issued Quot
   const suffix = randomUUID();
   try {
     const migrations = getMigrationFiles();
-    assert.equal(migrations.length, 51);
+    assert.equal(migrations.length, 52);
     const applied = await runMigrationCollection(pool, migrations, targetMetadata(cleanDatabaseUrl));
     assert.equal(applied.success, true);
-    assert.equal(applied.applied.length, 49);
+    assert.equal(applied.applied.length, 50);
     const replay = await runMigrationCollection(pool, migrations, targetMetadata(cleanDatabaseUrl));
     assert.equal(replay.success, true);
-    assert.equal(replay.skipped.length, 45);
+    assert.equal(replay.skipped.length, 46);
 
     const identities = await createIdentities(pool, suffix);
     const fixture = await createLifecycleFixture(pool, identities, `${suffix}-primary`, "A/C, disposal, lighting, fan and microwave work");
     const crossFixture = await createLifecycleFixture(pool, identities, `${suffix}-cross`, "separate property work");
     const declinedFixture = await createLifecycleFixture(pool, identities, `${suffix}-declined`, "declined commercial proposal");
     const raceFixture = await createLifecycleFixture(pool, identities, `${suffix}-race`, "concurrent customer decision");
+    const bridgeFixture = await createLifecycleFixture(pool, identities, `${suffix}-bridge`, "numbered working Quote bridge");
+    const bridgeRaceFixture = await createLifecycleFixture(pool, identities, `${suffix}-bridge-race`, "concurrent numbered working Quote bridge");
+    const contractor = await pool.query(
+      `SELECT id FROM contractor_profiles WHERE user_id = $1 LIMIT 1`,
+      [identities.professionalId]
+    );
+    const contractorProfileId = Number(contractor.rows[0].id);
+    async function insertWorkingQuote(fixture, documentNumber, projectTitle) {
+      const sourceId = randomUUID();
+      await pool.query(
+        `INSERT INTO business_document_working_drafts (
+          id, contractor_profile_id, created_by_user_id, job_id,
+          document_type, draft_reference, document_number,
+          content, workspace_context
+        ) VALUES ($1, $2, $3, $4, 'QUOTE', $5, $6, $7::jsonb, $8::jsonb)`,
+        [
+          sourceId,
+          contractorProfileId,
+          identities.professionalId,
+          fixture.jobId,
+          `WQ-${sourceId}`,
+          documentNumber,
+          JSON.stringify({
+            customerName: "External display-only customer",
+            projectTitle,
+            projectDescription: projectTitle,
+            materialItems: [{ id: "material", name: "Material", total: "89.99" }],
+            laborItems: [{ id: "labor", description: "Installation", total: "180.00" }],
+            lineItems: [],
+            totalOverride: "",
+            paymentTerms: "50% deposit.",
+            estimatedDuration: "1 day",
+            notes: "Protect the work area.",
+            agreement: {
+              exclusions: ["Permit fees"],
+              additionalWorkTerms: "Written authorization required.",
+            },
+          }),
+          JSON.stringify({ activeDocument: "QUOTE", instructions: [] }),
+        ]
+      );
+      return sourceId;
+    }
+
+    const bridgeSourceId = await insertWorkingQuote(
+      bridgeFixture,
+      "Q-0000001",
+      "Fan replacement"
+    );
+    const bridgeCommand = {
+      pool,
+      authenticatedActor: { id: identities.professionalId },
+      draftId: bridgeSourceId,
+      expectedDocumentVersion: 1,
+      idempotencyKey: `quote-bridge-${suffix}`,
+      logger: quiet,
+    };
+    const imported = await importBusinessDocumentDraftQuote(bridgeCommand);
+    assert.equal(imported.ok, true, imported.code);
+    assert.equal(imported.quote.status, "DRAFT");
+    assert.equal(imported.quote.documentNumber, "Q-0000001");
+    assert.equal(imported.quote.totalMinor, 26999);
+    assert.deepEqual(imported.quote.sourceBusinessDocument, {
+      documentId: bridgeSourceId,
+      documentVersion: 1,
+    });
+    assert.equal((await importBusinessDocumentDraftQuote(bridgeCommand)).replayed, true);
+    const existingBridge = await importBusinessDocumentDraftQuote({
+      ...bridgeCommand,
+      idempotencyKey: `quote-bridge-existing-${suffix}`,
+    });
+    assert.equal(existingBridge.code, "BUSINESS_DOCUMENT_QUOTE_ALREADY_CANONICALIZED");
+    assert.equal(existingBridge.quote.id, imported.quote.id);
+
+    await pool.query(
+      `UPDATE business_document_working_drafts
+       SET content = jsonb_set(content, '{totalOverride}', '"999.00"'::jsonb),
+         version = version + 1, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1`,
+      [bridgeSourceId]
+    );
+    const frozenBridge = await getDraftQuote({
+      pool,
+      authenticatedActor: { id: identities.professionalId },
+      quoteId: imported.quote.id,
+      logger: quiet,
+    });
+    assert.equal(frozenBridge.quote.totalMinor, 26999);
+    assert.equal(frozenBridge.quote.sourceBusinessDocument.documentVersion, 1);
+    assert.equal(
+      (await pool.query(
+        `SELECT draft_status FROM business_document_working_drafts WHERE id = $1`,
+        [bridgeSourceId]
+      )).rows[0].draft_status,
+      "WORKING_DRAFT"
+    );
+    assert.equal(
+      Number((await pool.query(
+        `SELECT count(*) AS count FROM canonical_quote_issuances WHERE quote_id = $1`,
+        [imported.quote.id]
+      )).rows[0].count),
+      0
+    );
+    assert.equal(
+      Number((await pool.query(
+        `SELECT count(*) AS count FROM canonical_quote_customer_decisions WHERE quote_id = $1`,
+        [imported.quote.id]
+      )).rows[0].count),
+      0
+    );
+    assert.equal(
+      Number((await pool.query(
+        `SELECT source_owner_user_id FROM commercial_authority_aggregates WHERE id = $1`,
+        [imported.quote.id]
+      )).rows[0].source_owner_user_id),
+      identities.homeownerId
+    );
+    assert.equal(
+      Number((await pool.query(
+        `SELECT count(*) AS count FROM business_document_number_sequences
+         WHERE contractor_profile_id = $1`,
+        [contractorProfileId]
+      )).rows[0].count),
+      0
+    );
+    await assert.rejects(
+      pool.query(
+        `UPDATE canonical_quote_business_document_sources
+         SET document_number = 'Q-9999999' WHERE quote_id = $1`,
+        [imported.quote.id]
+      ),
+      /append-only/i
+    );
+
+    const bridgeRaceSourceId = await insertWorkingQuote(
+      bridgeRaceFixture,
+      "BG-0001020",
+      "Knee wall reconstruction"
+    );
+    const raceImports = await Promise.all([
+      importBusinessDocumentDraftQuote({
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+        draftId: bridgeRaceSourceId,
+        expectedDocumentVersion: 1,
+        idempotencyKey: `quote-bridge-race-a-${suffix}`,
+        logger: quiet,
+      }),
+      importBusinessDocumentDraftQuote({
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+        draftId: bridgeRaceSourceId,
+        expectedDocumentVersion: 1,
+        idempotencyKey: `quote-bridge-race-b-${suffix}`,
+        logger: quiet,
+      }),
+    ]);
+    assert.deepEqual(
+      raceImports.map(({ ok }) => ok),
+      [true, true]
+    );
+    assert.equal(raceImports[0].quote.id, raceImports[1].quote.id);
+    assert.equal(raceImports[0].quote.documentNumber, "BG-0001020");
+    assert.equal(
+      Number((await pool.query(
+        `SELECT count(*) AS count FROM canonical_quotes WHERE job_id = $1`,
+        [bridgeRaceFixture.jobId]
+      )).rows[0].count),
+      1
+    );
+    await pool.query(
+      `DELETE FROM business_document_working_drafts WHERE id = $1`,
+      [bridgeRaceSourceId]
+    );
+    const durableBridge = await getDraftQuote({
+      pool,
+      authenticatedActor: { id: identities.professionalId },
+      quoteId: raceImports[0].quote.id,
+      logger: quiet,
+    });
+    assert.equal(durableBridge.ok, true);
+    assert.equal(durableBridge.quote.documentNumber, "BG-0001020");
+    assert.deepEqual(durableBridge.quote.sourceBusinessDocument, {
+      documentId: bridgeRaceSourceId,
+      documentVersion: 1,
+    });
     const occupantParticipantId = randomUUID();
     await pool.query(
       `INSERT INTO relationship_participants (

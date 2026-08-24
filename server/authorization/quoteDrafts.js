@@ -54,6 +54,16 @@ function createQuoteDraftHandlers({
   }
 
   return {
+    importBusinessDocumentDraftQuote: handle(
+      "import_business_document_draft_quote",
+      (req) => service.importBusinessDocumentDraftQuote({
+        pool: getPool(req),
+        authenticatedActor: req.user,
+        draftId: req.params.draftId,
+        expectedDocumentVersion: req.body?.expectedDocumentVersion,
+        idempotencyKey: req.headers?.["idempotency-key"],
+      })
+    ),
     createDraftQuote: handle("create_draft_quote", (req) =>
       service.createDraftQuote({
         pool: getPool(req),
@@ -165,6 +175,11 @@ function registerQuoteDraftRoutes({
     service,
   });
   app.post("/jobs/:jobId/quotes", authMiddleware, handlers.createDraftQuote);
+  app.post(
+    "/business-document-drafts/:draftId/canonical-quote",
+    authMiddleware,
+    handlers.importBusinessDocumentDraftQuote
+  );
   app.get("/jobs/:jobId/quotes", authMiddleware, handlers.listDraftQuotes);
   app.get("/quotes/:quoteId", authMiddleware, handlers.getDraftQuote);
   app.post("/quotes/:quoteId/scope-items", authMiddleware, handlers.addScopeItem);
