@@ -182,6 +182,9 @@ const {
 const {
   registerBusinessDocumentDraftRoutes,
 } = require("./server/documents/businessDocumentDrafts");
+const {
+  registerBusinessContactRoutes,
+} = require("./server/contacts/businessContacts");
 
 
 const JWT_SECRET = resolveJwtSecret(process.env);
@@ -977,6 +980,13 @@ registerBusinessDocumentDraftRoutes({
   getPool,
   sendPublicDatabaseError,
   emailDelivery,
+});
+
+registerBusinessContactRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
 });
 
 app.get("/health", (req, res) => {

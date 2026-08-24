@@ -12,7 +12,7 @@ const sql = readFileSync(join(__dirname, "..", "migrations", migrationName), "ut
 
 test("migration 44 is additive, replay-safe, append-only review evidence", () => {
   const migrations = getMigrationFiles();
-  assert.equal(migrations.length, 52);
+  assert.equal(migrations.length, 53);
 
   const migrationIndex =
     migrations.findIndex(

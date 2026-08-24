@@ -16,8 +16,8 @@ test("working-Quote bridge migration is the 52nd additive migration", () => {
   const migrations = readdirSync(join(__dirname, "..", "migrations"))
     .filter((name) => /^\d+.*\.sql$/.test(name))
     .sort();
-  assert.equal(migrations.length, 52);
-  assert.equal(migrations.at(-1), migrationName);
+  assert.equal(migrations.length, 53);
+  assert.equal(migrations.at(-2), migrationName);
 });
 
 test("bridge provenance is one-to-one, business-owned, numbered, and hash-bound", () => {
@@ -55,4 +55,3 @@ test("bridge migration performs no allocation, backfill, or lifecycle mutation",
   assert.doesNotMatch(sql, /INSERT INTO\s+(?:canonical_quotes|canonical_quote_versions|canonical_quote_issuances|canonical_quote_customer_decisions|jobs)/i);
   assert.doesNotMatch(sql, /^\s*(?:BEGIN|COMMIT|ROLLBACK)\s*;/im);
 });
-

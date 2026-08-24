@@ -70,6 +70,7 @@ Current inventory:
 50. `202608230001_add_business_document_numbers.sql`
 51. `202608230002_add_canonical_quote_customer_terms_snapshot.sql`
 52. `202608230003_create_canonical_quote_business_document_sources.sql`
+53. `202608230004_create_business_contact_foundation.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -105,6 +106,14 @@ append-only one-to-one provenance bridge from one exact saved, numbered working
 Quote version to one canonical Draft Quote. The inherited number is never
 allocated again, private workspace state is excluded, and the bridge creates no
 issuance, customer decision, payment, scheduling, or Job lifecycle authority.
+
+`202608230004_create_business_contact_foundation.sql` adds durable, private,
+business-owned PERSON and ORGANIZATION Contact identities, owner-scoped duplicate
+candidates, optimistic versioning, idempotent mutations, archival lifecycle, and
+append-only multi-role classification history. Contact data and roles grant no
+Meetro account, relationship, Conversation, Job, Quote, payment, scheduling, or
+lifecycle authority; future verified account linking can reference the stable
+Contact UUID without rewriting Contact history.
 
 `202608150001_activate_customer_safe_efr.sql` adds explicit, conservative
 customer visibility to append-only Finding and Recommendation versions and
