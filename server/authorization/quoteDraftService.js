@@ -92,6 +92,24 @@ const SOURCE_TYPES = Object.freeze([
 ]);
 const MAX_MINOR_AMOUNT = 9_000_000_000_000;
 const MAX_QUANTITY = 10_000;
+const QUOTE_INTEGRITY_VERSION_V1 = 1;
+const QUOTE_INTEGRITY_VERSION_V2 = 2;
+const CUSTOMER_TERMS_SCHEMA_VERSION = 1;
+const CUSTOMER_TERMS_TEXT_LIMITS = Object.freeze({
+  paymentTerms: 8000,
+  estimatedDuration: 240,
+  customerNotes: 8000,
+});
+const CUSTOMER_AGREEMENT_TEXT_LIMITS = Object.freeze({
+  additionalWorkTerms: 8000,
+  hiddenConditionsTerms: 8000,
+  diagnosticTerms: 8000,
+  customerResponsibilities: 8000,
+  warrantyTerms: 8000,
+  cancellationTerms: 8000,
+  acceptanceTerms: 8000,
+  preauthorizedAdditionalWorkLimit: 240,
+});
 
 function safeLogger(logger) {
   return logger && typeof logger.info === "function" && typeof logger.warn === "function"
@@ -160,6 +178,79 @@ function safeQuantity(value) {
 function validateCurrency(value) {
   const currency = typeof value === "string" ? value.trim().toUpperCase() : "";
   return /^[A-Z]{3}$/.test(currency) ? currency : null;
+}
+
+function normalizedCustomerTermText(value, maximum) {
+  if (value === undefined) return "";
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  return normalized.length <= maximum ? normalized : null;
+}
+
+function normalizeCustomerTermsSnapshot(value) {
+  if (!isPlainObject(value)) return { error: "INVALID_QUOTE_CUSTOMER_TERMS_SNAPSHOT" };
+  const allowed = new Set([
+    "schemaVersion",
+    "paymentTerms",
+    "estimatedDuration",
+    "customerNotes",
+    "agreement",
+  ]);
+  if (
+    Object.keys(value).some((key) => !allowed.has(key)) ||
+    value.schemaVersion !== CUSTOMER_TERMS_SCHEMA_VERSION ||
+    !isPlainObject(value.agreement)
+  ) {
+    return { error: "INVALID_QUOTE_CUSTOMER_TERMS_SNAPSHOT" };
+  }
+  const agreementAllowed = new Set([
+    "exclusions",
+    ...Object.keys(CUSTOMER_AGREEMENT_TEXT_LIMITS),
+  ]);
+  if (Object.keys(value.agreement).some((key) => !agreementAllowed.has(key))) {
+    return { error: "INVALID_QUOTE_CUSTOMER_TERMS_SNAPSHOT" };
+  }
+  const normalized = { schemaVersion: CUSTOMER_TERMS_SCHEMA_VERSION };
+  for (const [key, maximum] of Object.entries(CUSTOMER_TERMS_TEXT_LIMITS)) {
+    const text = normalizedCustomerTermText(value[key], maximum);
+    if (text == null) return { error: "INVALID_QUOTE_CUSTOMER_TERMS_SNAPSHOT" };
+    normalized[key] = text;
+  }
+  const exclusions = value.agreement.exclusions === undefined
+    ? []
+    : value.agreement.exclusions;
+  if (!Array.isArray(exclusions) || exclusions.length > 100) {
+    return { error: "INVALID_QUOTE_CUSTOMER_TERMS_SNAPSHOT" };
+  }
+  normalized.agreement = { exclusions: [] };
+  for (const exclusion of exclusions) {
+    const text = normalizedCustomerTermText(exclusion, 3000);
+    if (!text) return { error: "INVALID_QUOTE_CUSTOMER_TERMS_SNAPSHOT" };
+    normalized.agreement.exclusions.push(text);
+  }
+  for (const [key, maximum] of Object.entries(CUSTOMER_AGREEMENT_TEXT_LIMITS)) {
+    const text = normalizedCustomerTermText(value.agreement[key], maximum);
+    if (text == null) return { error: "INVALID_QUOTE_CUSTOMER_TERMS_SNAPSHOT" };
+    normalized.agreement[key] = text;
+  }
+  return { snapshot: normalized };
+}
+
+function quoteIntegrityContract(integrityVersion, customerTermsSnapshot) {
+  const version = Number(integrityVersion || QUOTE_INTEGRITY_VERSION_V1);
+  if (version === QUOTE_INTEGRITY_VERSION_V1 && customerTermsSnapshot == null) {
+    return { integrityVersion: version, customerTermsSnapshot: null };
+  }
+  if (version === QUOTE_INTEGRITY_VERSION_V2) {
+    const normalized = normalizeCustomerTermsSnapshot(customerTermsSnapshot);
+    if (!normalized.error) {
+      return {
+        integrityVersion: version,
+        customerTermsSnapshot: normalized.snapshot,
+      };
+    }
+  }
+  return { error: "INVALID_QUOTE_INTEGRITY_CONTRACT" };
 }
 
 function validateSource(value) {
@@ -771,6 +862,19 @@ async function loadCurrentSnapshots(client, quoteId, version) {
   return result.rows.map(snapshotFromRow);
 }
 
+async function loadQuoteVersionContract(client, quoteId, version, jobId) {
+  const result = await client.query(
+    `SELECT integrity_version, customer_terms_snapshot
+     FROM canonical_quote_versions
+     WHERE quote_id = $1 AND version = $2 AND job_id = $3
+     LIMIT 1`,
+    [quoteId, version, jobId]
+  );
+  const row = result.rows[0];
+  if (!row) return { error: "INVALID_QUOTE_INTEGRITY_CONTRACT" };
+  return quoteIntegrityContract(row.integrity_version, row.customer_terms_snapshot);
+}
+
 function calculateTotals(snapshots) {
   let materialsSubtotalMinor = 0;
   let laborServiceSubtotalMinor = 0;
@@ -841,9 +945,12 @@ function integrityHash({
   snapshots,
   conditions,
   exclusions,
+  integrityVersion = QUOTE_INTEGRITY_VERSION_V1,
+  customerTermsSnapshot = null,
 }) {
-  return createHash("sha256")
-    .update(JSON.stringify({
+  const contract = quoteIntegrityContract(integrityVersion, customerTermsSnapshot);
+  if (contract.error) throw new TypeError("The Quote integrity contract is invalid.");
+  const payload = {
       quoteId,
       version,
       currency,
@@ -868,7 +975,13 @@ function integrityHash({
       })),
       conditions,
       exclusions,
-    }))
+  };
+  if (contract.integrityVersion === QUOTE_INTEGRITY_VERSION_V2) {
+    payload.integrityVersion = QUOTE_INTEGRITY_VERSION_V2;
+    payload.customerTermsSnapshot = contract.customerTermsSnapshot;
+  }
+  return createHash("sha256")
+    .update(JSON.stringify(payload))
     .digest("hex");
 }
 
@@ -882,10 +995,20 @@ async function insertQuoteVersion({
   snapshots,
   status = QUOTE_STATUS.DRAFT,
   issuedAt = null,
+  customerTermsSnapshot = null,
 }) {
   const totals = calculateTotals(snapshots);
   if (totals.error) return totals;
   const commercialSnapshots = deriveCommercialSnapshots(snapshots);
+  const integrityVersion = customerTermsSnapshot == null
+    ? QUOTE_INTEGRITY_VERSION_V1
+    : QUOTE_INTEGRITY_VERSION_V2;
+  const contract = quoteIntegrityContract(integrityVersion, customerTermsSnapshot);
+  if (contract.error) {
+    return {
+      error: failure(400, "INVALID_QUOTE_CUSTOMER_TERMS_SNAPSHOT", "The Quote customer terms are invalid."),
+    };
+  }
   const hash = integrityHash({
     quoteId,
     version,
@@ -895,6 +1018,8 @@ async function insertQuoteVersion({
     totals,
     snapshots,
     ...commercialSnapshots,
+    integrityVersion: contract.integrityVersion,
+    customerTermsSnapshot: contract.customerTermsSnapshot,
   });
   const result = await client.query(
     `
@@ -902,10 +1027,11 @@ async function insertQuoteVersion({
       quote_id, version, job_id, status, currency,
       materials_subtotal_minor, labor_service_subtotal_minor, total_minor,
       scope_item_count, conditions_snapshot, exclusions_snapshot,
-      issued_at, created_by_participant_id, integrity_hash
+      customer_terms_snapshot, issued_at, created_by_participant_id,
+      integrity_hash, integrity_version
     )
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb,
-      $12, $13, $14)
+      $12::jsonb, $13, $14, $15, $16)
     RETURNING *
     `,
     [
@@ -920,9 +1046,13 @@ async function insertQuoteVersion({
       snapshots.length,
       JSON.stringify(commercialSnapshots.conditions),
       JSON.stringify(commercialSnapshots.exclusions),
+      contract.customerTermsSnapshot == null
+        ? null
+        : JSON.stringify(contract.customerTermsSnapshot),
       issuedAt,
       actorParticipantId,
       hash,
+      contract.integrityVersion,
     ]
   );
   return { row: result.rows[0], totals, ...commercialSnapshots };
@@ -1058,8 +1188,10 @@ async function loadQuoteProjection(client, quoteId) {
       versions.scope_item_count,
       versions.conditions_snapshot,
       versions.exclusions_snapshot,
+      versions.customer_terms_snapshot,
       versions.issued_at AS version_issued_at,
       versions.integrity_hash,
+      versions.integrity_version,
       versions.created_at AS version_created_at,
       decisions.decision AS customer_decision,
       decisions.issued_quote_version AS customer_decision_quote_version,
@@ -1087,7 +1219,7 @@ async function loadQuoteProjection(client, quoteId) {
     SELECT version, status, currency, materials_subtotal_minor,
       labor_service_subtotal_minor, total_minor, scope_item_count,
       conditions_snapshot, exclusions_snapshot, issued_at,
-      integrity_hash, created_at
+      customer_terms_snapshot, integrity_hash, integrity_version, created_at
     FROM canonical_quote_versions
     WHERE quote_id = $1
     ORDER BY version ASC
@@ -1113,6 +1245,8 @@ async function loadQuoteProjection(client, quoteId) {
     scopeItemCount: Number(identity.scope_item_count),
     conditions: identity.conditions_snapshot,
     exclusions: identity.exclusions_snapshot,
+    customerTermsSnapshot: identity.customer_terms_snapshot,
+    integrityVersion: Number(identity.integrity_version || QUOTE_INTEGRITY_VERSION_V1),
     scopeItems: scopes,
     versions: historyResult.rows.map((row) => ({
       version: Number(row.version),
@@ -1124,8 +1258,10 @@ async function loadQuoteProjection(client, quoteId) {
       scopeItemCount: Number(row.scope_item_count),
       conditions: row.conditions_snapshot,
       exclusions: row.exclusions_snapshot,
+      customerTermsSnapshot: row.customer_terms_snapshot,
       issuedAt: row.issued_at,
       integrityHash: row.integrity_hash,
+      integrityVersion: Number(row.integrity_version || QUOTE_INTEGRITY_VERSION_V1),
       createdAt: row.created_at,
     })),
     createdAt: identity.created_at,
@@ -1211,7 +1347,7 @@ function customerQuoteDetailProjection(
     }
   );
 
-  return {
+  const projection = {
     quoteId: quote.id,
     jobId: quote.jobId,
     status: QUOTE_STATUS.ISSUED,
@@ -1232,15 +1368,27 @@ function customerQuoteDetailProjection(
       canDecline: decisionPending && canDecline === true,
     },
   };
+  if (quote.customerTermsSnapshot != null) {
+    const normalized = normalizeCustomerTermsSnapshot(quote.customerTermsSnapshot);
+    if (normalized.error) return null;
+    projection.customerTermsSnapshot = normalized.snapshot;
+  }
+  return projection;
 }
 
 async function createDraftQuote(input = {}) {
-  const validated = validateCommand(input, ["jobId", "currency"]);
+  const validated = validateCommand(input, ["jobId", "currency", "customerTermsSnapshot"]);
   if (validated.error) return validated.error;
   const jobId = normalizedUuid(input.jobId);
   const currency = validateCurrency(input.currency);
   if (!jobId || !currency) {
     return failure(400, "INVALID_DRAFT_QUOTE", "The Draft Quote is invalid.");
+  }
+  const terms = input.customerTermsSnapshot === undefined
+    ? { snapshot: null }
+    : normalizeCustomerTermsSnapshot(input.customerTermsSnapshot);
+  if (terms.error) {
+    return failure(400, "INVALID_QUOTE_CUSTOMER_TERMS_SNAPSHOT", "The Quote customer terms are invalid.");
   }
   const logger = safeLogger(input.logger);
 
@@ -1258,6 +1406,7 @@ async function createDraftQuote(input = {}) {
       jobId,
       currency,
       expectedVersion: 0,
+      customerTermsSnapshot: terms.snapshot,
     });
     const idempotency = await reserveIdempotency({
       client,
@@ -1336,6 +1485,7 @@ async function createDraftQuote(input = {}) {
       currency,
       actorParticipantId: context.actor_participant_id,
       snapshots: [],
+      customerTermsSnapshot: terms.snapshot,
     });
     if (!version.row) throw new Error("Canonical Quote version creation failed.");
     const evidence = await insertQuoteEvidence({
@@ -1445,6 +1595,15 @@ async function addDraftScopeItem(input = {}) {
       return { abort: sourceValidation.error };
     }
     const existingSnapshots = await loadCurrentSnapshots(client, quoteId, expectedVersion);
+    const currentContract = await loadQuoteVersionContract(
+      client,
+      quoteId,
+      expectedVersion,
+      context.job_id
+    );
+    if (currentContract.error) {
+      return { abort: failure(409, "QUOTE_SNAPSHOT_INVALID", "The Draft Quote snapshot is invalid.") };
+    }
     const scopeItemId = randomUUID();
     const newSnapshot = {
       scopeItemId,
@@ -1479,6 +1638,7 @@ async function addDraftScopeItem(input = {}) {
       currency: context.currency,
       actorParticipantId: context.actor_participant_id,
       snapshots: nextSnapshots,
+      customerTermsSnapshot: currentContract.customerTermsSnapshot,
     });
     if (version.error) return { abort: version.error };
     await client.query(
@@ -1594,6 +1754,15 @@ async function removeDraftScopeItem(input = {}) {
       return { abort: failure(409, "STALE_QUOTE_VERSION", "The Quote version is stale.") };
     }
     const currentSnapshots = await loadCurrentSnapshots(client, quoteId, expectedVersion);
+    const currentContract = await loadQuoteVersionContract(
+      client,
+      quoteId,
+      expectedVersion,
+      context.job_id
+    );
+    if (currentContract.error) {
+      return { abort: failure(409, "QUOTE_SNAPSHOT_INVALID", "The Draft Quote snapshot is invalid.") };
+    }
     if (!currentSnapshots.some((item) => item.scopeItemId === scopeItemId)) {
       return { abort: failure(404, "QUOTE_SCOPE_ITEM_UNAVAILABLE", "The Quote Scope Item is unavailable.") };
     }
@@ -1625,6 +1794,7 @@ async function removeDraftScopeItem(input = {}) {
       currency: context.currency,
       actorParticipantId: context.actor_participant_id,
       snapshots: nextSnapshots,
+      customerTermsSnapshot: currentContract.customerTermsSnapshot,
     });
     if (version.error) return { abort: version.error };
     for (const snapshot of nextSnapshots) {
@@ -1754,6 +1924,24 @@ async function issueQuote(input = {}) {
     const snapshots = await loadCurrentSnapshots(client, quoteId, expectedVersion);
     const totals = calculateTotals(snapshots);
     const commercialSnapshots = deriveCommercialSnapshots(snapshots);
+    const currentContract = current
+      ? quoteIntegrityContract(current.integrity_version, current.customer_terms_snapshot)
+      : { error: "INVALID_QUOTE_INTEGRITY_CONTRACT" };
+    let expectedIntegrityHash = null;
+    if (!currentContract.error && !totals.error) {
+      expectedIntegrityHash = integrityHash({
+        quoteId,
+        version: expectedVersion,
+        currency: context.currency,
+        status: QUOTE_STATUS.DRAFT,
+        issuedAt: null,
+        totals,
+        snapshots,
+        ...commercialSnapshots,
+        integrityVersion: currentContract.integrityVersion,
+        customerTermsSnapshot: currentContract.customerTermsSnapshot,
+      });
+    }
     const includedCount = snapshots.filter((item) => item.includedInTotal).length;
     const eligibilityInvalid =
       !current ||
@@ -1768,7 +1956,9 @@ async function issueQuote(input = {}) {
       fingerprint(current.conditions_snapshot) !==
         fingerprint(commercialSnapshots.conditions) ||
       fingerprint(current.exclusions_snapshot) !==
-        fingerprint(commercialSnapshots.exclusions);
+        fingerprint(commercialSnapshots.exclusions) ||
+      currentContract.error ||
+      current.integrity_hash !== expectedIntegrityHash;
     if (eligibilityInvalid || includedCount < 1) {
       logger.warn("Quote issue eligibility rejected", {
         code: includedCount < 1 ? "QUOTE_INCLUDED_SCOPE_REQUIRED" : "QUOTE_SNAPSHOT_INVALID",
@@ -1828,6 +2018,7 @@ async function issueQuote(input = {}) {
       snapshots,
       status: QUOTE_STATUS.ISSUED,
       issuedAt,
+      customerTermsSnapshot: currentContract.customerTermsSnapshot,
     });
     if (version.error) return { abort: version.error };
     for (const snapshot of snapshots) {
@@ -2338,12 +2529,17 @@ module.exports = {
   removeDraftScopeItem,
   validateScopeItem,
   quoteDraftServiceInternals: Object.freeze({
+    CUSTOMER_TERMS_SCHEMA_VERSION,
+    QUOTE_INTEGRITY_VERSION_V1,
+    QUOTE_INTEGRITY_VERSION_V2,
     customerQuoteDetailProjection,
     deriveCommercialSnapshots,
     integrityHash,
     loadQuoteContext,
     loadQuoteProjection,
     persistedSnapshotIsValid,
+    normalizeCustomerTermsSnapshot,
+    quoteIntegrityContract,
     requireQuoteAuthority,
   }),
 };

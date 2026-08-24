@@ -73,6 +73,10 @@ test("handlers forward only governed Draft inputs and idempotency", async () => 
     headers: { "idempotency-key": "key" },
     body: {
       currency: "USD",
+      customerTermsSnapshot: {
+        schemaVersion: 1,
+        agreement: {},
+      },
       expectedVersion: 1,
       expectedIssuedVersion: 2,
       lineageType: "SUPPLEMENTAL_QUOTE",
@@ -98,6 +102,7 @@ test("handlers forward only governed Draft inputs and idempotency", async () => 
     assert.equal(res.payload.success, true);
   }
   assert.equal(calls[0][1].totalMinor, undefined);
+  assert.deepEqual(calls[0][1].customerTermsSnapshot, req.body.customerTermsSnapshot);
   assert.equal(calls[3][1].expectedVersion, 1);
   assert.equal(calls[4][1].scopeItemId, "scope");
   assert.equal(calls[4][1].idempotencyKey, "key");

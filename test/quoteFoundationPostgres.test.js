@@ -38,6 +38,23 @@ const cleanDatabaseUrl = process.env.QUOTE_FOUNDATION_DATABASE_URL;
 const upgradeDatabaseUrl = process.env.QUOTE_UPGRADE_DATABASE_URL;
 const migrationName = "202608100003_create_canonical_quote_scope_foundation.sql";
 const quiet = { info() {}, warn() {} };
+const customerTermsSnapshot = {
+  schemaVersion: 1,
+  paymentTerms: "50% deposit; balance due on completion.",
+  estimatedDuration: "3 days",
+  customerNotes: "Protect the existing landscaping.",
+  agreement: {
+    exclusions: ["Permit fees", "Hidden damage"],
+    additionalWorkTerms: "Written customer approval is required.",
+    hiddenConditionsTerms: "Hidden conditions require a revised Quote.",
+    diagnosticTerms: "Diagnostic work is limited to the stated scope.",
+    customerResponsibilities: "Provide safe site access.",
+    warrantyTerms: "One-year workmanship warranty.",
+    cancellationTerms: "Cancellation terms apply as stated.",
+    acceptanceTerms: "Approval accepts this exact issued Quote.",
+    preauthorizedAdditionalWorkLimit: "$0",
+  },
+};
 
 function targetMetadata(databaseUrl) {
   return {
@@ -241,10 +258,18 @@ function scopeItem({
   };
 }
 
-async function createSimpleIssuedQuote(pool, identities, fixture, suffix, amountMinor = 2000) {
+async function createSimpleIssuedQuote(
+  pool,
+  identities,
+  fixture,
+  suffix,
+  amountMinor = 2000,
+  terms = null
+) {
   const created = await quoteCommand(createDraftQuote, pool, identities.professionalId, {
     jobId: fixture.jobId,
     currency: "USD",
+    ...(terms == null ? {} : { customerTermsSnapshot: terms }),
   }, `simple-create-${suffix}`);
   assert.equal(created.ok, true, created.code);
   const scoped = await quoteCommand(addDraftScopeItem, pool, identities.professionalId, {
@@ -272,10 +297,10 @@ test("clean disposable PostgreSQL certifies canonical $920 Draft and issued Quot
   const suffix = randomUUID();
   try {
     const migrations = getMigrationFiles();
-    assert.equal(migrations.length, 47);
+    assert.equal(migrations.length, 51);
     const applied = await runMigrationCollection(pool, migrations, targetMetadata(cleanDatabaseUrl));
     assert.equal(applied.success, true);
-    assert.equal(applied.applied.length, 45);
+    assert.equal(applied.applied.length, 49);
     const replay = await runMigrationCollection(pool, migrations, targetMetadata(cleanDatabaseUrl));
     assert.equal(replay.success, true);
     assert.equal(replay.skipped.length, 45);
@@ -356,11 +381,17 @@ test("clean disposable PostgreSQL certifies canonical $920 Draft and issued Quot
       [finding.id, workstream.workstream.id, fixture.jobId]
     );
 
-    const createInput = { jobId: fixture.jobId, currency: "USD" };
+    const createInput = {
+      jobId: fixture.jobId,
+      currency: "USD",
+      customerTermsSnapshot,
+    };
     const createKey = `quote-create-${suffix}`;
     const created = await quoteCommand(createDraftQuote, pool, identities.professionalId, createInput, createKey);
     assert.equal(created.code, "DRAFT_QUOTE_CREATED");
     assert.equal(created.quote.currentVersion, 1);
+    assert.equal(created.quote.integrityVersion, 2);
+    assert.deepEqual(created.quote.customerTermsSnapshot, customerTermsSnapshot);
     assert.equal((await quoteCommand(createDraftQuote, pool, identities.professionalId, createInput, createKey)).replayed, true);
     assert.equal((await quoteCommand(createDraftQuote, pool, identities.professionalId, { ...createInput, currency: "CAD" }, createKey)).code, "COMMERCIAL_IDEMPOTENCY_KEY_CONFLICT");
     assert.equal((await quoteCommand(createDraftQuote, pool, identities.homeownerId, createInput, `homeowner-${suffix}`)).code, "QUOTE_AUTHORITY_REQUIRED");
@@ -408,6 +439,14 @@ test("clean disposable PostgreSQL certifies canonical $920 Draft and issued Quot
     assert.equal(quote.laborServiceSubtotalMinor, 68000);
     assert.equal(quote.totalMinor, 92000);
     assert.equal(quote.scopeItemCount, 11);
+    assert.equal(quote.integrityVersion, 2);
+    assert.equal(
+      quote.versions.every((version) =>
+        version.integrityVersion === 2 &&
+        JSON.stringify(version.customerTermsSnapshot) === JSON.stringify(customerTermsSnapshot)
+      ),
+      true
+    );
     assert.equal(quote.scopeItems.find((row) => row.description.includes("ceiling fan")).includedInTotal, false);
     assert.equal(quote.scopeItems.find((row) => row.description.includes("separate proposal")).includedInTotal, false);
     assert.equal(quote.scopeItems.some((row) => row.source.recommendationId === r22.id), false);
@@ -522,6 +561,8 @@ test("clean disposable PostgreSQL certifies canonical $920 Draft and issued Quot
     assert.equal(issued.materialsSubtotalMinor, 24000);
     assert.equal(issued.laborServiceSubtotalMinor, 68000);
     assert.equal(issued.totalMinor, 92000);
+    assert.equal(issued.integrityVersion, 2);
+    assert.deepEqual(issued.customerTermsSnapshot, customerTermsSnapshot);
     assert.deepEqual(issued.conditions, []);
     assert.equal(issued.exclusions.length, 2);
     assert.equal(issued.scopeItems.find((row) => row.description.includes("ceiling fan")).includedInTotal, false);
@@ -560,6 +601,19 @@ test("clean disposable PostgreSQL certifies canonical $920 Draft and issued Quot
         `UPDATE canonical_quote_scope_item_snapshots
          SET unit_amount_minor = unit_amount_minor + 1
          WHERE quote_id = $1 AND quote_version = $2`,
+        [issued.id, issued.currentVersion]
+      ),
+      /append-only/
+    );
+    await assert.rejects(
+      pool.query(
+        `UPDATE canonical_quote_versions
+         SET customer_terms_snapshot = jsonb_set(
+           customer_terms_snapshot,
+           '{agreement,warrantyTerms}',
+           '"Two years"'::jsonb
+         )
+         WHERE quote_id = $1 AND version = $2`,
         [issued.id, issued.currentVersion]
       ),
       /append-only/
@@ -617,6 +671,7 @@ test("clean disposable PostgreSQL certifies canonical $920 Draft and issued Quot
     assert.equal(customerRead.quote.decisionCommandVersion, 15);
     assert.equal(customerRead.quote.totalMinor, 92000);
     assert.equal(customerRead.quote.customerDecision, null);
+    assert.deepEqual(customerRead.quote.customerTermsSnapshot, customerTermsSnapshot);
     assert.deepEqual(customerRead.quote.actions, {
       canViewQuote: true,
       canApprove: true,
@@ -807,13 +862,19 @@ test("clean disposable PostgreSQL certifies canonical $920 Draft and issued Quot
       pool,
       identities,
       declinedFixture,
-      `${suffix}-declined`
+      `${suffix}-declined`,
+      2000,
+      customerTermsSnapshot
     );
     const declined = await quoteCommand(declineIssuedQuote, pool, identities.homeownerId, {
       quoteId: declinedIssued.id,
       expectedIssuedVersion: declinedIssued.currentVersion,
     }, `decline-${suffix}`);
     assert.equal(declined.quote.decisionState, "DECLINED");
+    assert.equal(
+      declined.customerDecision.issuedIntegrityHash,
+      declinedIssued.versions.at(-1).integrityHash
+    );
     const declinedCustomerRead = await getCustomerIssuedQuote({
       pool,
       authenticatedActor: { id: identities.homeownerId },

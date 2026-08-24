@@ -39,6 +39,7 @@ const {
   loadQuoteContext,
   loadQuoteProjection,
   persistedSnapshotIsValid,
+  quoteIntegrityContract,
   requireQuoteAuthority,
 } = quoteDraftServiceInternals;
 
@@ -140,6 +141,9 @@ function validIssuedQuote(quote, issuance) {
   const current = quote.versions.find((version) => version.version === quote.currentVersion);
   const totals = calculateTotals(quote.scopeItems);
   const commercialSnapshots = deriveCommercialSnapshots(quote.scopeItems);
+  const integrityContract = current
+    ? quoteIntegrityContract(current.integrityVersion, current.customerTermsSnapshot)
+    : { error: "INVALID_QUOTE_INTEGRITY_CONTRACT" };
   if (
     !current ||
     current.status !== QUOTE_STATUS.ISSUED ||
@@ -154,6 +158,11 @@ function validIssuedQuote(quote, issuance) {
     Number(current.scopeItemCount) !== quote.scopeItems.length ||
     !isDeepStrictEqual(current.conditions, commercialSnapshots.conditions) ||
     !isDeepStrictEqual(current.exclusions, commercialSnapshots.exclusions) ||
+    integrityContract.error ||
+    !isDeepStrictEqual(
+      quote.customerTermsSnapshot == null ? null : quote.customerTermsSnapshot,
+      integrityContract.customerTermsSnapshot
+    ) ||
     new Date(current.issuedAt).getTime() !== new Date(quote.issuedAt).getTime()
   ) return false;
   const recomputedHash = integrityHash({
@@ -166,6 +175,8 @@ function validIssuedQuote(quote, issuance) {
     snapshots: quote.scopeItems,
     conditions: commercialSnapshots.conditions,
     exclusions: commercialSnapshots.exclusions,
+    integrityVersion: integrityContract.integrityVersion,
+    customerTermsSnapshot: integrityContract.customerTermsSnapshot,
   });
   return Boolean(
     issuance &&
@@ -195,7 +206,7 @@ function safeText(value, fallback, max = 200) {
 function buildSafeSnapshot(quote, deliveryContext) {
   const customer = customerQuoteDetailProjection(quote);
   if (!customer) return null;
-  return {
+  const snapshot = {
     schemaVersion: SNAPSHOT_SCHEMA_VERSION,
     quoteId: customer.quoteId,
     jobId: customer.jobId,
@@ -216,6 +227,10 @@ function buildSafeSnapshot(quote, deliveryContext) {
       service: safeText(deliveryContext.job_service, "", 120) || null,
     },
   };
+  if (customer.customerTermsSnapshot != null) {
+    snapshot.customerTermsSnapshot = customer.customerTermsSnapshot;
+  }
+  return snapshot;
 }
 
 function hasSendAuthority(deliveryContext, actorId) {

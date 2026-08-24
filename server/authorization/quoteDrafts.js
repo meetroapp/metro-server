@@ -60,6 +60,7 @@ function createQuoteDraftHandlers({
         authenticatedActor: req.user,
         jobId: req.params.jobId,
         currency: req.body?.currency,
+        customerTermsSnapshot: req.body?.customerTermsSnapshot,
         idempotencyKey: req.headers?.["idempotency-key"],
       })
     ),
