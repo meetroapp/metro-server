@@ -71,6 +71,7 @@ Current inventory:
 51. `202608230002_add_canonical_quote_customer_terms_snapshot.sql`
 52. `202608230003_create_canonical_quote_business_document_sources.sql`
 53. `202608230004_create_business_contact_foundation.sql`
+54. `202608230005_create_business_customer_relationship_foundation.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -114,6 +115,12 @@ append-only multi-role classification history. Contact data and roles grant no
 Meetro account, relationship, Conversation, Job, Quote, payment, scheduling, or
 lifecycle authority; future verified account linking can reference the stable
 Contact UUID without rewriting Contact history.
+
+`202608230005_create_business_customer_relationship_foundation.sql` adds one
+durable business-owned Customer Relationship per Business Contact, with exact
+idempotent establishment and owner-scoped reads. Contact identity remains joined
+from the Contact authority; no Meetro account, marketplace request, Conversation,
+Job, Quote, Invoice, payment, scheduling, or lifecycle authority is created.
 
 `202608150001_activate_customer_safe_efr.sql` adds explicit, conservative
 customer visibility to append-only Finding and Recommendation versions and
