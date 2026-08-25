@@ -107,12 +107,12 @@ function normalizeInput(input = {}) {
   return { actor, proposalId, elementId, action, editedValue, reasonCategory, idempotencyKey };
 }
 
-function reviewProjection(row) {
+function reviewProjection(row, { elementId = row.proposal_element_id } = {}) {
   return {
     reviewId: row.id,
     proposalId: row.operation_id,
     operation: row.operation_type,
-    elementId: row.proposal_element_id,
+    elementId,
     action: row.action,
     editedValue: row.edited_value || null,
     reasonCategory: row.reason_category || null,
@@ -148,6 +148,7 @@ async function recordWorkflowReview(input = {}) {
       started = false;
       return response(false, 404, "INTELLIGENCE_REVIEW_ELEMENT_UNAVAILABLE", "The proposal item is unavailable.");
     }
+    const storedElementId = validated.elementId.toLowerCase();
     const proposal = operationRow.result_payload;
     const recordContext = Object.fromEntries([
       ["jobId", proposal.jobId],
@@ -183,7 +184,7 @@ async function recordWorkflowReview(input = {}) {
        DO NOTHING RETURNING *`,
       [
         randomUUID(), validated.proposalId, operationRow.operation, validated.actor.id,
-        validated.elementId, validated.action,
+        storedElementId, validated.action,
         validated.editedValue == null ? null : JSON.stringify(validated.editedValue),
         JSON.stringify(recordContext), JSON.stringify(sourceReferences), validated.reasonCategory,
         JSON.stringify(learningContext), validated.idempotencyKey, requestFingerprint,
@@ -198,7 +199,7 @@ async function recordWorkflowReview(input = {}) {
          WHERE actor_user_id = $1 AND operation_id = $2
            AND proposal_element_id = $3 AND idempotency_key = $4
          LIMIT 1 FOR SHARE`,
-        [validated.actor.id, validated.proposalId, validated.elementId, validated.idempotencyKey]
+        [validated.actor.id, validated.proposalId, storedElementId, validated.idempotencyKey]
       )).rows[0];
       if (!row || row.request_fingerprint !== requestFingerprint) {
         await client.query("ROLLBACK");
@@ -219,7 +220,7 @@ async function recordWorkflowReview(input = {}) {
     return response(true, replayed ? 200 : 201, replayed
       ? "INTELLIGENCE_REVIEW_REPLAYED"
       : "INTELLIGENCE_REVIEW_RECORDED", "The review decision was recorded.", {
-      review: reviewProjection(row),
+      review: reviewProjection(row, { elementId: validated.elementId }),
       replayed,
       canonicalMutationPerformed: false,
     });
