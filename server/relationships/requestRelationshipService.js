@@ -336,6 +336,9 @@ async function listHomeownerRequestRelationships({
       request_relationships.id,
       request_relationships.post_id,
       request_relationships.contractor_id,
+      request_relationships.professional_response_id,
+      request_relationships.ordinary_authority_source,
+      request_relationships.current_version AS relationship_current_version,
       request_relationships.status,
       request_relationships.introduction_text,
       request_relationships.created_at,
@@ -347,7 +350,12 @@ async function listHomeownerRequestRelationships({
       contractor_profiles.business_name,
       contractor_profiles.category AS professional_category,
       contractor_profiles.image_url AS business_image_url,
-      posts.title AS request_title
+      posts.title AS request_title,
+      professional_responses.id AS response_id,
+      professional_responses.status AS response_status,
+      professional_responses.current_version AS response_current_version,
+      professional_responses.introduction_text AS response_introduction_text,
+      professional_responses.submitted_at AS response_submitted_at
     FROM request_relationships
     JOIN contractor_profiles
       ON request_relationships.contractor_id = contractor_profiles.id

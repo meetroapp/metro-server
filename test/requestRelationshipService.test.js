@@ -22,8 +22,11 @@ test("homeowner relationship inbox returns only homeowner-owned request relation
             id: 51,
             post_id: 41,
             contractor_id: 80,
+            professional_response_id: "9007199254740993",
+            ordinary_authority_source: "professional_response",
+            relationship_current_version: 1,
             status: "pending",
-            introduction_text: "I can help.",
+            introduction_text: "Legacy introduction must not win.",
             created_at: "2026-07-20T12:00:00.000Z",
             responded_at: "2026-07-20T12:00:00.000Z",
             accepted_at: null,
@@ -34,6 +37,11 @@ test("homeowner relationship inbox returns only homeowner-owned request relation
             professional_category: "handyman",
             business_image_url: "https://example.test/logo.jpg",
             request_title: "Drywall Repair",
+            response_id: "9007199254740993",
+            response_status: "submitted",
+            response_current_version: 1,
+            response_introduction_text: "I can help.",
+            response_submitted_at: "2026-07-20T12:00:00.000Z",
           }],
         };
       }
@@ -53,6 +61,8 @@ test("homeowner relationship inbox returns only homeowner-owned request relation
 
   assert.equal(rows.length, 1);
   assert.equal(rows[0].id, 51);
+  assert.equal(rows[0].response_id, "9007199254740993");
+  assert.equal(rows[0].response_introduction_text, "I can help.");
 
   const query = calls[0];
 
@@ -64,6 +74,14 @@ test("homeowner relationship inbox returns only homeowner-owned request relation
   assert.match(
     query.sql,
     /posts\.user_id = \$1/
+  );
+  assert.match(
+    query.sql,
+    /professional_responses\.id AS response_id/
+  );
+  assert.match(
+    query.sql,
+    /request_relationships\.professional_response_id/
   );
 });
 
