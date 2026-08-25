@@ -353,7 +353,14 @@ test("one homeowner message can propose existing request fields without invented
     },
   });
 
-  const result = await current.run({ body: requestBody({ text: homeownerText }) });
+  const result = await current.run({
+    authenticatedActor: {
+      id: 91,
+      role: "customer",
+      accountType: "homeowner",
+    },
+    body: requestBody({ text: homeownerText }),
+  });
   const serialized = JSON.stringify(result.result);
 
   assert.equal(result.code, "INTELLIGENCE_OPERATION_COMPLETED");

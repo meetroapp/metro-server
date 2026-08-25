@@ -200,6 +200,56 @@ test("actual authenticated route derives actor from token truth and rejects unkn
   assert.equal(calls.length, 1);
 });
 
+test("companion route resolves staging-compatible homeowner account type before Gateway authorization", async () => {
+  const runtime = createTestRuntime();
+  const registrations = [];
+  const accountTypeCalls = [];
+  const fakeApp = {
+    post(path, ...handlers) {
+      registrations.push({ path, handlers });
+    },
+  };
+  registerIntelligenceRoutes({
+    app: fakeApp,
+    authMiddleware(req, _res, next) {
+      req.user = { id: 73, role: "customer" };
+      next();
+    },
+    getPool: () => ({
+      async query(text, values) {
+        accountTypeCalls.push({ text: String(text), values });
+        return { rows: [{ account_type: "homeowner" }] };
+      },
+    }),
+    operationRegistry: runtime.operationRegistry,
+    engineRegistry: runtime.engineRegistry,
+    providers: runtime.providers,
+    repository: runtime.repository,
+  });
+  const route = registrations.find(({ path }) => path === INTELLIGENCE_COMPANION_ROUTE);
+  const req = {
+    app: { locals: {} },
+    headers: { "idempotency-key": randomUUID() },
+    body: {
+      operation: "test.echo",
+      capability: "test.echo",
+      locale: "en",
+      context: { topic: "Cape Coral" },
+      input: { message: "Available this week" },
+    },
+  };
+  const res = response();
+
+  await runHandlers(route.handlers, req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.code, "INTELLIGENCE_OPERATION_COMPLETED");
+  assert.equal(runtime.providerCalls.length, 1);
+  assert.equal(accountTypeCalls.length, 1);
+  assert.match(accountTypeCalls[0].text, /intelligence_gateway:actor_account_type/);
+  assert.deepEqual(accountTypeCalls[0].values, [73]);
+});
+
 test("registered route reaches the real Gateway, durable service, and one provider", async () => {
   const runtime = createTestRuntime();
   const registrations = [];

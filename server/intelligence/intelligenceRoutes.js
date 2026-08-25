@@ -225,10 +225,15 @@ function createIntelligenceGatewayHandler({
 
   return async function intelligenceGatewayHandler(req, res) {
     try {
+      const pool = getPool(req);
+      const authenticatedActor = await resolveIntelligenceAuthenticatedActor({
+        pool,
+        authenticatedActor: req.user,
+      });
       const result = await gateway({
         ...gatewayDependencies,
-        pool: getPool(req),
-        authenticatedActor: req.user,
+        pool,
+        authenticatedActor,
         idempotencyKey: req.headers?.["idempotency-key"],
         body: req.body,
         providers: req.app?.locals?.intelligenceProviders || gatewayDependencies.providers,
@@ -250,6 +255,41 @@ function createIntelligenceGatewayHandler({
         message: "The Intelligence operation could not be completed.",
       });
     }
+  };
+}
+
+async function resolveIntelligenceAuthenticatedActor({
+  pool,
+  authenticatedActor,
+} = {}) {
+  const role = String(authenticatedActor?.role || "").trim().toLowerCase();
+  const accountType = String(authenticatedActor?.accountType || "").trim().toLowerCase();
+  if (
+    ["homeowner", "professional"].includes(role) ||
+    ["homeowner", "professional"].includes(accountType)
+  ) {
+    return authenticatedActor;
+  }
+
+  const actorId = Number(authenticatedActor?.id);
+  if (!Number.isInteger(actorId) || actorId <= 0 || !pool?.query) {
+    return authenticatedActor;
+  }
+
+  const result = await pool.query(
+    `
+    /* intelligence_gateway:actor_account_type */
+    SELECT account_type
+    FROM users
+    WHERE id = $1
+    LIMIT 1
+    `,
+    [actorId]
+  );
+
+  return {
+    ...authenticatedActor,
+    accountType: result.rows[0]?.account_type,
   };
 }
 
