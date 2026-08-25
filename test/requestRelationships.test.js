@@ -11,6 +11,7 @@ const {
   cleanText,
   isPlainObject,
   isValidPositiveInteger,
+  parsePositiveOpaqueId,
   parsePositiveInteger,
   serializeEmergencyResponseRelationship,
   serializeCanonicalProfessionalResponse,
@@ -59,6 +60,18 @@ test("positive integer parsing rejects malformed and unsafe identifiers", () => 
   ]) {
     assert.equal(isValidPositiveInteger(value), false);
     assert.equal(parsePositiveInteger(value), null);
+  }
+});
+
+test("opaque positive identifiers preserve PostgreSQL BIGINT values exactly", () => {
+  assert.equal(parsePositiveOpaqueId("41"), 41);
+  assert.equal(
+    parsePositiveOpaqueId("9007199254740993"),
+    "9007199254740993"
+  );
+
+  for (const value of ["", "0", 0, "-1", "41abc", "1.5", null, undefined]) {
+    assert.equal(parsePositiveOpaqueId(value), null);
   }
 });
 

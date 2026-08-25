@@ -99,6 +99,20 @@ test("selection atomically creates one canonical selection and exact conversatio
   );
 });
 
+test("selection preserves a PostgreSQL BIGINT professional response identity", async () => {
+  const responseId = "9007199254740993";
+  const fake = createRequestSelectionFake();
+  fake.state.responses[0].id = responseId;
+  fake.state.relationships[0].professional_response_id = responseId;
+
+  const result = await select(fake, { responseId });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.response.id, responseId);
+  assert.equal(result.selection.response_id, responseId);
+  assert.equal(fake.state.selections[0].professional_response_id, responseId);
+});
+
 test("lifecycle-v2 selection bootstraps one Job from the canonical selection", async () => {
   const fake = createRequestSelectionFake({
     request: {

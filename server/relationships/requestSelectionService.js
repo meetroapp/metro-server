@@ -3,6 +3,7 @@
 const { createHash, randomUUID } = require("node:crypto");
 
 const {
+  parsePositiveOpaqueId,
   parsePositiveInteger,
 } = require("./requestRelationships");
 const {
@@ -754,7 +755,7 @@ async function selectProfessionalResponse({
 }) {
   const actorUserId = normalizeActorId(authenticatedActor);
   const postId = parsePositiveInteger(rawPostId);
-  const responseId = parsePositiveInteger(rawResponseId);
+  const responseId = parsePositiveOpaqueId(rawResponseId);
   const payloadValidation = validateSelectionPayload(payload);
   const idempotencyValidation =
     validateSelectionIdempotencyKey(rawIdempotencyKey);
