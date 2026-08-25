@@ -19,6 +19,9 @@ const {
 const {
   orchestrateIntelligenceOperation,
 } = require("./intelligenceOrchestrator");
+const {
+  resolveIntelligenceAuthority,
+} = require("./intelligenceAuthorityResolver");
 
 function gatewayResponse(ok, status, code, message) {
   return { ok, status, code, message };
@@ -62,7 +65,7 @@ async function executeIntelligenceGateway({
   logger = null,
   onDiagnostics,
 } = {}) {
-  const actor = normalizeActor(authenticatedActor);
+  let actor = normalizeActor(authenticatedActor);
   if (!actor) {
     return gatewayResponse(
       false,
@@ -92,12 +95,42 @@ async function executeIntelligenceGateway({
       "The Intelligence operation is not permitted."
     );
   }
-  if (
-    definition.capability !== request.capability ||
-    (
-      definition.roleAuthorization !== "context_builder" &&
-      !definition.supportedRoles.includes(actor.role)
-    )
+  if (definition.capability !== request.capability) {
+    return gatewayResponse(
+      false,
+      403,
+      "INTELLIGENCE_CAPABILITY_FORBIDDEN",
+      "The Intelligence capability is not permitted."
+    );
+  }
+
+  if (definition.roleAuthorization === "request_service") {
+    const requestServiceAuthority =
+      await resolveIntelligenceAuthority({
+        authority: definition.roleAuthorization,
+        pool,
+        actorUserId: actor.id,
+      });
+    if (
+      !requestServiceAuthority.authorized ||
+      !definition.supportedRoles.includes(
+        requestServiceAuthority.accountType
+      )
+    ) {
+      return gatewayResponse(
+        false,
+        403,
+        "INTELLIGENCE_CAPABILITY_FORBIDDEN",
+        "The Intelligence capability is not permitted."
+      );
+    }
+    actor = Object.freeze({
+      id: actor.id,
+      role: requestServiceAuthority.accountType,
+    });
+  } else if (
+    definition.roleAuthorization !== "context_builder" &&
+    !definition.supportedRoles.includes(actor.role)
   ) {
     return gatewayResponse(
       false,

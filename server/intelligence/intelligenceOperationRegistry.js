@@ -42,7 +42,7 @@ function validateOperationDefinition(definition) {
     errors.push("invalid_engine_ids");
   }
   if (!/^[a-z][a-z0-9_-]*$/.test(providerName)) errors.push("invalid_provider_name");
-  if (!["registry", "context_builder"].includes(roleAuthorization)) {
+  if (!["registry", "context_builder", "request_service"].includes(roleAuthorization)) {
     errors.push("invalid_role_authorization");
   }
   if (

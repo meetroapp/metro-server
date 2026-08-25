@@ -116,7 +116,7 @@ function createPool({ failInsert = false } = {}) {
       if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql)) {
         return { rows: [] };
       }
-      if (sql.includes("job_request_create:homeowner_authority")) {
+      if (sql.includes("request_service_authority:authenticated_account")) {
         return { rows: Number(values[0]) === user.id ? [user] : [] };
       }
       if (sql.includes("job_request_create:idempotency_reserve")) {

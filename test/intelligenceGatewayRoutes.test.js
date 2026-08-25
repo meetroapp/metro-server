@@ -13,9 +13,11 @@ const {
   createToken,
 } = require("../index");
 const {
+  canonicalIntelligenceEngineRegistry,
   createIntelligenceEngineRegistry,
 } = require("../server/intelligence/intelligenceEngineRegistry");
 const {
+  canonicalIntelligenceOperationRegistry,
   createIntelligenceOperationRegistry,
 } = require("../server/intelligence/intelligenceOperationRegistry");
 const {
@@ -248,6 +250,132 @@ test("companion route resolves staging-compatible homeowner account type before 
   assert.equal(accountTypeCalls.length, 1);
   assert.match(accountTypeCalls[0].text, /intelligence_gateway:actor_account_type/);
   assert.deepEqual(accountTypeCalls[0].values, [73]);
+});
+
+test("professional Request Help uses server-derived REQUEST_SERVICE authority through the real Gateway", async () => {
+  const registrations = [];
+  const authorityCalls = [];
+  const providerCalls = [];
+  const repository = createIntelligenceOperationRepositoryFake();
+  const professional = {
+    id: 73,
+    role: "painting",
+    account_type: "professional",
+  };
+  const homeownerText =
+    "I need someone to repair a cracked section of the wall by my front entry in Cape Coral. It is separating and temporarily braced. I would like someone to inspect it and repair or rebuild the damaged area. I am available this week and I can add photos.";
+
+  registerIntelligenceRoutes({
+    app: { post(path, ...handlers) { registrations.push({ path, handlers }); } },
+    authMiddleware(req, _res, next) {
+      req.user = { id: professional.id, role: "customer" };
+      next();
+    },
+    getPool: () => ({
+      async query(text, values) {
+        authorityCalls.push({ text: String(text), values });
+        return { rows: [professional] };
+      },
+    }),
+    operationRegistry: canonicalIntelligenceOperationRegistry,
+    engineRegistry: canonicalIntelligenceEngineRegistry,
+    providers: {
+      job_request: {
+        async complete(request) {
+          providerCalls.push(request);
+          return {
+            schemaVersion: 1,
+            summary: "Review the supplied request facts.",
+            draftPatch: {
+              fields: [
+                {
+                  path: "location.city",
+                  value: "Cape Coral",
+                  provenance: "assistant_suggested",
+                  confidence: 0.96,
+                  uncertainty: "assistant_suggested",
+                  requiresConfirmation: true,
+                },
+                {
+                  path: "timing.availability",
+                  value: "Available this week",
+                  provenance: "assistant_suggested",
+                  confidence: 0.96,
+                  uncertainty: "assistant_suggested",
+                  requiresConfirmation: true,
+                },
+              ],
+            },
+            clarifications: [],
+            warnings: [],
+          };
+        },
+      },
+    },
+    repository,
+  });
+
+  const route = registrations.find(
+    ({ path }) => path === INTELLIGENCE_COMPANION_ROUTE
+  );
+  const req = {
+    app: { locals: {} },
+    headers: { "idempotency-key": randomUUID() },
+    body: {
+      operation: "job_request.interpret",
+      capability: "job_request.interpret",
+      locale: "en-US",
+      context: {
+        draft: {
+          version: 1,
+          job: { title: "", description: homeownerText },
+          service: {
+            category: "",
+            requestCategory: "",
+            domain: "",
+            specialty: "",
+          },
+          location: {
+            affectedArea: "front entry",
+            city: "",
+            region: "",
+            postalCode: "",
+          },
+          timing: { urgency: "", desiredTiming: "", availability: "" },
+          details: { measurements: "", expectations: "", additionalNotes: "" },
+          fieldState: [],
+          photosAttached: false,
+        },
+      },
+      input: { text: homeownerText },
+    },
+  };
+  const res = response();
+
+  await runHandlers(route.handlers, req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.code, "INTELLIGENCE_OPERATION_COMPLETED");
+  assert.deepEqual(
+    res.body.result.draftPatch.fields.map(({ path, value }) => ({ path, value })),
+    [
+      { path: "location.city", value: "Cape Coral" },
+      { path: "timing.availability", value: "Available this week" },
+    ]
+  );
+  assert.equal(providerCalls.length, 1);
+  assert.equal(providerCalls[0].homeownerText, homeownerText);
+  assert.equal(professional.account_type, "professional");
+  assert.equal(authorityCalls.length, 2);
+  assert.match(authorityCalls[0].text, /intelligence_gateway:actor_account_type/);
+  assert.match(
+    authorityCalls[1].text,
+    /request_service_authority:authenticated_account/
+  );
+  assert.equal(
+    authorityCalls.some(({ text }) => /INSERT|UPDATE|DELETE/i.test(text)),
+    false
+  );
 });
 
 test("registered route reaches the real Gateway, durable service, and one provider", async () => {

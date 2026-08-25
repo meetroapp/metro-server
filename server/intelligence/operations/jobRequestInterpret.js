@@ -535,7 +535,8 @@ const jobRequestInterpretEngines = Object.freeze([
 const jobRequestInterpretOperationDefinition = Object.freeze({
   operation: JOB_REQUEST_INTERPRET_OPERATION,
   capability: JOB_REQUEST_INTERPRET_CAPABILITY,
-  supportedRoles: Object.freeze(["homeowner"]),
+  supportedRoles: Object.freeze(["homeowner", "professional"]),
+  roleAuthorization: "request_service",
   engineIds: JOB_REQUEST_INTERPRET_ENGINE_IDS,
   providerName: JOB_REQUEST_INTERPRET_PROVIDER,
   buildContext: buildJobRequestInterpretContext,

@@ -95,7 +95,7 @@ test("production registry ships only the governed core workflow advisory operati
     {
       operation: "job_request.interpret",
       capability: "job_request.interpret",
-      supportedRoles: ["homeowner"],
+      supportedRoles: ["homeowner", "professional"],
       engineIds: ["job_request_capability", "job_request_validation"],
       providerName: "job_request",
     },

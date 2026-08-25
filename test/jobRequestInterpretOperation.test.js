@@ -98,13 +98,28 @@ function fixture({ complete } = {}) {
       },
     },
   };
+  const requestServiceUsers = new Map([
+    [91, { id: 91, role: "homeowner", account_type: "homeowner" }],
+    [92, { id: 92, role: "painting", account_type: "professional" }],
+    [93, { id: 93, role: "admin", account_type: "internal" }],
+  ]);
   return {
     repository,
     providerCalls,
     usageCalls,
     run(overrides = {}) {
       return executeIntelligenceGateway({
-        pool: { name: "repository-fake" },
+        pool: {
+          name: "repository-fake",
+          async query(text, values) {
+            assert.match(
+              String(text),
+              /request_service_authority:authenticated_account/
+            );
+            const user = requestServiceUsers.get(Number(values[0]));
+            return { rows: user ? [user] : [] };
+          },
+        },
         authenticatedActor: { id: 91, role: "homeowner" },
         idempotencyKey: randomUUID(),
         body: requestBody(),
@@ -138,19 +153,24 @@ test("canonical registration retains the bounded homeowner operation and fixed e
   assert.deepEqual(operations.find(({ operation }) => operation === "job_request.interpret"), {
     operation: "job_request.interpret",
     capability: "job_request.interpret",
-    supportedRoles: ["homeowner"],
+    supportedRoles: ["homeowner", "professional"],
     engineIds: ["job_request_capability", "job_request_validation"],
     providerName: "job_request",
   });
+  assert.equal(
+    canonicalIntelligenceOperationRegistry.get("job_request.interpret")
+      .roleAuthorization,
+    "request_service"
+  );
   assert.equal(canonicalIntelligenceOperationRegistry.get("ask_meetro"), null);
   assert.equal(canonicalIntelligenceOperationRegistry.get("test.echo"), null);
 });
 
-test("authentication, role, capability, and browser actor spoofing fail before execution", async () => {
+test("authentication, requester authority, capability, and browser actor spoofing fail before execution", async () => {
   const current = fixture();
   const unauthenticated = await current.run({ authenticatedActor: null });
   const ineligible = await current.run({
-    authenticatedActor: { id: 91, role: "professional" },
+    authenticatedActor: { id: 93, role: "homeowner" },
   });
   const wrongCapability = await current.run({
     body: { ...requestBody(), capability: "job_request.create" },
@@ -377,6 +397,52 @@ test("one homeowner message can propose existing request fields without invented
   assert.equal(result.result.clarifications.length, 1);
   assert.equal(/price|materials|diagnosis|permit|payment/i.test(serialized), false);
   assert.equal(current.providerCalls.length, 1);
+});
+
+test("the same Cape Coral intake is authorized for a professional requester without reclassification", async () => {
+  const professionalText =
+    "I need someone to repair a cracked section of the wall by my front entry in Cape Coral. It is separating and temporarily braced. I would like someone to inspect it and repair or rebuild the damaged area. I am available this week and I can add photos.";
+  const current = fixture({
+    complete(request) {
+      assert.equal(request.homeownerText, professionalText);
+      return providerResult({
+        summary: "Review the supplied request facts.",
+        draftPatch: {
+          fields: [
+            patch({ path: "location.affectedArea", value: "front entry wall" }),
+            patch({ path: "location.city", value: "Cape Coral" }),
+            patch({ path: "timing.availability", value: "Available this week" }),
+          ],
+        },
+        clarifications: [],
+        warnings: [],
+      });
+    },
+  });
+
+  const result = await current.run({
+    authenticatedActor: {
+      id: 92,
+      role: "customer",
+      accountType: "professional",
+    },
+    body: requestBody({ text: professionalText }),
+  });
+
+  assert.equal(result.code, "INTELLIGENCE_OPERATION_COMPLETED");
+  assert.deepEqual(
+    result.result.draftPatch.fields.map(({ path, value }) => ({ path, value })),
+    [
+      { path: "location.affectedArea", value: "front entry wall" },
+      { path: "location.city", value: "Cape Coral" },
+      { path: "timing.availability", value: "Available this week" },
+    ]
+  );
+  assert.equal(current.providerCalls.length, 1);
+  assert.equal(current.repository.records.size, 1);
+  const [record] = current.repository.records.values();
+  assert.equal(record.actor_user_id, 92);
+  assert.equal(record.authority_scope, "user:92");
 });
 
 test("parser fails closed for malformed, unknown, oversized, or unsafe provider output", () => {

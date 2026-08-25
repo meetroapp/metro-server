@@ -6,6 +6,9 @@ const { normalizeRequestPhotoCollection, parseStoredRequestPhotos } = require(".
 const { serializeOwnedRequest, validateRequestPayload } = require("./requestLifecycle");
 const { resolveLifecycleContractVersion } = require("./lifecycleContract");
 const { createReportedConcern } = require("./reportedConcernService");
+const {
+  resolveRequestServiceAuthority,
+} = require("./requestServiceAuthority");
 
 const COMMAND_NAME = "job_request.create";
 const COMMAND_SCOPE = "ordinary";
@@ -121,25 +124,6 @@ function validateJobRequestIdempotencyKey(value) {
   }
 
   return { valid: true, value: idempotencyKey.toLowerCase() };
-}
-
-async function loadHomeownerAuthority(client, actorUserId) {
-  const result = await client.query(
-    `
-    /* job_request_create:homeowner_authority */
-    SELECT id, role, account_type
-    FROM users
-    WHERE id = $1
-    LIMIT 1
-    `,
-    [actorUserId]
-  );
-  const user = result.rows[0];
-  if (!user) return false;
-
-  const accountType = normalizeString(user.account_type).toLowerCase();
-  const role = normalizeString(user.role).toLowerCase();
-  return accountType === "homeowner" || (!accountType && role === "homeowner");
 }
 
 async function reserveIdempotency({
@@ -416,15 +400,18 @@ async function createJobRequest({
     await client.query("BEGIN");
     transactionStarted = true;
 
-    const hasHomeownerAuthority =
-      await loadHomeownerAuthority(client, actorUserId);
-    if (!hasHomeownerAuthority) {
+    const requestServiceAuthority =
+      await resolveRequestServiceAuthority({
+        pool: client,
+        actorUserId,
+      });
+    if (!requestServiceAuthority.authorized) {
       await client.query("ROLLBACK");
       transactionStarted = false;
       return failure(
         403,
-        "HOMEOWNER_AUTHORITY_REQUIRED",
-        "Homeowner authority is required to create a Job Request."
+        "REQUEST_SERVICE_AUTHORITY_REQUIRED",
+        "Request Service authority is required to create a Job Request."
       );
     }
 

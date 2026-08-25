@@ -26,6 +26,7 @@ const { professionalCanSeeRequest } = require("../server/requests/requestLifecyc
 const HOMEOWNER_ID = 7;
 const OTHER_HOMEOWNER_ID = 8;
 const PROFESSIONAL_ID = 9;
+const INTERNAL_ID = 10;
 
 function validPayload(overrides = {}) {
   return {
@@ -107,6 +108,7 @@ function createPool({
     [HOMEOWNER_ID, { id: HOMEOWNER_ID, role: "homeowner", account_type: "homeowner" }],
     [OTHER_HOMEOWNER_ID, { id: OTHER_HOMEOWNER_ID, role: "homeowner", account_type: "homeowner" }],
     [PROFESSIONAL_ID, { id: PROFESSIONAL_ID, role: "painting", account_type: "professional" }],
+    [INTERNAL_ID, { id: INTERNAL_ID, role: "admin", account_type: "internal" }],
   ]),
   failAt,
 } = {}) {
@@ -163,7 +165,7 @@ function createPool({
         };
       }
 
-      if (sql.includes("job_request_create:homeowner_authority")) {
+      if (sql.includes("request_service_authority:authenticated_account")) {
         const user = users.get(Number(values[0]));
         return { rows: user ? [user] : [] };
       }
@@ -263,7 +265,7 @@ function createPool({
     },
   };
 
-  return { calls, pool, state };
+  return { calls, pool, state, users };
 }
 
 function submit(fixture, overrides = {}) {
@@ -296,7 +298,13 @@ function response() {
   };
 }
 
-async function invokePost({ fixture, body = validPayload(), headers = {} } = {}) {
+async function invokePost({
+  fixture,
+  body = validPayload(),
+  headers = {},
+  actorUserId = HOMEOWNER_ID,
+  actorRole = "homeowner",
+} = {}) {
   app.locals.pool = fixture.pool;
   const req = {
     app,
@@ -304,9 +312,9 @@ async function invokePost({ fixture, body = validPayload(), headers = {} } = {})
     params: {},
     headers: {
       authorization: `Bearer ${createToken({
-        id: HOMEOWNER_ID,
-        email: "owner@example.test",
-        role: "homeowner",
+        id: actorUserId,
+        email: `user${actorUserId}@example.test`,
+        role: actorRole,
         token_version: 0,
       })}`,
       ...headers,
@@ -600,7 +608,7 @@ test("different key and actor scoping allow deliberate separate commands", async
   assert.equal(fixture.state.idempotency.length, 3);
 });
 
-test("homeowner authority is server-side and rejects professional-only identity", async () => {
+test("REQUEST_SERVICE authority aligns homeowner and professional canonical creation", async () => {
   const fixture = createPool();
   const unauthenticated = await createJobRequest({
     pool: fixture.pool,
@@ -608,19 +616,48 @@ test("homeowner authority is server-side and rejects professional-only identity"
     payload: validPayload(),
     idempotencyKey: "11111111-1111-4111-8111-111111111111",
   });
-  const forbidden = await submit(fixture, {
+  const professional = await submit(fixture, {
     authenticatedActor: {
       id: PROFESSIONAL_ID,
       role: "homeowner",
       account_type: "homeowner",
     },
   });
+  const professionalReplay = await submit(fixture, {
+    authenticatedActor: { id: PROFESSIONAL_ID, role: "customer" },
+  });
+  const payloadSpoof = await submit(fixture, {
+    authenticatedActor: {
+      id: INTERNAL_ID,
+      role: "homeowner",
+      account_type: "professional",
+    },
+    payload: validPayload({
+      isRequester: true,
+      requestService: true,
+    }),
+  });
+  const forbidden = await submit(fixture, {
+    authenticatedActor: {
+      id: INTERNAL_ID,
+      role: "homeowner",
+      account_type: "professional",
+    },
+  });
 
   assert.equal(unauthenticated.status, 401);
   assert.equal(unauthenticated.code, "AUTHENTICATION_REQUIRED");
+  assert.equal(professional.status, 201);
+  assert.equal(fixture.state.posts[0].user_id, PROFESSIONAL_ID);
+  assert.equal(professionalReplay.status, 200);
+  assert.equal(professionalReplay.post.id, professional.post.id);
+  assert.equal(fixture.users.get(PROFESSIONAL_ID).account_type, "professional");
+  assert.equal(fixture.users.size, 4);
+  assert.equal(payloadSpoof.status, 400);
   assert.equal(forbidden.status, 403);
-  assert.equal(forbidden.code, "HOMEOWNER_AUTHORITY_REQUIRED");
-  assert.equal(fixture.state.posts.length, 0);
+  assert.equal(forbidden.code, "REQUEST_SERVICE_AUTHORITY_REQUIRED");
+  assert.equal(fixture.state.posts.length, 1);
+  assert.equal(fixture.state.idempotency.length, 1);
 });
 
 test("validation and direct-request defense fail before command reservation", async () => {
@@ -755,6 +792,21 @@ test("POST /posts routes all ordinary create traffic through governed idempotenc
   assert.equal(keyed.body.post.id, 1);
   assert.equal(keyed.headers.get("cache-control"), "private, no-store");
   assert.equal(keyedFixture.state.idempotency.length, 1);
+
+  const professionalFixture = createPool();
+  const professional = await invokePost({
+    fixture: professionalFixture,
+    actorUserId: PROFESSIONAL_ID,
+    actorRole: "painting",
+    headers: {
+      "idempotency-key": "44444444-4444-4444-8444-444444444444",
+    },
+  });
+
+  assert.equal(professional.statusCode, 201);
+  assert.equal(professionalFixture.state.posts[0].user_id, PROFESSIONAL_ID);
+  assert.equal(professionalFixture.users.get(PROFESSIONAL_ID).account_type, "professional");
+  assert.equal(professionalFixture.users.size, 4);
 
   const unkeyedFixture = createPool();
   const unkeyed = await invokePost({ fixture: unkeyedFixture });
