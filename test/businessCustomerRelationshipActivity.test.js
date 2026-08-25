@@ -60,6 +60,7 @@ function createPool({ owned = true, archived = false, empty = false } = {}) {
         return { rows: empty ? [] : [{
           quote_id: QUOTE_ID,
           job_id: JOB_ID,
+          job_title: "Kitchen repair",
           document_number: "Q-0001020",
           status: "ISSUED",
           classification: "APPROVED",
@@ -79,6 +80,7 @@ function createPool({ owned = true, archived = false, empty = false } = {}) {
           invoice_id: INVOICE_ID,
           invoice_number: "INV-ABCDEF123456",
           job_id: JOB_ID,
+          job_title: "Kitchen repair",
           status: "PARTIALLY_PAID",
           currency: "USD",
           total_minor: "28999",
@@ -90,6 +92,16 @@ function createPool({ owned = true, archived = false, empty = false } = {}) {
           issued_at: "2026-08-23T14:00:00.000Z",
           last_activity_at: "2026-08-24T13:00:00.000Z",
           linked_at: "2026-08-23T13:01:00.000Z",
+        }] };
+      }
+      if (text.includes("business_customer_relationship:activity_media")) {
+        return { rows: empty ? [] : [{
+          job_id: JOB_ID,
+          job_title: "Kitchen repair",
+          media_id: "meetro/users/101/request-photos/kitchen-before",
+          secure_url: "https://res.cloudinary.com/meetro/image/upload/v1/meetro/users/101/request-photos/kitchen-before.jpg",
+          format: "jpg",
+          uploaded_at: "2026-08-21T11:00:00.000Z",
         }] };
       }
       throw new Error(`Unexpected SQL: ${text}`);
@@ -134,6 +146,11 @@ test("owned Customer Relationship returns canonical work, Quote, and Invoice act
   assert.equal(result.activity.invoices[0].status, "PARTIALLY_PAID");
   assert.equal(result.activity.invoices[0].paidMinor, 10000);
   assert.equal(result.activity.invoices[0].balanceMinor, 18999);
+  assert.deepEqual(result.activity.documents.map(({ documentType }) => documentType), [
+    "INVOICE",
+    "QUOTE",
+  ]);
+  assert.equal(result.activity.media[0].parentId, JOB_ID);
 });
 
 test("cross-business activity read fails closed before any history query", async () => {
@@ -151,6 +168,8 @@ test("relationship with no canonical customer-party links returns truthful empty
   assert.deepEqual(result.activity.work, []);
   assert.deepEqual(result.activity.quotes, []);
   assert.deepEqual(result.activity.invoices, []);
+  assert.deepEqual(result.activity.documents, []);
+  assert.deepEqual(result.activity.media, []);
 });
 
 test("archived external Contact retains historical activity without Meetro account identity", async () => {
@@ -159,6 +178,8 @@ test("archived external Contact retains historical activity without Meetro accou
   assert.equal(result.activity.work.length, 1);
   assert.equal(result.activity.quotes.length, 1);
   assert.equal(result.activity.invoices.length, 1);
+  assert.equal(result.activity.documents.length, 2);
+  assert.equal(result.activity.media.length, 1);
   assert.equal("userId" in result.activity.relationship, false);
   assert.equal("email" in result.activity.relationship, false);
   assert.equal("phone" in result.activity.relationship, false);
@@ -168,7 +189,7 @@ test("every history query is scoped to the exact business, Contact, and Relation
   const pool = createPool();
   await getBusinessCustomerRelationshipActivity(input(pool));
   const queries = pool.calls.filter(({ sql }) => sql.includes(":activity_"));
-  assert.equal(queries.length, 3);
+  assert.equal(queries.length, 4);
   for (const query of queries) {
     assert.deepEqual(query.values, [10, CONTACT_ID, RELATIONSHIP_ID]);
     assert.match(query.sql, /parties\.contractor_profile_id = \$1/);
@@ -204,6 +225,7 @@ test("activity ordering is newest-authoritative-first with a stable identity tie
   assert.match(source, /COALESCE\(completions\.completed_at, jobs\.created_at\) DESC,[\s\S]*jobs\.id ASC/);
   assert.match(source, /ORDER BY last_activity_at DESC NULLS LAST, quotes\.id ASC/);
   assert.match(source, /ORDER BY last_activity_at DESC NULLS LAST, invoices\.id ASC/);
+  assert.match(source, /ORDER BY photo\.item->>'uploaded_at' DESC NULLS LAST,[\s\S]*photo\.item->>'public_id' ASC/);
 });
 
 test("activity projection contains no CRM analytics, fabricated history, or mutation SQL", async () => {
@@ -241,6 +263,6 @@ test("relationship activity implementation adds no schema, AI, or downstream mut
   assert.doesNotMatch(source, /openai|provider|ask meetro/i);
   assert.doesNotMatch(
     String(businessCustomerRelationshipInternals.sqlStore.getActivity),
-    /business_document_working_drafts|documents|photos|moments|conversations/i
+    /business_document_working_drafts|business_document_draft_media|moments|conversations/i
   );
 });

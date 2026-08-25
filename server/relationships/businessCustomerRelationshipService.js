@@ -107,6 +107,58 @@ function invoiceActivityProjection(row) {
   });
 }
 
+function documentActivityProjection(row, documentType) {
+  const quote = documentType === "QUOTE";
+  return Object.freeze({
+    documentId: String(quote ? row.quote_id : row.invoice_id),
+    documentType,
+    documentNumber: quote ? (row.document_number || null) : row.invoice_number,
+    parentType: "JOB",
+    parentId: String(row.job_id),
+    jobTitle: String(row.job_title || "").trim() || null,
+    status: row.status,
+    provenance: quote ? "CANONICAL_QUOTE" : "CANONICAL_INVOICE",
+    createdAt: isoTimestamp(row.created_at),
+    issuedAt: isoTimestamp(row.issued_at),
+    lastActivityAt: isoTimestamp(row.last_activity_at),
+  });
+}
+
+function activityTimestamp(item) {
+  const value = item.lastActivityAt || item.issuedAt || item.createdAt;
+  const timestamp = value ? new Date(value).getTime() : Number.NEGATIVE_INFINITY;
+  return Number.isNaN(timestamp) ? Number.NEGATIVE_INFINITY : timestamp;
+}
+
+function newestFirst(left, right) {
+  const timestampDifference = activityTimestamp(right) - activityTimestamp(left);
+  return timestampDifference || String(left.documentId || left.mediaId)
+    .localeCompare(String(right.documentId || right.mediaId));
+}
+
+function documentActivityProjections(quoteRows, invoiceRows) {
+  return [
+    ...quoteRows.map((row) => documentActivityProjection(row, "QUOTE")),
+    ...invoiceRows.map((row) => documentActivityProjection(row, "INVOICE")),
+  ].sort(newestFirst);
+}
+
+function mediaActivityProjection(row) {
+  return Object.freeze({
+    mediaId: String(row.media_id),
+    kind: "PHOTO",
+    mediaType: "IMAGE",
+    format: String(row.format || "").trim().toLowerCase() || null,
+    secureUrl: row.secure_url,
+    parentType: "JOB",
+    parentId: String(row.job_id),
+    jobTitle: String(row.job_title || "").trim() || null,
+    provenance: "JOB_REQUEST",
+    category: "REQUEST_PHOTO",
+    createdAt: isoTimestamp(row.uploaded_at),
+  });
+}
+
 function relationshipProjection(row) {
   if (!row) return null;
   return Object.freeze({
@@ -538,6 +590,7 @@ const sqlStore = Object.freeze({
         `/* business_customer_relationship:activity_quotes */
          SELECT quotes.id AS quote_id,
            quotes.job_id,
+           posts.title AS job_title,
            sources.document_number,
            quotes.status,
            current.currency,
@@ -583,6 +636,10 @@ const sqlStore = Object.freeze({
          INNER JOIN canonical_quotes quotes
            ON quotes.id = parties.quote_id
           AND quotes.job_id = parties.job_id
+         INNER JOIN jobs
+           ON jobs.id = quotes.job_id
+         INNER JOIN posts
+           ON posts.id = jobs.job_request_id
          INNER JOIN commercial_authority_aggregates aggregates
            ON aggregates.id = quotes.id
           AND aggregates.aggregate_type = 'quote'
@@ -608,6 +665,7 @@ const sqlStore = Object.freeze({
          SELECT invoices.id AS invoice_id,
            invoices.invoice_number,
            invoices.job_id,
+           posts.title AS job_title,
            current.status,
            current.currency,
            current.total_minor,
@@ -627,6 +685,10 @@ const sqlStore = Object.freeze({
          INNER JOIN canonical_invoices invoices
            ON invoices.id = parties.invoice_id
           AND invoices.job_id = parties.job_id
+         INNER JOIN jobs
+           ON jobs.id = invoices.job_id
+         INNER JOIN posts
+           ON posts.id = jobs.job_request_id
          INNER JOIN LATERAL (
            SELECT versions.*
            FROM canonical_invoice_versions versions
@@ -644,6 +706,35 @@ const sqlStore = Object.freeze({
          ORDER BY last_activity_at DESC NULLS LAST, invoices.id ASC`,
         scope
       );
+      const media = await client.query(
+        `/* business_customer_relationship:activity_media */
+         SELECT jobs.id AS job_id,
+           posts.title AS job_title,
+           photo.item->>'public_id' AS media_id,
+           photo.item->>'secure_url' AS secure_url,
+           photo.item->>'format' AS format,
+           photo.item->>'uploaded_at' AS uploaded_at
+         FROM job_customer_parties parties
+         INNER JOIN jobs ON jobs.id = parties.job_id
+         INNER JOIN posts ON posts.id = jobs.job_request_id
+         CROSS JOIN LATERAL jsonb_array_elements(
+           CASE
+             WHEN jsonb_typeof(posts.request_photos) = 'array' THEN posts.request_photos
+             ELSE '[]'::jsonb
+           END
+         ) WITH ORDINALITY AS photo(item, ordinal)
+         WHERE parties.contractor_profile_id = $1
+           AND parties.business_contact_id = $2
+           AND parties.business_customer_relationship_id = $3
+           AND photo.item->>'purpose' = 'request-photo'
+           AND photo.item->>'resource_type' = 'image'
+           AND photo.item->>'lifecycle_state' = 'attached'
+           AND COALESCE(photo.item->>'public_id', '') <> ''
+           AND photo.item->>'secure_url' LIKE 'https://res.cloudinary.com/%'
+         ORDER BY photo.item->>'uploaded_at' DESC NULLS LAST,
+           photo.item->>'public_id' ASC`,
+        scope
+      );
       return Object.freeze({
         contractVersion: 1,
         relationship: Object.freeze({
@@ -655,6 +746,8 @@ const sqlStore = Object.freeze({
         work: Object.freeze(work.rows.map(workActivityProjection)),
         quotes: Object.freeze(quotes.rows.map(quoteActivityProjection)),
         invoices: Object.freeze(invoices.rows.map(invoiceActivityProjection)),
+        documents: Object.freeze(documentActivityProjections(quotes.rows, invoices.rows)),
+        media: Object.freeze(media.rows.map(mediaActivityProjection)),
       });
     });
   },
@@ -677,7 +770,11 @@ module.exports = {
   businessCustomerRelationshipInternals: Object.freeze({
     ESTABLISH_OPERATION,
     dateOnly,
+    documentActivityProjection,
+    documentActivityProjections,
     invoiceActivityProjection,
+    mediaActivityProjection,
+    newestFirst,
     quoteActivityProjection,
     relationshipProjection,
     requestHash,
