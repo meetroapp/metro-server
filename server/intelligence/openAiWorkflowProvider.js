@@ -10,8 +10,9 @@ const QUICK_QUOTE_ANALYSIS_IMAGE_TRANSFORMATION =
 
 const OUTPUT_CONTRACTS = Object.freeze({
   "job_request.interpret": `Return exactly this JSON object shape:
-{"schemaVersion":1,"summary":"string","draftPatch":{"fields":[{"path":"allowed path from request","value":"string","provenance":"assistant_suggested or assistant_inferred","confidence":0.0,"uncertainty":"assistant_suggested or approximate or uncertain","requiresConfirmation":true,"rationale":"optional string"}]},"clarifications":[{"question":"string","fieldPath":"optional allowed path"}],"warnings":[{"code":"lowercase_code","message":"string"}]}
-For service recommendations, use only service.specialty and only a value listed in operationContext.validation.canonicalRequestServiceIds. Recommend one when the homeowner's description reasonably identifies one canonical service. If several remain genuinely plausible, do not choose one; ask one concise clarification with fieldPath service.specialty. Never invent or return a free-text service value.`,
+{"schemaVersion":1,"summary":"string","draftPatch":{"fields":[{"path":"allowed path from request","value":"string","provenance":"assistant_suggested or assistant_inferred","confidence":0.0,"uncertainty":"assistant_suggested or approximate or uncertain","requiresConfirmation":true,"rationale":"string or null"}]},"clarifications":[{"question":"string","fieldPath":"allowed path from request or null"}],"warnings":[{"code":"lowercase_code","message":"string"}]}
+For a concrete project description, include both job.title and job.description proposals. Extract explicit city and availability facts. Normalize timing.availability to concise sentence case without changing its meaning, for example "Available this week". Do not ask for preferred timing when the supplied availability already answers when the homeowner can proceed.
+For service recommendations, use only service.specialty and only a value listed in operationContext.validation.canonicalRequestServiceIds. Recommend one when the homeowner's description reasonably identifies one canonical service. Do not treat every theoretical alternative as genuine ambiguity. Reported stability or structural-scope signals such as separation, temporary bracing, or a request to rebuild a wall or structural section reasonably support structural_repairs unless the supplied facts conflict; that is a service classification, not a diagnosis. Surface-finish-only wall or drywall damage does not by itself establish structural_repairs. If several services remain genuinely plausible after applying those distinctions, do not choose one; ask one concise clarification with fieldPath service.specialty. Never invent or return a free-text service value.`,
   "quick_quote.photo_assist": `Return exactly this JSON object shape:
 {"schemaVersion":1,"summary":"string","observed":[assistanceItem],"needsVerification":[assistanceItem],"repairSuggestions":[assistanceItem],"materialSuggestions":[assistanceItem],"photoAnalysis":{"analyzedReferenceIds":["authorized photo id"],"limitations":["string"]},"warnings":["string"]}
 where assistanceItem is exactly {"id":"lowercase_stable_id","text":"string","classification":"OBSERVED or NEEDS_VERIFICATION or AI_SUGGESTED","sourceReferences":[{"type":"QUOTE_DRAFT_PHOTO","id":"authorized photo id","version":1}]}. OBSERVED items require exact authorized photo sourceReferences. Repair and material suggestions are advisory only. Do not provide prices, markup, retailer claims, customer attachment decisions, or hidden-condition certainty. Use empty arrays when evidence is absent.`,
@@ -1352,7 +1353,163 @@ function quoteComposeOutputSchema(
   return schema;
 }
 
+function jobRequestInterpretOutputSchema(request) {
+  const allowedPatchPaths = Array.isArray(request?.instructions?.allowedPatchPaths)
+    ? request.instructions.allowedPatchPaths.filter(
+        (value) => typeof value === "string" && value
+      )
+    : [];
+  const allowedProvenance = Array.isArray(request?.instructions?.allowedProvenance)
+    ? request.instructions.allowedProvenance.filter(
+        (value) => typeof value === "string" && value
+      )
+    : [];
+  const allowedUncertainty = Array.isArray(request?.instructions?.allowedUncertainty)
+    ? request.instructions.allowedUncertainty.filter(
+        (value) => typeof value === "string" && value
+      )
+    : [];
+
+  if (
+    !allowedPatchPaths.length ||
+    !allowedProvenance.length ||
+    !allowedUncertainty.length
+  ) {
+    throw providerError(
+      "provider_request_invalid",
+      "The Job Request provider contract is incomplete."
+    );
+  }
+
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "schemaVersion",
+      "summary",
+      "draftPatch",
+      "clarifications",
+      "warnings",
+    ],
+    properties: {
+      schemaVersion: {
+        type: "integer",
+        const: 1,
+      },
+      summary: {
+        type: "string",
+        minLength: 1,
+        maxLength: 600,
+      },
+      draftPatch: {
+        type: "object",
+        additionalProperties: false,
+        required: ["fields"],
+        properties: {
+          fields: {
+            type: "array",
+            maxItems: allowedPatchPaths.length,
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: [
+                "path",
+                "value",
+                "provenance",
+                "confidence",
+                "uncertainty",
+                "requiresConfirmation",
+                "rationale",
+              ],
+              properties: {
+                path: {
+                  type: "string",
+                  enum: allowedPatchPaths,
+                },
+                value: {
+                  type: "string",
+                  minLength: 1,
+                  maxLength: 4000,
+                },
+                provenance: {
+                  type: "string",
+                  enum: allowedProvenance,
+                },
+                confidence: {
+                  type: "number",
+                  minimum: 0,
+                  maximum: 1,
+                },
+                uncertainty: {
+                  type: "string",
+                  enum: allowedUncertainty,
+                },
+                requiresConfirmation: {
+                  type: "boolean",
+                  const: true,
+                },
+                rationale: {
+                  type: ["string", "null"],
+                  maxLength: 300,
+                },
+              },
+            },
+          },
+        },
+      },
+      clarifications: {
+        type: "array",
+        maxItems: 3,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["question", "fieldPath"],
+          properties: {
+            question: {
+              type: "string",
+              minLength: 1,
+              maxLength: 300,
+            },
+            fieldPath: {
+              enum: [null, ...allowedPatchPaths],
+            },
+          },
+        },
+      },
+      warnings: {
+        type: "array",
+        maxItems: 5,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["code", "message"],
+          properties: {
+            code: {
+              type: "string",
+              pattern: "^[a-z][a-z0-9_]{0,79}$",
+            },
+            message: {
+              type: "string",
+              minLength: 1,
+              maxLength: 300,
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
 function workflowResponseFormat(request) {
+  if (request?.operation === "job_request.interpret") {
+    return {
+      type: "json_schema",
+      name: "meetro_job_request_interpret",
+      strict: true,
+      schema: jobRequestInterpretOutputSchema(request),
+    };
+  }
+
   if (
     request?.operation ===
     "quick_quote.analysis.continue"

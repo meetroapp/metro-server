@@ -280,7 +280,12 @@ function buildJobRequestInterpretProviderRequest({ semanticInput, engineContext 
         "do_not_ask_for_information_already_supplied_or_present",
         "do_not_infer_unsupplied_location_details",
         "do_not_invent_price_diagnosis_repair_method_or_materials",
+        "when_the_project_is_concrete_propose_job.title_and_job.description",
+        "extract_explicit_location.city_and_timing.availability",
+        "normalize_timing.availability_to_concise_sentence_case_without_changing_meaning",
+        "do_not_ask_for_desired_timing_when_supplied_availability_already_answers_it",
         "when_one_canonical_service_is_a_reasonable_match_propose_service.specialty",
+        "reported_separation_temporary_bracing_or_rebuild_scope_reasonably_supports_structural_repairs_without_asserting_a_diagnosis",
         "when_multiple_canonical_services_are_plausible_ask_one_service.specialty_clarification",
       ],
       serviceRecommendation: {
@@ -290,6 +295,15 @@ function buildJobRequestInterpretProviderRequest({ semanticInput, engineContext 
         preserveExistingHomeownerSelection: true,
         requiresConfirmation: true,
         ambiguityBehavior: "clarify_without_selecting",
+        classificationGuidance: {
+          structuralSignals: [
+            "reported_separation",
+            "temporary_bracing",
+            "requested_rebuild_of_wall_or_structural_section",
+          ],
+          classificationIsNotDiagnosis: true,
+          surfaceFinishOnlyDoesNotEstablishStructuralRepairs: true,
+        },
       },
       prohibitedActions: [
         "submit_job_request",
@@ -353,7 +367,7 @@ function normalizePatch(field) {
     uncertainty: field.uncertainty,
     requiresConfirmation: true,
   };
-  if (Object.hasOwn(field, "rationale")) {
+  if (field.rationale != null) {
     normalized.rationale = boundedText(field.rationale, MAX_RATIONALE_LENGTH, resultError);
   }
   return normalized;
@@ -364,7 +378,7 @@ function normalizeClarification(value) {
   const clarification = {
     question: boundedText(value.question, MAX_QUESTION_LENGTH, resultError, { allowEmpty: false }),
   };
-  if (Object.hasOwn(value, "fieldPath")) {
+  if (value.fieldPath != null) {
     if (!PATCH_PATHS.has(value.fieldPath)) {
       throw resultError("Unsupported clarification field path.");
     }
@@ -392,9 +406,20 @@ function draftValueAtPath(draft, path) {
 
 function removeRedundantClarifications(clarifications, patches, currentDraft = {}) {
   const proposedPaths = new Set(patches.map(({ path }) => path));
+  const relatedSatisfiedPaths = new Map([
+    ["timing.desiredTiming", ["timing.availability"]],
+    ["timing.availability", ["timing.desiredTiming"]],
+  ]);
   return clarifications.filter((clarification) => {
     if (!clarification.fieldPath) return true;
     if (proposedPaths.has(clarification.fieldPath)) return false;
+    if (
+      (relatedSatisfiedPaths.get(clarification.fieldPath) || []).some(
+        (path) => proposedPaths.has(path) || String(draftValueAtPath(currentDraft, path) || "").trim()
+      )
+    ) {
+      return false;
+    }
     return !String(draftValueAtPath(currentDraft, clarification.fieldPath) || "").trim();
   });
 }

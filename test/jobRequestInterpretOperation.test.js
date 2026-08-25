@@ -231,7 +231,22 @@ test("provider request contains only bounded text, draft state, and server-selec
     preserveExistingHomeownerSelection: true,
     requiresConfirmation: true,
     ambiguityBehavior: "clarify_without_selecting",
+    classificationGuidance: {
+      structuralSignals: [
+        "reported_separation",
+        "temporary_bracing",
+        "requested_rebuild_of_wall_or_structural_section",
+      ],
+      classificationIsNotDiagnosis: true,
+      surfaceFinishOnlyDoesNotEstablishStructuralRepairs: true,
+    },
   });
+  assert.equal(
+    request.instructions.requirements.includes(
+      "reported_separation_temporary_bracing_or_rebuild_scope_reasonably_supports_structural_repairs_without_asserting_a_diagnosis"
+    ),
+    true
+  );
   for (const prohibited of [
     "localDraftId", "serviceAddress", "unitNumber", "accessNotes", "previewUrl",
     "file", "submission", "postId", "relationshipId", "conversationId", "payment",
@@ -340,7 +355,7 @@ test("parser removes follow-ups for fields already present or proposed", () => {
       },
       clarifications: [
         { question: "Which city?", fieldPath: "location.city" },
-        { question: "Which area is affected?", fieldPath: "location.affectedArea" },
+        { question: "What timing do you prefer?", fieldPath: "timing.desiredTiming" },
         { question: "Is there anything else to add?" },
       ],
     }),

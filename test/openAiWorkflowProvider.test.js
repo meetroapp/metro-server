@@ -9,6 +9,30 @@ const {
   createOpenAiWorkflowProvider,
   createWorkflowProviderConfiguration,
 } = require("../server/intelligence/openAiWorkflowProvider");
+const {
+  JOB_REQUEST_INTERPRET_PATCH_PATHS,
+  parseJobRequestInterpretResult,
+} = require("../server/intelligence/operations/jobRequestInterpret");
+
+const CAPE_CORAL_HOMEOWNER_TEXT =
+  "I need someone to repair a cracked section of the wall by my front entry in Cape Coral. It is separating and temporarily braced. I would like someone to inspect it and repair or rebuild the damaged area. I am available this week and I can add photos.";
+
+function jobRequestProviderRequest() {
+  return {
+    operation: "job_request.interpret",
+    homeownerText: CAPE_CORAL_HOMEOWNER_TEXT,
+    operationContext: {
+      validation: {
+        canonicalRequestServiceIds: "drywall_repair,structural_repairs",
+      },
+    },
+    instructions: {
+      allowedPatchPaths: [...JOB_REQUEST_INTERPRET_PATCH_PATHS],
+      allowedProvenance: ["assistant_suggested", "assistant_inferred"],
+      allowedUncertainty: ["assistant_suggested", "approximate", "uncertain"],
+    },
+  };
+}
 
 function response({ ok = true, status = 200, payload = {}, requestId = "req_fixture" } = {}) {
   return {
@@ -317,15 +341,148 @@ test("Job Request provider instructions use the exact governed parser vocabulary
     },
   });
 
-  await provider.complete({ operation: "job_request.interpret" });
+  await provider.complete(jobRequestProviderRequest());
   const instructions = JSON.parse(calls[0].options.body).instructions;
   assert.match(instructions, /assistant_suggested or assistant_inferred/);
   assert.match(instructions, /assistant_suggested or approximate or uncertain/);
   assert.match(instructions, /only service\.specialty/);
   assert.match(instructions, /canonicalRequestServiceIds/);
   assert.match(instructions, /ask one concise clarification/);
+  assert.match(instructions, /temporary bracing/);
+  assert.match(instructions, /service classification, not a diagnosis/);
+  assert.match(instructions, /Surface-finish-only/);
+  assert.match(instructions, /include both job\.title and job\.description/);
+  assert.match(instructions, /Available this week/);
+  assert.match(instructions, /Do not ask for preferred timing/);
   assert.doesNotMatch(instructions, /AI_SUGGESTED or INFERRED/);
   assert.doesNotMatch(instructions, /KNOWN or UNCERTAIN or NEEDS_CLARIFICATION/);
+});
+
+test("Cape Coral Job Request uses strict provider output and survives canonical response validation", async () => {
+  const calls = [];
+  const rawProviderResult = {
+    schemaVersion: 1,
+    summary: "Review the project facts supplied by the homeowner.",
+    draftPatch: {
+      fields: [
+        {
+          path: "job.title",
+          value: "Repair cracked wall by front entry",
+          provenance: "assistant_suggested",
+          confidence: 0.93,
+          uncertainty: "assistant_suggested",
+          requiresConfirmation: true,
+          rationale: null,
+        },
+        {
+          path: "job.description",
+          value: CAPE_CORAL_HOMEOWNER_TEXT,
+          provenance: "assistant_suggested",
+          confidence: 0.99,
+          uncertainty: "assistant_suggested",
+          requiresConfirmation: true,
+          rationale: "Uses only facts supplied by the homeowner.",
+        },
+        {
+          path: "service.specialty",
+          value: "structural_repairs",
+          provenance: "assistant_inferred",
+          confidence: 0.9,
+          uncertainty: "approximate",
+          requiresConfirmation: true,
+          rationale: "The homeowner described a separating, temporarily braced wall section.",
+        },
+        {
+          path: "location.city",
+          value: "Cape Coral",
+          provenance: "assistant_suggested",
+          confidence: 0.99,
+          uncertainty: "assistant_suggested",
+          requiresConfirmation: true,
+          rationale: null,
+        },
+        {
+          path: "timing.availability",
+          value: "Available this week",
+          provenance: "assistant_suggested",
+          confidence: 0.99,
+          uncertainty: "assistant_suggested",
+          requiresConfirmation: true,
+          rationale: null,
+        },
+      ],
+    },
+    clarifications: [],
+    warnings: [],
+  };
+  const provider = createOpenAiWorkflowProvider({
+    apiKey: "fixture-secret",
+    model: "fixture-model",
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return response({
+        payload: { output_text: JSON.stringify(rawProviderResult) },
+        requestId: "req_cape_coral_fixture",
+      });
+    },
+  });
+
+  const providerResult = await provider.complete(jobRequestProviderRequest());
+  const accepted = parseJobRequestInterpretResult(providerResult, {
+    semanticInput: {
+      context: {
+        draft: {
+          service: { category: "", requestCategory: "", domain: "", specialty: "" },
+        },
+      },
+    },
+  });
+  const body = JSON.parse(calls[0].options.body);
+  const format = body.text.format;
+
+  assert.equal(format.type, "json_schema");
+  assert.equal(format.name, "meetro_job_request_interpret");
+  assert.equal(format.strict, true);
+  assert.equal(format.schema.additionalProperties, false);
+  assert.deepEqual(
+    format.schema.properties.draftPatch.properties.fields.items.required,
+    [
+      "path",
+      "value",
+      "provenance",
+      "confidence",
+      "uncertainty",
+      "requiresConfirmation",
+      "rationale",
+    ]
+  );
+  assert.deepEqual(
+    format.schema.properties.draftPatch.properties.fields.items.properties.path.enum,
+    JOB_REQUEST_INTERPRET_PATCH_PATHS
+  );
+  assert.equal(body.input.includes(CAPE_CORAL_HOMEOWNER_TEXT), true);
+  assert.equal(accepted.validation.status, "accepted");
+  assert.deepEqual(
+    accepted.draftPatch.fields.map(({ path, value }) => ({ path, value })),
+    [
+      { path: "job.title", value: "Repair cracked wall by front entry" },
+      { path: "job.description", value: CAPE_CORAL_HOMEOWNER_TEXT },
+      { path: "service.specialty", value: "structural_repairs" },
+      { path: "location.city", value: "Cape Coral" },
+      { path: "timing.availability", value: "Available this week" },
+    ]
+  );
+  assert.deepEqual(
+    accepted.draftPatch.fields.find(({ path }) => path === "service.specialty").taxonomy,
+    { validated: true, vocabulary: "request_service" }
+  );
+  assert.equal(
+    Object.hasOwn(
+      accepted.draftPatch.fields.find(({ path }) => path === "job.title"),
+      "rationale"
+    ),
+    false
+  );
 });
 
 test("Estimate provider uses strict Structured Outputs for its governed result contract", async () => {
