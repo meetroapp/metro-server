@@ -894,6 +894,48 @@ async function loadCustomerQuoteContext(client, quoteId, actorUserId, { lock = f
   return result.rows[0] || null;
 }
 
+async function requireSavedEvaluation({ client, context, logger }) {
+  const result = await client.query(
+    `SELECT evaluations.id, evaluations.status,
+      aggregates.current_version AS evaluation_version
+     FROM canonical_evaluations evaluations
+     INNER JOIN commercial_authority_aggregates aggregates
+       ON aggregates.id = evaluations.id
+       AND aggregates.aggregate_type = 'evaluation'
+       AND aggregates.owning_engine = $4
+       AND aggregates.source_context_type = 'ordinary_request'
+       AND aggregates.ordinary_request_id = $3
+       AND aggregates.emergency_request_id IS NULL
+       AND aggregates.relationship_id = $1
+     INNER JOIN canonical_evaluation_versions versions
+       ON versions.evaluation_id = evaluations.id
+       AND versions.version = aggregates.current_version
+       AND versions.status = evaluations.status
+     WHERE evaluations.relationship_id = $1
+       AND evaluations.professional_user_id = $2
+       AND evaluations.status IN ('draft', 'completed')
+     LIMIT 1`,
+    [
+      Number(context.relationship_id),
+      Number(context.actor_user_id),
+      Number(context.job_request_id),
+      OWNING_ENGINE,
+    ]
+  );
+  const evaluation = result.rows[0] || null;
+  if (evaluation) return null;
+  logger.warn("Quote issuance blocked until Evaluation is saved", {
+    code: "QUOTE_EVALUATION_REQUIRED",
+    jobId: context.job_id,
+    relationshipId: Number(context.relationship_id),
+  });
+  return failure(
+    409,
+    "QUOTE_EVALUATION_REQUIRED",
+    "A saved Evaluation is required before the Quote can be issued."
+  );
+}
+
 async function requireCustomerQuoteAuthority({ client, context, capability, logger }) {
   if (!context || Number(context.lifecycle_contract_version) !== 2) {
     return failure(404, "QUOTE_UNAVAILABLE", "The Quote is unavailable.");
@@ -2571,6 +2613,12 @@ async function issueQuote(input = {}) {
       logger,
     });
     if (authorityError) return { abort: authorityError };
+    const evaluationError = await requireSavedEvaluation({
+      client,
+      context,
+      logger,
+    });
+    if (evaluationError) return { abort: evaluationError };
     const authorityGrantId = await loadActiveQuoteGrant(
       client,
       context,
@@ -3267,6 +3315,7 @@ module.exports = {
     normalizeCustomerTermsSnapshot,
     quoteIntegrityContract,
     requireQuoteAuthority,
+    requireSavedEvaluation,
     workingQuoteConversion,
   }),
 };

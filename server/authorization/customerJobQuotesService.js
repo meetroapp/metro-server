@@ -159,6 +159,11 @@ async function loadCustomerJobContext(client, { actorId, jobId }) {
       participants.id AS actor_participant_id,
       posts.title AS job_title,
       posts.category AS job_service,
+      COALESCE(
+        NULLIF(btrim(issuer_profile.business_name), ''),
+        NULLIF(btrim(issuer_user.username), ''),
+        'Professional'
+      ) AS issuer_name,
       EXISTS (
         SELECT 1
         FROM participant_role_assignments roles
@@ -194,6 +199,15 @@ async function loadCustomerJobContext(client, { actorId, jobId }) {
       ON relationships.id = jobs.source_request_relationship_id
       AND relationships.post_id = jobs.job_request_id
       AND relationships.emergency_request_id IS NULL
+    INNER JOIN users issuer_user
+      ON issuer_user.id = relationships.professional_user_id
+    LEFT JOIN LATERAL (
+      SELECT profiles.business_name
+      FROM contractor_profiles profiles
+      WHERE profiles.user_id = issuer_user.id
+      ORDER BY profiles.id ASC
+      LIMIT 1
+    ) issuer_profile ON TRUE
     LEFT JOIN relationship_participants participants
       ON participants.job_id = jobs.id
       AND participants.request_relationship_id = relationships.id
@@ -457,6 +471,7 @@ async function getCustomerJobQuotes(input = {}) {
         title: String(context.job_title || "").trim() ||
           String(context.job_service || "").trim() || "Job",
         service: String(context.job_service || "").trim() || null,
+        issuerName: String(context.issuer_name || "").trim() || "Professional",
       },
       quotes: pageRows.map(quoteProjection),
       pagination: {

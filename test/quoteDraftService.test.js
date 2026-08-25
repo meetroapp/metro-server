@@ -108,3 +108,62 @@ test("issue rejects client-owned totals and timestamps before database access", 
   assert.equal((await service.issueQuote({ ...base, issuedAt: "2026-08-10T00:00:00Z" })).code, "QUOTE_AUTHORITY_FIELD_REJECTED");
   assert.equal((await service.issueQuote({ ...base, conditions: ["client condition"] })).code, "QUOTE_AUTHORITY_FIELD_REJECTED");
 });
+
+test("Quote issuance requires one saved canonical Evaluation in the exact Request and Relationship context", async () => {
+  const context = {
+    job_id: "00000000-0000-4000-8000-000000000001",
+    job_request_id: 22,
+    relationship_id: 344,
+    actor_user_id: 24,
+  };
+  const calls = [];
+  const allowed = await service.quoteDraftServiceInternals.requireSavedEvaluation({
+    client: {
+      async query(sql, values) {
+        calls.push({ sql, values });
+        return {
+          rows: [{
+            id: "10000000-0000-4000-8000-000000000001",
+            status: "draft",
+            evaluation_version: 2,
+          }],
+        };
+      },
+    },
+    context,
+    logger: { warn() {} },
+  });
+  assert.equal(allowed, null);
+  assert.deepEqual(calls[0].values.slice(0, 3), [344, 24, 22]);
+  assert.match(calls[0].sql, /aggregates\.ordinary_request_id = \$3/);
+  assert.match(calls[0].sql, /aggregates\.relationship_id = \$1/);
+  assert.match(calls[0].sql, /evaluations\.professional_user_id = \$2/);
+  assert.match(calls[0].sql, /versions\.version = aggregates\.current_version/);
+
+  const warnings = [];
+  const blocked = await service.quoteDraftServiceInternals.requireSavedEvaluation({
+    client: { async query() { return { rows: [] }; } },
+    context,
+    logger: { warn(message, evidence) { warnings.push({ message, evidence }); } },
+  });
+  assert.deepEqual(blocked, {
+    ok: false,
+    status: 409,
+    code: "QUOTE_EVALUATION_REQUIRED",
+    message: "A saved Evaluation is required before the Quote can be issued.",
+  });
+  assert.equal(warnings[0].evidence.jobId, context.job_id);
+});
+
+test("the canonical issue command invokes the saved-Evaluation gate and customer acceptance stays account-type neutral", () => {
+  const source = readFileSync(
+    join(__dirname, "..", "server", "authorization", "quoteDraftService.js"),
+    "utf8"
+  );
+  assert.match(
+    source,
+    /async function issueQuote[\s\S]*requireQuoteAuthority[\s\S]*requireSavedEvaluation[\s\S]*loadActiveQuoteGrant/
+  );
+  assert.doesNotMatch(source, /account_type\s*=\s*['\"]homeowner['\"]/i);
+  assert.match(source, /roles\.role = 'CUSTOMER_REPRESENTATIVE'/);
+});

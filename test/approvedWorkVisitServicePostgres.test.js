@@ -12,6 +12,7 @@ const {
   createVisitLifecycleFixture,
   createVisitTestIdentities,
   createVisitWorkstream,
+  ensureVisitEvaluation,
   quiet,
 } = require("./helpers/visitLifecycleFixture");
 const {
@@ -122,6 +123,7 @@ async function createIssuedQuote(pool, identities, fixture, suffix) {
     `approved-work-pending-scope-${suffix}`
   );
   assert.equal(scoped.ok, true, scoped.code);
+  await ensureVisitEvaluation(pool, identities, fixture, suffix);
   const issued = await quoteCommand(
     issueQuote,
     pool,

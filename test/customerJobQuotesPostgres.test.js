@@ -19,6 +19,9 @@ const {
   issueQuote,
 } = require("../server/authorization/quoteDraftService");
 const {
+  createOrdinaryJobEvaluation,
+} = require("../server/authorization/evaluationService");
+const {
   getCustomerJobQuotes,
 } = require("../server/authorization/customerJobQuotesService");
 const {
@@ -43,6 +46,34 @@ function command(service, pool, actorId, values, key) {
     logger: quiet,
     ...values,
   });
+}
+
+async function saveEvaluation(pool, identities, fixture, suffix) {
+  const evaluation = await command(
+    createOrdinaryJobEvaluation,
+    pool,
+    identities.professionalId,
+    {
+      jobId: fixture.jobId,
+      content: {
+        serviceType: "handyman",
+        evaluationContext: "ordinary_job",
+        observations: "Saved governed evaluation before Quote issuance.",
+        measurements: [],
+        findings: [],
+        diagnosisSummary: "",
+        limitations: "",
+        scopeRecommendations: [],
+        relevantConditions: [],
+        supportingMediaReferences: [],
+        internalNotes: "",
+      },
+      expectedVersion: 0,
+    },
+    `customer-discovery-evaluation-${suffix}`
+  );
+  assert.equal(evaluation.ok, true, evaluation.code);
+  return evaluation.evaluation;
 }
 
 async function addSyntheticScope(pool, identities, quote, suffix) {
@@ -83,7 +114,9 @@ test(
       assert.equal(applied.success, true);
       assert.equal(applied.applied.length, migrations.length);
 
-      const identities = await createVisitTestIdentities(pool, suffix);
+      const identities = await createVisitTestIdentities(pool, suffix, {
+        requesterAccountType: "professional",
+      });
       const fixture = await createVisitLifecycleFixture(
         pool,
         identities,
@@ -113,6 +146,18 @@ test(
         `${suffix}-original`
       );
       assert.equal(originalScoped.ok, true, originalScoped.code);
+      const blockedBeforeEvaluation = await command(
+        issueQuote,
+        pool,
+        identities.professionalId,
+        {
+          quoteId: originalScoped.quote.id,
+          expectedVersion: originalScoped.quote.currentVersion,
+        },
+        `customer-discovery-issue-before-evaluation-${suffix}`
+      );
+      assert.equal(blockedBeforeEvaluation.code, "QUOTE_EVALUATION_REQUIRED");
+      await saveEvaluation(pool, identities, fixture, suffix);
       const originalIssued = await command(
         issueQuote,
         pool,

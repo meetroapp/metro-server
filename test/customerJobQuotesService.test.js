@@ -28,6 +28,7 @@ function context(overrides = {}) {
     actor_participant_id: IDS.participant,
     job_title: "Synthetic sink repair",
     job_service: "Handyman",
+    issuer_name: "All Handyman Services",
     actor_is_customer_representative: true,
     can_read_customer_quotes: true,
     ...overrides,
@@ -142,6 +143,7 @@ test("customer discovery returns only exact issued Job Quotes with independent l
     requestId: 16,
     title: "Synthetic sink repair",
     service: "Handyman",
+    issuerName: "All Handyman Services",
   });
   assert.deepEqual(result.quotes.map(({ quoteId, businessStatus, lineageLabel }) => ({
     quoteId,

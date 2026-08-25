@@ -16,6 +16,9 @@ const {
   issueQuote,
 } = require("../server/authorization/quoteDraftService");
 const {
+  createOrdinaryJobEvaluation,
+} = require("../server/authorization/evaluationService");
+const {
   getProfessionalQuoteDelivery,
   sendQuoteInMeetro,
 } = require("../server/authorization/quoteDeliveryService");
@@ -144,6 +147,28 @@ async function createFixture(pool, ids, suffix) {
 }
 
 async function createQuote(pool, ids, fixture, suffix, { issue = true } = {}) {
+  const evaluation = await createOrdinaryJobEvaluation({
+    pool,
+    authenticatedActor: { id: ids.professionalId },
+    jobId: fixture.jobId,
+    content: {
+      serviceType: "handyman",
+      evaluationContext: "ordinary_job",
+      observations: "Saved governed evaluation before Quote delivery.",
+      measurements: [],
+      findings: [],
+      diagnosisSummary: "",
+      limitations: "",
+      scopeRecommendations: [],
+      relevantConditions: [],
+      supportingMediaReferences: [],
+      internalNotes: "",
+    },
+    expectedVersion: 0,
+    idempotencyKey: `delivery-evaluation-${suffix}`,
+    logger: quiet,
+  });
+  assert.equal(evaluation.ok, true, evaluation.code);
   const created = await createDraftQuote({
     pool,
     authenticatedActor: { id: ids.professionalId },

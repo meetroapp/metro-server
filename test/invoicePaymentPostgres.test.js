@@ -9,6 +9,7 @@ const {
   createVisitLifecycleFixture,
   createVisitTestIdentities,
   createVisitWorkstream,
+  ensureVisitEvaluation,
   quiet,
 } = require("./helpers/visitLifecycleFixture");
 const {
@@ -80,6 +81,7 @@ async function prepareCompletedJob(pool, suffix) {
       },
     },
   }, `invoice-quote-scope-${suffix}`);
+  await ensureVisitEvaluation(pool, identities, fixture, suffix);
   const issued = await command(issueQuote, pool, identities.professionalId, {
     quoteId: scoped.quote.id,
     expectedVersion: scoped.quote.currentVersion,

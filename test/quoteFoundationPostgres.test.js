@@ -101,6 +101,20 @@ function evaluationContent() {
   };
 }
 
+async function saveEvaluation(pool, identities, fixture, suffix) {
+  const evaluation = await createOrdinaryJobEvaluation({
+    pool,
+    authenticatedActor: { id: identities.professionalId },
+    jobId: fixture.jobId,
+    content: evaluationContent(),
+    expectedVersion: 0,
+    idempotencyKey: `quote-evaluation-${suffix}`,
+    logger: quiet,
+  });
+  assert.equal(evaluation.ok, true, evaluation.code);
+  return evaluation.evaluation;
+}
+
 async function createIdentities(pool, suffix) {
   const rows = {};
   for (const [key, role, accountType] of [
@@ -183,20 +197,11 @@ async function createLifecycleFixture(pool, identities, suffix, description) {
 }
 
 async function createFinding(pool, identities, fixture, suffix, statement) {
-  const evaluation = await createOrdinaryJobEvaluation({
-    pool,
-    authenticatedActor: { id: identities.professionalId },
-    jobId: fixture.jobId,
-    content: evaluationContent(),
-    expectedVersion: 0,
-    idempotencyKey: `quote-evaluation-${suffix}`,
-    logger: quiet,
-  });
-  assert.equal(evaluation.ok, true, evaluation.code);
+  const evaluation = await saveEvaluation(pool, identities, fixture, suffix);
   const proposed = await submitFinding({
     pool,
     authenticatedActor: { id: identities.professionalId },
-    evaluationId: evaluation.evaluation.id,
+    evaluationId: evaluation.id,
     statement,
     idempotencyKey: `quote-finding-${suffix}`,
     logger: quiet,
@@ -1045,6 +1050,7 @@ test("clean disposable PostgreSQL certifies canonical $920 Draft and issued Quot
       currency: "USD",
     }, `second-root-${suffix}`)).code, "ROOT_QUOTE_ALREADY_EXISTS");
 
+    await saveEvaluation(pool, identities, declinedFixture, `${suffix}-declined`);
     const declinedIssued = await createSimpleIssuedQuote(
       pool,
       identities,
@@ -1090,6 +1096,7 @@ test("clean disposable PostgreSQL certifies canonical $920 Draft and issued Quot
     assert.equal(declined.quote.status, "ISSUED");
     assert.equal(declined.quote.totalMinor, 2000);
 
+    await saveEvaluation(pool, identities, raceFixture, `${suffix}-race`);
     const raceIssued = await createSimpleIssuedQuote(
       pool,
       identities,

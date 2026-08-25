@@ -10,6 +10,7 @@ const {
   createVisitLifecycleFixture,
   createVisitTestIdentities,
   createVisitWorkstream,
+  ensureVisitEvaluation,
   quiet,
 } = require("./helpers/visitLifecycleFixture");
 const {
@@ -91,6 +92,7 @@ async function createQuote(pool, identities, fixture, workstream, suffix, approv
   );
   assert.equal(scoped.ok, true, scoped.code);
   if (!approve) return scoped.quote;
+  await ensureVisitEvaluation(pool, identities, fixture, suffix);
   const issued = await command(
     issueQuote,
     pool,

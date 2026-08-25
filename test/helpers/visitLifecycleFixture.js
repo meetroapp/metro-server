@@ -62,12 +62,22 @@ function evaluationContent(description) {
   };
 }
 
-async function createVisitTestIdentities(pool, suffix) {
+async function createVisitTestIdentities(
+  pool,
+  suffix,
+  { requesterAccountType = "homeowner" } = {}
+) {
+  const requesterIsProfessional = requesterAccountType === "professional";
   const homeowner = await pool.query(
     `INSERT INTO users (username, email, password_hash, role, account_type)
-     VALUES ('Visit Homeowner', $1, 'test-only-hash', 'homeowner', 'homeowner')
+     VALUES ($1, $2, 'test-only-hash', $3, $4)
      RETURNING id`,
-    [`visit-service-homeowner-${suffix}@example.test`]
+    [
+      requesterIsProfessional ? "Visit Requester" : "Visit Homeowner",
+      `visit-service-homeowner-${suffix}@example.test`,
+      requesterIsProfessional ? "handyman" : "homeowner",
+      requesterAccountType,
+    ]
   );
   const professional = await pool.query(
     `INSERT INTO users (username, email, password_hash, role, account_type)
@@ -93,6 +103,20 @@ async function createVisitTestIdentities(pool, suffix) {
       }),
     ]
   );
+  if (requesterIsProfessional) {
+    await pool.query(
+      `INSERT INTO contractor_profiles
+        (user_id, business_name, category, location, profile_details)
+       VALUES ($1, 'Visit Requester Business', 'handyman', 'Cape Coral', $2::jsonb)`,
+      [
+        homeowner.rows[0].id,
+        JSON.stringify({
+          service_area: "Cape Coral",
+          service_specialties: ["handyman"],
+        }),
+      ]
+    );
+  }
   return {
     homeownerId: Number(homeowner.rows[0].id),
     professionalId: Number(professional.rows[0].id),
@@ -167,6 +191,21 @@ async function createVisitEvaluation(pool, identities, fixture, suffix) {
   return result.evaluation;
 }
 
+async function ensureVisitEvaluation(pool, identities, fixture, suffix) {
+  const existing = await pool.query(
+    `SELECT evaluations.id
+     FROM canonical_evaluations evaluations
+     INNER JOIN jobs
+       ON jobs.id = $1
+       AND jobs.source_request_relationship_id = evaluations.relationship_id
+     WHERE evaluations.professional_user_id = $2
+     LIMIT 1`,
+    [fixture.jobId, identities.professionalId]
+  );
+  if (existing.rows[0]) return existing.rows[0];
+  return createVisitEvaluation(pool, identities, fixture, suffix);
+}
+
 async function createVisitWorkstream(
   pool,
   identities,
@@ -198,6 +237,7 @@ function quoteCommand(service, pool, actorId, values, idempotencyKey) {
 }
 
 async function createVisitApprovedDecision(pool, identities, fixture, suffix) {
+  await ensureVisitEvaluation(pool, identities, fixture, suffix);
   const created = await quoteCommand(
     createDraftQuote,
     pool,
@@ -287,6 +327,7 @@ async function grantVisitCapabilities(pool, fixture, grants) {
 module.exports = {
   createVisitApprovedDecision,
   createVisitEvaluation,
+  ensureVisitEvaluation,
   createVisitLifecycleFixture,
   createVisitTestIdentities,
   createVisitWorkstream,
