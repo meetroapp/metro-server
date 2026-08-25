@@ -16,7 +16,7 @@ const OPERATIONS = new Set([
   "invoice.assist",
 ]);
 const ACTIONS = new Set(["ACCEPTED", "EDITED", "REJECTED"]);
-const ELEMENT_ID = /^[a-z][a-z0-9_.:-]{0,159}$/;
+const ELEMENT_ID = /^[A-Za-z][A-Za-z0-9_.:-]{0,159}$/;
 
 function response(ok, status, code, message, extra = {}) {
   return { ok, status, code, message, ...extra };
@@ -42,7 +42,7 @@ function normalizeActor(actor) {
 }
 
 function normalizeElementId(value) {
-  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  const normalized = typeof value === "string" ? value.trim() : "";
   return ELEMENT_ID.test(normalized) ? normalized : null;
 }
 
@@ -56,7 +56,12 @@ function findElement(proposal, operation, elementId) {
     const value = pending.shift();
     if (!value || typeof value !== "object" || visited.has(value)) continue;
     visited.add(value);
-    if (!Array.isArray(value) && String(value.id || "").toLowerCase() === elementId) return value;
+    if (
+      !Array.isArray(value) &&
+      String(value.id || "").toLowerCase() === elementId.toLowerCase()
+    ) {
+      return value;
+    }
     for (const child of Array.isArray(value) ? value : Object.values(value)) {
       if (child && typeof child === "object") pending.push(child);
     }
