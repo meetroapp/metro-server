@@ -8,6 +8,7 @@ function sendResult(res, result) {
     code: result?.code || "BUSINESS_CUSTOMER_RELATIONSHIP_FAILED",
   };
   if (result?.message) payload.message = result.message;
+  if (result?.activity !== undefined) payload.activity = result.activity;
   if (result?.relationship !== undefined) payload.relationship = result.relationship;
   if (result?.relationships !== undefined) payload.relationships = result.relationships;
   if (result?.replayed) payload.replayed = true;
@@ -67,6 +68,13 @@ function createBusinessCustomerRelationshipHandlers({
         businessContactId: req.params.businessContactId,
       })
     ),
+    getActivity: handle("get_business_customer_relationship_activity", (req) =>
+      relationshipService.getBusinessCustomerRelationshipActivity({
+        pool: getPool(req),
+        authenticatedActor: req.user,
+        relationshipId: req.params.relationshipId,
+      })
+    ),
     get: handle("get_business_customer_relationship", (req) =>
       relationshipService.getBusinessCustomerRelationship({
         pool: getPool(req),
@@ -99,6 +107,11 @@ function registerBusinessCustomerRelationshipRoutes({
     "/business-customer-relationships/by-contact/:businessContactId",
     authMiddleware,
     handlers.getByContact
+  );
+  app.get(
+    "/business-customer-relationships/:relationshipId/activity",
+    authMiddleware,
+    handlers.getActivity
   );
   app.get(
     "/business-customer-relationships/:relationshipId",

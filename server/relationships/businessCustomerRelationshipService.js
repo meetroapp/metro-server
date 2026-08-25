@@ -50,6 +50,63 @@ function isoTimestamp(value) {
   return Number.isNaN(timestamp.getTime()) ? null : timestamp.toISOString();
 }
 
+function dateOnly(value) {
+  if (!value) return null;
+  if (typeof value === "string") return value.slice(0, 10);
+  const timestamp = new Date(value);
+  return Number.isNaN(timestamp.getTime()) ? null : timestamp.toISOString().slice(0, 10);
+}
+
+function workActivityProjection(row) {
+  return Object.freeze({
+    jobId: String(row.job_id),
+    title: String(row.service_title || "").trim() || null,
+    service: String(row.service_category || "").trim() || null,
+    status: row.completion_status || null,
+    createdAt: isoTimestamp(row.job_created_at),
+    completedAt: isoTimestamp(row.completed_at),
+    linkedAt: isoTimestamp(row.linked_at),
+  });
+}
+
+function quoteActivityProjection(row) {
+  return Object.freeze({
+    quoteId: String(row.quote_id),
+    jobId: String(row.job_id),
+    documentNumber: row.document_number || null,
+    status: row.status,
+    classification: row.classification || null,
+    customerDecision: row.customer_decision || null,
+    currency: row.currency,
+    totalMinor: Number(row.total_minor),
+    createdAt: isoTimestamp(row.created_at),
+    updatedAt: isoTimestamp(row.updated_at),
+    issuedAt: isoTimestamp(row.issued_at),
+    decidedAt: isoTimestamp(row.decided_at),
+    lastActivityAt: isoTimestamp(row.last_activity_at),
+    linkedAt: isoTimestamp(row.linked_at),
+  });
+}
+
+function invoiceActivityProjection(row) {
+  return Object.freeze({
+    invoiceId: String(row.invoice_id),
+    invoiceNumber: row.invoice_number,
+    jobId: String(row.job_id),
+    status: row.status,
+    currency: row.currency,
+    totalMinor: Number(row.total_minor),
+    paidMinor: Number(row.paid_minor),
+    balanceMinor: Number(row.balance_minor),
+    invoiceDate: dateOnly(row.invoice_date),
+    createdAt: isoTimestamp(row.created_at),
+    updatedAt: isoTimestamp(row.updated_at),
+    issuedAt: isoTimestamp(row.issued_at),
+    lastActivityAt: isoTimestamp(row.last_activity_at),
+    linkedAt: isoTimestamp(row.linked_at),
+  });
+}
+
 function relationshipProjection(row) {
   if (!row) return null;
   return Object.freeze({
@@ -184,6 +241,28 @@ async function getBusinessCustomerRelationship(input = {}) {
     : failure(404, "BUSINESS_CUSTOMER_RELATIONSHIP_NOT_FOUND", "The Customer Relationship was not found.");
 }
 
+async function getBusinessCustomerRelationshipActivity(input = {}) {
+  const validated = validateIdentityRead(input, "relationshipId");
+  if (validated.error) return validated.error;
+  const activity = await (input.store || sqlStore).getActivity(
+    input.pool,
+    validated.actor,
+    validated.identity
+  );
+  return activity
+    ? {
+        ok: true,
+        status: 200,
+        code: "BUSINESS_CUSTOMER_RELATIONSHIP_ACTIVITY_LOADED",
+        activity,
+      }
+    : failure(
+        404,
+        "BUSINESS_CUSTOMER_RELATIONSHIP_NOT_FOUND",
+        "The Customer Relationship was not found."
+      );
+}
+
 async function getBusinessCustomerRelationshipByContact(input = {}) {
   const validated = validateIdentityRead(input, "businessContactId");
   if (validated.error) return validated.error;
@@ -223,6 +302,27 @@ async function withTransaction(pool, action) {
     return result;
   } catch (error) {
     try { await client.query("ROLLBACK"); } catch { /* Preserve the original error. */ }
+    throw error;
+  } finally {
+    if (client !== pool && typeof client.release === "function") client.release();
+  }
+}
+
+async function withReadTransaction(pool, action) {
+  if (!pool || typeof pool.query !== "function") throw new TypeError("A database pool is required.");
+  const client = typeof pool.connect === "function" ? await pool.connect() : pool;
+  let started = false;
+  try {
+    await client.query("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    started = true;
+    const result = await action(client);
+    await client.query("COMMIT");
+    started = false;
+    return result;
+  } catch (error) {
+    if (started) {
+      try { await client.query("ROLLBACK"); } catch { /* Preserve the original error. */ }
+    }
     throw error;
   } finally {
     if (client !== pool && typeof client.release === "function") client.release();
@@ -404,6 +504,161 @@ const sqlStore = Object.freeze({
     return loadOwnedByContact(pool, actorUserId, businessContactId);
   },
 
+  getActivity(pool, actorUserId, relationshipId) {
+    return withReadTransaction(pool, async (client) => {
+      const relationship = await loadOwnedById(client, actorUserId, relationshipId);
+      if (!relationship) return null;
+      const scope = [
+        relationship.contractorProfileId,
+        relationship.businessContactId,
+        relationship.id,
+      ];
+      const work = await client.query(
+        `/* business_customer_relationship:activity_work */
+         SELECT jobs.id AS job_id,
+           posts.title AS service_title,
+           posts.category AS service_category,
+           jobs.created_at AS job_created_at,
+           completions.status AS completion_status,
+           completions.completed_at,
+           parties.created_at AS linked_at
+         FROM job_customer_parties parties
+         INNER JOIN jobs ON jobs.id = parties.job_id
+         INNER JOIN posts ON posts.id = jobs.job_request_id
+         LEFT JOIN canonical_job_completion_records completions
+           ON completions.job_id = jobs.id
+         WHERE parties.contractor_profile_id = $1
+           AND parties.business_contact_id = $2
+           AND parties.business_customer_relationship_id = $3
+         ORDER BY COALESCE(completions.completed_at, jobs.created_at) DESC,
+           jobs.id ASC`,
+        scope
+      );
+      const quotes = await client.query(
+        `/* business_customer_relationship:activity_quotes */
+         SELECT quotes.id AS quote_id,
+           quotes.job_id,
+           sources.document_number,
+           quotes.status,
+           current.currency,
+           current.total_minor,
+           quotes.created_at,
+           quotes.updated_at,
+           quotes.issued_at,
+           CASE
+             WHEN decisions.issued_quote_version = aggregates.current_version
+               THEN decisions.decision
+             ELSE NULL
+           END AS customer_decision,
+           CASE
+             WHEN decisions.issued_quote_version = aggregates.current_version
+               THEN decisions.decided_at
+             ELSE NULL
+           END AS decided_at,
+           CASE
+             WHEN quotes.status = 'DRAFT' AND decisions.id IS NULL THEN 'DRAFT'
+             WHEN quotes.status = 'ISSUED' AND decisions.id IS NULL
+               THEN 'WAITING_ON_CUSTOMER'
+             WHEN quotes.status = 'ISSUED'
+               AND decisions.decision = 'APPROVED'
+               AND decisions.issued_quote_version = aggregates.current_version
+               THEN 'APPROVED'
+             WHEN quotes.status = 'ISSUED'
+               AND decisions.decision = 'DECLINED'
+               AND decisions.issued_quote_version = aggregates.current_version
+               THEN 'DECLINED'
+             ELSE NULL
+           END AS classification,
+           GREATEST(
+             quotes.updated_at,
+             quotes.issued_at,
+             CASE
+               WHEN decisions.issued_quote_version = aggregates.current_version
+                 THEN decisions.decided_at
+               ELSE NULL
+             END
+           ) AS last_activity_at,
+           parties.created_at AS linked_at
+         FROM canonical_quote_customer_parties parties
+         INNER JOIN canonical_quotes quotes
+           ON quotes.id = parties.quote_id
+          AND quotes.job_id = parties.job_id
+         INNER JOIN commercial_authority_aggregates aggregates
+           ON aggregates.id = quotes.id
+          AND aggregates.aggregate_type = 'quote'
+          AND aggregates.owning_engine = 'authorization_engine'
+         INNER JOIN canonical_quote_versions current
+           ON current.quote_id = quotes.id
+          AND current.version = aggregates.current_version
+          AND current.job_id = quotes.job_id
+         LEFT JOIN canonical_quote_customer_decisions decisions
+           ON decisions.quote_id = quotes.id
+         LEFT JOIN canonical_quote_business_document_sources sources
+           ON sources.quote_id = quotes.id
+          AND sources.job_id = quotes.job_id
+          AND sources.contractor_profile_id = parties.contractor_profile_id
+         WHERE parties.contractor_profile_id = $1
+           AND parties.business_contact_id = $2
+           AND parties.business_customer_relationship_id = $3
+         ORDER BY last_activity_at DESC NULLS LAST, quotes.id ASC`,
+        scope
+      );
+      const invoices = await client.query(
+        `/* business_customer_relationship:activity_invoices */
+         SELECT invoices.id AS invoice_id,
+           invoices.invoice_number,
+           invoices.job_id,
+           current.status,
+           current.currency,
+           current.total_minor,
+           current.paid_minor,
+           current.balance_minor,
+           current.invoice_date,
+           invoices.created_at,
+           current.created_at AS updated_at,
+           issuances.issued_at,
+           GREATEST(
+             invoices.created_at,
+             current.created_at,
+             issuances.issued_at
+           ) AS last_activity_at,
+           parties.created_at AS linked_at
+         FROM canonical_invoice_customer_parties parties
+         INNER JOIN canonical_invoices invoices
+           ON invoices.id = parties.invoice_id
+          AND invoices.job_id = parties.job_id
+         INNER JOIN LATERAL (
+           SELECT versions.*
+           FROM canonical_invoice_versions versions
+           WHERE versions.invoice_id = invoices.id
+             AND versions.job_id = invoices.job_id
+           ORDER BY versions.version DESC
+           LIMIT 1
+         ) current ON TRUE
+         LEFT JOIN canonical_invoice_issuances issuances
+           ON issuances.invoice_id = invoices.id
+          AND issuances.job_id = invoices.job_id
+         WHERE parties.contractor_profile_id = $1
+           AND parties.business_contact_id = $2
+           AND parties.business_customer_relationship_id = $3
+         ORDER BY last_activity_at DESC NULLS LAST, invoices.id ASC`,
+        scope
+      );
+      return Object.freeze({
+        contractVersion: 1,
+        relationship: Object.freeze({
+          id: relationship.id,
+          contractorProfileId: relationship.contractorProfileId,
+          businessContactId: relationship.businessContactId,
+          contactStatus: relationship.contact.status,
+        }),
+        work: Object.freeze(work.rows.map(workActivityProjection)),
+        quotes: Object.freeze(quotes.rows.map(quoteActivityProjection)),
+        invoices: Object.freeze(invoices.rows.map(invoiceActivityProjection)),
+      });
+    });
+  },
+
   async list(pool, actorUserId, contractorProfileId, limit) {
     const result = await pool.query(
       `/* business_customer_relationship:list */
@@ -421,12 +676,17 @@ const sqlStore = Object.freeze({
 module.exports = {
   businessCustomerRelationshipInternals: Object.freeze({
     ESTABLISH_OPERATION,
+    dateOnly,
+    invoiceActivityProjection,
+    quoteActivityProjection,
     relationshipProjection,
     requestHash,
     sqlStore,
+    workActivityProjection,
   }),
   establishBusinessCustomerRelationship,
   getBusinessCustomerRelationship,
+  getBusinessCustomerRelationshipActivity,
   getBusinessCustomerRelationshipByContact,
   listBusinessCustomerRelationships,
 };

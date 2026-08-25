@@ -35,6 +35,10 @@ test("authenticated handlers pass only governed actor, identity, query, payload,
       calls.push(["byContact", input]);
       return { ok: true, status: 200, code: "LOADED", relationship: { id: "relationship" } };
     },
+    async getBusinessCustomerRelationshipActivity(input) {
+      calls.push(["activity", input]);
+      return { ok: true, status: 200, code: "ACTIVITY", activity: { work: [], quotes: [], invoices: [] } };
+    },
     async getBusinessCustomerRelationship(input) {
       calls.push(["get", input]);
       return { ok: true, status: 200, code: "LOADED", relationship: { id: "relationship" } };
@@ -53,7 +57,7 @@ test("authenticated handlers pass only governed actor, identity, query, payload,
     query: { contractorProfileId: "10", limit: "20" },
     headers: { "idempotency-key": "command-key" },
   };
-  for (const name of ["establish", "list", "getByContact", "get"]) {
+  for (const name of ["establish", "list", "getByContact", "getActivity", "get"]) {
     await handlers[name](request, response());
   }
   assert.deepEqual(calls[0][1], {
@@ -65,6 +69,7 @@ test("authenticated handlers pass only governed actor, identity, query, payload,
   assert.deepEqual(calls[1][1].query, request.query);
   assert.equal(calls[2][1].businessContactId, "contact-id");
   assert.equal(calls[3][1].relationshipId, "relationship-id");
+  assert.equal(calls[4][1].relationshipId, "relationship-id");
 });
 
 test("Customer Relationship responses remain private and preserve governed failures", async () => {
@@ -89,6 +94,14 @@ test("Customer Relationship responses remain private and preserve governed failu
           message: "not found",
         };
       },
+      async getBusinessCustomerRelationshipActivity() {
+        return {
+          ok: true,
+          status: 200,
+          code: "BUSINESS_CUSTOMER_RELATIONSHIP_ACTIVITY_LOADED",
+          activity: { work: [], quotes: [], invoices: [] },
+        };
+      },
     },
   });
   const created = response();
@@ -103,6 +116,9 @@ test("Customer Relationship responses remain private and preserve governed failu
     code: "BUSINESS_CUSTOMER_RELATIONSHIP_NOT_FOUND",
     message: "not found",
   });
+  const activity = response();
+  await handlers.getActivity({ user: { id: 1 }, params: {} }, activity);
+  assert.deepEqual(activity.body.activity, { work: [], quotes: [], invoices: [] });
 });
 
 test("registers only authenticated establish and owner-scoped read routes", () => {
@@ -124,6 +140,7 @@ test("registers only authenticated establish and owner-scoped read routes", () =
     ["POST", "/business-customer-relationships", 2],
     ["GET", "/business-customer-relationships", 2],
     ["GET", "/business-customer-relationships/by-contact/:businessContactId", 2],
+    ["GET", "/business-customer-relationships/:relationshipId/activity", 2],
     ["GET", "/business-customer-relationships/:relationshipId", 2],
   ]);
   assert.equal(routes.some(([method]) => method === "PATCH" || method === "DELETE"), false);
