@@ -23,6 +23,9 @@ const JOB_REQUEST_INTERPRET_PATCH_PATHS = Object.freeze([
   "service.domain",
   "service.specialty",
   "location.affectedArea",
+  "location.city",
+  "location.region",
+  "location.postalCode",
   "timing.urgency",
   "timing.desiredTiming",
   "timing.availability",
@@ -67,6 +70,9 @@ const PATCH_VALUE_LIMITS = Object.freeze({
   "service.domain": 80,
   "service.specialty": 120,
   "location.affectedArea": 200,
+  "location.city": 120,
+  "location.region": 120,
+  "location.postalCode": 32,
   "timing.urgency": 120,
   "timing.desiredTiming": 300,
   "timing.availability": 500,
@@ -125,6 +131,37 @@ function normalizeContextGroup(value, keys) {
       return [key.name, boundedText(value[key.name], PATCH_VALUE_LIMITS[path], contextError)];
     })
   );
+}
+
+function normalizeLocationContext(value) {
+  assertExactKeys(
+    value,
+    ["affectedArea"],
+    ["city", "region", "postalCode"],
+    contextError
+  );
+  return {
+    affectedArea: boundedText(
+      value.affectedArea,
+      PATCH_VALUE_LIMITS["location.affectedArea"],
+      contextError
+    ),
+    city: boundedText(
+      value.city || "",
+      PATCH_VALUE_LIMITS["location.city"],
+      contextError
+    ),
+    region: boundedText(
+      value.region || "",
+      PATCH_VALUE_LIMITS["location.region"],
+      contextError
+    ),
+    postalCode: boundedText(
+      value.postalCode || "",
+      PATCH_VALUE_LIMITS["location.postalCode"],
+      contextError
+    ),
+  };
 }
 
 function normalizeJobRequestDraftContext(context, input) {
@@ -192,9 +229,7 @@ function normalizeJobRequestDraftContext(context, input) {
       { name: "domain", path: "service.domain" },
       { name: "specialty", path: "service.specialty" },
     ]),
-    location: normalizeContextGroup(draft.location, [
-      { name: "affectedArea", path: "location.affectedArea" },
-    ]),
+    location: normalizeLocationContext(draft.location),
     timing: normalizeContextGroup(draft.timing, [
       { name: "urgency", path: "timing.urgency" },
       { name: "desiredTiming", path: "timing.desiredTiming" },
@@ -237,6 +272,10 @@ function buildJobRequestInterpretProviderRequest({ semanticInput, engineContext 
         "require_homeowner_confirmation",
         "avoid_professional_diagnosis",
         "ask_bounded_clarifications",
+        "extract_all_homeowner_supplied_facts_before_clarifying",
+        "do_not_ask_for_information_already_supplied_or_present",
+        "do_not_infer_unsupplied_location_details",
+        "do_not_invent_price_diagnosis_repair_method_or_materials",
       ],
       prohibitedActions: [
         "submit_job_request",
@@ -331,6 +370,21 @@ function normalizeWarning(value) {
   };
 }
 
+function draftValueAtPath(draft, path) {
+  return String(path || "")
+    .split(".")
+    .reduce((cursor, key) => cursor?.[key], draft);
+}
+
+function removeRedundantClarifications(clarifications, patches, currentDraft = {}) {
+  const proposedPaths = new Set(patches.map(({ path }) => path));
+  return clarifications.filter((clarification) => {
+    if (!clarification.fieldPath) return true;
+    if (proposedPaths.has(clarification.fieldPath)) return false;
+    return !String(draftValueAtPath(currentDraft, clarification.fieldPath) || "").trim();
+  });
+}
+
 function validateServicePatches(patches, currentService = {}) {
   const servicePatches = patches.filter((patch) => SERVICE_PATCH_PATHS.has(patch.path));
   if (!servicePatches.length) return { patches, taxonomyRejected: false };
@@ -406,7 +460,11 @@ function parseJobRequestInterpretResult(providerResult, { semanticInput } = {}) 
   if (new Set(patches.map(({ path }) => path)).size !== patches.length) {
     throw resultError("Duplicate draft patch path.");
   }
-  const clarifications = payload.clarifications.map(normalizeClarification);
+  const clarifications = removeRedundantClarifications(
+    payload.clarifications.map(normalizeClarification),
+    patches,
+    semanticInput?.context?.draft || {}
+  );
   const warnings = payload.warnings.map(normalizeWarning);
   const taxonomy = validateServicePatches(
     patches,

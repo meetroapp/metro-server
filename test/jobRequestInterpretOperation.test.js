@@ -38,7 +38,12 @@ function requestBody({ text = "The cabinet under my sink is swollen from a leak.
           domain: "",
           specialty: "",
         },
-        location: { affectedArea: "kitchen" },
+        location: {
+          affectedArea: "kitchen",
+          city: "Cape Coral",
+          region: "",
+          postalCode: "",
+        },
         timing: { urgency: "", desiredTiming: "", availability: "" },
         details: { measurements: "", expectations: "", additionalNotes: "" },
         fieldState: [],
@@ -184,6 +189,7 @@ test("provider request contains only bounded text, draft state, and server-selec
   assert.equal(request.operation, "job_request.interpret");
   assert.equal(request.homeownerText, "The cabinet under my sink is swollen from a leak.");
   assert.equal(request.currentDraft.location.affectedArea, "kitchen");
+  assert.equal(request.currentDraft.location.city, "Cape Coral");
   assert.equal(request.currentDraft.photosAttached, true);
   assert.deepEqual(Object.keys(request.operationContext).sort(), ["capability", "validation"]);
   assert.equal(request.operationContext.capability.mediaAllowed, false);
@@ -214,6 +220,23 @@ test("strict context rejects whole-draft, address, media, and authority addition
   }
   assert.equal(current.providerCalls.length, 0);
   assert.equal(current.repository.calls.length, 0);
+});
+
+test("legacy clients may omit general locality while exact address remains excluded", async () => {
+  const current = fixture();
+  const result = await current.run({
+    body: requestBody({
+      draft: { location: { affectedArea: "front entry" } },
+    }),
+  });
+
+  assert.equal(result.code, "INTELLIGENCE_OPERATION_COMPLETED");
+  assert.deepEqual(current.providerCalls[0].currentDraft.location, {
+    affectedArea: "front entry",
+    city: "",
+    region: "",
+    postalCode: "",
+  });
 });
 
 test("first completion, replay, and conflict execute and finalize exactly once", async () => {
@@ -266,13 +289,96 @@ test("parser accepts strict JSON and constrains proposal provenance and confirma
   assert.equal(parsed.validation.taxonomy, "validated");
 });
 
+test("parser removes follow-ups for fields already present or proposed", () => {
+  const parsed = parseJobRequestInterpretResult(
+    providerResult({
+      draftPatch: {
+        fields: [
+          patch({ path: "location.city", value: "Cape Coral" }),
+          patch({ path: "timing.availability", value: "Available this week" }),
+        ],
+      },
+      clarifications: [
+        { question: "Which city?", fieldPath: "location.city" },
+        { question: "Which area is affected?", fieldPath: "location.affectedArea" },
+        { question: "Is there anything else to add?" },
+      ],
+    }),
+    {
+      semanticInput: {
+        context: {
+          draft: {
+            location: { affectedArea: "front entry" },
+          },
+        },
+      },
+    }
+  );
+
+  assert.deepEqual(parsed.clarifications, [
+    { question: "Is there anything else to add?" },
+  ]);
+});
+
+test("one homeowner message can propose existing request fields without invented commercial facts", async () => {
+  const homeownerText =
+    "I need someone to repair a cracked section of the wall by my front entry in Cape Coral. It is separating and temporarily braced. I would like someone to inspect it and repair or rebuild the damaged area. I am available this week and I can add photos.";
+  const proposedFields = [
+    patch({ path: "job.title", value: "Repair cracked wall by front entry" }),
+    patch({ path: "location.affectedArea", value: "front entry wall" }),
+    patch({ path: "location.city", value: "Cape Coral" }),
+    patch({ path: "timing.availability", value: "Available this week" }),
+    patch({
+      path: "details.additionalNotes",
+      value: "The section is separating and temporarily braced. The homeowner can add photos.",
+    }),
+  ];
+  const current = fixture({
+    complete(request) {
+      assert.equal(request.homeownerText, homeownerText);
+      assert.ok(request.instructions.allowedPatchPaths.includes("location.city"));
+      assert.ok(
+        request.instructions.requirements.includes(
+          "extract_all_homeowner_supplied_facts_before_clarifying"
+        )
+      );
+      return providerResult({
+        summary: "Review the project facts supplied by the homeowner.",
+        draftPatch: { fields: proposedFields },
+        clarifications: [
+          { question: "What region and postal code should be used?", fieldPath: "location.region" },
+        ],
+        warnings: [],
+      });
+    },
+  });
+
+  const result = await current.run({ body: requestBody({ text: homeownerText }) });
+  const serialized = JSON.stringify(result.result);
+
+  assert.equal(result.code, "INTELLIGENCE_OPERATION_COMPLETED");
+  assert.deepEqual(
+    result.result.draftPatch.fields.map(({ path }) => path),
+    [
+      "job.title",
+      "location.affectedArea",
+      "location.city",
+      "timing.availability",
+      "details.additionalNotes",
+    ]
+  );
+  assert.equal(result.result.clarifications.length, 1);
+  assert.equal(/price|materials|diagnosis|permit|payment/i.test(serialized), false);
+  assert.equal(current.providerCalls.length, 1);
+});
+
 test("parser fails closed for malformed, unknown, oversized, or unsafe provider output", () => {
   const invalidResults = [
     "{not-json",
     [],
     providerResult({ summary: "x".repeat(601) }),
     providerResult({ draftPatch: { fields: [patch({ path: "submission.status" })] } }),
-    providerResult({ draftPatch: { fields: Array.from({ length: 14 }, (_, index) => patch({ path: JOB_REQUEST_INTERPRET_PATCH_PATHS[index % 13] })) } }),
+    providerResult({ draftPatch: { fields: Array.from({ length: 17 }, (_, index) => patch({ path: JOB_REQUEST_INTERPRET_PATCH_PATHS[index % 16] })) } }),
     providerResult({ draftPatch: { fields: [patch({ value: "x".repeat(161) })] } }),
     providerResult({ draftPatch: { fields: [patch({ provenance: "user_entered" })] } }),
     providerResult({ draftPatch: { fields: [patch({ confidence: -0.1 })] } }),
