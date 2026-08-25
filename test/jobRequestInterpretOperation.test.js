@@ -213,13 +213,33 @@ test("provider request contains only bounded text, draft state, and server-selec
   assert.equal(request.currentDraft.photosAttached, true);
   assert.deepEqual(Object.keys(request.operationContext).sort(), ["capability", "validation"]);
   assert.equal(request.operationContext.capability.mediaAllowed, false);
+  const canonicalRequestServiceIds =
+    request.operationContext.validation.canonicalRequestServiceIds.split(",");
+  assert.equal(canonicalRequestServiceIds.length, 246);
+  assert.equal(
+    canonicalRequestServiceIds.includes("structural_repairs"),
+    true
+  );
+  assert.equal(
+    canonicalRequestServiceIds.includes("drywall_repair"),
+    true
+  );
+  assert.deepEqual(request.instructions.serviceRecommendation, {
+    targetPath: "service.specialty",
+    canonicalValuesFrom:
+      "operationContext.validation.canonicalRequestServiceIds",
+    preserveExistingHomeownerSelection: true,
+    requiresConfirmation: true,
+    ambiguityBehavior: "clarify_without_selecting",
+  });
   for (const prohibited of [
     "localDraftId", "serviceAddress", "unitNumber", "accessNotes", "previewUrl",
     "file", "submission", "postId", "relationshipId", "conversationId", "payment",
-    "authorization", "localStorage", "providerName", "model", "memory",
+    "authorization", "localStorage", "providerName", "memory",
   ]) {
     assert.equal(serialized.includes(prohibited), false, prohibited);
   }
+  assert.equal(serialized.includes('"model"'), false, "model metadata");
 });
 
 test("strict context rejects whole-draft, address, media, and authority additions before reservation", async () => {
@@ -345,6 +365,8 @@ test("one homeowner message can propose existing request fields without invented
     "I need someone to repair a cracked section of the wall by my front entry in Cape Coral. It is separating and temporarily braced. I would like someone to inspect it and repair or rebuild the damaged area. I am available this week and I can add photos.";
   const proposedFields = [
     patch({ path: "job.title", value: "Repair cracked wall by front entry" }),
+    patch({ path: "job.description", value: homeownerText }),
+    patch({ path: "service.specialty", value: "structural_repairs" }),
     patch({ path: "location.affectedArea", value: "front entry wall" }),
     patch({ path: "location.city", value: "Cape Coral" }),
     patch({ path: "timing.availability", value: "Available this week" }),
@@ -388,6 +410,8 @@ test("one homeowner message can propose existing request fields without invented
     result.result.draftPatch.fields.map(({ path }) => path),
     [
       "job.title",
+      "job.description",
+      "service.specialty",
       "location.affectedArea",
       "location.city",
       "timing.availability",
@@ -395,6 +419,19 @@ test("one homeowner message can propose existing request fields without invented
     ]
   );
   assert.equal(result.result.clarifications.length, 1);
+  assert.deepEqual(
+    result.result.draftPatch.fields.find(
+      ({ path }) => path === "service.specialty"
+    ),
+    {
+      ...proposedFields[2],
+      value: "structural_repairs",
+      taxonomy: {
+        validated: true,
+        vocabulary: "request_service",
+      },
+    }
+  );
   assert.equal(/price|materials|diagnosis|permit|payment/i.test(serialized), false);
   assert.equal(current.providerCalls.length, 1);
 });
@@ -410,6 +447,7 @@ test("the same Cape Coral intake is authorized for a professional requester with
         draftPatch: {
           fields: [
             patch({ path: "location.affectedArea", value: "front entry wall" }),
+            patch({ path: "service.specialty", value: "structural_repairs" }),
             patch({ path: "location.city", value: "Cape Coral" }),
             patch({ path: "timing.availability", value: "Available this week" }),
           ],
@@ -434,6 +472,7 @@ test("the same Cape Coral intake is authorized for a professional requester with
     result.result.draftPatch.fields.map(({ path, value }) => ({ path, value })),
     [
       { path: "location.affectedArea", value: "front entry wall" },
+      { path: "service.specialty", value: "structural_repairs" },
       { path: "location.city", value: "Cape Coral" },
       { path: "timing.availability", value: "Available this week" },
     ]
@@ -443,6 +482,47 @@ test("the same Cape Coral intake is authorized for a professional requester with
   const [record] = current.repository.records.values();
   assert.equal(record.actor_user_id, 92);
   assert.equal(record.authority_scope, "user:92");
+});
+
+test("ambiguous service descriptions produce a bounded clarification without selecting taxonomy", async () => {
+  const current = fixture({
+    complete(request) {
+      assert.equal(
+        request.instructions.serviceRecommendation.ambiguityBehavior,
+        "clarify_without_selecting"
+      );
+      return providerResult({
+        summary: "More detail is needed to recommend one service.",
+        draftPatch: {
+          fields: [patch({ path: "job.title", value: "Inspect reported problem" })],
+        },
+        clarifications: [
+          {
+            question: "Is the problem with plumbing, electrical service, or the wall itself?",
+            fieldPath: "service.specialty",
+          },
+        ],
+        warnings: [],
+      });
+    },
+  });
+
+  const result = await current.run({
+    body: requestBody({ text: "Something near the wall is not working." }),
+  });
+
+  assert.equal(result.code, "INTELLIGENCE_OPERATION_COMPLETED");
+  assert.equal(
+    result.result.draftPatch.fields.some(({ path }) => path.startsWith("service.")),
+    false
+  );
+  assert.deepEqual(result.result.clarifications, [
+    {
+      question: "Is the problem with plumbing, electrical service, or the wall itself?",
+      fieldPath: "service.specialty",
+    },
+  ]);
+  assert.equal(current.providerCalls.length, 1);
 });
 
 test("parser fails closed for malformed, unknown, oversized, or unsafe provider output", () => {

@@ -289,6 +289,14 @@ test("professional Request Help uses server-derived REQUEST_SERVICE authority th
             draftPatch: {
               fields: [
                 {
+                  path: "service.specialty",
+                  value: "structural_repairs",
+                  provenance: "assistant_inferred",
+                  confidence: 0.9,
+                  uncertainty: "approximate",
+                  requiresConfirmation: true,
+                },
+                {
                   path: "location.city",
                   value: "Cape Coral",
                   provenance: "assistant_suggested",
@@ -359,12 +367,19 @@ test("professional Request Help uses server-derived REQUEST_SERVICE authority th
   assert.deepEqual(
     res.body.result.draftPatch.fields.map(({ path, value }) => ({ path, value })),
     [
+      { path: "service.specialty", value: "structural_repairs" },
       { path: "location.city", value: "Cape Coral" },
       { path: "timing.availability", value: "Available this week" },
     ]
   );
   assert.equal(providerCalls.length, 1);
   assert.equal(providerCalls[0].homeownerText, homeownerText);
+  assert.equal(
+    providerCalls[0].operationContext.validation.canonicalRequestServiceIds.includes(
+      "structural_repairs"
+    ),
+    true
+  );
   assert.equal(professional.account_type, "professional");
   assert.equal(authorityCalls.length, 2);
   assert.match(authorityCalls[0].text, /intelligence_gateway:actor_account_type/);

@@ -1,6 +1,7 @@
 "use strict";
 
 const {
+  REQUEST_SERVICE_IDS,
   SUPPORTED_REQUEST_DOMAINS,
   getRequestServiceDomain,
   isSupportedRequestService,
@@ -88,6 +89,9 @@ const MAX_WARNINGS = 5;
 const MAX_QUESTION_LENGTH = 300;
 const MAX_WARNING_LENGTH = 300;
 const WARNING_CODE_PATTERN = /^[a-z][a-z0-9_]{0,79}$/;
+const CANONICAL_REQUEST_SERVICE_IDS = Object.freeze(
+  [...REQUEST_SERVICE_IDS].sort()
+);
 
 function operationError(message, code) {
   return Object.assign(new Error(message), { code });
@@ -276,7 +280,17 @@ function buildJobRequestInterpretProviderRequest({ semanticInput, engineContext 
         "do_not_ask_for_information_already_supplied_or_present",
         "do_not_infer_unsupplied_location_details",
         "do_not_invent_price_diagnosis_repair_method_or_materials",
+        "when_one_canonical_service_is_a_reasonable_match_propose_service.specialty",
+        "when_multiple_canonical_services_are_plausible_ask_one_service.specialty_clarification",
       ],
+      serviceRecommendation: {
+        targetPath: "service.specialty",
+        canonicalValuesFrom:
+          "operationContext.validation.canonicalRequestServiceIds",
+        preserveExistingHomeownerSelection: true,
+        requiresConfirmation: true,
+        ambiguityBehavior: "clarify_without_selecting",
+      },
       prohibitedActions: [
         "submit_job_request",
         "select_professional",
@@ -526,6 +540,7 @@ const jobRequestInterpretEngines = Object.freeze([
       return {
         schemaVersion: 1,
         taxonomy: "request_service",
+        canonicalRequestServiceIds: CANONICAL_REQUEST_SERVICE_IDS.join(","),
         patchWhitelistEnforced: true,
       };
     },

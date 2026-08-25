@@ -321,6 +321,9 @@ test("Job Request provider instructions use the exact governed parser vocabulary
   const instructions = JSON.parse(calls[0].options.body).instructions;
   assert.match(instructions, /assistant_suggested or assistant_inferred/);
   assert.match(instructions, /assistant_suggested or approximate or uncertain/);
+  assert.match(instructions, /only service\.specialty/);
+  assert.match(instructions, /canonicalRequestServiceIds/);
+  assert.match(instructions, /ask one concise clarification/);
   assert.doesNotMatch(instructions, /AI_SUGGESTED or INFERRED/);
   assert.doesNotMatch(instructions, /KNOWN or UNCERTAIN or NEEDS_CLARIFICATION/);
 });
