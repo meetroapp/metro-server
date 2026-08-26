@@ -132,6 +132,11 @@ test(
         identities,
         `${suffix}-negotiated`
       );
+      const reasonedFixture = await createVisitLifecycleFixture(
+        pool,
+        identities,
+        `${suffix}-reasoned`
+      );
 
       const grants = await pool.query(
         `SELECT participants.user_id, grants.capability
@@ -357,6 +362,21 @@ test(
         proposal(negotiatedFixture),
         randomUUID()
       );
+      const missingLegacyReason = await command(
+        requestVisitChange,
+        pool,
+        identities.homeownerId,
+        {
+          jobId: negotiatedFixture.jobId,
+          visitId: negotiatedProposed.visit.id,
+          expectedVersion: 1,
+          reason: null,
+        },
+        randomUUID()
+      );
+      assert.equal(missingLegacyReason.code, "INVALID_VISIT_CHANGE_REQUEST");
+      assert.equal(negotiatedProposed.visit.currentVersion, 1);
+
       const alternateKey = randomUUID();
       const alternate = await command(
         requestVisitChange,
@@ -366,7 +386,7 @@ test(
           jobId: negotiatedFixture.jobId,
           visitId: negotiatedProposed.visit.id,
           expectedVersion: 1,
-          reason: "Please use the alternate customer-proposed time.",
+          reason: null,
           scheduledStartAt: "2026-09-03T17:00:00.000Z",
           scheduledEndAt: "2026-09-03T18:00:00.000Z",
           timeZone: "America/New_York",
@@ -386,7 +406,7 @@ test(
           jobId: negotiatedFixture.jobId,
           visitId: negotiatedProposed.visit.id,
           expectedVersion: 1,
-          reason: "Please use the alternate customer-proposed time.",
+          reason: null,
           scheduledStartAt: "2026-09-03T17:00:00.000Z",
           scheduledEndAt: "2026-09-03T18:00:00.000Z",
           timeZone: "America/New_York",
@@ -396,6 +416,45 @@ test(
       );
       assert.equal(alternateReplay.replayed, true);
       assert.equal(alternateReplay.visit.currentVersion, 2);
+
+      const alternateEvidence = await pool.query(
+        `SELECT versions.state, versions.recorded_by_participant_id,
+           events.event_type, events.visit_version,
+           events.previous_visit_version, events.reason,
+           events.recorded_by_participant_id AS event_participant_id
+         FROM canonical_visit_versions versions
+         INNER JOIN canonical_visit_events events
+           ON events.visit_id = versions.visit_id
+          AND events.visit_version = versions.version
+          AND events.event_type = 'VISIT_SCHEDULE_PROPOSED'
+         WHERE versions.visit_id = $1 AND versions.version = 2`,
+        [negotiatedProposed.visit.id]
+      );
+      assert.deepEqual(alternateEvidence.rows, [{
+        state: "PROPOSED",
+        recorded_by_participant_id: negotiatedFixture.homeownerParticipantId,
+        event_type: "VISIT_SCHEDULE_PROPOSED",
+        visit_version: 2,
+        previous_visit_version: 1,
+        reason: null,
+        event_participant_id: negotiatedFixture.homeownerParticipantId,
+      }]);
+
+      const customerCannotSelfConfirm = await command(
+        confirmVisit,
+        pool,
+        identities.homeownerId,
+        {
+          jobId: negotiatedFixture.jobId,
+          visitId: negotiatedProposed.visit.id,
+          expectedVersion: 2,
+        },
+        randomUUID()
+      );
+      assert.equal(
+        customerCannotSelfConfirm.code,
+        "VISIT_OPPOSITE_PARTY_CONFIRMATION_REQUIRED"
+      );
 
       const staleAlternate = await command(
         requestVisitChange,
@@ -534,6 +593,85 @@ test(
         visits: 1,
         visit_versions: 5,
         visit_events: 5,
+        evaluation_links: 0,
+        evaluations: 0,
+        quotes: 0,
+        invoices: 0,
+      });
+
+      const reasonedProposed = await command(
+        proposeVisit,
+        pool,
+        identities.professionalId,
+        proposal(reasonedFixture),
+        randomUUID()
+      );
+      const overlongNote = await command(
+        requestVisitChange,
+        pool,
+        identities.homeownerId,
+        {
+          jobId: reasonedFixture.jobId,
+          visitId: reasonedProposed.visit.id,
+          expectedVersion: 1,
+          reason: "x".repeat(2001),
+          scheduledStartAt: "2026-09-06T14:00:00.000Z",
+          scheduledEndAt: "2026-09-06T15:00:00.000Z",
+          timeZone: "America/New_York",
+          locationMode: "JOB_SERVICE_LOCATION",
+        },
+        randomUUID()
+      );
+      assert.equal(overlongNote.code, "INVALID_VISIT_CHANGE_REQUEST");
+
+      const reasonedAlternate = await command(
+        requestVisitChange,
+        pool,
+        identities.homeownerId,
+        {
+          jobId: reasonedFixture.jobId,
+          visitId: reasonedProposed.visit.id,
+          expectedVersion: 1,
+          reason: "  Please coordinate arrival at the front entrance.  ",
+          scheduledStartAt: "2026-09-06T14:00:00.000Z",
+          scheduledEndAt: "2026-09-06T15:00:00.000Z",
+          timeZone: "America/New_York",
+          locationMode: "JOB_SERVICE_LOCATION",
+        },
+        randomUUID()
+      );
+      assert.equal(reasonedAlternate.code, "VISIT_SCHEDULE_PROPOSED");
+      assert.equal(reasonedAlternate.visit.currentVersion, 2);
+      const reasonedEvent = await pool.query(
+        `SELECT reason FROM canonical_visit_events
+         WHERE visit_id = $1
+           AND visit_version = 2
+           AND event_type = 'VISIT_SCHEDULE_PROPOSED'`,
+        [reasonedProposed.visit.id]
+      );
+      assert.deepEqual(reasonedEvent.rows, [{
+        reason: "Please coordinate arrival at the front entrance.",
+      }]);
+
+      const legacyReasonOnly = await command(
+        requestVisitChange,
+        pool,
+        identities.homeownerId,
+        {
+          jobId: reasonedFixture.jobId,
+          visitId: reasonedProposed.visit.id,
+          expectedVersion: 2,
+          reason: "Please call before arriving.",
+        },
+        randomUUID()
+      );
+      assert.equal(legacyReasonOnly.code, "VISIT_CHANGE_REQUESTED");
+      assert.equal(legacyReasonOnly.visit.currentVersion, 2);
+      assert.equal(legacyReasonOnly.event.reason, "Please call before arriving.");
+      assert.deepEqual(await lifecycleCounts(pool, reasonedFixture.jobId), {
+        visits: 1,
+        visit_versions: 2,
+        visit_events: 3,
         evaluation_links: 0,
         evaluations: 0,
         quotes: 0,

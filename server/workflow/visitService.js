@@ -1701,12 +1701,15 @@ async function requestVisitChange(input = {}) {
     "INVALID_VISIT_CHANGE_REQUEST"
   );
   if (command.error) return command.error;
-  const reason = boundedText(input.reason, 2000);
-  if (!reason) {
+  const reasonIsEmpty =
+    input.reason == null ||
+    (typeof input.reason === "string" && input.reason.trim().length === 0);
+  const reason = reasonIsEmpty ? null : boundedText(input.reason, 2000);
+  if (!reasonIsEmpty && !reason) {
     return failure(
       400,
       "INVALID_VISIT_CHANGE_REQUEST",
-      "A bounded Visit change reason is required."
+      "The Visit change reason is invalid."
     );
   }
   const hasSchedule = [
@@ -1744,6 +1747,13 @@ async function requestVisitChange(input = {}) {
       resultCode: "VISIT_SCHEDULE_PROPOSED",
       requiredRole: "CUSTOMER",
     });
+  }
+  if (!reason) {
+    return failure(
+      400,
+      "INVALID_VISIT_CHANGE_REQUEST",
+      "A bounded Visit change reason is required."
+    );
   }
   const logger = safeLogger(input.logger);
   return runTransaction(input.pool, async (client) => {
