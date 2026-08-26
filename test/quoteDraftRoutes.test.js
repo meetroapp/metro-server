@@ -34,6 +34,7 @@ test("Quote routes register bounded Draft, issue, customer decision, and lineage
   });
   assert.deepEqual(routes, [
     ["POST", "/jobs/:jobId/quotes"],
+    ["GET", "/business-document-drafts/:draftId/quote-review"],
     ["POST", "/business-document-drafts/:draftId/canonical-quote"],
     ["GET", "/jobs/:jobId/quotes"],
     ["GET", "/quotes/:quoteId"],
@@ -52,6 +53,7 @@ test("handlers forward only governed Draft inputs and idempotency", async () => 
   const calls = [];
   const result = { ok: true, status: 200, code: "OK", quote: { id: "quote" } };
   const service = {
+    async getBusinessDocumentDraftQuoteReview(input) { calls.push(["review", input]); return { ...result, review: { documentId: "draft" } }; },
     async importBusinessDocumentDraftQuote(input) { calls.push(["import", input]); return { ...result, status: 201 }; },
     async createDraftQuote(input) { calls.push(["create", input]); return { ...result, status: 201 }; },
     async listDraftQuotesByJob(input) { calls.push(["list", input]); return { ...result, quotes: [] }; },
@@ -72,6 +74,7 @@ test("handlers forward only governed Draft inputs and idempotency", async () => 
   const req = {
     user: { id: 7 },
     params: { jobId: "job", quoteId: "quote", scopeItemId: "scope", draftId: "draft" },
+    query: { version: "3" },
     headers: { "idempotency-key": "key" },
     body: {
       currency: "USD",
@@ -100,6 +103,7 @@ test("handlers forward only governed Draft inputs and idempotency", async () => 
     "declineIssuedQuote",
     "createDerivedDraftQuote",
     "importBusinessDocumentDraftQuote",
+    "getBusinessDocumentDraftQuoteReview",
   ]) {
     const res = response();
     await handlers[name](req, res);
@@ -122,6 +126,34 @@ test("handlers forward only governed Draft inputs and idempotency", async () => 
   assert.equal(calls[10][1].draftId, "draft");
   assert.equal(calls[10][1].expectedDocumentVersion, 3);
   assert.equal(calls[10][1].totalMinor, undefined);
+  assert.equal(calls[11][0], "review");
+  assert.equal(calls[11][1].expectedDocumentVersion, "3");
+});
+
+test("Working Quote review identity is private and no-store", async () => {
+  const handlers = createQuoteDraftHandlers({
+    getPool: () => "pool",
+    sendPublicDatabaseError() {},
+    service: {
+      async getBusinessDocumentDraftQuoteReview() {
+        return {
+          ok: true,
+          status: 200,
+          code: "BUSINESS_DOCUMENT_QUOTE_REVIEW_LOADED",
+          review: { documentId: "draft" },
+        };
+      },
+    },
+  });
+  const res = response();
+  await handlers.getBusinessDocumentDraftQuoteReview({
+    user: { id: 7 },
+    params: { draftId: "draft" },
+    query: { version: "3" },
+  }, res);
+  assert.equal(res.headers["Cache-Control"], "private, no-store");
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.payload.code, "BUSINESS_DOCUMENT_QUOTE_REVIEW_LOADED");
 });
 
 test("customer Quote detail is private and no-store", async () => {

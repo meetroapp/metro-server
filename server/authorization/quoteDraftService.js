@@ -1798,6 +1798,191 @@ async function loadOwnedBusinessDocumentQuoteMapping(client, draftId, actorUserI
   return result.rows[0] || null;
 }
 
+async function loadBusinessDocumentQuoteReviewIdentity(
+  client,
+  draftId,
+  actorUserId
+) {
+  const result = await client.query(
+    `/* quote_business_document:load_review_identity */
+     SELECT drafts.id AS document_id, drafts.version AS document_version,
+       drafts.job_id, jobs.job_request_id,
+       jobs.source_request_relationship_id AS relationship_id,
+       jobs.lifecycle_contract_version,
+       posts.title AS project_title,
+       relationships.status AS relationship_status,
+       relationships.professional_user_id AS selected_professional_user_id,
+       customers.username AS customer_name,
+       participants.id AS actor_participant_id,
+       EXISTS (
+         SELECT 1
+         FROM participant_role_assignments roles
+         LEFT JOIN participant_role_revocations revocations
+           ON revocations.role_assignment_id = roles.id
+         WHERE roles.participant_id = participants.id
+           AND roles.job_id = jobs.id
+           AND roles.role = 'PRIMARY_PROFESSIONAL'
+           AND roles.valid_from <= CURRENT_TIMESTAMP
+           AND (roles.valid_until IS NULL OR roles.valid_until > CURRENT_TIMESTAMP)
+           AND revocations.id IS NULL
+       ) AS actor_is_primary_professional,
+       EXISTS (
+         SELECT 1
+         FROM lifecycle_authority_grants grants
+         LEFT JOIN lifecycle_authority_grant_revocations revocations
+           ON revocations.authority_grant_id = grants.id
+         WHERE grants.grantee_participant_id = participants.id
+           AND grants.job_id = jobs.id
+           AND grants.scope_type = 'job'
+           AND grants.scope_job_id = jobs.id
+           AND grants.scope_concern_id IS NULL
+           AND grants.capability = 'participant.read'
+           AND grants.valid_from <= CURRENT_TIMESTAMP
+           AND (grants.valid_until IS NULL OR grants.valid_until > CURRENT_TIMESTAMP)
+           AND revocations.id IS NULL
+       ) AS actor_can_read_participant
+     FROM business_document_working_drafts drafts
+     INNER JOIN contractor_profiles profiles
+       ON profiles.id = drafts.contractor_profile_id
+       AND profiles.user_id = $2
+     INNER JOIN jobs
+       ON jobs.id = drafts.job_id
+     INNER JOIN posts
+       ON posts.id = jobs.job_request_id
+       AND posts.lifecycle_contract_version = 2
+       AND posts.cancelled_at IS NULL
+     INNER JOIN request_relationships relationships
+       ON relationships.id = jobs.source_request_relationship_id
+       AND relationships.post_id = jobs.job_request_id
+       AND relationships.emergency_request_id IS NULL
+     INNER JOIN request_selections selections
+       ON selections.id = jobs.source_request_selection_id
+       AND selections.request_relationship_id = relationships.id
+       AND selections.post_id = jobs.job_request_id
+       AND selections.professional_user_id = $2
+       AND selections.ended_at IS NULL
+     INNER JOIN relationship_participants participants
+       ON participants.job_id = jobs.id
+       AND participants.request_relationship_id = relationships.id
+       AND participants.user_id = $2
+     INNER JOIN users customers
+       ON customers.id = relationships.homeowner_id
+       AND customers.id = posts.user_id
+     WHERE drafts.id = $1
+       AND drafts.document_type = 'QUOTE'
+       AND drafts.draft_status = 'WORKING_DRAFT'
+     LIMIT 1`,
+    [draftId, actorUserId]
+  );
+  return result.rows[0] || null;
+}
+
+function businessDocumentQuoteReviewProjection(row) {
+  const customerName = boundedText(row?.customer_name, 200);
+  const projectTitle = boundedText(row?.project_title, 500);
+  if (!customerName || !projectTitle) return null;
+  return Object.freeze({
+    documentId: normalizedUuid(row.document_id),
+    documentVersion: positiveInteger(row.document_version),
+    jobId: normalizedUuid(row.job_id),
+    requestId: positiveInteger(row.job_request_id),
+    relationshipId: positiveInteger(row.relationship_id),
+    customerName,
+    projectTitle,
+  });
+}
+
+async function getBusinessDocumentDraftQuoteReview(input = {}) {
+  const validated = validateRead(input, ["draftId", "expectedDocumentVersion"]);
+  if (validated.error) return validated.error;
+  const draftId = normalizedUuid(input.draftId);
+  const expectedDocumentVersion = positiveInteger(input.expectedDocumentVersion);
+  if (!draftId || !expectedDocumentVersion) {
+    return failure(
+      400,
+      "INVALID_BUSINESS_DOCUMENT_QUOTE_REVIEW",
+      "The working Quote review request is invalid."
+    );
+  }
+
+  const client = await databaseClient(input.pool);
+  let started = false;
+  try {
+    await client.query("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    started = true;
+    const row = await loadBusinessDocumentQuoteReviewIdentity(
+      client,
+      draftId,
+      validated.id
+    );
+    if (!row) {
+      await client.query("COMMIT");
+      started = false;
+      return failure(
+        404,
+        "BUSINESS_DOCUMENT_QUOTE_REVIEW_UNAVAILABLE",
+        "The working Quote review is unavailable."
+      );
+    }
+    if (Number(row.document_version) !== expectedDocumentVersion) {
+      await client.query("COMMIT");
+      started = false;
+      return failure(
+        409,
+        "STALE_BUSINESS_DOCUMENT_VERSION",
+        "The working Quote version is stale."
+      );
+    }
+    if (
+      Number(row.lifecycle_contract_version) !== 2 ||
+      row.relationship_status !== "active" ||
+      Number(row.selected_professional_user_id) !== Number(validated.id) ||
+      row.actor_is_primary_professional !== true ||
+      row.actor_can_read_participant !== true
+    ) {
+      await client.query("COMMIT");
+      started = false;
+      return failure(
+        403,
+        "BUSINESS_DOCUMENT_QUOTE_REVIEW_AUTHORITY_REQUIRED",
+        "Working Quote review authority is required."
+      );
+    }
+    const review = businessDocumentQuoteReviewProjection(row);
+    if (
+      !review?.documentId ||
+      !review?.documentVersion ||
+      !review?.jobId ||
+      !review?.requestId ||
+      !review?.relationshipId
+    ) {
+      await client.query("COMMIT");
+      started = false;
+      return failure(
+        409,
+        "BUSINESS_DOCUMENT_QUOTE_REVIEW_IDENTITY_INVALID",
+        "The working Quote customer or project identity is unavailable."
+      );
+    }
+    await client.query("COMMIT");
+    started = false;
+    return {
+      ok: true,
+      success: true,
+      status: 200,
+      code: "BUSINESS_DOCUMENT_QUOTE_REVIEW_LOADED",
+      review,
+    };
+  } catch (error) {
+    if (started) await rollback(client);
+    throw error;
+  } finally {
+    if (client !== input.pool && typeof client.release === "function") {
+      client.release();
+    }
+  }
+}
+
 function validateBusinessDocumentQuoteSource(source) {
   if (!source) {
     return failure(404, "BUSINESS_DOCUMENT_QUOTE_UNAVAILABLE", "The working Quote is unavailable.");
@@ -3293,6 +3478,7 @@ module.exports = {
   createDraftQuote,
   createDerivedDraftQuote,
   declineIssuedQuote,
+  getBusinessDocumentDraftQuoteReview,
   getCustomerIssuedQuote,
   getDraftQuote,
   importBusinessDocumentDraftQuote,
@@ -3309,8 +3495,10 @@ module.exports = {
     integrityHash,
     businessDocumentSourceFingerprint,
     buildWorkingQuoteTerms,
+    businessDocumentQuoteReviewProjection,
     loadQuoteContext,
     loadQuoteProjection,
+    loadBusinessDocumentQuoteReviewIdentity,
     persistedSnapshotIsValid,
     normalizeCustomerTermsSnapshot,
     quoteIntegrityContract,

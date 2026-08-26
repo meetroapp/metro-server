@@ -14,6 +14,7 @@ function sendQuoteDraftResult(res, result) {
   for (const field of [
     "quote",
     "quotes",
+    "review",
     "scopeItem",
     "removedScopeItemId",
     "customerDecision",
@@ -54,6 +55,16 @@ function createQuoteDraftHandlers({
   }
 
   return {
+    getBusinessDocumentDraftQuoteReview: handle(
+      "get_business_document_draft_quote_review",
+      (req) => service.getBusinessDocumentDraftQuoteReview({
+        pool: getPool(req),
+        authenticatedActor: req.user,
+        draftId: req.params.draftId,
+        expectedDocumentVersion: req.query?.version,
+      }),
+      { privateNoStore: true }
+    ),
     importBusinessDocumentDraftQuote: handle(
       "import_business_document_draft_quote",
       (req) => service.importBusinessDocumentDraftQuote({
@@ -175,6 +186,11 @@ function registerQuoteDraftRoutes({
     service,
   });
   app.post("/jobs/:jobId/quotes", authMiddleware, handlers.createDraftQuote);
+  app.get(
+    "/business-document-drafts/:draftId/quote-review",
+    authMiddleware,
+    handlers.getBusinessDocumentDraftQuoteReview
+  );
   app.post(
     "/business-document-drafts/:draftId/canonical-quote",
     authMiddleware,
