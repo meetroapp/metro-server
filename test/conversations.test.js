@@ -450,6 +450,17 @@ test("conversation detail serializer exposes canonical participant-scoped data",
 
   const serialized =
     serializeConversationDetail(row, 7);
+  const jobBound = serializeConversationDetail(
+    {
+      ...row,
+      job_id: "11111111-1111-4111-8111-111111111111",
+    },
+    7
+  );
+  assert.equal(
+    jobBound.relationship.jobId,
+    "11111111-1111-4111-8111-111111111111"
+  );
 
   for (const internalField of [
     "homeowner_id",

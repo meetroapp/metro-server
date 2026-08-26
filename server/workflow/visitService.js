@@ -1188,6 +1188,7 @@ async function proposeVisit(input = {}) {
     "evaluationId",
     "workstreamIds",
     "approvedQuoteDecisionId",
+    "reason",
   ]);
   if (validated.error) return validated.error;
   const jobId = normalizedUuid(input.jobId);
@@ -1200,13 +1201,17 @@ async function proposeVisit(input = {}) {
     ? null
     : normalizedUuid(input.approvedQuoteDecisionId);
   const workstreamIds = normalizedWorkstreamIds(input.workstreamIds);
+  const reason = input.reason == null
+    ? null
+    : boundedText(input.reason, 2000, { optional: true });
   if (
     !jobId ||
     !purpose ||
     !schedule ||
     (input.evaluationId != null && !evaluationId) ||
     (input.approvedQuoteDecisionId != null && !approvedQuoteDecisionId) ||
-    workstreamIds === null
+    workstreamIds === null ||
+    (input.reason != null && !reason)
   ) {
     return failure(400, "INVALID_VISIT_PROPOSAL", "The Visit proposal is invalid.");
   }
@@ -1268,6 +1273,7 @@ async function proposeVisit(input = {}) {
         evaluationId,
         workstreamIds,
         approvedQuoteDecisionId,
+        reason,
       }),
     });
     if (idempotency.error) return { abort: idempotency.error };
@@ -1314,7 +1320,7 @@ async function proposeVisit(input = {}) {
       jobId,
       eventType: "VISIT_PROPOSED",
       visitState: "PROPOSED",
-      reason: null,
+      reason,
       participantId,
       commandId: idempotency.reservation.id,
     });

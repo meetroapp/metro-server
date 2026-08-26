@@ -65,6 +65,7 @@ test("handlers forward only governed Visit fields from authenticated boundaries"
     params: { jobId: "job", visitId: "visit" },
     headers: { "idempotency-key": "visit-key" },
     body: {
+      purpose: "EVALUATION",
       expectedVersion: 2,
       scheduledStartAt: "2026-08-20T13:00:00.000Z",
       scheduledEndAt: "2026-08-20T14:00:00.000Z",
@@ -75,10 +76,29 @@ test("handlers forward only governed Visit fields from authenticated boundaries"
       actorParticipantId: "browser-owned",
     },
   };
+  await handlers.proposeVisit(base, response());
   await handlers.rescheduleVisit(base, response());
   await handlers.requestVisitChange(base, response());
   await handlers.completeVisit(base, response());
   assert.deepEqual(calls, [
+    {
+      operation: "proposeVisit",
+      input: {
+        pool: "pool",
+        authenticatedActor: { id: 9 },
+        jobId: "job",
+        purpose: "EVALUATION",
+        scheduledStartAt: "2026-08-20T13:00:00.000Z",
+        scheduledEndAt: "2026-08-20T14:00:00.000Z",
+        timeZone: "America/New_York",
+        locationMode: "REMOTE",
+        evaluationId: undefined,
+        workstreamIds: undefined,
+        approvedQuoteDecisionId: undefined,
+        reason: "A governed reason",
+        idempotencyKey: "visit-key",
+      },
+    },
     {
       operation: "rescheduleVisit",
       input: {

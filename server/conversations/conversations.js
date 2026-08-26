@@ -557,6 +557,7 @@ function serializeConversationDetail(row = {}, viewerUserId) {
       : {
           id: row.relationship_id,
           requestId: row.post_id,
+          ...(row.job_id ? { jobId: row.job_id } : {}),
           title: row.request_title || "",
         };
 

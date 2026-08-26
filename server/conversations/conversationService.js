@@ -175,6 +175,7 @@ async function ensureConversation({
 
 const SOURCE_PROJECTION = `
   request_relationships.post_id,
+  jobs.id AS job_id,
   request_relationships.emergency_request_id,
   request_relationships.status AS source_relationship_status,
   CASE
@@ -207,6 +208,10 @@ const SOURCE_PROJECTION = `
 const SOURCE_JOINS = `
   LEFT JOIN posts
     ON request_relationships.post_id = posts.id
+  LEFT JOIN jobs
+    ON jobs.source_request_relationship_id = request_relationships.id
+    AND jobs.job_request_id = request_relationships.post_id
+    AND jobs.lifecycle_contract_version = 2
   LEFT JOIN emergency_requests
     ON request_relationships.emergency_request_id = emergency_requests.id
 `;

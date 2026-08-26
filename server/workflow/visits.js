@@ -86,6 +86,7 @@ function createVisitHandlers({
       evaluationId: req.body?.evaluationId,
       workstreamIds: req.body?.workstreamIds,
       approvedQuoteDecisionId: req.body?.approvedQuoteDecisionId,
+      reason: req.body?.reason,
       idempotencyKey: req.headers?.["idempotency-key"],
     })),
     confirmVisit: handle("confirm_visit", (req) =>
