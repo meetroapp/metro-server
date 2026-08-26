@@ -95,6 +95,10 @@ function createVisitHandlers({
       service.requestVisitChange({
         ...versionCommand(req),
         reason: req.body?.reason,
+        scheduledStartAt: req.body?.scheduledStartAt,
+        scheduledEndAt: req.body?.scheduledEndAt,
+        timeZone: req.body?.timeZone,
+        locationMode: req.body?.locationMode,
       })
     ),
     rescheduleVisit: handle("reschedule_visit", (req) =>

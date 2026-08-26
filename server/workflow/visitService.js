@@ -37,6 +37,7 @@ const VISIT_COMMANDS = Object.freeze({
   RESCHEDULE: "visit.reschedule",
   CANCEL: "visit.cancel",
   COMPLETE: "visit.complete",
+  LINK_EVALUATION: "visit.link_evaluation",
 });
 
 const VISIT_PURPOSES = Object.freeze([
@@ -373,6 +374,25 @@ async function loadJobContext(client, jobId, actorUserId, { lock = false } = {})
           AND revocations.id IS NULL
         ORDER BY grants.capability
       ) AS active_evaluation_visit_capabilities,
+      ARRAY(
+        SELECT grants.capability
+        FROM lifecycle_authority_grants grants
+        LEFT JOIN lifecycle_authority_grant_revocations revocations
+          ON revocations.authority_grant_id = grants.id
+        WHERE grants.grantee_participant_id = participants.id
+          AND grants.job_id = jobs.id
+          AND grants.scope_type = 'evaluation_visit'
+          AND grants.scope_job_id = jobs.id
+          AND grants.scope_concern_id IS NULL
+          AND grants.scope_evaluation_id IS NULL
+          AND grants.scope_approved_quote_decision_id IS NULL
+          AND grants.scope_approved_quote_decision IS NULL
+          AND grants.capability = ANY($3::text[])
+          AND grants.valid_from <= CURRENT_TIMESTAMP
+          AND (grants.valid_until IS NULL OR grants.valid_until > CURRENT_TIMESTAMP)
+          AND revocations.id IS NULL
+        ORDER BY grants.capability
+      ) AS active_job_evaluation_visit_capabilities,
       COALESCE((
         SELECT jsonb_agg(
           jsonb_build_object(
@@ -481,6 +501,7 @@ async function requireAuthority({
   evaluationId = null,
   approvedQuoteDecisionId = null,
   allowJobScope = true,
+  allowEvaluationVisitScope = false,
 }) {
   const authorized = await requireActorRole({
     client,
@@ -499,6 +520,7 @@ async function requireAuthority({
     evaluationId,
     approvedQuoteDecisionId,
     allowJobScope,
+    allowEvaluationVisitScope,
     logger,
   });
   if (!granted) {
@@ -522,6 +544,12 @@ function activeCapabilities(context, row = null) {
       ? []
       : context?.active_job_visit_capabilities || context?.active_visit_capabilities || []
   );
+  if (!row || row.purpose === "EVALUATION") {
+    for (const capability of
+      context?.active_job_evaluation_visit_capabilities || []) {
+      capabilities.add(capability);
+    }
+  }
   if (
     row?.purpose === "EVALUATION" &&
     row.evaluation_id &&
@@ -547,8 +575,9 @@ function visitActions(context, row, now = new Date()) {
   const state = row.state;
   return {
     canConfirm:
-      role === "CUSTOMER" &&
+      (role === "CUSTOMER" || role === "PROFESSIONAL") &&
       state === "PROPOSED" &&
+      row.recorded_by_participant_id !== context?.actor_participant_id &&
       capabilities.has(VISIT_CAPABILITIES.CONFIRM),
     canRequestChange:
       role === "CUSTOMER" &&
@@ -556,7 +585,7 @@ function visitActions(context, row, now = new Date()) {
       capabilities.has(VISIT_CAPABILITIES.CHANGE_REQUEST),
     canReschedule:
       role === "PROFESSIONAL" &&
-      state === "SCHEDULED" &&
+      ACTIVE_VISIT_STATES.has(state) &&
       capabilities.has(VISIT_CAPABILITIES.RESCHEDULE),
     canCancel:
       role === "PROFESSIONAL" &&
@@ -901,6 +930,8 @@ async function authorizeEvaluationRead(client, validated) {
     requiredRole: "EITHER",
     logger: validated.logger,
     evaluationId: validated.evaluationId,
+    allowJobScope: false,
+    allowEvaluationVisitScope: true,
   });
   if (
     authorized.error ||
@@ -1135,7 +1166,7 @@ async function validateProposedSubjects({
   }
   return (
     (purpose === "EVALUATION" &&
-      evaluationId !== null &&
+      evaluationId === null &&
       approvedQuoteDecisionId === null) ||
     (purpose === "APPROVED_WORK" &&
       evaluationId === null &&
@@ -1173,7 +1204,6 @@ async function proposeVisit(input = {}) {
     !jobId ||
     !purpose ||
     !schedule ||
-    (purpose === "EVALUATION" && !evaluationId) ||
     (input.evaluationId != null && !evaluationId) ||
     (input.approvedQuoteDecisionId != null && !approvedQuoteDecisionId) ||
     workstreamIds === null
@@ -1202,7 +1232,8 @@ async function proposeVisit(input = {}) {
       approvedQuoteDecisionId: purpose === "APPROVED_WORK"
         ? approvedQuoteDecisionId
         : null,
-      allowJobScope: purpose !== "APPROVED_WORK",
+      allowJobScope: purpose === "FOLLOW_UP",
+      allowEvaluationVisitScope: purpose === "EVALUATION",
     });
     if (authorized.error) return { abort: authorized.error };
     const participantId = authorized.context.actor_participant_id;
@@ -1287,15 +1318,6 @@ async function proposeVisit(input = {}) {
       participantId,
       commandId: idempotency.reservation.id,
     });
-    if (evaluationId) {
-      await client.query(
-        `INSERT INTO canonical_visit_evaluation_links (
-          visit_id, job_id, evaluation_id,
-          linked_by_participant_id, command_idempotency_id
-         ) VALUES ($1, $2, $3, $4, $5)`,
-        [visitId, jobId, evaluationId, participantId, idempotency.reservation.id]
-      );
-    }
     for (const workstreamId of workstreamIds) {
       await client.query(
         `INSERT INTO canonical_visit_workstream_links (
@@ -1436,6 +1458,7 @@ async function runVersionCommand({
   schedule = null,
   reason = null,
   resultCode,
+  requiredRole,
 }) {
   const logger = safeLogger(input.logger);
   return runTransaction(input.pool, async (client) => {
@@ -1443,9 +1466,7 @@ async function runVersionCommand({
       client,
       actorUserId: validated.actorId,
       jobId,
-      requiredRole: commandName === VISIT_COMMANDS.CONFIRM
-        ? "CUSTOMER"
-        : "PROFESSIONAL",
+      requiredRole,
       logger,
       lock: true,
     });
@@ -1467,7 +1488,8 @@ async function runVersionCommand({
       approvedQuoteDecisionId: current.purpose === "APPROVED_WORK"
         ? current.approved_quote_decision_id
         : null,
-      allowJobScope: current.purpose !== "APPROVED_WORK",
+      allowJobScope: current.purpose === "FOLLOW_UP",
+      allowEvaluationVisitScope: current.purpose === "EVALUATION",
       logger,
     });
     if (!granted) {
@@ -1525,6 +1547,18 @@ async function runVersionCommand({
         ),
       };
     }
+    if (
+      commandName === VISIT_COMMANDS.CONFIRM &&
+      current.recorded_by_participant_id === participantId
+    ) {
+      return {
+        abort: failure(
+          403,
+          "VISIT_OPPOSITE_PARTY_CONFIRMATION_REQUIRED",
+          "A Visit proposal must be confirmed by the opposite canonical party."
+        ),
+      };
+    }
 
     const now = currentInstant(input.clock);
     if (
@@ -1539,7 +1573,7 @@ async function runVersionCommand({
         ),
       };
     }
-    if (commandName === VISIT_COMMANDS.RESCHEDULE) {
+    if (schedule) {
       const priorSchedule = currentSchedule(current);
       if (
         priorSchedule.scheduledStartAt === schedule.scheduledStartAt &&
@@ -1644,13 +1678,20 @@ async function confirmVisit(input = {}) {
     targetState: "SCHEDULED",
     eventType: "VISIT_CONFIRMED",
     resultCode: "VISIT_CONFIRMED",
+    requiredRole: "EITHER",
   });
 }
 
 async function requestVisitChange(input = {}) {
   const command = validatedVersionCommand(
     input,
-    ["reason"],
+    [
+      "reason",
+      "scheduledStartAt",
+      "scheduledEndAt",
+      "timeZone",
+      "locationMode",
+    ],
     "INVALID_VISIT_CHANGE_REQUEST"
   );
   if (command.error) return command.error;
@@ -1661,6 +1702,42 @@ async function requestVisitChange(input = {}) {
       "INVALID_VISIT_CHANGE_REQUEST",
       "A bounded Visit change reason is required."
     );
+  }
+  const hasSchedule = [
+    input.scheduledStartAt,
+    input.scheduledEndAt,
+    input.timeZone,
+    input.locationMode,
+  ].some((value) => value != null);
+  if (hasSchedule) {
+    const schedule = normalizedSchedule(input);
+    if (!schedule) {
+      return failure(
+        400,
+        "INVALID_VISIT_SCHEDULE_PROPOSAL",
+        "The alternate Visit schedule is invalid."
+      );
+    }
+    if (Date.parse(schedule.scheduledStartAt) <= currentInstant(input.clock).getTime()) {
+      return failure(
+        400,
+        "VISIT_START_TIME_NOT_FUTURE",
+        "An alternate Visit schedule must start in the future."
+      );
+    }
+    return runVersionCommand({
+      input,
+      ...command,
+      capability: VISIT_CAPABILITIES.CHANGE_REQUEST,
+      commandName: VISIT_COMMANDS.CHANGE_REQUEST,
+      permittedStates: ACTIVE_VISIT_STATES,
+      targetState: "PROPOSED",
+      eventType: "VISIT_SCHEDULE_PROPOSED",
+      schedule,
+      reason,
+      resultCode: "VISIT_SCHEDULE_PROPOSED",
+      requiredRole: "CUSTOMER",
+    });
   }
   const logger = safeLogger(input.logger);
   return runTransaction(input.pool, async (client) => {
@@ -1692,7 +1769,8 @@ async function requestVisitChange(input = {}) {
       approvedQuoteDecisionId: current.purpose === "APPROVED_WORK"
         ? current.approved_quote_decision_id
         : null,
-      allowJobScope: current.purpose !== "APPROVED_WORK",
+      allowJobScope: current.purpose === "FOLLOW_UP",
+      allowEvaluationVisitScope: current.purpose === "EVALUATION",
       logger,
     });
     if (!granted) {
@@ -1807,12 +1885,13 @@ async function rescheduleVisit(input = {}) {
     ...command,
     capability: VISIT_CAPABILITIES.RESCHEDULE,
     commandName: VISIT_COMMANDS.RESCHEDULE,
-    permittedStates: new Set(["SCHEDULED"]),
-    targetState: "SCHEDULED",
-    eventType: "VISIT_RESCHEDULED",
+    permittedStates: ACTIVE_VISIT_STATES,
+    targetState: "PROPOSED",
+    eventType: "VISIT_SCHEDULE_PROPOSED",
     schedule,
     reason,
-    resultCode: "VISIT_RESCHEDULED",
+    resultCode: "VISIT_SCHEDULE_PROPOSED",
+    requiredRole: "PROFESSIONAL",
   });
 }
 
@@ -1843,6 +1922,7 @@ async function cancelVisit(input = {}) {
     eventType: "VISIT_CANCELLED",
     reason,
     resultCode: "VISIT_CANCELLED",
+    requiredRole: "PROFESSIONAL",
   });
 }
 
@@ -1858,6 +1938,7 @@ async function completeVisit(input = {}) {
     targetState: "COMPLETED",
     eventType: "VISIT_COMPLETED",
     resultCode: "VISIT_COMPLETED",
+    requiredRole: "PROFESSIONAL",
   });
 }
 

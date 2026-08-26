@@ -14,7 +14,7 @@ test("Slice 004 is one additive migration after Workstream foundation", () => {
   const migrations = readdirSync(join(root, "migrations"))
     .filter((name) => /^\d+.*\.sql$/.test(name))
     .sort();
-  assert.equal(migrations.length, 55);
+  assert.equal(migrations.length, 56);
   const index = migrations.indexOf(migrationName);
   assert.equal(migrations[index - 1], "202608100001_create_workstream_activity_foundation.sql");
   assert.equal(migrations[index + 1], "202608100003_create_canonical_quote_scope_foundation.sql");

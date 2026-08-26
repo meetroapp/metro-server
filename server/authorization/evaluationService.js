@@ -423,6 +423,7 @@ function validateOrdinaryCreateInput(input) {
       "pool",
       "authenticatedActor",
       "jobId",
+      "visitId",
       "content",
       "expectedVersion",
       "idempotencyKey",
@@ -433,9 +434,19 @@ function validateOrdinaryCreateInput(input) {
   const actor = validateAuthenticatedActor(input.authenticatedActor);
   if (actor.error) return actor;
   const jobId = normalizedUuid(input.jobId);
+  const visitId = normalizedUuid(input.visitId);
   if (!jobId) {
     return {
       error: failure(400, "INVALID_JOB_ID", "A valid Job ID is required."),
+    };
+  }
+  if (!visitId) {
+    return {
+      error: failure(
+        400,
+        "INVALID_EVALUATION_VISIT_ID",
+        "A completed Evaluation Visit is required."
+      ),
     };
   }
   const idempotency = validateIdempotencyKey(input.idempotencyKey);
@@ -456,6 +467,7 @@ function validateOrdinaryCreateInput(input) {
   return {
     actorId: actor.id,
     jobId,
+    visitId,
     idempotencyKey: idempotency.idempotencyKey,
     content: content.content,
   };
@@ -642,6 +654,170 @@ async function requireOrdinaryEvaluationAuthority({
   return null;
 }
 
+async function loadCompletedEvaluationVisit(
+  client,
+  { jobId, visitId, requireUnlinked = false, evaluationId = null, lock = false }
+) {
+  const result = await client.query(
+    `
+    /* ordinary_evaluation:completed_visit */
+    SELECT
+      visits.id AS visit_id,
+      visits.job_id,
+      visits.purpose,
+      versions.version AS visit_version,
+      versions.state AS visit_state,
+      versions.completed_at,
+      links.evaluation_id
+    FROM canonical_visits visits
+    INNER JOIN LATERAL (
+      SELECT version, state, completed_at
+      FROM canonical_visit_versions
+      WHERE visit_id = visits.id AND job_id = visits.job_id
+      ORDER BY version DESC
+      LIMIT 1
+    ) versions ON TRUE
+    LEFT JOIN canonical_visit_evaluation_links links
+      ON links.visit_id = visits.id
+      AND links.job_id = visits.job_id
+    WHERE visits.id = $1
+      AND visits.job_id = $2
+      AND visits.purpose = 'EVALUATION'
+      AND versions.state = 'COMPLETED'
+      AND versions.completed_at IS NOT NULL
+      AND ($3::boolean = FALSE OR links.visit_id IS NULL)
+      AND ($4::uuid IS NULL OR links.evaluation_id = $4)
+    LIMIT 1
+    ${lock ? "FOR UPDATE OF visits" : ""}
+    `,
+    [visitId, jobId, requireUnlinked === true, evaluationId]
+  );
+  return result.rows[0] || null;
+}
+
+async function reserveVisitEvaluationLinkCommand({
+  client,
+  context,
+  visitId,
+  evaluationId,
+  idempotencyKey,
+}) {
+  const requestFingerprint = fingerprint({
+    command: "visit.link_evaluation",
+    jobId: context.job_id,
+    visitId,
+    evaluationId,
+  });
+  const inserted = await client.query(
+    `
+    INSERT INTO canonical_visit_command_idempotency (
+      id, actor_participant_id, job_id, command_name, command_scope,
+      idempotency_key, request_fingerprint
+    )
+    VALUES ($1, $2, $3, 'visit.link_evaluation', $4, $5, $6)
+    ON CONFLICT (
+      actor_participant_id, command_name, command_scope, idempotency_key
+    )
+    DO NOTHING
+    RETURNING *
+    `,
+    [
+      randomUUID(),
+      context.actor_participant_id,
+      context.job_id,
+      `visit:${visitId}:evaluation-link`,
+      idempotencyKey,
+      requestFingerprint,
+    ]
+  );
+  if (inserted.rows[0]) return { reservation: inserted.rows[0] };
+  const existing = await client.query(
+    `SELECT *
+     FROM canonical_visit_command_idempotency
+     WHERE actor_participant_id = $1
+       AND command_name = 'visit.link_evaluation'
+       AND command_scope = $2
+       AND idempotency_key = $3
+     LIMIT 1
+     FOR UPDATE`,
+    [
+      context.actor_participant_id,
+      `visit:${visitId}:evaluation-link`,
+      idempotencyKey,
+    ]
+  );
+  const reservation = existing.rows[0];
+  if (!reservation || reservation.request_fingerprint !== requestFingerprint) {
+    return {
+      error: failure(
+        409,
+        "VISIT_LINK_IDEMPOTENCY_KEY_CONFLICT",
+        "The Evaluation Visit linkage key was already used differently."
+      ),
+    };
+  }
+  return { reservation, replay: reservation.result_reference || null };
+}
+
+async function completeVisitEvaluationLinkCommand(
+  client,
+  reservationId,
+  { visitId, evaluationId, jobId }
+) {
+  const result = await client.query(
+    `UPDATE canonical_visit_command_idempotency
+     SET result_reference = $2::jsonb, completed_at = CURRENT_TIMESTAMP
+     WHERE id = $1
+       AND result_reference IS NULL
+       AND completed_at IS NULL
+     RETURNING id`,
+    [
+      reservationId,
+      JSON.stringify({
+        visitId,
+        evaluationId,
+        jobId,
+        command: "visit.link_evaluation",
+      }),
+    ]
+  );
+  if (!result.rows[0]) {
+    throw new Error("Evaluation Visit linkage idempotency completion failed.");
+  }
+}
+
+async function requireCompletedEvaluationVisitEvidence({
+  client,
+  jobId,
+  evaluationId,
+}) {
+  const result = await client.query(
+    `
+    /* ordinary_evaluation:completed_visit_evidence */
+    SELECT links.visit_id
+    FROM canonical_visit_evaluation_links links
+    INNER JOIN canonical_visits visits
+      ON visits.id = links.visit_id
+      AND visits.job_id = links.job_id
+      AND visits.purpose = 'EVALUATION'
+    INNER JOIN LATERAL (
+      SELECT state, completed_at
+      FROM canonical_visit_versions
+      WHERE visit_id = visits.id AND job_id = visits.job_id
+      ORDER BY version DESC
+      LIMIT 1
+    ) versions ON TRUE
+    WHERE links.evaluation_id = $1
+      AND links.job_id = $2
+      AND versions.state = 'COMPLETED'
+      AND versions.completed_at IS NOT NULL
+    LIMIT 1
+    `,
+    [evaluationId, jobId]
+  );
+  return result.rows[0] || null;
+}
+
 function parseArray(value) {
   if (Array.isArray(value)) return value;
   if (typeof value !== "string") return [];
@@ -677,6 +853,7 @@ function sourceContextFromRow(row) {
       jobId: row.job_id,
       requestId: Number(row.ordinary_request_id || row.job_request_id),
       relationshipId: Number(row.relationship_id),
+      evaluationVisitId: row.evaluation_visit_id || null,
     };
   }
   return {
@@ -881,7 +1058,7 @@ async function insertEvaluationEvidence({
   return result.rows[0] || null;
 }
 
-function combinedRow({ aggregate, evaluation, version, context }) {
+function combinedRow({ aggregate, evaluation, version, context, visitId = null }) {
   return {
     evaluation_id: aggregate.id,
     current_version: aggregate.current_version,
@@ -892,6 +1069,7 @@ function combinedRow({ aggregate, evaluation, version, context }) {
     job_id: context.job_id || null,
     job_request_id: context.job_request_id || null,
     relationship_id: context.relationship_id,
+    evaluation_visit_id: visitId,
     evaluation_status: evaluation.status,
     evaluation_created_at: evaluation.created_at,
     evaluation_updated_at: evaluation.updated_at,
@@ -912,6 +1090,7 @@ async function loadEvaluation(client, evaluationId, actorUserId, { lock = false 
       a.relationship_id,
       ordinary_subject.job_id,
       ordinary_subject.job_request_id,
+      ordinary_visit_link.visit_id AS evaluation_visit_id,
       actor_participant.id AS actor_participant_id,
       CASE
         WHEN a.source_context_type = 'ordinary_request' THEN COALESCE(
@@ -969,6 +1148,9 @@ async function loadEvaluation(client, evaluationId, actorUserId, { lock = false 
       ON ordinary_subject.evaluation_id = a.id
       AND ordinary_subject.relationship_id = a.relationship_id
       AND ordinary_subject.job_request_id = a.ordinary_request_id
+    LEFT JOIN canonical_visit_evaluation_links AS ordinary_visit_link
+      ON ordinary_visit_link.evaluation_id = ordinary_subject.evaluation_id
+      AND ordinary_visit_link.job_id = ordinary_subject.job_id
     LEFT JOIN jobs AS ordinary_job
       ON ordinary_job.id = ordinary_subject.job_id
       AND ordinary_job.job_request_id = ordinary_subject.job_request_id
@@ -1210,6 +1392,7 @@ async function createOrdinaryJobEvaluation(input = {}) {
       command: EVALUATION_COMMANDS.CREATE,
       expectedVersion: 0,
       jobId: validated.jobId,
+      visitId: validated.visitId,
       content: validated.content,
     });
     const idempotency = await reserveIdempotency({
@@ -1235,6 +1418,22 @@ async function createOrdinaryJobEvaluation(input = {}) {
         evaluationId: idempotency.replay.evaluation?.id || null,
       });
       return { ...idempotency.replay, replayed: true };
+    }
+
+    const completedVisit = await loadCompletedEvaluationVisit(client, {
+      jobId: validated.jobId,
+      visitId: validated.visitId,
+      requireUnlinked: true,
+      lock: true,
+    });
+    if (!completedVisit) {
+      await rollback(client);
+      transactionStarted = false;
+      return failure(
+        409,
+        "COMPLETED_EVALUATION_VISIT_REQUIRED",
+        "A completed, unlinked Evaluation Visit is required before documenting the Evaluation."
+      );
     }
 
     const existing = await client.query(
@@ -1325,6 +1524,43 @@ async function createOrdinaryJobEvaluation(input = {}) {
       throw new Error("Canonical ordinary Evaluation creation failed.");
     }
 
+    const linkCommand = await reserveVisitEvaluationLinkCommand({
+      client,
+      context,
+      visitId: completedVisit.visit_id,
+      evaluationId,
+      idempotencyKey: validated.idempotencyKey,
+    });
+    if (linkCommand.error || linkCommand.replay) {
+      throw new Error("Canonical Evaluation Visit linkage reservation failed.");
+    }
+    const linkResult = await client.query(
+      `INSERT INTO canonical_visit_evaluation_links (
+         visit_id, job_id, evaluation_id,
+         linked_by_participant_id, command_idempotency_id
+       ) VALUES ($1, $2, $3, $4, $5)
+       RETURNING visit_id`,
+      [
+        completedVisit.visit_id,
+        context.job_id,
+        evaluationId,
+        context.actor_participant_id,
+        linkCommand.reservation.id,
+      ]
+    );
+    if (!linkResult.rows[0]) {
+      throw new Error("Canonical Evaluation Visit linkage failed.");
+    }
+    await completeVisitEvaluationLinkCommand(
+      client,
+      linkCommand.reservation.id,
+      {
+        visitId: completedVisit.visit_id,
+        evaluationId,
+        jobId: context.job_id,
+      }
+    );
+
     const evidence = await insertEvaluationEvidence({
       client,
       aggregate,
@@ -1340,7 +1576,13 @@ async function createOrdinaryJobEvaluation(input = {}) {
     });
     if (!evidence) throw new Error("Canonical Evaluation evidence creation failed.");
 
-    const row = combinedRow({ aggregate, evaluation, version, context });
+    const row = combinedRow({
+      aggregate,
+      evaluation,
+      version,
+      context,
+      visitId: completedVisit.visit_id,
+    });
     const result = successResult({
       status: 201,
       code: "EVALUATION_CREATED",
@@ -1476,6 +1718,22 @@ async function mutateEvaluation(input, { completion = false } = {}) {
         await rollback(client);
         transactionStarted = false;
         return authorityError;
+      }
+      if (
+        completion &&
+        !(await requireCompletedEvaluationVisitEvidence({
+          client,
+          jobId: context.job_id,
+          evaluationId: validated.evaluationId,
+        }))
+      ) {
+        await rollback(client);
+        transactionStarted = false;
+        return failure(
+          409,
+          "COMPLETED_EVALUATION_VISIT_REQUIRED",
+          "Completed Evaluation Visit provenance is required before completing the Evaluation."
+        );
       }
     } else {
       context = await resolveEmergencyWriteContext(

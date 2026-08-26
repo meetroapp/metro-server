@@ -41,6 +41,7 @@ test("Visit runtime vocabulary exactly preserves the approved authority contract
     "visit.change_request",
     "visit.complete",
     "visit.confirm",
+    "visit.link_evaluation",
     "visit.propose",
     "visit.reschedule",
   ]);

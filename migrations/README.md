@@ -73,12 +73,21 @@ Current inventory:
 53. `202608230004_create_business_contact_foundation.sql`
 54. `202608230005_create_business_customer_relationship_foundation.sql`
 55. `202608240001_create_customer_party_linkage_foundation.sql`
+56. `202608250001_correct_evaluation_visit_authority_and_negotiation.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
 
 This inventory records migration source files, not applied database state.
 Migration creation and governed migration execution remain separate operations.
+
+`202608250001_correct_evaluation_visit_authority_and_negotiation.sql` adds the
+Job-scoped `evaluation_visit` authority shape, immutable
+`VISIT_SCHEDULE_PROPOSED` transition vocabulary, the distinct
+`visit.link_evaluation` command, and an active-grant lookup index. It creates no
+grants or business rows, performs no legacy backfill, and preserves the single
+canonical Visit engine for Conversation coordination, Work Center / Schedule
+operations, and Dashboard attention projections.
 
 `202608210001_create_business_document_working_drafts.sql` adds private,
 noncanonical Quote/Invoice working drafts, independently governed media role and

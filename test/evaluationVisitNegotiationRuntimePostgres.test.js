@@ -1,0 +1,546 @@
+"use strict";
+
+const assert = require("node:assert/strict");
+const { randomUUID } = require("node:crypto");
+const test = require("node:test");
+const { Pool } = require("pg");
+
+const { assertSafeTestDatabaseUrl } = require("./helpers/databaseTargetSafety");
+const {
+  createVisitLifecycleFixture,
+  createVisitTestIdentities,
+  quiet,
+} = require("./helpers/visitLifecycleFixture");
+const {
+  completeEvaluation,
+  createOrdinaryJobEvaluation,
+} = require("../server/authorization/evaluationService");
+const {
+  completeVisit,
+  confirmVisit,
+  proposeVisit,
+  requestVisitChange,
+  rescheduleVisit,
+} = require("../server/workflow/visitService");
+const {
+  getProfessionalSchedule,
+} = require("../server/workflow/professionalScheduleService");
+const {
+  getMigrationFiles,
+  runMigrationCollection,
+} = require("../scripts/run-migrations");
+
+const databaseUrl = process.env.EVALUATION_VISIT_R3_DATABASE_URL;
+const professionalClock = () => new Date("2026-08-26T12:00:00.000Z");
+const completionClock = () => new Date("2026-09-04T18:00:00.000Z");
+
+function targetMetadata() {
+  return {
+    target: "local-test",
+    database: assertSafeTestDatabaseUrl(databaseUrl, {
+      nodeEnv: process.env.NODE_ENV,
+    }),
+  };
+}
+
+function command(service, pool, actorId, values, idempotencyKey, clock = professionalClock) {
+  return service({
+    pool,
+    authenticatedActor: { id: actorId },
+    idempotencyKey,
+    logger: quiet,
+    clock,
+    ...values,
+  });
+}
+
+function proposal(fixture, values = {}) {
+  return {
+    jobId: fixture.jobId,
+    purpose: "EVALUATION",
+    scheduledStartAt: "2026-09-02T14:00:00.000Z",
+    scheduledEndAt: "2026-09-02T15:00:00.000Z",
+    timeZone: "America/New_York",
+    locationMode: "JOB_SERVICE_LOCATION",
+    ...values,
+  };
+}
+
+function evaluationContent(observations) {
+  return {
+    serviceType: "handyman",
+    evaluationContext: "ordinary_job",
+    observations,
+    measurements: [],
+    findings: [],
+    diagnosisSummary: "",
+    limitations: "",
+    scopeRecommendations: [],
+    relevantConditions: [],
+    supportingMediaReferences: [],
+    internalNotes: "",
+  };
+}
+
+async function lifecycleCounts(pool, jobId) {
+  const result = await pool.query(
+    `SELECT
+       (SELECT count(*) FROM canonical_visits
+         WHERE job_id = $1)::integer AS visits,
+       (SELECT count(*) FROM canonical_visit_versions
+         WHERE job_id = $1)::integer AS visit_versions,
+       (SELECT count(*) FROM canonical_visit_events
+         WHERE job_id = $1)::integer AS visit_events,
+       (SELECT count(*) FROM canonical_visit_evaluation_links
+         WHERE job_id = $1)::integer AS evaluation_links,
+       (SELECT count(*) FROM canonical_evaluation_job_subjects
+         WHERE job_id = $1)::integer AS evaluations,
+       (SELECT count(*) FROM canonical_quotes
+         WHERE job_id = $1)::integer AS quotes,
+       (SELECT count(*) FROM canonical_invoices
+         WHERE job_id = $1)::integer AS invoices`,
+    [jobId]
+  );
+  return result.rows[0];
+}
+
+test(
+  "Migration 56 runtime enforces Evaluation Visit negotiation and completed-Visit provenance",
+  { skip: !databaseUrl },
+  async () => {
+    const pool = new Pool({ connectionString: databaseUrl, max: 8 });
+    const suffix = randomUUID();
+    try {
+      const migrations = getMigrationFiles();
+      assert.equal(migrations.length, 56);
+      assert.equal(
+        migrations.at(-1).filename,
+        "202608250001_correct_evaluation_visit_authority_and_negotiation.sql"
+      );
+      const migrated = await runMigrationCollection(pool, migrations, targetMetadata());
+      assert.equal(migrated.success, true, migrated.errorCode);
+      assert.equal(migrated.applied.length, 56);
+
+      const identities = await createVisitTestIdentities(pool, suffix);
+      const directFixture = await createVisitLifecycleFixture(
+        pool,
+        identities,
+        `${suffix}-direct`
+      );
+      const negotiatedFixture = await createVisitLifecycleFixture(
+        pool,
+        identities,
+        `${suffix}-negotiated`
+      );
+
+      const grants = await pool.query(
+        `SELECT participants.user_id, grants.capability
+         FROM lifecycle_authority_grants grants
+         INNER JOIN relationship_participants participants
+           ON participants.id = grants.grantee_participant_id
+         WHERE grants.job_id = $1
+           AND grants.scope_type = 'evaluation_visit'
+           AND grants.scope_job_id = $1
+         ORDER BY participants.user_id, grants.capability`,
+        [directFixture.jobId]
+      );
+      assert.deepEqual(
+        grants.rows.filter((row) => Number(row.user_id) === identities.homeownerId)
+          .map((row) => row.capability),
+        ["visit.change_request", "visit.confirm", "visit.read"]
+      );
+      assert.deepEqual(
+        grants.rows.filter((row) => Number(row.user_id) === identities.professionalId)
+          .map((row) => row.capability),
+        [
+          "visit.cancel",
+          "visit.complete",
+          "visit.confirm",
+          "visit.propose",
+          "visit.read",
+          "visit.reschedule",
+        ]
+      );
+
+      const scheduleBefore = await getProfessionalSchedule({
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+        view: "active",
+        clock: professionalClock,
+      });
+      const directOpportunity = scheduleBefore.schedule.opportunities.find(
+        (item) => item.jobId === directFixture.jobId
+      );
+      assert.equal(directOpportunity.semanticState, "READY_TO_SCHEDULE");
+      assert.equal(directOpportunity.purpose, "EVALUATION");
+      assert.equal(directOpportunity.evaluationId, null);
+
+      const noVisitEvaluation = await createOrdinaryJobEvaluation({
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+        jobId: directFixture.jobId,
+        visitId: randomUUID(),
+        content: evaluationContent("Attempted before the Evaluation Visit."),
+        expectedVersion: 0,
+        idempotencyKey: `r3-evaluation-before-visit-${suffix}`,
+        logger: quiet,
+      });
+      assert.equal(noVisitEvaluation.code, "COMPLETED_EVALUATION_VISIT_REQUIRED");
+
+      for (const purpose of ["FOLLOW_UP", "APPROVED_WORK"]) {
+        const deniedPurpose = await command(
+          proposeVisit,
+          pool,
+          identities.professionalId,
+          proposal(directFixture, {
+            purpose,
+            approvedQuoteDecisionId: purpose === "APPROVED_WORK" ? randomUUID() : undefined,
+          }),
+          randomUUID()
+        );
+        assert.equal(deniedPurpose.code, "VISIT_AUTHORITY_REQUIRED");
+      }
+
+      const directProposalKey = randomUUID();
+      const directProposed = await command(
+        proposeVisit,
+        pool,
+        identities.professionalId,
+        proposal(directFixture),
+        directProposalKey
+      );
+      assert.equal(directProposed.code, "VISIT_PROPOSED");
+      assert.equal(directProposed.visit.state, "PROPOSED");
+      assert.equal(directProposed.visit.currentVersion, 1);
+      assert.equal(directProposed.visit.evaluationId, null);
+
+      const directProposalReplay = await command(
+        proposeVisit,
+        pool,
+        identities.professionalId,
+        proposal(directFixture),
+        directProposalKey
+      );
+      assert.equal(directProposalReplay.replayed, true);
+      assert.equal(directProposalReplay.visit.id, directProposed.visit.id);
+
+      const ownProposalDenied = await command(
+        confirmVisit,
+        pool,
+        identities.professionalId,
+        {
+          jobId: directFixture.jobId,
+          visitId: directProposed.visit.id,
+          expectedVersion: 1,
+        },
+        randomUUID()
+      );
+      assert.equal(ownProposalDenied.code, "VISIT_OPPOSITE_PARTY_CONFIRMATION_REQUIRED");
+
+      const directConfirmKey = randomUUID();
+      const directConfirmed = await command(
+        confirmVisit,
+        pool,
+        identities.homeownerId,
+        {
+          jobId: directFixture.jobId,
+          visitId: directProposed.visit.id,
+          expectedVersion: 1,
+        },
+        directConfirmKey
+      );
+      assert.equal(directConfirmed.visit.state, "SCHEDULED");
+      assert.equal(directConfirmed.visit.currentVersion, 2);
+      const directConfirmReplay = await command(
+        confirmVisit,
+        pool,
+        identities.homeownerId,
+        {
+          jobId: directFixture.jobId,
+          visitId: directProposed.visit.id,
+          expectedVersion: 1,
+        },
+        directConfirmKey
+      );
+      assert.equal(directConfirmReplay.replayed, true);
+      assert.equal(directConfirmReplay.visit.currentVersion, 2);
+
+      const beforeCompletion = await createOrdinaryJobEvaluation({
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+        jobId: directFixture.jobId,
+        visitId: directProposed.visit.id,
+        content: evaluationContent("Attempted while the Visit is scheduled."),
+        expectedVersion: 0,
+        idempotencyKey: `r3-evaluation-before-completion-${suffix}`,
+        logger: quiet,
+      });
+      assert.equal(beforeCompletion.code, "COMPLETED_EVALUATION_VISIT_REQUIRED");
+
+      const completedVisit = await command(
+        completeVisit,
+        pool,
+        identities.professionalId,
+        {
+          jobId: directFixture.jobId,
+          visitId: directProposed.visit.id,
+          expectedVersion: 2,
+        },
+        randomUUID(),
+        completionClock
+      );
+      assert.equal(completedVisit.visit.state, "COMPLETED");
+      assert.equal(completedVisit.visit.currentVersion, 3);
+      assert.deepEqual(await lifecycleCounts(pool, directFixture.jobId), {
+        visits: 1,
+        visit_versions: 3,
+        visit_events: 3,
+        evaluation_links: 0,
+        evaluations: 0,
+        quotes: 0,
+        invoices: 0,
+      });
+
+      const createEvaluationKey = `r3-evaluation-after-visit-${suffix}`;
+      const createdEvaluation = await createOrdinaryJobEvaluation({
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+        jobId: directFixture.jobId,
+        visitId: directProposed.visit.id,
+        content: evaluationContent("Documented only after the completed Evaluation Visit."),
+        expectedVersion: 0,
+        idempotencyKey: createEvaluationKey,
+        logger: quiet,
+      });
+      assert.equal(createdEvaluation.code, "EVALUATION_CREATED");
+      assert.equal(
+        createdEvaluation.aggregate.sourceContext.evaluationVisitId,
+        directProposed.visit.id
+      );
+      const createdReplay = await createOrdinaryJobEvaluation({
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+        jobId: directFixture.jobId,
+        visitId: directProposed.visit.id,
+        content: evaluationContent("Documented only after the completed Evaluation Visit."),
+        expectedVersion: 0,
+        idempotencyKey: createEvaluationKey,
+        logger: quiet,
+      });
+      assert.equal(createdReplay.replayed, true);
+      assert.equal(createdReplay.evaluation.id, createdEvaluation.evaluation.id);
+
+      const completedEvaluation = await completeEvaluation({
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+        evaluationId: createdEvaluation.evaluation.id,
+        expectedVersion: 1,
+        idempotencyKey: `r3-complete-evaluation-${suffix}`,
+        logger: quiet,
+      });
+      assert.equal(completedEvaluation.code, "EVALUATION_COMPLETED");
+      assert.equal(completedEvaluation.evaluation.status, "completed");
+      assert.deepEqual(await lifecycleCounts(pool, directFixture.jobId), {
+        visits: 1,
+        visit_versions: 3,
+        visit_events: 3,
+        evaluation_links: 1,
+        evaluations: 1,
+        quotes: 0,
+        invoices: 0,
+      });
+
+      const negotiatedProposed = await command(
+        proposeVisit,
+        pool,
+        identities.professionalId,
+        proposal(negotiatedFixture),
+        randomUUID()
+      );
+      const alternateKey = randomUUID();
+      const alternate = await command(
+        requestVisitChange,
+        pool,
+        identities.homeownerId,
+        {
+          jobId: negotiatedFixture.jobId,
+          visitId: negotiatedProposed.visit.id,
+          expectedVersion: 1,
+          reason: "Please use the alternate customer-proposed time.",
+          scheduledStartAt: "2026-09-03T17:00:00.000Z",
+          scheduledEndAt: "2026-09-03T18:00:00.000Z",
+          timeZone: "America/New_York",
+          locationMode: "JOB_SERVICE_LOCATION",
+        },
+        alternateKey
+      );
+      assert.equal(alternate.code, "VISIT_SCHEDULE_PROPOSED");
+      assert.equal(alternate.visit.state, "PROPOSED");
+      assert.equal(alternate.visit.currentVersion, 2);
+
+      const alternateReplay = await command(
+        requestVisitChange,
+        pool,
+        identities.homeownerId,
+        {
+          jobId: negotiatedFixture.jobId,
+          visitId: negotiatedProposed.visit.id,
+          expectedVersion: 1,
+          reason: "Please use the alternate customer-proposed time.",
+          scheduledStartAt: "2026-09-03T17:00:00.000Z",
+          scheduledEndAt: "2026-09-03T18:00:00.000Z",
+          timeZone: "America/New_York",
+          locationMode: "JOB_SERVICE_LOCATION",
+        },
+        alternateKey
+      );
+      assert.equal(alternateReplay.replayed, true);
+      assert.equal(alternateReplay.visit.currentVersion, 2);
+
+      const staleAlternate = await command(
+        requestVisitChange,
+        pool,
+        identities.homeownerId,
+        {
+          jobId: negotiatedFixture.jobId,
+          visitId: negotiatedProposed.visit.id,
+          expectedVersion: 1,
+          reason: "A stale second customer time.",
+          scheduledStartAt: "2026-09-03T19:00:00.000Z",
+          scheduledEndAt: "2026-09-03T20:00:00.000Z",
+          timeZone: "America/New_York",
+          locationMode: "JOB_SERVICE_LOCATION",
+        },
+        randomUUID()
+      );
+      assert.equal(staleAlternate.code, "STALE_VISIT_VERSION");
+
+      const scheduleWithCustomerProposal = await getProfessionalSchedule({
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+        view: "active",
+        clock: professionalClock,
+      });
+      const actionableProposal = scheduleWithCustomerProposal.schedule.visits.find(
+        (item) => item.id === negotiatedProposed.visit.id
+      );
+      assert.equal(actionableProposal.semanticState, "CHANGE_REQUESTED");
+      assert.equal(actionableProposal.currentVersion, 2);
+      assert.equal(actionableProposal.actions.canConfirm, true);
+
+      const professionalConfirm = await command(
+        confirmVisit,
+        pool,
+        identities.professionalId,
+        {
+          jobId: negotiatedFixture.jobId,
+          visitId: negotiatedProposed.visit.id,
+          expectedVersion: 2,
+        },
+        randomUUID()
+      );
+      assert.equal(professionalConfirm.visit.state, "SCHEDULED");
+      assert.equal(professionalConfirm.visit.currentVersion, 3);
+
+      const professionalRevision = await command(
+        rescheduleVisit,
+        pool,
+        identities.professionalId,
+        {
+          jobId: negotiatedFixture.jobId,
+          visitId: negotiatedProposed.visit.id,
+          expectedVersion: 3,
+          reason: "Professional schedule revision requiring renewed confirmation.",
+          scheduledStartAt: "2026-09-04T15:00:00.000Z",
+          scheduledEndAt: "2026-09-04T16:00:00.000Z",
+          timeZone: "America/New_York",
+          locationMode: "JOB_SERVICE_LOCATION",
+        },
+        randomUUID()
+      );
+      assert.equal(professionalRevision.visit.state, "PROPOSED");
+      assert.equal(professionalRevision.visit.currentVersion, 4);
+
+      const professionalCannotSelfConfirm = await command(
+        confirmVisit,
+        pool,
+        identities.professionalId,
+        {
+          jobId: negotiatedFixture.jobId,
+          visitId: negotiatedProposed.visit.id,
+          expectedVersion: 4,
+        },
+        randomUUID()
+      );
+      assert.equal(
+        professionalCannotSelfConfirm.code,
+        "VISIT_OPPOSITE_PARTY_CONFIRMATION_REQUIRED"
+      );
+
+      const renewedCustomerConfirmation = await command(
+        confirmVisit,
+        pool,
+        identities.homeownerId,
+        {
+          jobId: negotiatedFixture.jobId,
+          visitId: negotiatedProposed.visit.id,
+          expectedVersion: 4,
+        },
+        randomUUID()
+      );
+      assert.equal(renewedCustomerConfirmation.visit.state, "SCHEDULED");
+      assert.equal(renewedCustomerConfirmation.visit.currentVersion, 5);
+
+      const lineage = await pool.query(
+        `SELECT event_type, visit_version, previous_visit_version, visit_state
+         FROM canonical_visit_events
+         WHERE visit_id = $1
+         ORDER BY visit_version`,
+        [negotiatedProposed.visit.id]
+      );
+      assert.deepEqual(lineage.rows, [
+        {
+          event_type: "VISIT_PROPOSED",
+          visit_version: 1,
+          previous_visit_version: null,
+          visit_state: "PROPOSED",
+        },
+        {
+          event_type: "VISIT_SCHEDULE_PROPOSED",
+          visit_version: 2,
+          previous_visit_version: 1,
+          visit_state: "PROPOSED",
+        },
+        {
+          event_type: "VISIT_CONFIRMED",
+          visit_version: 3,
+          previous_visit_version: 2,
+          visit_state: "SCHEDULED",
+        },
+        {
+          event_type: "VISIT_SCHEDULE_PROPOSED",
+          visit_version: 4,
+          previous_visit_version: 3,
+          visit_state: "PROPOSED",
+        },
+        {
+          event_type: "VISIT_CONFIRMED",
+          visit_version: 5,
+          previous_visit_version: 4,
+          visit_state: "SCHEDULED",
+        },
+      ]);
+      assert.deepEqual(await lifecycleCounts(pool, negotiatedFixture.jobId), {
+        visits: 1,
+        visit_versions: 5,
+        visit_events: 5,
+        evaluation_links: 0,
+        evaluations: 0,
+        quotes: 0,
+        invoices: 0,
+      });
+    } finally {
+      await pool.end();
+    }
+  }
+);

@@ -34,6 +34,7 @@ async function hasActiveLifecycleGrant({
   evaluationId = null,
   approvedQuoteDecisionId = null,
   allowJobScope = true,
+  allowEvaluationVisitScope = false,
   at = null,
   logger = null,
 } = {}) {
@@ -88,6 +89,14 @@ async function hasActiveLifecycleGrant({
           AND lifecycle_authority_grants.scope_approved_quote_decision_id = $6
           AND lifecycle_authority_grants.scope_approved_quote_decision = 'APPROVED'
         )
+        OR (
+          $9::boolean = TRUE
+          AND lifecycle_authority_grants.scope_type = 'evaluation_visit'
+          AND lifecycle_authority_grants.scope_concern_id IS NULL
+          AND lifecycle_authority_grants.scope_evaluation_id IS NULL
+          AND lifecycle_authority_grants.scope_approved_quote_decision_id IS NULL
+          AND lifecycle_authority_grants.scope_approved_quote_decision IS NULL
+        )
       )
       AND lifecycle_authority_grants.valid_from <= COALESCE($8::timestamptz, CURRENT_TIMESTAMP)
       AND (
@@ -106,6 +115,7 @@ async function hasActiveLifecycleGrant({
       normalizedApprovedQuoteDecisionId,
       allowJobScope === true,
       at,
+      allowEvaluationVisitScope === true,
     ]
   );
 
@@ -120,6 +130,7 @@ async function hasActiveLifecycleGrant({
       evaluationId: normalizedEvaluationId,
       approvedQuoteDecisionId: normalizedApprovedQuoteDecisionId,
       allowJobScope: allowJobScope === true,
+      allowEvaluationVisitScope: allowEvaluationVisitScope === true,
     });
   }
   return granted;

@@ -167,7 +167,76 @@ const ACTIVE_GRANT = `
 async function loadOpportunities(client, actorId, limit) {
   const result = await client.query(
     `WITH ${PROFESSIONAL_JOBS_CTE},
-    evaluation_opportunities AS (
+    evaluation_visit_opportunities AS (
+      SELECT
+        'EVALUATION'::text AS purpose,
+        jobs.job_id,
+        NULL::uuid AS evaluation_id,
+        NULL::uuid AS quote_id,
+        NULL::uuid AS approved_quote_decision_id,
+        'ACTIVE'::text AS authority_state,
+        jobs.job_created_at AS authority_activated_at,
+        jobs.*,
+        jobs.job_created_at AS subject_updated_at
+      FROM professional_jobs jobs
+      WHERE (
+        SELECT count(DISTINCT grants.capability)
+        FROM lifecycle_authority_grants grants
+        LEFT JOIN lifecycle_authority_grant_revocations revocations
+          ON revocations.authority_grant_id = grants.id
+        WHERE grants.grantee_participant_id = jobs.professional_participant_id
+          AND grants.job_id = jobs.job_id
+          AND grants.scope_type = 'evaluation_visit'
+          AND grants.scope_job_id = jobs.job_id
+          AND grants.scope_concern_id IS NULL
+          AND grants.scope_evaluation_id IS NULL
+          AND grants.scope_approved_quote_decision_id IS NULL
+          AND grants.scope_approved_quote_decision IS NULL
+          AND grants.capability = ANY(ARRAY[
+            'visit.read','visit.propose','visit.confirm','visit.reschedule',
+            'visit.cancel','visit.complete'
+          ])
+          AND ${ACTIVE_GRANT}
+      ) = 6
+      AND (
+        SELECT count(DISTINCT grants.capability)
+        FROM lifecycle_authority_grants grants
+        LEFT JOIN lifecycle_authority_grant_revocations revocations
+          ON revocations.authority_grant_id = grants.id
+        WHERE grants.grantee_participant_id = jobs.customer_participant_id
+          AND grants.job_id = jobs.job_id
+          AND grants.scope_type = 'evaluation_visit'
+          AND grants.scope_job_id = jobs.job_id
+          AND grants.scope_concern_id IS NULL
+          AND grants.scope_evaluation_id IS NULL
+          AND grants.scope_approved_quote_decision_id IS NULL
+          AND grants.scope_approved_quote_decision IS NULL
+          AND grants.capability = ANY(ARRAY[
+            'visit.read','visit.confirm','visit.change_request'
+          ])
+          AND ${ACTIVE_GRANT}
+      ) = 3
+      AND NOT EXISTS (
+        SELECT 1
+        FROM canonical_evaluation_job_subjects subjects
+        WHERE subjects.job_id = jobs.job_id
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM canonical_visits visits
+        INNER JOIN LATERAL (
+          SELECT state
+          FROM canonical_visit_versions
+          WHERE visit_id = visits.id AND job_id = visits.job_id
+          ORDER BY version DESC
+          LIMIT 1
+        ) current_visit ON TRUE
+        WHERE visits.job_id = jobs.job_id
+          AND visits.purpose = 'EVALUATION'
+          AND current_visit.state IN ('PROPOSED','SCHEDULED','COMPLETED')
+      )
+    ),
+    legacy_evaluation_opportunities AS (
       SELECT
         'EVALUATION'::text AS purpose,
         jobs.job_id,
@@ -304,7 +373,9 @@ async function loadOpportunities(client, actorId, limit) {
       )
     )
     SELECT opportunities.*, count(*) OVER() AS opportunity_total FROM (
-      SELECT * FROM evaluation_opportunities
+      SELECT * FROM evaluation_visit_opportunities
+      UNION ALL
+      SELECT * FROM legacy_evaluation_opportunities
       UNION ALL
       SELECT * FROM approved_work_opportunities
     ) opportunities
@@ -326,12 +397,15 @@ async function loadVisits(client, actorId, view, limit) {
       versions.version, versions.state, versions.scheduled_start_at,
       versions.scheduled_end_at, versions.time_zone, versions.location_mode,
       versions.cancellation_reason, versions.cancelled_at, versions.completed_at,
+      versions.recorded_by_participant_id,
       versions.created_at AS version_created_at,
       evaluation_links.evaluation_id,
       jobs.job_title, jobs.job_category, jobs.customer_name,
       jobs.location_intake_mode, jobs.location_normalization_status,
       jobs.service_address_line1, jobs.service_city, jobs.service_region,
       jobs.service_postal_code, jobs.service_country_code, jobs.discovery_area_label,
+      (versions.recorded_by_participant_id = jobs.customer_participant_id)
+        AS proposal_by_customer,
       change_request.reason AS change_request_reason,
       change_request.visit_version AS change_request_version,
       change_request.created_at AS change_request_created_at,
@@ -343,12 +417,15 @@ async function loadVisits(client, actorId, view, limit) {
           AND grants.job_id = visits.job_id
           AND grants.scope_job_id = visits.job_id
           AND grants.scope_concern_id IS NULL
-          AND grants.capability = ANY(ARRAY['visit.read','visit.reschedule','visit.cancel','visit.complete'])
+          AND grants.capability = ANY(ARRAY[
+            'visit.read','visit.confirm','visit.reschedule','visit.cancel','visit.complete'
+          ])
           AND (
             (visits.purpose = 'EVALUATION' AND (
-              (grants.scope_type = 'job' AND grants.scope_job_id = visits.job_id
+              (grants.scope_type = 'evaluation_visit'
                 AND grants.scope_evaluation_id IS NULL
-                AND grants.scope_approved_quote_decision_id IS NULL)
+                AND grants.scope_approved_quote_decision_id IS NULL
+                AND grants.scope_approved_quote_decision IS NULL)
               OR
               (grants.scope_type = 'evaluation'
                 AND grants.scope_evaluation_id = evaluation_links.evaluation_id
@@ -363,16 +440,27 @@ async function loadVisits(client, actorId, view, limit) {
           AND ${ACTIVE_GRANT}
         ORDER BY grants.capability
       ) AS active_capabilities,
-      count(*) FILTER (WHERE versions.state = 'PROPOSED' AND change_request.created_at IS NULL) OVER()
+      count(*) FILTER (
+        WHERE versions.state = 'PROPOSED'
+          AND versions.recorded_by_participant_id <> jobs.customer_participant_id
+          AND change_request.created_at IS NULL
+      ) OVER()
         AS waiting_on_customer_total,
-      count(*) FILTER (WHERE versions.state = 'PROPOSED' AND change_request.created_at IS NOT NULL) OVER()
+      count(*) FILTER (
+        WHERE versions.state = 'PROPOSED'
+          AND (
+            versions.recorded_by_participant_id = jobs.customer_participant_id
+            OR change_request.created_at IS NOT NULL
+          )
+      ) OVER()
         AS change_requested_total,
       count(*) FILTER (WHERE versions.state = 'SCHEDULED') OVER() AS upcoming_total
     FROM canonical_visits visits
     INNER JOIN professional_jobs jobs ON jobs.job_id = visits.job_id
     INNER JOIN LATERAL (
-      SELECT version, state, scheduled_start_at, scheduled_end_at, time_zone,
-        location_mode, cancellation_reason, cancelled_at, completed_at, created_at
+        SELECT version, state, scheduled_start_at, scheduled_end_at, time_zone,
+          location_mode, cancellation_reason, cancelled_at, completed_at,
+          recorded_by_participant_id, created_at
       FROM canonical_visit_versions
       WHERE visit_id = visits.id AND job_id = visits.job_id
       ORDER BY version DESC LIMIT 1
@@ -398,9 +486,10 @@ async function loadVisits(client, actorId, view, limit) {
           AND grants.scope_concern_id IS NULL
           AND (
             (visits.purpose = 'EVALUATION' AND (
-              (grants.scope_type = 'job' AND grants.scope_job_id = visits.job_id
+              (grants.scope_type = 'evaluation_visit'
                 AND grants.scope_evaluation_id IS NULL
-                AND grants.scope_approved_quote_decision_id IS NULL)
+                AND grants.scope_approved_quote_decision_id IS NULL
+                AND grants.scope_approved_quote_decision IS NULL)
               OR
               (grants.scope_type = 'evaluation'
                 AND grants.scope_evaluation_id = evaluation_links.evaluation_id
@@ -456,7 +545,7 @@ function customerProjection(row) {
 }
 
 function opportunityProjection(row) {
-  const subjectId = row.evaluation_id || row.approved_quote_decision_id;
+  const subjectId = row.evaluation_id || row.approved_quote_decision_id || row.job_id;
   const sortAt = iso(row.subject_updated_at || row.authority_activated_at || row.job_created_at);
   return {
     kind: "opportunity",
@@ -481,7 +570,9 @@ function opportunityProjection(row) {
 
 function visitSemanticState(row) {
   if (row.state === "PROPOSED") {
-    return row.change_request_created_at ? "CHANGE_REQUESTED" : "WAITING_FOR_CUSTOMER";
+    return row.proposal_by_customer || row.change_request_created_at
+      ? "CHANGE_REQUESTED"
+      : "WAITING_FOR_CUSTOMER";
   }
   return row.state;
 }
@@ -527,7 +618,11 @@ function visitProjection(row, now) {
     createdAt: iso(row.created_at),
     versionCreatedAt: iso(row.version_created_at),
     actions: {
-      canReschedule: row.state === "SCHEDULED" && capabilities.has("visit.reschedule"),
+      canConfirm:
+        row.state === "PROPOSED" &&
+        row.proposal_by_customer === true &&
+        capabilities.has("visit.confirm"),
+      canReschedule: ACTIVE_STATES.has(row.state) && capabilities.has("visit.reschedule"),
       canCancel: ACTIVE_STATES.has(row.state) && capabilities.has("visit.cancel"),
       canComplete:
         row.state === "SCHEDULED" &&

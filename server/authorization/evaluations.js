@@ -72,6 +72,7 @@ function createEvaluationHandlers({
         pool: getPool(req),
         authenticatedActor: req.user,
         jobId: req.params.jobId,
+        visitId: req.body?.visitId,
         content: req.body?.content,
         expectedVersion: req.body?.expectedVersion,
         idempotencyKey: req.headers?.["idempotency-key"],

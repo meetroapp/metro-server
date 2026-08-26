@@ -41,6 +41,19 @@ const PROFESSIONAL_BOOTSTRAP_CAPABILITIES = Object.freeze([
   "quote.issue",
   "quote.revise",
 ]);
+const CUSTOMER_EVALUATION_VISIT_CAPABILITIES = Object.freeze([
+  "visit.read",
+  "visit.confirm",
+  "visit.change_request",
+]);
+const PROFESSIONAL_EVALUATION_VISIT_CAPABILITIES = Object.freeze([
+  "visit.read",
+  "visit.propose",
+  "visit.confirm",
+  "visit.reschedule",
+  "visit.cancel",
+  "visit.complete",
+]);
 
 async function bootstrapLifecycleJob({
   client,
@@ -173,6 +186,34 @@ async function bootstrapLifecycleJob({
     professionalCapabilityResult.rows.map((row) => row.capability);
   const registeredCustomerCapabilities =
     customerCapabilityResult.rows.map((row) => row.capability);
+  const evaluationVisitCapabilityResult = await client.query(
+    `
+    /* job_foundation:evaluation_visit_capabilities */
+    SELECT capability
+    FROM lifecycle_capabilities
+    WHERE capability = ANY($1::text[])
+      AND EXISTS (
+        SELECT 1
+        FROM pg_constraint constraints
+        INNER JOIN pg_class relations ON relations.oid = constraints.conrelid
+        INNER JOIN pg_namespace namespaces ON namespaces.oid = relations.relnamespace
+        WHERE namespaces.nspname = current_schema()
+          AND relations.relname = 'lifecycle_authority_grants'
+          AND constraints.contype = 'c'
+          AND pg_get_constraintdef(constraints.oid) LIKE '%evaluation_visit%'
+      )
+    ORDER BY capability ASC
+    `,
+    [[
+      ...new Set([
+        ...CUSTOMER_EVALUATION_VISIT_CAPABILITIES,
+        ...PROFESSIONAL_EVALUATION_VISIT_CAPABILITIES,
+      ]),
+    ]]
+  );
+  const registeredEvaluationVisitCapabilities = new Set(
+    evaluationVisitCapabilityResult.rows.map((row) => row.capability)
+  );
 
   for (const [participantId, capabilities] of [
     [homeownerParticipantId, [
@@ -212,6 +253,47 @@ async function bootstrapLifecycleJob({
     }
   }
 
+  for (const [participantId, role, capabilities] of [
+    [
+      homeownerParticipantId,
+      "customer",
+      CUSTOMER_EVALUATION_VISIT_CAPABILITIES,
+    ],
+    [
+      professionalParticipantId,
+      "professional",
+      PROFESSIONAL_EVALUATION_VISIT_CAPABILITIES,
+    ],
+  ]) {
+    for (const capability of capabilities) {
+      if (!registeredEvaluationVisitCapabilities.has(capability)) continue;
+      await client.query(
+        `
+        /* job_foundation:insert_evaluation_visit_grant */
+        INSERT INTO lifecycle_authority_grants
+        (
+          id, grantee_participant_id, grantor_participant_id, job_id,
+          capability, scope_type, scope_job_id,
+          source_evidence_type, source_evidence_reference, idempotency_key
+        )
+        VALUES (
+          $1, $2, $3, $4, $5, 'evaluation_visit', $4,
+          'request_selection', $6, $7
+        )
+        `,
+        [
+          randomUUID(),
+          participantId,
+          homeownerParticipantId,
+          jobId,
+          capability,
+          selectionReference,
+          `selection:${selectionReference}:evaluation_visit:${role}:${capability}`,
+        ]
+      );
+    }
+  }
+
   logger.info("Lifecycle Job foundation created", {
     code: "LIFECYCLE_JOB_CREATED",
     jobId,
@@ -221,6 +303,8 @@ async function bootstrapLifecycleJob({
     participantCount: 2,
     customerCapabilityCount: registeredCustomerCapabilities.length,
     professionalCapabilityCount: registeredProfessionalCapabilities.length,
+    evaluationVisitCapabilityCount:
+      registeredEvaluationVisitCapabilities.size,
   });
 
   return {
@@ -233,6 +317,8 @@ async function bootstrapLifecycleJob({
 module.exports = {
   BOOTSTRAP_CAPABILITIES,
   CUSTOMER_BOOTSTRAP_CAPABILITIES,
+  CUSTOMER_EVALUATION_VISIT_CAPABILITIES,
   PROFESSIONAL_BOOTSTRAP_CAPABILITIES,
+  PROFESSIONAL_EVALUATION_VISIT_CAPABILITIES,
   bootstrapLifecycleJob,
 };

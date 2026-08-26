@@ -111,6 +111,22 @@ async function loadContext(
       relationships.homeowner_id,
       EXISTS (
         SELECT 1
+        FROM lifecycle_authority_grants grants
+        LEFT JOIN lifecycle_authority_grant_revocations revocations
+          ON revocations.authority_grant_id = grants.id
+        WHERE grants.job_id = jobs.id
+          AND grants.scope_type = 'evaluation_visit'
+          AND grants.scope_job_id = jobs.id
+          AND grants.scope_concern_id IS NULL
+          AND grants.scope_evaluation_id IS NULL
+          AND grants.scope_approved_quote_decision_id IS NULL
+          AND grants.scope_approved_quote_decision IS NULL
+          AND grants.valid_from <= CURRENT_TIMESTAMP
+          AND (grants.valid_until IS NULL OR grants.valid_until > CURRENT_TIMESTAMP)
+          AND revocations.id IS NULL
+      ) AS job_evaluation_visit_authority,
+      EXISTS (
+        SELECT 1
         FROM participant_role_assignments roles
         LEFT JOIN participant_role_revocations revocations
           ON revocations.role_assignment_id = roles.id
@@ -191,6 +207,13 @@ async function requireActivationAuthority({
       404,
       "EVALUATION_VISIT_AUTHORITY_UNAVAILABLE",
       "Evaluation Visit authority is unavailable."
+    );
+  }
+  if (context.job_evaluation_visit_authority === true) {
+    return failure(
+      409,
+      "EVALUATION_VISIT_AUTHORITY_JOB_SCOPED",
+      "Evaluation Visit authority is already governed by the selected Job."
     );
   }
   const granted = await hasActiveLifecycleGrant({

@@ -10,16 +10,20 @@ const migrationName =
 const migrationsDirectory = join(__dirname, "..", "migrations");
 const sql = readFileSync(join(migrationsDirectory, migrationName), "utf8");
 
-test("customer-party linkage is the 55th additive migration", () => {
+test("customer-party linkage remains the 55th additive migration", () => {
   const migrations = readdirSync(migrationsDirectory)
     .filter((name) => /^\d+.*\.sql$/.test(name))
     .sort();
-  assert.equal(migrations.length, 55);
+  assert.equal(migrations.length, 56);
   assert.equal(
-    migrations.at(-2),
+    migrations.at(-3),
     "202608230005_create_business_customer_relationship_foundation.sql"
   );
-  assert.equal(migrations.at(-1), migrationName);
+  assert.equal(migrations.at(-2), migrationName);
+  assert.equal(
+    migrations.at(-1),
+    "202608250001_correct_evaluation_visit_authority_and_negotiation.sql"
+  );
 });
 
 test("working documents receive nullable owner-consistent Contact and Relationship references", () => {

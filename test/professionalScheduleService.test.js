@@ -161,13 +161,29 @@ test("scheduled professional actions reuse state, time, and exact capability tru
   }), new Date("2026-08-16T12:00:00.000Z"));
   assert.equal(projected.semanticState, "SCHEDULED");
   assert.deepEqual(projected.actions, {
+    canConfirm: false,
     canReschedule: true,
     canCancel: true,
     canComplete: true,
     canViewJob: true,
   });
-  assert.equal("canConfirm" in projected.actions, false);
   assert.equal("canRequestChange" in projected.actions, false);
+});
+
+test("customer-authored proposal is actionable by the professional without becoming scheduled", () => {
+  const projected = professionalScheduleInternals.visitProjection(visit({
+    state: "PROPOSED",
+    proposal_by_customer: true,
+    active_capabilities: ["visit.read", "visit.confirm", "visit.reschedule"],
+  }), new Date("2026-08-16T12:00:00.000Z"));
+  assert.equal(projected.semanticState, "CHANGE_REQUESTED");
+  assert.deepEqual(projected.actions, {
+    canConfirm: true,
+    canReschedule: true,
+    canCancel: false,
+    canComplete: false,
+    canViewJob: true,
+  });
 });
 
 test("history view is bounded and deterministic with opaque cursor pagination", async () => {

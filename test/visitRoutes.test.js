@@ -105,6 +105,10 @@ test("handlers forward only governed Visit fields from authenticated boundaries"
         expectedVersion: 2,
         idempotencyKey: "visit-key",
         reason: "A governed reason",
+        scheduledStartAt: "2026-08-20T13:00:00.000Z",
+        scheduledEndAt: "2026-08-20T14:00:00.000Z",
+        timeZone: "America/New_York",
+        locationMode: "REMOTE",
       },
     },
     {

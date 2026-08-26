@@ -6,7 +6,9 @@ const test = require("node:test");
 const {
   BOOTSTRAP_CAPABILITIES,
   CUSTOMER_BOOTSTRAP_CAPABILITIES,
+  CUSTOMER_EVALUATION_VISIT_CAPABILITIES,
   PROFESSIONAL_BOOTSTRAP_CAPABILITIES,
+  PROFESSIONAL_EVALUATION_VISIT_CAPABILITIES,
   bootstrapLifecycleJob,
 } = require("../server/workflow/jobFoundationService");
 const {
@@ -26,6 +28,12 @@ function createBootstrapClient({
   concernExists = true,
   customerCapabilities = [...CUSTOMER_BOOTSTRAP_CAPABILITIES],
   professionalCapabilities = [...PROFESSIONAL_BOOTSTRAP_CAPABILITIES],
+  evaluationVisitCapabilities = [
+    ...new Set([
+      ...CUSTOMER_EVALUATION_VISIT_CAPABILITIES,
+      ...PROFESSIONAL_EVALUATION_VISIT_CAPABILITIES,
+    ]),
+  ],
 } = {}) {
   const state = {
     jobs: [],
@@ -80,6 +88,11 @@ function createBootstrapClient({
           rows: customerCapabilities.map((capability) => ({ capability })),
         };
       }
+      if (operation === "evaluation_visit_capabilities") {
+        return {
+          rows: evaluationVisitCapabilities.map((capability) => ({ capability })),
+        };
+      }
       if (operation === "insert_grant") {
         state.grants.push({
           id: values[0],
@@ -87,6 +100,18 @@ function createBootstrapClient({
           grantor_participant_id: values[2],
           job_id: values[3],
           capability: values[4],
+          scope_type: "job",
+        });
+        return { rows: [] };
+      }
+      if (operation === "insert_evaluation_visit_grant") {
+        state.grants.push({
+          id: values[0],
+          grantee_participant_id: values[1],
+          grantor_participant_id: values[2],
+          job_id: values[3],
+          capability: values[4],
+          scope_type: "evaluation_visit",
         });
         return { rows: [] };
       }
@@ -121,10 +146,18 @@ test("canonical selection bootstraps one Job, two known participants, roles, and
     "CUSTOMER_REPRESENTATIVE",
     "PRIMARY_PROFESSIONAL",
   ]);
-  assert.equal(client.state.grants.length, 32);
+  assert.equal(client.state.grants.length, 41);
   assert.deepEqual(
     [...new Set(client.state.grants.map((row) => row.capability))].sort(),
-    [...BOOTSTRAP_CAPABILITIES, ...CUSTOMER_BOOTSTRAP_CAPABILITIES, ...PROFESSIONAL_BOOTSTRAP_CAPABILITIES].sort()
+    [
+      ...new Set([
+        ...BOOTSTRAP_CAPABILITIES,
+        ...CUSTOMER_BOOTSTRAP_CAPABILITIES,
+        ...PROFESSIONAL_BOOTSTRAP_CAPABILITIES,
+        ...CUSTOMER_EVALUATION_VISIT_CAPABILITIES,
+        ...PROFESSIONAL_EVALUATION_VISIT_CAPABILITIES,
+      ]),
+    ].sort()
   );
   assert.deepEqual(
     client.state.grants
@@ -141,6 +174,16 @@ test("canonical selection bootstraps one Job, two known participants, roles, and
         !CUSTOMER_BOOTSTRAP_CAPABILITIES.includes(row.capability)
     ),
     false
+  );
+  assert.deepEqual(
+    client.state.grants
+      .filter((row) => row.scope_type === "evaluation_visit")
+      .map((row) => row.capability)
+      .sort(),
+    [
+      ...CUSTOMER_EVALUATION_VISIT_CAPABILITIES,
+      ...PROFESSIONAL_EVALUATION_VISIT_CAPABILITIES,
+    ].sort()
   );
   assert.equal(
     client.state.grants.some((row) => /payment|procurement|invoice/.test(row.capability)),
@@ -179,7 +222,11 @@ test("legacy selection creates no Job and v2 fails closed without concern truth"
 });
 
 test("bootstrap does not fabricate lifecycle grants before their capability migrations", async () => {
-  const client = createBootstrapClient({ customerCapabilities: [], professionalCapabilities: [] });
+  const client = createBootstrapClient({
+    customerCapabilities: [],
+    professionalCapabilities: [],
+    evaluationVisitCapabilities: [],
+  });
   await bootstrapLifecycleJob(bootstrapInput(client));
   assert.equal(client.state.grants.length, 6);
   assert.equal(

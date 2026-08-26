@@ -44,6 +44,7 @@ test("ordinary create derives actor, Job, and idempotency from authenticated bou
     headers: { "idempotency-key": "ordinary-route-key" },
     body: {
       jobId: "browser-job",
+      visitId: "visit-from-body",
       actorUserId: 999,
       relationshipId: 999,
       lifecycleContractVersion: 2,
@@ -54,6 +55,7 @@ test("ordinary create derives actor, Job, and idempotency from authenticated bou
 
   assert.equal(received.authenticatedActor.id, 41);
   assert.equal(received.jobId, "job-from-path");
+  assert.equal(received.visitId, "visit-from-body");
   assert.equal(received.idempotencyKey, "ordinary-route-key");
   assert.equal(Object.hasOwn(received, "relationshipId"), false);
   assert.equal(Object.hasOwn(received, "lifecycleContractVersion"), false);
