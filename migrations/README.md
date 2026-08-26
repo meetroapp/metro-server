@@ -74,6 +74,7 @@ Current inventory:
 54. `202608230005_create_business_customer_relationship_foundation.sql`
 55. `202608240001_create_customer_party_linkage_foundation.sql`
 56. `202608250001_correct_evaluation_visit_authority_and_negotiation.sql`
+57. `202608260001_create_evaluation_remote_provenance.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -88,6 +89,15 @@ Job-scoped `evaluation_visit` authority shape, immutable
 grants or business rows, performs no legacy backfill, and preserves the single
 canonical Visit engine for Conversation coordination, Work Center / Schedule
 operations, and Dashboard attention projections.
+
+`202608260001_create_evaluation_remote_provenance.sql` adds immutable,
+exact-version remote/no-Visit Evaluation provenance with exact Job,
+professional-participant, and completed-command references. Database guards
+bind role and grant authority to the exact completion-command timestamp, while
+a minimal internal Evaluation claim serializes physical and remote provenance
+through one unique key under both read-committed and snapshot isolation. It
+creates no provenance, claims, or other business rows, performs no backfill,
+and does not infer authority from absent Visit history.
 
 `202608210001_create_business_document_working_drafts.sql` adds private,
 noncanonical Quote/Invoice working drafts, independently governed media role and
