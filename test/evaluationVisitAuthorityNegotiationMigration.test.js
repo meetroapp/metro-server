@@ -16,14 +16,14 @@ const sql = readFileSync(
 
 test("migration 56 follows the unchanged migration 1-55 prefix", () => {
   const migrations = getMigrationFiles();
-  assert.equal(migrations.length, 57);
+  assert.equal(migrations.length, 58);
   assert.equal(
-    migrations.at(-3).filename,
+    migrations.at(-4).filename,
     "202608240001_create_customer_party_linkage_foundation.sql"
   );
-  assert.equal(migrations.at(-2).filename, migrationName);
+  assert.equal(migrations.at(-3).filename, migrationName);
   assert.equal(
-    migrations.at(-1).filename,
+    migrations.at(-2).filename,
     "202608260001_create_evaluation_remote_provenance.sql"
   );
   assert.doesNotMatch(sql, /^\s*(?:BEGIN|COMMIT|ROLLBACK)\s*;/im);

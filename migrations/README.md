@@ -75,6 +75,7 @@ Current inventory:
 55. `202608240001_create_customer_party_linkage_foundation.sql`
 56. `202608250001_correct_evaluation_visit_authority_and_negotiation.sql`
 57. `202608260001_create_evaluation_remote_provenance.sql`
+58. `202608270001_add_canonical_visit_start_authority.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -98,6 +99,14 @@ a minimal internal Evaluation claim serializes physical and remote provenance
 through one unique key under both read-committed and snapshot isolation. It
 creates no provenance, claims, or other business rows, performs no backfill,
 and does not infer authority from absent Visit history.
+
+`202608270001_add_canonical_visit_start_authority.sql` adds the canonical
+`STARTED` Visit state, immutable `started_at` evidence, `visit.start` command
+vocabulary, the `VISIT_STARTED` event, and bounded schedule-variance
+acknowledgment evidence. It expands the existing append-only Visit aggregate,
+creates no grants or business rows, performs no backfill, and preserves legacy
+SCHEDULED-to-COMPLETED history without fabricating Visit starts. Runtime and
+client Visit-start behavior remain separately governed work.
 
 `202608210001_create_business_document_working_drafts.sql` adds private,
 noncanonical Quote/Invoice working drafts, independently governed media role and

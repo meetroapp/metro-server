@@ -116,14 +116,14 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 57);
+      assert.equal(migrations.length, 58);
       assert.equal(
         migrations.at(-1).filename,
-        "202608260001_create_evaluation_remote_provenance.sql"
+        "202608270001_add_canonical_visit_start_authority.sql"
       );
       const migrated = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(migrated.success, true, migrated.errorCode);
-      assert.equal(migrated.applied.length, 57);
+      assert.equal(migrated.applied.length, 58);
 
       const identities = await createVisitTestIdentities(pool, suffix);
       const directFixture = await createVisitLifecycleFixture(

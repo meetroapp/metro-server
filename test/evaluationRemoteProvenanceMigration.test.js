@@ -17,11 +17,11 @@ const approvedMigration56Checksum =
 const migrationsDirectory = join(__dirname, "..", "migrations");
 const sql = readFileSync(join(migrationsDirectory, migration57Name), "utf8");
 
-test("migration 57 follows frozen migration 56", () => {
+test("migration 57 follows frozen migration 56 and remains before migration 58", () => {
   const migrations = getMigrationFiles();
-  assert.equal(migrations.length, 57);
-  assert.equal(migrations.at(-2).filename, migration56Name);
-  assert.equal(migrations.at(-1).filename, migration57Name);
+  assert.equal(migrations.length, 58);
+  assert.equal(migrations.at(-3).filename, migration56Name);
+  assert.equal(migrations.at(-2).filename, migration57Name);
   assert.doesNotMatch(sql, /^\s*(?:BEGIN|COMMIT|ROLLBACK)\s*;/im);
 });
 
