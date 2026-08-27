@@ -49,6 +49,75 @@ test("working Quote components map deterministically to canonical material and l
   );
 });
 
+test("working Quote conversion omits only provably empty UI seed rows", () => {
+  const stagingShape = content({
+    pricingDisplayMode: "TOTAL_ONLY",
+    materialsDisplayMode: "INCLUDED_IN_TOTAL",
+    depositMode: "PERCENT",
+    depositPercent: "75",
+    terms: "75% deposit",
+    materialItems: [{ id: "material-line-1", name: "Materials", quantity: "", cost: "", total: "180", notes: "" }],
+    laborItems: [{ id: "labor-line-0", description: "Labor", hours: "", rate: "", total: "500" }],
+    lineItems: [{ id: "quote-line-0", description: "", quantity: "1", unitPrice: "", total: "0" }],
+  });
+  const result = internals.workingQuoteConversion(stagingShape);
+  assert.equal(result.error, undefined);
+  assert.equal(result.items.length, 1);
+  assert.equal(result.items[0].lineTotalMinor, 68000);
+  assert.equal(result.totals.totalMinor, 68000);
+  assert.equal(result.customerTermsSnapshot.paymentTerms, "75% deposit");
+
+  for (const seed of [
+    { id: "quote-line-0", description: "", quantity: "", unitPrice: "", total: "0" },
+    { id: "generated-arbitrary-id", description: "", quantity: "1", unitPrice: "", amount: "$0.00" },
+  ]) {
+    const converted = internals.workingQuoteConversion(content({
+      materialItems: [],
+      laborItems: [{ description: "Labor", total: "25" }],
+      lineItems: [seed],
+    }));
+    assert.equal(converted.error, undefined);
+    assert.equal(converted.totals.totalMinor, 2500);
+  }
+});
+
+test("working Quote conversion retains strict rejection for partial and malformed rows", () => {
+  const cases = [
+    [{ description: "Repair", total: "" }, "WORKING_QUOTE_ROW_PRICE_REQUIRED"],
+    [{ description: "", total: "5" }, "INVALID_WORKING_QUOTE_ROW"],
+    [{ description: "", quantity: "2", total: "0" }, "INVALID_WORKING_QUOTE_ROW"],
+    [{ description: "", quantity: "1", unitPrice: "5", total: "0" }, "INVALID_WORKING_QUOTE_ROW"],
+    [{ description: "", amount: "5" }, "INVALID_WORKING_QUOTE_ROW"],
+    [{ description: "Repair", total: "5.000" }, "INVALID_WORKING_QUOTE_AMOUNT"],
+    [{ description: "Repair", total: "5", amount: "6" }, "AMBIGUOUS_WORKING_QUOTE_AMOUNT"],
+  ];
+  for (const [row, error] of cases) {
+    assert.equal(internals.workingQuoteConversion(content({
+      materialItems: [],
+      laborItems: [],
+      lineItems: [row],
+    })).error, error);
+  }
+
+  const validGeneric = internals.workingQuoteConversion(content({
+    materialItems: [],
+    laborItems: [],
+    lineItems: [{ description: "Repair", quantity: "1", unitPrice: "12.50", total: "12.50" }],
+  }));
+  assert.equal(validGeneric.error, undefined);
+  assert.equal(validGeneric.totals.totalMinor, 1250);
+
+  assert.equal(internals.workingQuoteConversion(content({
+    materialItems: [],
+    laborItems: [],
+    lineItems: [{ description: "", quantity: "1", unitPrice: "", total: "0" }],
+  })).error, "WORKING_QUOTE_SCOPE_REQUIRED");
+  assert.equal(internals.workingQuoteConversion(content({
+    paymentTerms: "Due now",
+    terms: "Due later",
+  })).error, "AMBIGUOUS_WORKING_QUOTE_TERMS");
+});
+
 test("project total override becomes one counted scope item without component double-counting", () => {
   const result = internals.workingQuoteConversion(content({
     projectTitle: "Front knee wall reconstruction",
@@ -221,6 +290,7 @@ function createBridgePool({
   sourceVersion = 4,
   existingRoot = false,
   customerParty = null,
+  sourceContent = content(),
 } = {}) {
   const participantId = "33333333-3333-4333-8333-333333333333";
   const state = {
@@ -231,7 +301,7 @@ function createBridgePool({
       document_type: documentType,
       draft_status: "WORKING_DRAFT",
       document_number: documentNumber,
-      content: content(),
+      content: sourceContent,
       version: sourceVersion,
       business_contact_id: customerParty?.businessContactId || null,
       business_customer_relationship_id:
@@ -244,6 +314,7 @@ function createBridgePool({
     snapshots: [],
     evidenceWrites: 0,
     sourceWrites: 0,
+    quoteIdentityWrites: 0,
     quoteCustomerParty: null,
     customerPartyWrites: 0,
   };
@@ -317,6 +388,7 @@ function createBridgePool({
         return { rows: [{ id: values[0] }] };
       }
       if (sql.startsWith("INSERT INTO canonical_quotes")) {
+        state.quoteIdentityWrites += 1;
         return { rows: [{ id: values[0], status: "DRAFT" }] };
       }
       if (sql.includes("/* customer_party:insert_canonical_quote */")) {
@@ -512,6 +584,47 @@ test("governed bridge inherits the exact number, creates one Draft, and replays 
   }
 });
 
+test("governed bridge imports the historical $680 total-only seed shape exactly once", async () => {
+  const sourceContent = content({
+    customerName: "Antony Guzman",
+    projectTitle: "Inspect damaged cabinet door and trim",
+    projectDescription: "Inspect damaged cabinet door and trim",
+    pricingDisplayMode: "TOTAL_ONLY",
+    materialsDisplayMode: "INCLUDED_IN_TOTAL",
+    depositMode: "PERCENT",
+    depositPercent: "75",
+    terms: "75% deposit",
+    materialItems: [{ id: "material-line-1", name: "Materials", quantity: "", cost: "", total: "180", notes: "" }],
+    laborItems: [{ id: "labor-line-0", description: "Labor", hours: "", rate: "", total: "500" }],
+    lineItems: [{ id: "quote-line-0", description: "", quantity: "1", unitPrice: "", total: "0" }],
+  });
+  const pool = createBridgePool({ sourceVersion: 1, sourceContent });
+  const command = {
+    pool,
+    authenticatedActor: { id: 1 },
+    draftId,
+    expectedDocumentVersion: 1,
+    idempotencyKey: "bridge-historical-seed",
+    logger: { info() {}, warn() {} },
+  };
+  const created = await service.importBusinessDocumentDraftQuote(command);
+  assert.equal(created.ok, true, created.code);
+  assert.equal(created.quote.totalMinor, 68000);
+  assert.equal(created.quote.scopeItems.length, 1);
+  assert.deepEqual(created.quote.sourceBusinessDocument, {
+    documentId: draftId,
+    documentVersion: 1,
+  });
+  assert.equal(pool.state.sourceWrites, 1);
+  assert.equal(pool.state.quoteIdentityWrites, 1);
+
+  const replay = await service.importBusinessDocumentDraftQuote(command);
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.quote.id, created.quote.id);
+  assert.equal(pool.state.sourceWrites, 1);
+  assert.equal(pool.state.quoteIdentityWrites, 1);
+});
+
 test("governed bridge preserves an explicit source customer party once without changing the Quote snapshot", async () => {
   const pool = createBridgePool({
     customerParty: {
@@ -553,6 +666,7 @@ test("bridge fails closed for unnumbered, Invoice, missing-Job, wrong-owner, sta
     [{}, { id: 2 }, 4, "BUSINESS_DOCUMENT_QUOTE_UNAVAILABLE"],
     [{ sourceVersion: 5 }, { id: 1 }, 4, "STALE_BUSINESS_DOCUMENT_VERSION"],
     [{ existingRoot: true }, { id: 1 }, 4, "ROOT_QUOTE_ALREADY_EXISTS"],
+    [{ customerParty: { businessContactId: contactId } }, { id: 1 }, 4, "BUSINESS_DOCUMENT_CUSTOMER_PARTY_INVALID"],
   ];
   for (const [options, actor, expectedDocumentVersion, expectedCode] of cases) {
     const pool = createBridgePool(options);

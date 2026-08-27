@@ -305,6 +305,26 @@ function workingRowDescription(row) {
   return boundedText(description, 1000);
 }
 
+function isEmptyWorkingQuoteSeedRow(row, classification) {
+  if (!isPlainObject(row) || workingRowDescription(row)) return false;
+  if (String(row.notes || "").trim()) return false;
+
+  for (const field of ["unitPrice", "cost", "rate", "hours"]) {
+    if (String(row[field] || "").trim()) return false;
+  }
+
+  const quantity = String(row.quantity || "").trim();
+  if (quantity && !(classification === "LINE_ITEM" && quantity === "1")) {
+    return false;
+  }
+
+  for (const field of ["total", "amount"]) {
+    const parsed = parseWorkingMoney(row[field]);
+    if (parsed.error || (!parsed.empty && parsed.minor !== 0)) return false;
+  }
+  return true;
+}
+
 function convertWorkingRow(row, classification) {
   const description = workingRowDescription(row);
   if (!description) return { error: "INVALID_WORKING_QUOTE_ROW" };
@@ -486,6 +506,7 @@ function workingQuoteConversion(rawContent) {
     for (const [rows, classification] of groups) {
       if (classification === "MATERIAL" && content.materialsDisplayMode === "CUSTOMER_PROVIDES") continue;
       for (const row of rows) {
+        if (isEmptyWorkingQuoteSeedRow(row, classification)) continue;
         const converted = convertWorkingRow(row, classification);
         if (converted.error) return converted;
         items.push(converted.item);
@@ -3600,6 +3621,7 @@ module.exports = {
     quoteIntegrityContract,
     requireQuoteAuthority,
     requireSavedEvaluation,
+    isEmptyWorkingQuoteSeedRow,
     workingQuoteConversion,
   }),
 };

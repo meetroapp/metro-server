@@ -298,18 +298,140 @@ async function createSimpleIssuedQuote(
   return issued.quote;
 }
 
+test("clean disposable PostgreSQL imports the historical empty-seed Working Quote exactly once", { skip: !cleanDatabaseUrl }, async () => {
+  const pool = new Pool({ connectionString: cleanDatabaseUrl, max: 8 });
+  const suffix = randomUUID();
+  try {
+    const migrations = getMigrationFiles();
+    assert.equal(migrations.length, 58);
+    const applied = await runMigrationCollection(pool, migrations, targetMetadata(cleanDatabaseUrl));
+    assert.equal(applied.success, true);
+    assert.equal(applied.applied.length, 58);
+    const replayedMigrations = await runMigrationCollection(pool, migrations, targetMetadata(cleanDatabaseUrl));
+    assert.equal(replayedMigrations.success, true);
+    assert.equal(replayedMigrations.skipped.length, 58);
+
+    const identities = await createIdentities(pool, suffix);
+    const fixture = await createLifecycleFixture(pool, identities, `${suffix}-seed`, "historical empty seed working Quote bridge");
+    const malformedFixture = await createLifecycleFixture(pool, identities, `${suffix}-malformed`, "partially authored working Quote bridge");
+    const contractor = await pool.query(
+      `SELECT id FROM contractor_profiles WHERE user_id = $1 LIMIT 1`,
+      [identities.professionalId]
+    );
+    const contractorProfileId = Number(contractor.rows[0].id);
+
+    async function insertSource(target, documentNumber, contentValue) {
+      const sourceId = randomUUID();
+      await pool.query(
+        `INSERT INTO business_document_working_drafts (
+          id, contractor_profile_id, created_by_user_id, job_id,
+          document_type, draft_reference, document_number,
+          content, workspace_context
+        ) VALUES ($1, $2, $3, $4, 'QUOTE', $5, $6, $7::jsonb, $8::jsonb)`,
+        [
+          sourceId,
+          contractorProfileId,
+          identities.professionalId,
+          target.jobId,
+          `WQ-${sourceId}`,
+          documentNumber,
+          JSON.stringify(contentValue),
+          JSON.stringify({ activeDocument: "QUOTE", instructions: [] }),
+        ]
+      );
+      return sourceId;
+    }
+
+    const sourceId = await insertSource(fixture, "Q-0000001", {
+      customerName: "Antony Guzman",
+      projectTitle: "Inspect damaged cabinet door and trim",
+      projectDescription: "Inspect damaged cabinet door and trim",
+      materialItems: [{ id: "material-line-1", name: "Materials", quantity: "", cost: "", total: "180", notes: "" }],
+      laborItems: [{ id: "labor-line-0", description: "Labor", hours: "", rate: "", total: "500" }],
+      lineItems: [{ id: "quote-line-0", description: "", quantity: "1", unitPrice: "", total: "0" }],
+      totalOverride: "",
+      currency: "USD",
+      pricingDisplayMode: "TOTAL_ONLY",
+      materialsDisplayMode: "INCLUDED_IN_TOTAL",
+      depositMode: "PERCENT",
+      depositPercent: "75",
+      terms: "75% deposit",
+      paymentTerms: "",
+      agreement: { exclusions: [] },
+    });
+    const command = {
+      pool,
+      authenticatedActor: { id: identities.professionalId },
+      draftId: sourceId,
+      expectedDocumentVersion: 1,
+      idempotencyKey: `quote-seed-${suffix}`,
+      logger: quiet,
+    };
+    const imported = await importBusinessDocumentDraftQuote(command);
+    assert.equal(imported.ok, true, imported.code);
+    assert.equal(imported.quote.totalMinor, 68000);
+    assert.equal(imported.quote.scopeItems.length, 1);
+    assert.deepEqual(imported.quote.sourceBusinessDocument, {
+      documentId: sourceId,
+      documentVersion: 1,
+    });
+    assert.equal((await importBusinessDocumentDraftQuote(command)).replayed, true);
+    assert.equal(Number((await pool.query(
+      `SELECT count(*) AS count FROM canonical_quotes
+       WHERE job_id = $1 AND parent_quote_id IS NULL`,
+      [fixture.jobId]
+    )).rows[0].count), 1);
+    assert.equal(Number((await pool.query(
+      `SELECT count(*) AS count FROM canonical_quote_business_document_sources
+       WHERE source_document_id = $1`,
+      [sourceId]
+    )).rows[0].count), 1);
+    assert.equal(Number((await pool.query(
+      `SELECT count(*) AS count FROM canonical_quote_issuances WHERE quote_id = $1`,
+      [imported.quote.id]
+    )).rows[0].count), 0);
+
+    const malformedSourceId = await insertSource(malformedFixture, "Q-0000002", {
+      customerName: "Customer",
+      projectTitle: "Partially authored scope",
+      materialItems: [],
+      laborItems: [{ description: "Labor", total: "500" }],
+      lineItems: [{ id: "generated-row", description: "Needs a price", quantity: "1", unitPrice: "", total: "" }],
+      totalOverride: "",
+      currency: "USD",
+      agreement: { exclusions: [] },
+    });
+    const malformed = await importBusinessDocumentDraftQuote({
+      pool,
+      authenticatedActor: { id: identities.professionalId },
+      draftId: malformedSourceId,
+      expectedDocumentVersion: 1,
+      idempotencyKey: `quote-malformed-${suffix}`,
+      logger: quiet,
+    });
+    assert.equal(malformed.status, 409);
+    assert.equal(malformed.code, "WORKING_QUOTE_ROW_PRICE_REQUIRED");
+    assert.equal(Number((await pool.query(
+      `SELECT count(*) AS count FROM canonical_quotes WHERE job_id = $1`,
+      [malformedFixture.jobId]
+    )).rows[0].count), 0);
+  } finally {
+    await pool.end();
+  }
+});
+
 test("clean disposable PostgreSQL certifies canonical $920 Draft and issued Quote", { skip: !cleanDatabaseUrl }, async () => {
   const pool = new Pool({ connectionString: cleanDatabaseUrl, max: 8 });
   const suffix = randomUUID();
   try {
     const migrations = getMigrationFiles();
-    assert.equal(migrations.length, 54);
+    assert.equal(migrations.length, 58);
     const applied = await runMigrationCollection(pool, migrations, targetMetadata(cleanDatabaseUrl));
     assert.equal(applied.success, true);
-    assert.equal(applied.applied.length, 50);
+    assert.equal(applied.applied.length, 58);
     const replay = await runMigrationCollection(pool, migrations, targetMetadata(cleanDatabaseUrl));
     assert.equal(replay.success, true);
-    assert.equal(replay.skipped.length, 46);
+    assert.equal(replay.skipped.length, 58);
 
     const identities = await createIdentities(pool, suffix);
     const fixture = await createLifecycleFixture(pool, identities, `${suffix}-primary`, "A/C, disposal, lighting, fan and microwave work");
