@@ -107,6 +107,9 @@ test("saved total-only PDF agrees with customer package without leaking internal
   assert.match(pdfText, /75% deposit due on approval/);
   assert.match(pdfText, /\$712\.50/);
   assert.match(pdfText, /\$237\.50/);
+  assert.match(pdfText, /\/F1 10\.5 Tf/);
+  assert.match(pdfText, /\/F2 12\.5 Tf/);
+  assert.match(pdfText, /\/F2 22 Tf/);
   assert.doesNotMatch(pdfText, /Labor:|Materials:|\$500\.00|\$180\.00/);
 });
 

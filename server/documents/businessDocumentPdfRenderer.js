@@ -245,35 +245,35 @@ function renderPreparedCustomerPdf(customerPackage, photos, logo = null, options
   function section(title, body) {
     if (!body) return;
     const lines = doc.splitTextToSize(String(body), contentWidth);
-    ensureSpace(28 + Math.min(lines.length, 2) * 12);
+    ensureSpace(30 + Math.min(lines.length, 2) * 14);
     const startPage = pageNumber();
     const startY = y;
-    y = addText(doc, title, PAGE.margin, y, { size: 12, color: COLOR.ink, style: "bold" });
-    y += 3;
+    y = addText(doc, title, PAGE.margin, y, { size: 12.5, color: COLOR.ink, style: "bold" });
+    y += 4;
     doc.setFont("helvetica", "normal");
-    doc.setFontSize(9.5);
+    doc.setFontSize(10.5);
     doc.setTextColor(...COLOR.text);
     for (const line of lines) {
-      ensureSpace(13);
+      ensureSpace(14);
       doc.text(String(line), PAGE.margin, y);
-      y += 12;
+      y += 14;
     }
-    y += 8;
+    y += 9;
     record(title, startPage, startY, y);
   }
   function bulletSection(title, values) {
     const present = (values || []).filter(Boolean);
     if (!present.length) return;
     ensureSpace(46);
-    y = addText(doc, title, PAGE.margin, y, { size: 12, color: COLOR.ink, style: "bold" });
+    y = addText(doc, title, PAGE.margin, y, { size: 12.5, color: COLOR.ink, style: "bold" });
     for (const value of present) {
       const lines = doc.splitTextToSize(String(value), contentWidth - 16);
-      ensureSpace(Math.min(lines.length, 2) * 12 + 5);
-      addText(doc, "-", PAGE.margin + 4, y + 3, { size: 9.5 });
+      ensureSpace(Math.min(lines.length, 2) * 14 + 5);
+      addText(doc, "-", PAGE.margin + 4, y + 3, { size: 10.5 });
       for (const line of lines) {
-        ensureSpace(13);
-        addText(doc, line, PAGE.margin + 16, y + 3, { size: 9.5 });
-        y += 12;
+        ensureSpace(14);
+        addText(doc, line, PAGE.margin + 16, y + 3, { size: 10.5 });
+        y += 14;
       }
     }
     y += 8;
@@ -308,7 +308,7 @@ function renderPreparedCustomerPdf(customerPackage, photos, logo = null, options
     const rows = [];
     for (let index = 0; index < entries.length; index += columns) {
       const cells = entries.slice(index, index + columns);
-      const height = Math.max(48, ...cells.map(([, value]) => 30 + doc.splitTextToSize(String(value), width - 16).length * 10));
+      const height = Math.max(51, ...cells.map(([, value]) => 31 + doc.splitTextToSize(String(value), width - 16).length * 11.5));
       rows.push({ cells, height, width });
     }
     return rows;
@@ -327,8 +327,8 @@ function renderPreparedCustomerPdf(customerPackage, photos, logo = null, options
         doc.setDrawColor(...COLOR.line);
         doc.setFillColor(...COLOR.fill);
         doc.rect(x, y, row.width, row.height, "FD");
-        addText(doc, label, x + 8, y + 14, { size: 7, color: COLOR.muted, style: "bold" });
-        addText(doc, value, x + 8, y + 30, { size: 8.5, maxWidth: row.width - 16 });
+        addText(doc, label, x + 8, y + 14, { size: 8, color: COLOR.muted, style: "bold" });
+        addText(doc, value, x + 8, y + 31, { size: 9.5, maxWidth: row.width - 16 });
       });
       y += row.height;
     }
@@ -357,14 +357,14 @@ function renderPreparedCustomerPdf(customerPackage, photos, logo = null, options
   ];
   const metaWidth = contentWidth / meta.length;
   const metaLines = Math.max(...meta.map(([, value]) => doc.splitTextToSize(String(value), metaWidth - 16).length), 1);
-  const metaHeight = 34 + Math.max(0, metaLines - 1) * 10;
+  const metaHeight = 37 + Math.max(0, metaLines - 1) * 11.5;
   doc.setFillColor(...COLOR.fill);
   doc.setDrawColor(...COLOR.line);
   doc.rect(PAGE.margin, y, contentWidth, metaHeight, "FD");
   meta.forEach(([label, value], index) => {
     const x = PAGE.margin + metaWidth * index + 8;
-    addText(doc, label, x, y + 11, { size: 6.8, color: COLOR.muted, style: "bold" });
-    addText(doc, value, x, y + 25, { size: 8.3, style: "bold", maxWidth: metaWidth - 16 });
+    addText(doc, label, x, y + 12, { size: 7.5, color: COLOR.muted, style: "bold" });
+    addText(doc, value, x, y + 27, { size: 9.5, style: "bold", maxWidth: metaWidth - 16 });
   });
   y += metaHeight + 14;
 
@@ -412,18 +412,18 @@ function renderPreparedCustomerPdf(customerPackage, photos, logo = null, options
     const showUnits = customerPackage.lineItems.some((item) => item.pricingPresentation !== "flat");
     const x = { description: PAGE.margin, quantity: 376, unit: 430, amount: 512 };
     const descriptionWidth = showUnits ? 300 : 420;
-    const rowHeights = customerPackage.lineItems.map((item) => Math.max(22, doc.splitTextToSize(item.description, descriptionWidth).length * 12 + 8));
+    const rowHeights = customerPackage.lineItems.map((item) => Math.max(25, doc.splitTextToSize(item.description, descriptionWidth).length * 13.5 + 9));
     const allPricingHeight = 31 + rowHeights.reduce((sum, height) => sum + height + 3, 0) + 5 + pricingTailHeight;
     if (allPricingHeight <= usablePageHeight) ensureSpace(allPricingHeight);
     function tableHeader() {
       doc.setFillColor(...COLOR.fill);
       doc.rect(PAGE.margin, y + 3, contentWidth, 22, "F");
-      addText(doc, "Description", x.description + 7, y + 17, { size: 7.5, color: COLOR.muted, style: "bold" });
+      addText(doc, "Description", x.description + 7, y + 17, { size: 8.5, color: COLOR.muted, style: "bold" });
       if (showUnits) {
-        addText(doc, "Qty", x.quantity, y + 17, { size: 7.5, color: COLOR.muted, style: "bold" });
-        addText(doc, "Unit", x.unit, y + 17, { size: 7.5, color: COLOR.muted, style: "bold" });
+        addText(doc, "Qty", x.quantity, y + 17, { size: 8.5, color: COLOR.muted, style: "bold" });
+        addText(doc, "Unit", x.unit, y + 17, { size: 8.5, color: COLOR.muted, style: "bold" });
       }
-      addText(doc, "Amount", x.amount, y + 17, { size: 7.5, color: COLOR.muted, style: "bold" });
+      addText(doc, "Amount", x.amount, y + 17, { size: 8.5, color: COLOR.muted, style: "bold" });
       y += 31;
     }
     tableHeader();
@@ -432,12 +432,12 @@ function renderPreparedCustomerPdf(customerPackage, photos, logo = null, options
       const rowHeight = rowHeights[index];
       const lastRow = index === customerPackage.lineItems.length - 1;
       if (ensureSpace(rowHeight + 4 + (lastRow ? pricingTailHeight : 0))) tableHeader();
-      addText(doc, item.description, x.description + 7, y + 10, { size: 8.8, maxWidth: descriptionWidth });
+      addText(doc, item.description, x.description + 7, y + 10, { size: 9.5, maxWidth: descriptionWidth });
       if (item.pricingPresentation !== "flat") {
-        addText(doc, String(item.quantity), x.quantity, y + 10, { size: 8.8 });
-        addText(doc, item.unitAmountMinor == null ? "-" : money(item.unitAmountMinor, customerPackage.currency), x.unit, y + 10, { size: 8.3 });
+        addText(doc, String(item.quantity), x.quantity, y + 10, { size: 9.5 });
+        addText(doc, item.unitAmountMinor == null ? "-" : money(item.unitAmountMinor, customerPackage.currency), x.unit, y + 10, { size: 9.25 });
       }
-      addText(doc, money(item.lineTotalMinor, customerPackage.currency), x.amount, y + 10, { size: 8.3, style: "bold" });
+      addText(doc, money(item.lineTotalMinor, customerPackage.currency), x.amount, y + 10, { size: 9.25, style: "bold" });
       doc.setDrawColor(...COLOR.line);
       doc.line(PAGE.margin, y + rowHeight, PAGE.width - PAGE.margin, y + rowHeight);
       y += rowHeight + 3;
@@ -451,13 +451,13 @@ function renderPreparedCustomerPdf(customerPackage, photos, logo = null, options
   doc.setDrawColor(...COLOR.ink);
   doc.setFillColor(...COLOR.fill);
   doc.rect(PAGE.margin, y, contentWidth, 48, "FD");
-  addText(doc, customerPackage.document.type === "QUOTE" ? "PROJECT PRICE" : "TOTAL DUE", PAGE.margin + 28, y + 29, { size: 11, color: COLOR.ink, style: "bold" });
+  addText(doc, customerPackage.document.type === "QUOTE" ? "PROJECT PRICE" : "TOTAL DUE", PAGE.margin + 28, y + 29, { size: 12, color: COLOR.ink, style: "bold" });
   addText(doc, money(customerPackage.document.type === "INVOICE" ? customerPackage.balanceMinor : customerPackage.totalMinor, customerPackage.currency), PAGE.width - PAGE.margin - 28, y + 31, { size: 22, color: COLOR.ink, style: "bold", align: "right" });
   y += 62;
   for (const [label, amount] of financialRows) {
-    addText(doc, label, PAGE.margin + 300, y, { size: 8.5, color: COLOR.muted });
-    addText(doc, money(amount, customerPackage.currency), PAGE.width - PAGE.margin, y, { size: 8.5, style: "bold", align: "right" });
-    y += 16;
+    addText(doc, label, PAGE.margin + 300, y, { size: 9.5, color: COLOR.muted });
+    addText(doc, money(amount, customerPackage.currency), PAGE.width - PAGE.margin, y, { size: 9.5, style: "bold", align: "right" });
+    y += 17;
   }
   y += 4;
   record("Pricing totals", pricingPage, pricingStart, y);
@@ -490,8 +490,8 @@ function renderPreparedCustomerPdf(customerPackage, photos, logo = null, options
     doc.setPage(pageNumber);
     doc.setDrawColor(...COLOR.line);
     doc.line(PAGE.margin, PAGE.footerY - 10, PAGE.width - PAGE.margin, PAGE.footerY - 10);
-    addText(doc, customerPackage.business.displayName, PAGE.margin, PAGE.footerY, { size: 7, color: COLOR.muted });
-    addText(doc, `Prepared with Meetro  |  ${pageNumber} / ${pages}`, PAGE.width - PAGE.margin, PAGE.footerY, { size: 7, color: COLOR.muted, align: "right" });
+    addText(doc, customerPackage.business.displayName, PAGE.margin, PAGE.footerY, { size: 7.8, color: COLOR.muted });
+    addText(doc, `Prepared with Meetro  |  ${pageNumber} / ${pages}`, PAGE.width - PAGE.margin, PAGE.footerY, { size: 7.8, color: COLOR.muted, align: "right" });
   }
   doc.setProperties({
     title: `${customerPackage.document.type} ${customerPackage.document.reference}`,
