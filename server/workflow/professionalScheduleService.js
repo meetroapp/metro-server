@@ -15,6 +15,7 @@ const {
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
 const ACTIVE_STATES = new Set(["PROPOSED", "SCHEDULED"]);
+const CANCELLABLE_STATES = new Set(["PROPOSED", "SCHEDULED", "STARTED"]);
 const HISTORY_STATES = new Set(["CANCELLED", "COMPLETED"]);
 
 function iso(value) {
@@ -233,7 +234,7 @@ async function loadOpportunities(client, actorId, limit) {
         ) current_visit ON TRUE
         WHERE visits.job_id = jobs.job_id
           AND visits.purpose = 'EVALUATION'
-          AND current_visit.state IN ('PROPOSED','SCHEDULED','COMPLETED')
+          AND current_visit.state IN ('PROPOSED','SCHEDULED','STARTED','COMPLETED')
       )
     ),
     legacy_evaluation_opportunities AS (
@@ -301,7 +302,7 @@ async function loadOpportunities(client, actorId, limit) {
         ) current_visit ON TRUE
         WHERE visits.job_id = jobs.job_id AND visits.purpose = 'EVALUATION'
           AND links.evaluation_id = subjects.evaluation_id
-          AND current_visit.state IN ('PROPOSED','SCHEDULED')
+          AND current_visit.state IN ('PROPOSED','SCHEDULED','STARTED')
       )
     ),
     approved_work_opportunities AS (
@@ -369,7 +370,7 @@ async function loadOpportunities(client, actorId, limit) {
         ) current_visit ON TRUE
         WHERE visits.job_id = jobs.job_id AND visits.purpose = 'APPROVED_WORK'
           AND visits.approved_quote_decision_id = decisions.id
-          AND current_visit.state IN ('PROPOSED','SCHEDULED')
+          AND current_visit.state IN ('PROPOSED','SCHEDULED','STARTED')
       )
     )
     SELECT opportunities.*, count(*) OVER() AS opportunity_total FROM (
@@ -388,7 +389,9 @@ async function loadOpportunities(client, actorId, limit) {
 }
 
 async function loadVisits(client, actorId, view, limit) {
-  const states = view === "active" ? ["PROPOSED", "SCHEDULED"] : ["CANCELLED", "COMPLETED"];
+  const states = view === "active"
+    ? ["PROPOSED", "SCHEDULED", "STARTED"]
+    : ["CANCELLED", "COMPLETED"];
   const result = await client.query(
     `WITH ${PROFESSIONAL_JOBS_CTE}
     SELECT
@@ -396,7 +399,7 @@ async function loadVisits(client, actorId, view, limit) {
       visits.approved_quote_decision_id, visits.approved_quote_decision,
       versions.version, versions.state, versions.scheduled_start_at,
       versions.scheduled_end_at, versions.time_zone, versions.location_mode,
-      versions.cancellation_reason, versions.cancelled_at, versions.completed_at,
+      versions.cancellation_reason, versions.started_at, versions.cancelled_at, versions.completed_at,
       versions.recorded_by_participant_id,
       versions.created_at AS version_created_at,
       evaluation_links.evaluation_id,
@@ -418,7 +421,7 @@ async function loadVisits(client, actorId, view, limit) {
           AND grants.scope_job_id = visits.job_id
           AND grants.scope_concern_id IS NULL
           AND grants.capability = ANY(ARRAY[
-            'visit.read','visit.confirm','visit.reschedule','visit.cancel','visit.complete'
+            'visit.read','visit.confirm','visit.reschedule','visit.cancel','visit.start','visit.complete'
           ])
           AND (
             (visits.purpose = 'EVALUATION' AND (
@@ -454,12 +457,13 @@ async function loadVisits(client, actorId, view, limit) {
           )
       ) OVER()
         AS change_requested_total,
-      count(*) FILTER (WHERE versions.state = 'SCHEDULED') OVER() AS upcoming_total
+      count(*) FILTER (WHERE versions.state = 'SCHEDULED') OVER() AS upcoming_total,
+      count(*) FILTER (WHERE versions.state = 'STARTED') OVER() AS in_progress_total
     FROM canonical_visits visits
     INNER JOIN professional_jobs jobs ON jobs.job_id = visits.job_id
     INNER JOIN LATERAL (
         SELECT version, state, scheduled_start_at, scheduled_end_at, time_zone,
-          location_mode, cancellation_reason, cancelled_at, completed_at,
+          location_mode, cancellation_reason, started_at, cancelled_at, completed_at,
           recorded_by_participant_id, created_at
       FROM canonical_visit_versions
       WHERE visit_id = visits.id AND job_id = visits.job_id
@@ -601,6 +605,7 @@ function visitProjection(row, now) {
     locationMode: row.location_mode,
     location: locationProjection(row, row.location_mode),
     cancellationReason: row.cancellation_reason || null,
+    startedAt: iso(row.started_at),
     cancelledAt: iso(row.cancelled_at),
     completedAt: iso(row.completed_at),
     evaluationId: row.evaluation_id || null,
@@ -623,10 +628,12 @@ function visitProjection(row, now) {
         row.proposal_by_customer === true &&
         capabilities.has("visit.confirm"),
       canReschedule: ACTIVE_STATES.has(row.state) && capabilities.has("visit.reschedule"),
-      canCancel: ACTIVE_STATES.has(row.state) && capabilities.has("visit.cancel"),
-      canComplete:
+      canCancel: CANCELLABLE_STATES.has(row.state) && capabilities.has("visit.cancel"),
+      canStart:
         row.state === "SCHEDULED" &&
-        Date.parse(row.scheduled_start_at) <= now.getTime() &&
+        capabilities.has("visit.start"),
+      canComplete:
+        row.state === "STARTED" &&
         capabilities.has("visit.complete"),
       canViewJob: true,
     },
@@ -643,12 +650,13 @@ function compareItems(left, right, view) {
 
 function summary(opportunityRows, visitRows, view) {
   if (view === "history") {
-    return { readyToSchedule: 0, waitingOnCustomer: 0, changeRequested: 0, upcoming: 0 };
+    return { readyToSchedule: 0, waitingOnCustomer: 0, changeRequested: 0, inProgress: 0, upcoming: 0 };
   }
   return {
     readyToSchedule: Number(opportunityRows[0]?.opportunity_total || 0),
     waitingOnCustomer: Number(visitRows[0]?.waiting_on_customer_total || 0),
     changeRequested: Number(visitRows[0]?.change_requested_total || 0),
+    inProgress: Number(visitRows[0]?.in_progress_total || 0),
     upcoming: Number(visitRows[0]?.upcoming_total || 0),
   };
 }

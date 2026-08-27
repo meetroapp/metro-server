@@ -75,6 +75,18 @@ test("Recommendation text is descriptive input and never parsed for pricing", ()
   assert.doesNotMatch(source, /(?:INSERT INTO|UPDATE|DELETE FROM)\s+(?:jobs|canonical_workstreams|canonical_evaluation_finding_versions|canonical_recommendation_versions)\b/i);
 });
 
+test("professional-direct Quote drafts remain truthful and do not fabricate Evaluation evidence", () => {
+  const createSource = service.createDraftQuote.toString();
+  const scope = service.validateScopeItem(item()).item;
+  assert.deepEqual(scope.source, { type: "MANUAL_PROFESSIONAL" });
+  assert.doesNotMatch(createSource, /requireSavedEvaluation/);
+  assert.doesNotMatch(
+    createSource,
+    /INSERT INTO canonical_evaluations|INSERT INTO canonical_evaluation_versions/
+  );
+  assert.match(createSource, /requireQuoteAuthority/);
+});
+
 test("customer decisions and revisions reject client-owned authority evidence", async () => {
   const pool = { query() { throw new Error("database should not be reached"); } };
   const common = {

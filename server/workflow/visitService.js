@@ -27,6 +27,7 @@ const VISIT_CAPABILITIES = Object.freeze({
   CHANGE_REQUEST: "visit.change_request",
   RESCHEDULE: "visit.reschedule",
   CANCEL: "visit.cancel",
+  START: "visit.start",
   COMPLETE: "visit.complete",
 });
 
@@ -36,6 +37,7 @@ const VISIT_COMMANDS = Object.freeze({
   CHANGE_REQUEST: "visit.change_request",
   RESCHEDULE: "visit.reschedule",
   CANCEL: "visit.cancel",
+  START: "visit.start",
   COMPLETE: "visit.complete",
   LINK_EVALUATION: "visit.link_evaluation",
 });
@@ -48,6 +50,7 @@ const VISIT_PURPOSES = Object.freeze([
 const VISIT_STATES = Object.freeze([
   "PROPOSED",
   "SCHEDULED",
+  "STARTED",
   "CANCELLED",
   "COMPLETED",
 ]);
@@ -56,6 +59,12 @@ const VISIT_LOCATION_MODES = Object.freeze([
   "REMOTE",
 ]);
 const ACTIVE_VISIT_STATES = new Set(["PROPOSED", "SCHEDULED"]);
+const CANCELLABLE_VISIT_STATES = new Set([
+  "PROPOSED",
+  "SCHEDULED",
+  "STARTED",
+]);
+const EARLY_START_WINDOW_MS = 30 * 60 * 1000;
 const MAX_WORKSTREAM_LINKS = 50;
 const OFFSET_INSTANT_PATTERN =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?(Z|[+-]\d{2}:\d{2})$/;
@@ -242,6 +251,36 @@ function currentInstant(clock) {
     throw new TypeError("The Visit clock must return a valid instant.");
   }
   return parsed;
+}
+
+function localDateKey(value, timeZone) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(value);
+  const fields = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${fields.year}-${fields.month}-${fields.day}`;
+}
+
+function classifyVisitStart({ scheduledStartAt, timeZone, startedAt }) {
+  const scheduled = new Date(scheduledStartAt);
+  const actual = startedAt instanceof Date ? startedAt : new Date(startedAt);
+  if (
+    Number.isNaN(scheduled.getTime()) ||
+    Number.isNaN(actual.getTime()) ||
+    !canonicalTimeZone(timeZone)
+  ) {
+    throw new TypeError("Canonical Visit start timing is invalid.");
+  }
+  if (localDateKey(scheduled, timeZone) !== localDateKey(actual, timeZone)) {
+    return "DIFFERENT_LOCAL_DATE";
+  }
+  const earlyBy = scheduled.getTime() - actual.getTime();
+  if (earlyBy > EARLY_START_WINDOW_MS) return "EARLY_OUTSIDE_WINDOW";
+  if (earlyBy > 0) return "WITHIN_EARLY_WINDOW";
+  return "SAME_DATE_ON_OR_AFTER_SCHEDULE";
 }
 
 function iso(value) {
@@ -538,6 +577,29 @@ async function requireAuthority({
   return authorized;
 }
 
+async function hasPurposeVisitGrant({
+  client,
+  context,
+  row,
+  capability,
+  logger,
+}) {
+  const grantInput = {
+    client,
+    participantId: context.actor_participant_id,
+    capability,
+    jobId: row.job_id,
+    evaluationId: row.purpose === "EVALUATION" ? row.evaluation_id : null,
+    approvedQuoteDecisionId: row.purpose === "APPROVED_WORK"
+      ? row.approved_quote_decision_id
+      : null,
+    allowJobScope: row.purpose === "FOLLOW_UP",
+    allowEvaluationVisitScope: row.purpose === "EVALUATION",
+    logger,
+  };
+  return hasActiveLifecycleGrant(grantInput);
+}
+
 function activeCapabilities(context, row = null) {
   const capabilities = new Set(
     row?.purpose === "APPROVED_WORK"
@@ -589,12 +651,15 @@ function visitActions(context, row, now = new Date()) {
       capabilities.has(VISIT_CAPABILITIES.RESCHEDULE),
     canCancel:
       role === "PROFESSIONAL" &&
-      ACTIVE_VISIT_STATES.has(state) &&
+      CANCELLABLE_VISIT_STATES.has(state) &&
       capabilities.has(VISIT_CAPABILITIES.CANCEL),
-    canComplete:
+    canStart:
       role === "PROFESSIONAL" &&
       state === "SCHEDULED" &&
-      Date.parse(row.scheduled_start_at) <= now.getTime() &&
+      capabilities.has(VISIT_CAPABILITIES.START),
+    canComplete:
+      role === "PROFESSIONAL" &&
+      state === "STARTED" &&
       capabilities.has(VISIT_CAPABILITIES.COMPLETE),
   };
 }
@@ -611,6 +676,7 @@ function visitProjection(row, context, now) {
     timeZone: row.time_zone,
     locationMode: row.location_mode,
     cancellationReason: row.cancellation_reason,
+    startedAt: iso(row.started_at),
     cancelledAt: iso(row.cancelled_at),
     completedAt: iso(row.completed_at),
     evaluationId: row.evaluation_id || null,
@@ -638,6 +704,7 @@ function visitVersionProjection(row) {
     timeZone: row.time_zone,
     locationMode: row.location_mode,
     cancellationReason: row.cancellation_reason,
+    startedAt: iso(row.started_at),
     cancelledAt: iso(row.cancelled_at),
     completedAt: iso(row.completed_at),
     recordedByParticipantId: row.recorded_by_participant_id,
@@ -672,7 +739,7 @@ async function loadVisit(client, jobId, visitId, { lock = false } = {}) {
       versions.version, versions.state,
       versions.scheduled_start_at, versions.scheduled_end_at,
       versions.time_zone, versions.location_mode,
-      versions.cancellation_reason, versions.cancelled_at,
+      versions.cancellation_reason, versions.started_at, versions.cancelled_at,
       versions.completed_at, versions.recorded_by_participant_id,
       versions.created_at AS version_created_at,
       evaluation_links.evaluation_id,
@@ -681,7 +748,7 @@ async function loadVisit(client, jobId, visitId, { lock = false } = {}) {
     INNER JOIN LATERAL (
       SELECT
         version, state, scheduled_start_at, scheduled_end_at,
-        time_zone, location_mode, cancellation_reason, cancelled_at,
+        time_zone, location_mode, cancellation_reason, started_at, cancelled_at,
         completed_at, recorded_by_participant_id, created_at
       FROM canonical_visit_versions
       WHERE visit_id = visits.id AND job_id = visits.job_id
@@ -710,7 +777,7 @@ async function loadVisitHistory(client, jobId, visitId) {
   const [versions, events] = await Promise.all([
     client.query(
       `SELECT version, state, scheduled_start_at, scheduled_end_at,
-        time_zone, location_mode, cancellation_reason, cancelled_at,
+        time_zone, location_mode, cancellation_reason, started_at, cancelled_at,
         completed_at, recorded_by_participant_id, created_at
        FROM canonical_visit_versions
        WHERE visit_id = $1 AND job_id = $2
@@ -1045,7 +1112,7 @@ async function listVisits(input = {}) {
         versions.version, versions.state,
         versions.scheduled_start_at, versions.scheduled_end_at,
         versions.time_zone, versions.location_mode,
-        versions.cancellation_reason, versions.cancelled_at,
+        versions.cancellation_reason, versions.started_at, versions.cancelled_at,
         versions.completed_at, versions.recorded_by_participant_id,
         versions.created_at AS version_created_at,
         evaluation_links.evaluation_id,
@@ -1054,7 +1121,7 @@ async function listVisits(input = {}) {
       INNER JOIN LATERAL (
         SELECT
           version, state, scheduled_start_at, scheduled_end_at,
-          time_zone, location_mode, cancellation_reason, cancelled_at,
+          time_zone, location_mode, cancellation_reason, started_at, cancelled_at,
           completed_at, recorded_by_participant_id, created_at
         FROM canonical_visit_versions
         WHERE visit_id = visits.id AND job_id = visits.job_id
@@ -1362,6 +1429,7 @@ async function insertVisitVersion(client, {
   state,
   schedule,
   cancellationReason = null,
+  startedAt = null,
   cancelledAt = null,
   completedAt = null,
   participantId,
@@ -1371,11 +1439,11 @@ async function insertVisitVersion(client, {
     `INSERT INTO canonical_visit_versions (
       visit_id, version, job_id, state,
       scheduled_start_at, scheduled_end_at, time_zone, location_mode,
-      cancellation_reason, cancelled_at, completed_at,
+      cancellation_reason, started_at, cancelled_at, completed_at,
       recorded_by_participant_id, command_idempotency_id, integrity_hash
      ) VALUES (
       $1, $2, $3, $4, $5, $6, $7, $8,
-      $9, $10, $11, $12, $13, $14
+      $9, $10, $11, $12, $13, $14, $15
      )`,
     [
       visitId,
@@ -1387,6 +1455,7 @@ async function insertVisitVersion(client, {
       schedule.timeZone,
       schedule.locationMode,
       cancellationReason,
+      startedAt,
       cancelledAt,
       completedAt,
       participantId,
@@ -1398,6 +1467,7 @@ async function insertVisitVersion(client, {
         state,
         ...schedule,
         cancellationReason,
+        startedAt: iso(startedAt),
         cancelledAt: iso(cancelledAt),
         completedAt: iso(completedAt),
         participantId,
@@ -1414,15 +1484,18 @@ async function insertVisitEvent(client, {
   eventType,
   visitState,
   reason,
+  startTimingClassification = null,
+  scheduleVarianceAcknowledged = null,
   participantId,
   commandId,
 }) {
   const result = await client.query(
     `INSERT INTO canonical_visit_events (
       id, visit_id, visit_version, previous_visit_version, job_id,
-      event_type, visit_state, reason, recorded_by_participant_id,
+      event_type, visit_state, reason, start_timing_classification,
+      schedule_variance_acknowledged, recorded_by_participant_id,
       command_idempotency_id
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
      RETURNING id, event_type, visit_version, previous_visit_version,
        visit_state, reason, recorded_by_participant_id, created_at`,
     [
@@ -1434,6 +1507,8 @@ async function insertVisitEvent(client, {
       eventType,
       visitState,
       reason,
+      startTimingClassification,
+      scheduleVarianceAcknowledged,
       participantId,
       commandId,
     ]
@@ -1611,6 +1686,7 @@ async function runVersionCommand({
   eventType,
   schedule = null,
   reason = null,
+  acknowledgeScheduleVariance = null,
   resultCode,
   requiredRole,
 }) {
@@ -1631,19 +1707,11 @@ async function runVersionCommand({
         abort: failure(404, "VISIT_UNAVAILABLE", "The Visit is unavailable."),
       };
     }
-    const granted = await hasActiveLifecycleGrant({
+    const granted = await hasPurposeVisitGrant({
       client,
-      participantId: authorized.context.actor_participant_id,
-      jobId,
+      context: authorized.context,
+      row: current,
       capability,
-      evaluationId: current.purpose === "EVALUATION"
-        ? current.evaluation_id
-        : null,
-      approvedQuoteDecisionId: current.purpose === "APPROVED_WORK"
-        ? current.approved_quote_decision_id
-        : null,
-      allowJobScope: current.purpose === "FOLLOW_UP",
-      allowEvaluationVisitScope: current.purpose === "EVALUATION",
       logger,
     });
     if (!granted) {
@@ -1670,6 +1738,9 @@ async function runVersionCommand({
         commandName,
         schedule,
         reason,
+        ...(commandName === VISIT_COMMANDS.START
+          ? { acknowledgeScheduleVariance }
+          : {}),
       }),
     });
     if (idempotency.error) return { abort: idempotency.error };
@@ -1715,6 +1786,26 @@ async function runVersionCommand({
     }
 
     const now = currentInstant(input.clock);
+    const startTimingClassification = commandName === VISIT_COMMANDS.START
+      ? classifyVisitStart({
+          scheduledStartAt: current.scheduled_start_at,
+          timeZone: current.time_zone,
+          startedAt: now,
+        })
+      : null;
+    const scheduleVarianceRequired = new Set([
+      "EARLY_OUTSIDE_WINDOW",
+      "DIFFERENT_LOCAL_DATE",
+    ]).has(startTimingClassification);
+    if (scheduleVarianceRequired && acknowledgeScheduleVariance !== true) {
+      return {
+        abort: failure(
+          409,
+          "VISIT_START_ACKNOWLEDGMENT_REQUIRED",
+          "Confirm that you want to start this Visit outside its scheduled time."
+        ),
+      };
+    }
     if (
       commandName === VISIT_COMMANDS.CONFIRM &&
       Date.parse(current.scheduled_start_at) <= now.getTime()
@@ -1745,14 +1836,15 @@ async function runVersionCommand({
       }
     }
     if (
-      commandName === VISIT_COMMANDS.COMPLETE &&
-      Date.parse(current.scheduled_start_at) > now.getTime()
+      commandName === VISIT_COMMANDS.CANCEL &&
+      current.state === "STARTED" &&
+      !reason
     ) {
       return {
         abort: failure(
-          409,
-          "VISIT_HAS_NOT_STARTED",
-          "A future Visit cannot be completed."
+          400,
+          "VISIT_CANCELLATION_REASON_REQUIRED",
+          "A reason is required to cancel an in-progress Visit."
         ),
       };
     }
@@ -1760,6 +1852,7 @@ async function runVersionCommand({
     const resultingSchedule = schedule || currentSchedule(current);
     const cancelledAt = targetState === "CANCELLED" ? now : null;
     const completedAt = targetState === "COMPLETED" ? now : null;
+    const startedAt = targetState === "STARTED" ? now : current.started_at;
     await insertVisitVersion(client, {
       visitId,
       version: nextVersion,
@@ -1767,6 +1860,7 @@ async function runVersionCommand({
       state: targetState,
       schedule: resultingSchedule,
       cancellationReason: targetState === "CANCELLED" ? reason : null,
+      startedAt,
       cancelledAt,
       completedAt,
       participantId,
@@ -1780,6 +1874,11 @@ async function runVersionCommand({
       eventType,
       visitState: targetState,
       reason,
+      startTimingClassification,
+      scheduleVarianceAcknowledged:
+        commandName === VISIT_COMMANDS.START
+          ? acknowledgeScheduleVariance === true
+          : null,
       participantId,
       commandId: idempotency.reservation.id,
     });
@@ -2095,11 +2194,38 @@ async function cancelVisit(input = {}) {
     ...command,
     capability: VISIT_CAPABILITIES.CANCEL,
     commandName: VISIT_COMMANDS.CANCEL,
-    permittedStates: ACTIVE_VISIT_STATES,
+    permittedStates: CANCELLABLE_VISIT_STATES,
     targetState: "CANCELLED",
     eventType: "VISIT_CANCELLED",
     reason,
     resultCode: "VISIT_CANCELLED",
+    requiredRole: "PROFESSIONAL",
+  });
+}
+
+async function startVisit(input = {}) {
+  const command = validatedVersionCommand(
+    input,
+    ["acknowledgeScheduleVariance"],
+    "INVALID_VISIT_START"
+  );
+  if (command.error) return command.error;
+  if (
+    input.acknowledgeScheduleVariance != null &&
+    typeof input.acknowledgeScheduleVariance !== "boolean"
+  ) {
+    return failure(400, "INVALID_VISIT_START", "The Visit start command is invalid.");
+  }
+  return runVersionCommand({
+    input,
+    ...command,
+    capability: VISIT_CAPABILITIES.START,
+    commandName: VISIT_COMMANDS.START,
+    permittedStates: new Set(["SCHEDULED"]),
+    targetState: "STARTED",
+    eventType: "VISIT_STARTED",
+    acknowledgeScheduleVariance: input.acknowledgeScheduleVariance === true,
+    resultCode: "VISIT_STARTED",
     requiredRole: "PROFESSIONAL",
   });
 }
@@ -2112,7 +2238,7 @@ async function completeVisit(input = {}) {
     ...command,
     capability: VISIT_CAPABILITIES.COMPLETE,
     commandName: VISIT_COMMANDS.COMPLETE,
-    permittedStates: new Set(["SCHEDULED"]),
+    permittedStates: new Set(["STARTED"]),
     targetState: "COMPLETED",
     eventType: "VISIT_COMPLETED",
     resultCode: "VISIT_COMPLETED",
@@ -2136,8 +2262,10 @@ module.exports = {
   proposeVisit,
   requestVisitChange,
   rescheduleVisit,
+  startVisit,
   visitServiceInternals: Object.freeze({
     canonicalTimeZone,
+    classifyVisitStart,
     linkDraftEvaluationOnVisitCompletion,
     normalizedSchedule,
     strictInstant,

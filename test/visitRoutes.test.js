@@ -19,7 +19,7 @@ function response() {
   };
 }
 
-test("Visit routes expose exactly eight authenticated bounded endpoints", () => {
+test("Visit routes expose exactly nine authenticated bounded endpoints", () => {
   const routes = [];
   const app = {
     get(path, ...handlers) { routes.push({ method: "GET", path, handlers }); },
@@ -32,7 +32,7 @@ test("Visit routes expose exactly eight authenticated bounded endpoints", () => 
     getPool: () => ({}),
     sendPublicDatabaseError: () => {},
   });
-  assert.equal(routes.length, 8);
+  assert.equal(routes.length, 9);
   assert.equal(routes.every((route) => route.handlers[0] === authMiddleware), true);
   assert.deepEqual(routes.map(({ method, path }) => `${method} ${path}`), [
     "GET /jobs/:jobId/visits",
@@ -42,6 +42,7 @@ test("Visit routes expose exactly eight authenticated bounded endpoints", () => 
     "POST /jobs/:jobId/visits/:visitId/change-request",
     "POST /jobs/:jobId/visits/:visitId/reschedule",
     "POST /jobs/:jobId/visits/:visitId/cancel",
+    "POST /jobs/:jobId/visits/:visitId/start",
     "POST /jobs/:jobId/visits/:visitId/complete",
   ]);
 });
@@ -79,6 +80,7 @@ test("handlers forward only governed Visit fields from authenticated boundaries"
   await handlers.proposeVisit(base, response());
   await handlers.rescheduleVisit(base, response());
   await handlers.requestVisitChange(base, response());
+  await handlers.startVisit(base, response());
   await handlers.completeVisit(base, response());
   assert.deepEqual(calls, [
     {
@@ -129,6 +131,18 @@ test("handlers forward only governed Visit fields from authenticated boundaries"
         scheduledEndAt: "2026-08-20T14:00:00.000Z",
         timeZone: "America/New_York",
         locationMode: "REMOTE",
+      },
+    },
+    {
+      operation: "startVisit",
+      input: {
+        pool: "pool",
+        authenticatedActor: { id: 9 },
+        jobId: "job",
+        visitId: "visit",
+        expectedVersion: 2,
+        idempotencyKey: "visit-key",
+        acknowledgeScheduleVariance: undefined,
       },
     },
     {

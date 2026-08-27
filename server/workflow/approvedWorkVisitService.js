@@ -34,6 +34,7 @@ const PROFESSIONAL_APPROVED_WORK_VISIT_CAPABILITIES = Object.freeze([
   "visit.propose",
   "visit.reschedule",
   "visit.cancel",
+  "visit.start",
   "visit.complete",
 ]);
 

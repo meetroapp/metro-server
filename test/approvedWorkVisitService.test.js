@@ -29,6 +29,7 @@ test("Approved Work Visit activation grants only the exact approved matrices", (
     "visit.propose",
     "visit.reschedule",
     "visit.cancel",
+    "visit.start",
     "visit.complete",
   ]);
   assert.equal(

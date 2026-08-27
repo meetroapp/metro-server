@@ -118,6 +118,13 @@ function createVisitHandlers({
         reason: req.body?.reason,
       })
     ),
+    startVisit: handle("start_visit", (req) =>
+      service.startVisit({
+        ...versionCommand(req),
+        acknowledgeScheduleVariance:
+          req.body?.acknowledgeScheduleVariance,
+      })
+    ),
     completeVisit: handle("complete_visit", (req) =>
       service.completeVisit(versionCommand(req))
     ),
@@ -165,6 +172,11 @@ function registerVisitRoutes({
     "/jobs/:jobId/visits/:visitId/cancel",
     authMiddleware,
     handlers.cancelVisit
+  );
+  app.post(
+    "/jobs/:jobId/visits/:visitId/start",
+    authMiddleware,
+    handlers.startVisit
   );
   app.post(
     "/jobs/:jobId/visits/:visitId/complete",

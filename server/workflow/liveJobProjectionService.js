@@ -993,6 +993,7 @@ async function loadCanonicalState(pool, context) {
             "visit.propose",
             "visit.reschedule",
             "visit.cancel",
+            "visit.start",
             "visit.complete",
           ],
           context.actor_participant_id,

@@ -14,6 +14,7 @@ const {
   completeVisit,
   proposeVisit,
   rescheduleVisit,
+  startVisit,
   visitServiceInternals,
 } = require("../server/workflow/visitService");
 
@@ -25,7 +26,7 @@ const indexSource = readFileSync(join(__dirname, "..", "index.js"), "utf8");
 
 test("Visit runtime vocabulary exactly preserves the approved authority contract", () => {
   assert.deepEqual(VISIT_PURPOSES, ["EVALUATION", "APPROVED_WORK", "FOLLOW_UP"]);
-  assert.deepEqual(VISIT_STATES, ["PROPOSED", "SCHEDULED", "CANCELLED", "COMPLETED"]);
+  assert.deepEqual(VISIT_STATES, ["PROPOSED", "SCHEDULED", "STARTED", "CANCELLED", "COMPLETED"]);
   assert.deepEqual(VISIT_LOCATION_MODES, ["JOB_SERVICE_LOCATION", "REMOTE"]);
   assert.deepEqual(Object.values(VISIT_CAPABILITIES).sort(), [
     "visit.cancel",
@@ -35,6 +36,7 @@ test("Visit runtime vocabulary exactly preserves the approved authority contract
     "visit.propose",
     "visit.read",
     "visit.reschedule",
+    "visit.start",
   ]);
   assert.deepEqual(Object.values(VISIT_COMMANDS).sort(), [
     "visit.cancel",
@@ -44,6 +46,7 @@ test("Visit runtime vocabulary exactly preserves the approved authority contract
     "visit.link_evaluation",
     "visit.propose",
     "visit.reschedule",
+    "visit.start",
   ]);
   assert.equal(VISIT_PURPOSES.includes("COMPLETION"), false);
   assert.equal(VISIT_PURPOSES.includes("OTHER"), false);
@@ -134,6 +137,7 @@ test("canonical Visit DTO is an explicit allowlist with truthful actor actions",
     time_zone: "America/New_York",
     location_mode: "REMOTE",
     cancellation_reason: null,
+    started_at: null,
     cancelled_at: null,
     completed_at: null,
     evaluation_id: null,
@@ -177,6 +181,7 @@ test("canonical Visit DTO is an explicit allowlist with truthful actor actions",
     "timeZone",
     "locationMode",
     "cancellationReason",
+    "startedAt",
     "cancelledAt",
     "completedAt",
     "evaluationId",
@@ -193,9 +198,78 @@ test("canonical Visit DTO is an explicit allowlist with truthful actor actions",
     canRequestChange: true,
     canReschedule: false,
     canCancel: false,
+    canStart: false,
     canComplete: false,
   });
   assert.equal(JSON.stringify(dto).includes("must-not-leak"), false);
+});
+
+test("Visit start classification uses the stored IANA schedule and bounded early window", () => {
+  const scheduled = {
+    scheduled_start_at: "2026-08-27T13:00:00.000Z",
+    time_zone: "America/New_York",
+  };
+  assert.deepEqual(
+    visitServiceInternals.classifyVisitStart({
+      scheduledStartAt: scheduled.scheduled_start_at,
+      timeZone: scheduled.time_zone,
+      startedAt: new Date("2026-08-27T12:30:00.000Z"),
+    }),
+    "WITHIN_EARLY_WINDOW"
+  );
+  assert.equal(
+    visitServiceInternals.classifyVisitStart({
+      scheduledStartAt: scheduled.scheduled_start_at,
+      timeZone: scheduled.time_zone,
+      startedAt: new Date("2026-08-27T12:55:00.000Z"),
+    }),
+    "WITHIN_EARLY_WINDOW"
+  );
+  assert.equal(
+    visitServiceInternals.classifyVisitStart({
+      scheduledStartAt: scheduled.scheduled_start_at,
+      timeZone: scheduled.time_zone,
+      startedAt: new Date("2026-08-27T13:00:00.000Z"),
+    }),
+    "SAME_DATE_ON_OR_AFTER_SCHEDULE"
+  );
+  assert.equal(
+    visitServiceInternals.classifyVisitStart({
+      scheduledStartAt: scheduled.scheduled_start_at,
+      timeZone: scheduled.time_zone,
+      startedAt: new Date("2026-08-27T18:00:00.000Z"),
+    }),
+    "SAME_DATE_ON_OR_AFTER_SCHEDULE"
+  );
+  assert.deepEqual(
+    visitServiceInternals.classifyVisitStart({
+      scheduledStartAt: scheduled.scheduled_start_at,
+      timeZone: scheduled.time_zone,
+      startedAt: new Date("2026-08-27T12:29:59.000Z"),
+    }),
+    "EARLY_OUTSIDE_WINDOW"
+  );
+  assert.deepEqual(
+    visitServiceInternals.classifyVisitStart({
+      scheduledStartAt: scheduled.scheduled_start_at,
+      timeZone: scheduled.time_zone,
+      startedAt: new Date("2026-08-28T13:00:00.000Z"),
+    }),
+    "DIFFERENT_LOCAL_DATE"
+  );
+});
+
+test("Visit start rejects browser-owned authority before database access", async () => {
+  const result = await startVisit({
+    pool: { query() { throw new Error("database must not be reached"); } },
+    authenticatedActor: { id: 7 },
+    jobId: "00000000-0000-4000-8000-000000000001",
+    visitId: "00000000-0000-4000-8000-000000000002",
+    expectedVersion: 1,
+    acknowledgeScheduleVariance: "yes",
+    idempotencyKey: "start-key",
+  });
+  assert.equal(result.code, "INVALID_VISIT_START");
 });
 
 test("Evaluation Visit completion links the existing Job draft through one idempotent provenance command", async () => {

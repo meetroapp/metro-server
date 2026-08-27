@@ -52,6 +52,7 @@ const PROFESSIONAL_EVALUATION_VISIT_CAPABILITIES = Object.freeze([
   "visit.confirm",
   "visit.reschedule",
   "visit.cancel",
+  "visit.start",
   "visit.complete",
 ]);
 

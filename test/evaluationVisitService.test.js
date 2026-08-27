@@ -29,6 +29,7 @@ test("Evaluation Visit activation grants the exact approved role matrices", () =
     "visit.propose",
     "visit.reschedule",
     "visit.cancel",
+    "visit.start",
     "visit.complete",
   ]);
   assert.equal(EVALUATION_VISIT_AUTHORITY_SOURCE,

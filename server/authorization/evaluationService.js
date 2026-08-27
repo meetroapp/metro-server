@@ -809,6 +809,50 @@ async function loadCompletedEvaluationVisit(
   return result.rows[0] || null;
 }
 
+async function loadEvaluationVisitForDraft(
+  client,
+  { jobId, visitId, lock = false }
+) {
+  const result = await client.query(
+    `
+    /* ordinary_evaluation:active_or_completed_visit */
+    SELECT
+      visits.id AS visit_id,
+      visits.job_id,
+      visits.purpose,
+      versions.version AS visit_version,
+      versions.state AS visit_state,
+      versions.started_at,
+      versions.completed_at,
+      links.evaluation_id
+    FROM canonical_visits visits
+    INNER JOIN LATERAL (
+      SELECT version, state, started_at, completed_at
+      FROM canonical_visit_versions
+      WHERE visit_id = visits.id AND job_id = visits.job_id
+      ORDER BY version DESC
+      LIMIT 1
+    ) versions ON TRUE
+    LEFT JOIN canonical_visit_evaluation_links links
+      ON links.visit_id = visits.id
+      AND links.job_id = visits.job_id
+    WHERE visits.id = $1
+      AND visits.job_id = $2
+      AND visits.purpose = 'EVALUATION'
+      AND (
+        (versions.state = 'STARTED' AND versions.started_at IS NOT NULL)
+        OR
+        (versions.state = 'COMPLETED' AND versions.completed_at IS NOT NULL)
+      )
+      AND links.visit_id IS NULL
+    LIMIT 1
+    ${lock ? "FOR UPDATE OF visits" : ""}
+    `,
+    [visitId, jobId]
+  );
+  return result.rows[0] || null;
+}
+
 async function reserveVisitEvaluationLinkCommand({
   client,
   context,
@@ -1645,23 +1689,25 @@ async function createOrdinaryJobEvaluation(input = {}) {
       return { ...idempotency.replay, replayed: true };
     }
 
-    const completedVisit = validated.visitId
-      ? await loadCompletedEvaluationVisit(client, {
+    const evaluationVisit = validated.visitId
+      ? await loadEvaluationVisitForDraft(client, {
           jobId: validated.jobId,
           visitId: validated.visitId,
-          requireUnlinked: true,
           lock: true,
         })
       : null;
-    if (validated.visitId && !completedVisit) {
+    if (validated.visitId && !evaluationVisit) {
       await rollback(client);
       transactionStarted = false;
       return failure(
         409,
-        "COMPLETED_EVALUATION_VISIT_REQUIRED",
-        "The supplied Evaluation Visit must be completed and available for this Evaluation."
+        "STARTED_EVALUATION_VISIT_REQUIRED",
+        "Start the Evaluation Visit before documenting the onsite assessment."
       );
     }
+    const completedVisit = evaluationVisit?.visit_state === "COMPLETED"
+      ? evaluationVisit
+      : null;
 
     const existing = await client.query(
       `

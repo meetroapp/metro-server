@@ -116,6 +116,7 @@ test("active aggregate projects truthful opportunity, Visit, summary, identity, 
     readyToSchedule: 1,
     waitingOnCustomer: 1,
     changeRequested: 0,
+    inProgress: 0,
     upcoming: 0,
   });
   assert.equal(result.schedule.opportunities[0].semanticState, "READY_TO_SCHEDULE");
@@ -157,14 +158,15 @@ test("change-request evidence drives presentation without Visit detail fan-out",
 test("scheduled professional actions reuse state, time, and exact capability truth", () => {
   const projected = professionalScheduleInternals.visitProjection(visit({
     state: "SCHEDULED",
-    active_capabilities: ["visit.read", "visit.reschedule", "visit.cancel", "visit.complete"],
+    active_capabilities: ["visit.read", "visit.reschedule", "visit.cancel", "visit.start", "visit.complete"],
   }), new Date("2026-08-16T12:00:00.000Z"));
   assert.equal(projected.semanticState, "SCHEDULED");
   assert.deepEqual(projected.actions, {
     canConfirm: false,
     canReschedule: true,
     canCancel: true,
-    canComplete: true,
+    canStart: true,
+    canComplete: false,
     canViewJob: true,
   });
   assert.equal("canRequestChange" in projected.actions, false);
@@ -181,6 +183,7 @@ test("customer-authored proposal is actionable by the professional without becom
     canConfirm: true,
     canReschedule: true,
     canCancel: false,
+    canStart: false,
     canComplete: false,
     canViewJob: true,
   });
