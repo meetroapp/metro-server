@@ -119,6 +119,11 @@ const CONTENT_TEXT_LIMITS = Object.freeze({
   balanceDue: 80,
   terms: 8000,
   paymentTerms: 8000,
+  pricingDisplayMode: 40,
+  materialsDisplayMode: 40,
+  depositMode: 20,
+  depositPercent: 40,
+  depositFixedAmount: 80,
   estimatedDuration: 240,
   dueDate: 80,
   notes: 8000,
@@ -175,6 +180,17 @@ function normalizeContent(value, { partial = false } = {}) {
     const normalized = text(value[key], maximum);
     if (normalized === null) return null;
     result[key] = normalized;
+  }
+  if (result.pricingDisplayMode && !["TOTAL_ONLY", "CATEGORY_BREAKDOWN", "DETAILED_LINE_ITEMS"].includes(result.pricingDisplayMode)) return null;
+  if (result.materialsDisplayMode && !["INCLUDED_IN_TOTAL", "SHOW_SEPARATELY", "CUSTOMER_PROVIDES"].includes(result.materialsDisplayMode)) return null;
+  if (result.depositMode && !["NONE", "PERCENT", "FIXED"].includes(result.depositMode)) return null;
+  if (result.depositPercent) {
+    const percent = Number(result.depositPercent);
+    if (!Number.isFinite(percent) || percent < 0 || percent > 100) return null;
+  }
+  if (result.depositFixedAmount) {
+    const fixed = Number(String(result.depositFixedAmount).replace(/[$,\s]/g, ""));
+    if (!Number.isFinite(fixed) || fixed < 0) return null;
   }
   for (const key of ["lineItems", "materialItems", "laborItems"]) {
     if (!Object.hasOwn(value, key)) continue;

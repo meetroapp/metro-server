@@ -396,11 +396,16 @@ function buildWorkingQuoteTerms(content) {
   ]) {
     if (!exclusions.includes(exclusion)) exclusions.push(exclusion);
   }
+  const pricingNote = content.materialsDisplayMode === "CUSTOMER_PROVIDES"
+    ? "Customer to provide materials"
+    : content.materialsDisplayMode === "INCLUDED_IN_TOTAL"
+      ? "Labor and standard materials included"
+      : "";
   const raw = {
     schemaVersion: CUSTOMER_TERMS_SCHEMA_VERSION,
     paymentTerms,
     estimatedDuration: content.estimatedDuration || "",
-    customerNotes: content.notes || "",
+    customerNotes: [content.notes || "", pricingNote].filter(Boolean).join(" · "),
     agreement: {
       exclusions,
       additionalWorkTerms: agreement.additionalWorkTerms || "",
@@ -479,6 +484,7 @@ function workingQuoteConversion(rawContent) {
       [content.lineItems || [], "LINE_ITEM"],
     ];
     for (const [rows, classification] of groups) {
+      if (classification === "MATERIAL" && content.materialsDisplayMode === "CUSTOMER_PROVIDES") continue;
       for (const row of rows) {
         const converted = convertWorkingRow(row, classification);
         if (converted.error) return converted;
@@ -486,6 +492,46 @@ function workingQuoteConversion(rawContent) {
       }
     }
     if (items.length === 0) return { error: "WORKING_QUOTE_SCOPE_REQUIRED" };
+    if (content.pricingDisplayMode === "TOTAL_ONLY") {
+      const aggregate = calculateTotals(items);
+      if (aggregate.error) return { error: "INVALID_WORKING_QUOTE_TOTAL" };
+      const description = boundedText(
+        content.projectTitle || content.projectDescription || content.recommendedSolution || "",
+        1000
+      );
+      if (!description) return { error: "WORKING_QUOTE_SCOPE_REQUIRED" };
+      const validated = validateScopeItem({
+        classification: "LABOR_SERVICE",
+        scopeSemantic: "FUTURE_WORK",
+        materialResponsibility: "NOT_APPLICABLE",
+        description,
+        quantity: 1,
+        unitAmountMinor: aggregate.totalMinor,
+        source: { type: "MANUAL_PROFESSIONAL" },
+      });
+      if (validated.error) return { error: "INVALID_WORKING_QUOTE_TOTAL" };
+      items = [validated.item];
+    } else if (content.pricingDisplayMode === "CATEGORY_BREAKDOWN") {
+      const categoryItems = [];
+      for (const classification of ["LABOR_SERVICE", "MATERIAL"]) {
+        const matching = items.filter((item) => item.classification === classification);
+        if (!matching.length) continue;
+        const total = matching.reduce((sum, item) => sum + item.lineTotalMinor, 0);
+        const material = classification === "MATERIAL";
+        const validated = validateScopeItem({
+          classification,
+          scopeSemantic: material ? "MATERIAL_INCLUDED" : "FUTURE_WORK",
+          materialResponsibility: material ? "PROFESSIONAL_SUPPLIED" : "NOT_APPLICABLE",
+          description: material ? "Materials" : "Labor and services",
+          quantity: 1,
+          unitAmountMinor: total,
+          source: { type: "MANUAL_PROFESSIONAL" },
+        });
+        if (validated.error) return { error: "INVALID_WORKING_QUOTE_ROW" };
+        categoryItems.push(validated.item);
+      }
+      items = categoryItems;
+    }
   }
 
   const totals = calculateTotals(items);

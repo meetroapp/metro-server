@@ -461,6 +461,13 @@ function renderPreparedCustomerPdf(customerPackage, photos, logo = null, options
   }
   y += 4;
   record("Pricing totals", pricingPage, pricingStart, y);
+  section("Pricing", customerPackage.pricingPresentation?.note);
+  if (customerPackage.document.type === "QUOTE" && customerPackage.deposit) {
+    const label = customerPackage.deposit.mode === "PERCENT"
+      ? `${customerPackage.deposit.percent}% deposit due on approval`
+      : "Deposit due on approval";
+    section("Deposit", `${label} — ${money(customerPackage.deposit.dueMinor, customerPackage.currency)}\nRemaining balance — ${money(customerPackage.deposit.remainingMinor, customerPackage.currency)}`);
+  }
   summaryGrid(compactSummaryEntries, summaryColumns);
   for (const [label, value] of longSummaryEntries) section(label, value);
 

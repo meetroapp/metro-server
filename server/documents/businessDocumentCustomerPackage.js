@@ -41,12 +41,12 @@ function rowAmountMinor(row = {}) {
     : 0;
 }
 
-function safeRows(content = {}) {
+function safeCategorizedRows(content = {}) {
   return [
-    ...(Array.isArray(content.lineItems) ? content.lineItems : []),
-    ...(Array.isArray(content.materialItems) ? content.materialItems : []),
-    ...(Array.isArray(content.laborItems) ? content.laborItems : []),
-  ].map((row) => {
+    ...(Array.isArray(content.lineItems) ? content.lineItems.map((row) => [row, "SERVICE"]) : []),
+    ...(Array.isArray(content.materialItems) ? content.materialItems.map((row) => [row, "MATERIAL"]) : []),
+    ...(Array.isArray(content.laborItems) ? content.laborItems.map((row) => [row, "LABOR"]) : []),
+  ].map(([row, category]) => {
     const quantity = Number(row.quantity || row.hours || 0);
     const unitSource = row.unitPrice ?? row.rate;
     const unitAmount = Number(unitSource || 0);
@@ -57,8 +57,72 @@ function safeRows(content = {}) {
       unitAmountMinor: unitPricing ? amountMinor(unitAmount) : null,
       lineTotalMinor: rowAmountMinor(row),
       pricingPresentation: unitPricing ? "unit" : "flat",
+      category,
     };
   }).filter((row) => row.description && row.lineTotalMinor > 0);
+}
+
+function customerPricing(content = {}) {
+  const internalRows = safeCategorizedRows(content);
+  const pricingDisplayMode = ["TOTAL_ONLY", "CATEGORY_BREAKDOWN", "DETAILED_LINE_ITEMS"].includes(content.pricingDisplayMode)
+    ? content.pricingDisplayMode
+    : "DETAILED_LINE_ITEMS";
+  const materialsDisplayMode = ["INCLUDED_IN_TOTAL", "SHOW_SEPARATELY", "CUSTOMER_PROVIDES"].includes(content.materialsDisplayMode)
+    ? content.materialsDisplayMode
+    : "SHOW_SEPARATELY";
+  const includedRows = materialsDisplayMode === "CUSTOMER_PROVIDES"
+    ? internalRows.filter((row) => row.category !== "MATERIAL")
+    : internalRows;
+  let rows = includedRows;
+  if (pricingDisplayMode === "TOTAL_ONLY") rows = [];
+  if (pricingDisplayMode === "CATEGORY_BREAKDOWN") {
+    rows = ["SERVICE", "LABOR", "MATERIAL"].map((category) => {
+      const total = includedRows.filter((row) => row.category === category).reduce((sum, row) => sum + row.lineTotalMinor, 0);
+      return total > 0 ? {
+        description: category === "SERVICE" ? "Services" : category === "LABOR" ? "Labor" : "Materials",
+        quantity: null,
+        unitAmountMinor: null,
+        lineTotalMinor: total,
+        pricingPresentation: "flat",
+      } : null;
+    }).filter(Boolean);
+  }
+  const lineTotalMinor = includedRows.reduce((sum, row) => sum + row.lineTotalMinor, 0);
+  const explicitTotalMinor = String(content.totalOverride || "").trim()
+    ? amountMinor(content.totalOverride)
+    : null;
+  const totalMinor = explicitTotalMinor ?? lineTotalMinor;
+  const pricingNote = materialsDisplayMode === "CUSTOMER_PROVIDES"
+    ? "Customer to provide materials"
+    : materialsDisplayMode === "INCLUDED_IN_TOTAL"
+      ? "Labor and standard materials included"
+      : null;
+  const depositMode = ["NONE", "PERCENT", "FIXED"].includes(content.depositMode)
+    ? content.depositMode
+    : "NONE";
+  let deposit = null;
+  if (depositMode === "PERCENT") {
+    const percent = Number(content.depositPercent);
+    if (Number.isFinite(percent) && percent >= 0 && percent <= 100) {
+      const dueMinor = Math.round(totalMinor * percent / 100);
+      deposit = { mode: "PERCENT", percent, dueMinor, remainingMinor: totalMinor - dueMinor };
+    }
+  } else if (depositMode === "FIXED") {
+    const dueMinor = optionalAmountMinor(content.depositFixedAmount);
+    if (dueMinor != null && dueMinor <= totalMinor) {
+      deposit = { mode: "FIXED", dueMinor, remainingMinor: totalMinor - dueMinor };
+    }
+  }
+  return {
+    rows: rows.map(({ category, ...row }) => row),
+    internalRows,
+    lineTotalMinor,
+    totalMinor,
+    pricingDisplayMode,
+    materialsDisplayMode,
+    pricingNote,
+    deposit,
+  };
 }
 
 function safeAgreement(value = {}) {
@@ -114,15 +178,16 @@ function buildBusinessDocumentCustomerPackage(document, business = {}) {
       : content.workPerformed || content.projectDescription,
     12000
   );
-  const lineItems = safeRows(content);
-  const computedSubtotalMinor = lineItems.reduce((sum, item) => sum + item.lineTotalMinor, 0);
+  const pricing = customerPricing(content);
+  const lineItems = pricing.rows;
+  const computedSubtotalMinor = pricing.lineTotalMinor;
   const subtotalMinor = optionalAmountMinor(content.subtotal) ?? computedSubtotalMinor;
   const discountMinor = optionalAmountMinor(content.discount) ?? 0;
   const taxMinor = optionalAmountMinor(content.tax) ?? 0;
   const feesMinor = optionalAmountMinor(content.fees) ?? 0;
   const totalMinor = String(content.totalOverride || "").trim()
-    ? amountMinor(content.totalOverride)
-    : Math.max(0, subtotalMinor - discountMinor + taxMinor + feesMinor);
+    ? pricing.totalMinor
+    : Math.max(0, computedSubtotalMinor - discountMinor + taxMinor + feesMinor);
   const paidMinor = optionalAmountMinor(content.paidAmount);
   const balanceMinor = optionalAmountMinor(content.balanceDue) ?? Math.max(0, totalMinor - (paidMinor || 0));
   const agreement = document.documentType === "QUOTE"
@@ -174,6 +239,14 @@ function buildBusinessDocumentCustomerPackage(document, business = {}) {
       ? String(content.currency).toUpperCase()
       : "USD",
     paymentTerms: cleanText(content.paymentTerms || content.terms, 8000) || null,
+    ...(content.pricingDisplayMode || content.materialsDisplayMode ? {
+      pricingPresentation: Object.freeze({
+        displayMode: pricing.pricingDisplayMode,
+        materialsMode: pricing.materialsDisplayMode,
+        note: pricing.pricingNote,
+      }),
+    } : {}),
+    ...(content.depositMode ? { deposit: pricing.deposit ? Object.freeze(pricing.deposit) : null } : {}),
     estimatedDuration: cleanText(content.estimatedDuration, 240) || null,
     conditions: Object.freeze(safeList(content.conditions)),
     exclusions: Object.freeze(safeList(content.exclusions)),
@@ -213,6 +286,10 @@ function customerPackageLines(customerPackage, customerMessage = "") {
     customerPackage.project.observation ? `Observation\n${customerPackage.project.observation}` : null,
     ...customerPackage.lineItems.map((item) => `${item.description}: ${formatMoney(item.lineTotalMinor, customerPackage.currency)}`),
     `${customerPackage.document.type === "QUOTE" ? "Project Price" : "Total Due"}: ${formatMoney(customerPackage.totalMinor, customerPackage.currency)}`,
+    customerPackage.pricingPresentation?.note || null,
+    customerPackage.deposit
+      ? `${customerPackage.deposit.mode === "PERCENT" ? `${customerPackage.deposit.percent}% deposit due on approval` : "Deposit due on approval"}: ${formatMoney(customerPackage.deposit.dueMinor, customerPackage.currency)}\nRemaining balance: ${formatMoney(customerPackage.deposit.remainingMinor, customerPackage.currency)}`
+      : null,
     customerPackage.paymentTerms ? `Deposit / Payment Terms\n${customerPackage.paymentTerms}` : null,
     [...new Set([...(customerPackage.exclusions || []), ...(agreement.exclusions || [])])].length
       ? `Not Included / Exclusions\n${[...new Set([...(customerPackage.exclusions || []), ...(agreement.exclusions || [])])].map((item) => `- ${item}`).join("\n")}`
