@@ -260,7 +260,38 @@ function deliveryProjection(quote, snapshot, deliveryContext, canSendInMeetro) {
     conversation: canSendInMeetro
       ? { id: Number(deliveryContext.conversation_id) }
       : null,
+    existingDelivery: deliveryContext?.existing_delivery || null,
   };
+}
+
+async function loadExistingQuoteDelivery(client, quote, deliveryContext) {
+  if (!hasSendAuthority(deliveryContext, Number(deliveryContext?.professional_user_id))) {
+    return null;
+  }
+  const result = await client.query(
+    `SELECT id, conversation_id, sender_id, receiver_id, quote_id, job_id, created_at
+     FROM messages
+     WHERE conversation_id = $1
+       AND sender_id = $2
+       AND receiver_id = $3
+       AND quote_id = $4
+       AND job_id = $5
+       AND message_type = 'quote_shared'
+       AND workflow_type = 'QUOTE_SHARED'
+       AND workflow_status = 'SENT'
+     ORDER BY id ASC
+     LIMIT 1`,
+    [
+      Number(deliveryContext.conversation_id),
+      Number(deliveryContext.professional_user_id),
+      Number(deliveryContext.homeowner_id),
+      quote.id,
+      quote.jobId,
+    ]
+  );
+  return result.rows[0]
+    ? messageDeliveryEvidence(result.rows[0], { replayed: true })
+    : null;
 }
 
 async function loadAuthorizedDelivery({ client, actorId, quoteId, logger, lock = false }) {
@@ -281,6 +312,13 @@ async function loadAuthorizedDelivery({ client, actorId, quoteId, logger, lock =
   const snapshot = deliveryContext ? buildSafeSnapshot(quote, deliveryContext) : null;
   if (!snapshot) {
     return { error: failure(409, "QUOTE_DELIVERY_SNAPSHOT_INVALID", "The Quote delivery snapshot is invalid.") };
+  }
+  if (deliveryContext) {
+    deliveryContext.existing_delivery = await loadExistingQuoteDelivery(
+      client,
+      quote,
+      deliveryContext
+    );
   }
   return {
     context,
@@ -394,6 +432,15 @@ async function sendQuoteInMeetro(input = {}) {
     if (loaded.quote.currentVersion !== expectedIssuedVersion) {
       return { abort: failure(409, "STALE_QUOTE_VERSION", "The Quote version is stale.") };
     }
+    if (loaded.deliveryContext.existing_delivery) {
+      return {
+        ok: true,
+        success: true,
+        status: 200,
+        code: "QUOTE_SENT_IN_MEETRO",
+        delivery: loaded.deliveryContext.existing_delivery,
+      };
+    }
 
     const conversation = {
       id: Number(loaded.deliveryContext.conversation_id),
@@ -506,6 +553,7 @@ module.exports = {
     buildSafeSnapshot,
     deliveryProjection,
     hasSendAuthority,
+    loadExistingQuoteDelivery,
     messageDeliveryEvidence,
     requestFingerprint,
     validIssuedQuote,

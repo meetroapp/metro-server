@@ -16,6 +16,7 @@ const {
   issueQuote,
 } = require("../server/authorization/quoteDraftService");
 const {
+  completeEvaluation,
   createOrdinaryJobEvaluation,
 } = require("../server/authorization/evaluationService");
 const {
@@ -169,6 +170,19 @@ async function createQuote(pool, ids, fixture, suffix, { issue = true } = {}) {
     logger: quiet,
   });
   assert.equal(evaluation.ok, true, evaluation.code);
+  const completedEvaluation = await completeEvaluation({
+    pool,
+    authenticatedActor: { id: ids.professionalId },
+    evaluationId: evaluation.evaluation.id,
+    expectedVersion: 1,
+    completionMode: "REMOTE",
+    assessmentMethod: "PHONE",
+    assessmentBasis:
+      "Reviewed the governed Quote delivery fixture with the customer by phone.",
+    idempotencyKey: `delivery-evaluation-complete-${suffix}`,
+    logger: quiet,
+  });
+  assert.equal(completedEvaluation.ok, true, completedEvaluation.code);
   const created = await createDraftQuote({
     pool,
     authenticatedActor: { id: ids.professionalId },
@@ -232,7 +246,10 @@ test("disposable PostgreSQL certifies canonical Quote delivery and ordinary mess
   const suffix = randomUUID();
   try {
     const migrations = getMigrationFiles();
-    assert.equal(migrations.at(-1).filename, migrationName);
+    assert.ok(
+      migrations.some(({ filename }) => filename === migrationName),
+      `${migrationName} must remain in the migration inventory`,
+    );
     const applied = await runMigrationCollection(pool, migrations, targetMetadata());
     assert.equal(applied.success, true);
     assert.equal(applied.applied.length, migrations.length);
@@ -264,6 +281,7 @@ test("disposable PostgreSQL certifies canonical Quote delivery and ordinary mess
     assert.equal(projection.ok, true, projection.code);
     assert.equal(projection.delivery.actions.canSendInMeetro, true);
     assert.equal(projection.delivery.conversation.id, fixture.conversationId);
+    assert.equal(projection.delivery.existingDelivery, null);
     assert.equal(projection.delivery.snapshot.totalMinor, 92000);
     assert.equal(JSON.stringify(projection).includes("materialsSubtotalMinor"), false);
 
@@ -288,17 +306,26 @@ test("disposable PostgreSQL certifies canonical Quote delivery and ordinary mess
     const replayed = await sendQuoteInMeetro(input);
     assert.equal(replayed.delivery.messageId, first.delivery.messageId);
     assert.equal(replayed.delivery.replayed, true);
+    const recoveredProjection = await getProfessionalQuoteDelivery({
+      pool,
+      authenticatedActor: { id: ids.professionalId },
+      quoteId: quote.id,
+      logger: quiet,
+    });
+    assert.equal(recoveredProjection.delivery.existingDelivery.messageId, first.delivery.messageId);
+    assert.equal(recoveredProjection.delivery.existingDelivery.replayed, true);
     const conflict = await sendQuoteInMeetro({ ...input, expectedIssuedVersion: quote.currentVersion + 1 });
     assert.equal(conflict.code, "QUOTE_DELIVERY_IDEMPOTENCY_CONFLICT");
     const reshared = await sendQuoteInMeetro({ ...input, idempotencyKey: `${key}-again` });
     assert.equal(reshared.ok, true, reshared.code);
-    assert.notEqual(reshared.delivery.messageId, first.delivery.messageId);
+    assert.equal(reshared.delivery.messageId, first.delivery.messageId);
+    assert.equal(reshared.delivery.replayed, true);
 
     const rows = await pool.query(
       `SELECT * FROM messages WHERE quote_id = $1 ORDER BY id ASC`,
       [quote.id]
     );
-    assert.equal(rows.rowCount, 2);
+    assert.equal(rows.rowCount, 1);
     assert.equal(rows.rows[0].conversation_id, fixture.conversationId);
     assert.equal(Number(rows.rows[0].sender_id), ids.professionalId);
     assert.equal(Number(rows.rows[0].receiver_id), ids.homeownerId);
@@ -408,8 +435,13 @@ test("disposable PostgreSQL certifies canonical Quote delivery and ordinary mess
     assert.equal(approval.ok, true, approval.code);
     const approvedReshare = await sendQuoteInMeetro({ ...input, idempotencyKey: `${key}-approved` });
     assert.equal(approvedReshare.ok, true, approvedReshare.code);
+    assert.equal(approvedReshare.delivery.messageId, first.delivery.messageId);
+    assert.equal(approvedReshare.delivery.replayed, true);
     const approvedMessage = await pool.query(`SELECT workflow_payload FROM messages WHERE id = $1`, [approvedReshare.delivery.messageId]);
-    assert.equal(approvedMessage.rows[0].workflow_payload.businessStatus, "APPROVED");
+    assert.equal(
+      approvedMessage.rows[0].workflow_payload.businessStatus,
+      "WAITING_ON_CUSTOMER"
+    );
 
     const after = await pool.query(
       `SELECT quotes.status, quotes.updated_at, aggregates.current_version,
@@ -427,7 +459,7 @@ test("disposable PostgreSQL certifies canonical Quote delivery and ordinary mess
     assert.equal(after.rows[0].job_created_at.toISOString(), before.rows[0].job_created_at.toISOString());
     assert.equal(after.rows[0].visits, before.rows[0].visits);
     assert.equal(after.rows[0].decision, "APPROVED");
-    assert.equal((await pool.query(`SELECT count(*)::integer AS count FROM messages WHERE quote_id = $1`, [quote.id])).rows[0].count, 3);
+    assert.equal((await pool.query(`SELECT count(*)::integer AS count FROM messages WHERE quote_id = $1`, [quote.id])).rows[0].count, 1);
     assert.equal((await pool.query(`SELECT count(*)::integer AS count FROM schema_migrations`)).rows[0].count, migrations.length);
   } finally {
     await pool.end();

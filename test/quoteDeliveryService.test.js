@@ -243,6 +243,41 @@ test("send authority is exact to active Conversation participants", () => {
   assert.equal(quoteDeliveryInternals.hasSendAuthority({ ...deliveryContext, conversation_id: null }, 65), false);
 });
 
+test("existing exact Quote delivery is projected as replay evidence for recovery", async () => {
+  const queries = [];
+  const existing = await quoteDeliveryInternals.loadExistingQuoteDelivery(
+    {
+      async query(sql, values) {
+        queries.push({ sql, values });
+        return { rows: [{
+          id: 71,
+          conversation_id: 17,
+          sender_id: 65,
+          receiver_id: 64,
+          quote_id: QUOTE_ID,
+          job_id: JOB_ID,
+          created_at: "2026-08-15T12:00:00.000Z",
+        }] };
+      },
+    },
+    issuedQuote(),
+    deliveryContext
+  );
+  assert.deepEqual(existing, {
+    messageId: 71,
+    conversationId: 17,
+    quoteId: QUOTE_ID,
+    jobId: JOB_ID,
+    messageType: "QUOTE_SHARED",
+    state: "SENT_IN_MEETRO",
+    sentAt: "2026-08-15T12:00:00.000Z",
+    replayed: true,
+  });
+  assert.deepEqual(queries[0].values, [17, 65, 64, QUOTE_ID, JOB_ID]);
+  assert.match(queries[0].sql, /message_type = 'quote_shared'/);
+  assert.match(queries[0].sql, /workflow_status = 'SENT'/);
+});
+
 test("shared professional Quote authority rejects an inactive exact relationship", async () => {
   const result = await quoteDraftServiceInternals.requireQuoteAuthority({
     client: { query() { throw new Error("inactive authority must fail before grants"); } },
