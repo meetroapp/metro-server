@@ -115,6 +115,9 @@ function createEvaluationHandlers({
         authenticatedActor: req.user,
         evaluationId: req.params.evaluationId,
         expectedVersion: req.body?.expectedVersion,
+        completionMode: req.body?.completionMode,
+        assessmentMethod: req.body?.assessmentMethod,
+        assessmentBasis: req.body?.assessmentBasis,
         idempotencyKey: req.headers?.["idempotency-key"],
       })
     ),

@@ -26,7 +26,7 @@ const LIVE_JOB_CAPABILITIES = Object.freeze([
 ]);
 
 const STAGE_DEFINITIONS = Object.freeze({
-  EVALUATION_NEEDED: "Evaluation needed",
+  EVALUATION_NEEDED: "Evaluation draft available",
   EVALUATION_IN_PROGRESS: "Evaluation in progress",
   FINDINGS_REVIEW_NEEDED: "Findings need review",
   FINDINGS_NEEDED: "Findings needed",
@@ -67,8 +67,8 @@ const BLOCKER_DEFINITIONS = Object.freeze({
 
 const NEXT_ACTION_DEFINITIONS = Object.freeze({
   START_OR_CONTINUE_EVALUATION: {
-    label: "Review or continue the evaluation",
-    description: "Record what you observed before moving to findings and recommendations.",
+    label: "Open or continue the Evaluation",
+    description: "Prepare known information now. Finalize after the on-site visit or choose a remote assessment.",
   },
   REVIEW_FINDINGS: {
     label: "Review findings",
@@ -135,7 +135,7 @@ const NEXT_ACTION_DEFINITIONS = Object.freeze({
 const ACTION_DEFINITIONS = Object.freeze({
   VIEW_CONCERN: "View customer concern",
   MESSAGE_CUSTOMER: "Message customer",
-  START_EVALUATION: "Start evaluation",
+  START_EVALUATION: "Open Evaluation",
   EDIT_EVALUATION: "Edit evaluation",
   COMPLETE_EVALUATION: "Complete evaluation",
   REVIEW_FINDINGS: "Review findings",
@@ -227,7 +227,10 @@ function baseAvailableActions(state, capabilities, stage) {
     capabilities.has("evaluation.perform")
   ) {
     actions.push("EDIT_EVALUATION");
-    if (String(state.evaluation.observations || "").trim()) {
+    if (
+      String(state.evaluation.observations || "").trim() &&
+      state.evaluation.evaluation_visit_id
+    ) {
       actions.push("COMPLETE_EVALUATION");
     }
   }
@@ -315,6 +318,7 @@ function result({
       derivedAt,
       jobCreatedAt: state.jobCreatedAt || null,
       evaluationVersion: Number(state.evaluation?.version) || 0,
+      evaluationCompletionMode: state.evaluation?.completion_mode || null,
       findingVersion: currentVersion(state.findings),
       recommendationVersion: currentVersion(state.recommendations),
       quoteVersion: currentVersion(state.quotes),
@@ -592,12 +596,17 @@ function deriveCanonicalLiveJob(state = {}, { derivedAt = new Date().toISOString
     (finding) => finding.confirmation_state === "CONFIRMED"
   );
   if (!confirmedFindings.length) {
+    const completionReason = state.evaluation.completion_mode === "REMOTE"
+      ? "REMOTE_ASSESSMENT_COMPLETED"
+      : state.evaluation.completion_mode === "PHYSICAL"
+        ? "ON_SITE_ASSESSMENT_COMPLETED"
+        : "EVALUATION_COMPLETED";
     return result({
       stage: "FINDINGS_NEEDED",
       responsibility: "PROFESSIONAL",
       blocker: "FINDINGS_NOT_RECORDED",
       action: "REVIEW_FINDINGS",
-      reasons: ["COMPLETED_EVALUATION_WITHOUT_CONFIRMED_FINDINGS"],
+      reasons: [completionReason, "COMPLETED_EVALUATION_WITHOUT_CONFIRMED_FINDINGS"],
       state: scopedState,
       derivedAt,
     });
@@ -715,7 +724,13 @@ async function loadCanonicalState(pool, context) {
         `/* live_job:evaluation */
          SELECT canonical_evaluations.id, canonical_evaluations.status,
            canonical_evaluation_versions.version,
-           canonical_evaluation_versions.observations
+           canonical_evaluation_versions.observations,
+           canonical_visit_evaluation_links.visit_id AS evaluation_visit_id,
+           CASE
+             WHEN remote_provenance.id IS NOT NULL THEN 'REMOTE'
+             WHEN canonical_visit_evaluation_links.visit_id IS NOT NULL THEN 'PHYSICAL'
+             ELSE NULL
+           END AS completion_mode
          FROM canonical_evaluation_job_subjects
          INNER JOIN canonical_evaluations
            ON canonical_evaluations.id = canonical_evaluation_job_subjects.evaluation_id
@@ -725,6 +740,16 @@ async function loadCanonicalState(pool, context) {
            WHERE evaluation_id = canonical_evaluations.id
            ORDER BY version DESC LIMIT 1
          ) AS canonical_evaluation_versions ON TRUE
+         LEFT JOIN canonical_visit_evaluation_links
+           ON canonical_visit_evaluation_links.evaluation_id =
+             canonical_evaluation_job_subjects.evaluation_id
+           AND canonical_visit_evaluation_links.job_id =
+             canonical_evaluation_job_subjects.job_id
+         LEFT JOIN canonical_evaluation_remote_provenance remote_provenance
+           ON remote_provenance.evaluation_id =
+             canonical_evaluation_job_subjects.evaluation_id
+           AND remote_provenance.job_id =
+             canonical_evaluation_job_subjects.job_id
          WHERE canonical_evaluation_job_subjects.job_id = $1
          LIMIT 1`,
         [jobId]

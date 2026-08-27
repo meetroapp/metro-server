@@ -109,12 +109,13 @@ test("issue rejects client-owned totals and timestamps before database access", 
   assert.equal((await service.issueQuote({ ...base, conditions: ["client condition"] })).code, "QUOTE_AUTHORITY_FIELD_REJECTED");
 });
 
-test("Quote issuance requires one saved canonical Evaluation in the exact Request and Relationship context", async () => {
+test("Quote issuance requires exactly one finalized physical or remote Evaluation branch", async () => {
   const context = {
     job_id: "00000000-0000-4000-8000-000000000001",
     job_request_id: 22,
     relationship_id: 344,
     actor_user_id: 24,
+    actor_participant_id: "20000000-0000-4000-8000-000000000001",
   };
   const calls = [];
   const allowed = await service.quoteDraftServiceInternals.requireSavedEvaluation({
@@ -124,7 +125,7 @@ test("Quote issuance requires one saved canonical Evaluation in the exact Reques
         return {
           rows: [{
             id: "10000000-0000-4000-8000-000000000001",
-            status: "draft",
+            status: "completed",
             evaluation_version: 2,
           }],
         };
@@ -134,11 +135,25 @@ test("Quote issuance requires one saved canonical Evaluation in the exact Reques
     logger: { warn() {} },
   });
   assert.equal(allowed, null);
-  assert.deepEqual(calls[0].values.slice(0, 3), [344, 24, 22]);
+  assert.deepEqual(calls[0].values, [
+    344,
+    24,
+    22,
+    "authorization_engine",
+    context.job_id,
+    context.actor_participant_id,
+  ]);
   assert.match(calls[0].sql, /aggregates\.ordinary_request_id = \$3/);
   assert.match(calls[0].sql, /aggregates\.relationship_id = \$1/);
   assert.match(calls[0].sql, /evaluations\.professional_user_id = \$2/);
   assert.match(calls[0].sql, /versions\.version = aggregates\.current_version/);
+  assert.match(calls[0].sql, /evaluations\.status = 'completed'/);
+  assert.match(calls[0].sql, /completed_visit\.state = 'COMPLETED'/);
+  assert.match(calls[0].sql, /canonical_visit_evaluation_links/);
+  assert.match(calls[0].sql, /canonical_evaluation_remote_provenance/);
+  assert.match(calls[0].sql, /completion_command\.command_name = 'evaluation\.complete'/);
+  assert.match(calls[0].sql, /remote\.id IS NULL/);
+  assert.match(calls[0].sql, /visit_links\.evaluation_id IS NULL/);
 
   const warnings = [];
   const blocked = await service.quoteDraftServiceInternals.requireSavedEvaluation({
@@ -150,7 +165,7 @@ test("Quote issuance requires one saved canonical Evaluation in the exact Reques
     ok: false,
     status: 409,
     code: "QUOTE_EVALUATION_REQUIRED",
-    message: "A saved Evaluation is required before the Quote can be issued.",
+    message: "A completed Evaluation with a confirmed on-site visit or remote assessment is required before the Quote can be issued.",
   });
   assert.equal(warnings[0].evidence.jobId, context.job_id);
 });
@@ -163,6 +178,10 @@ test("the canonical issue command invokes the saved-Evaluation gate and customer
   assert.match(
     source,
     /async function issueQuote[\s\S]*requireQuoteAuthority[\s\S]*requireSavedEvaluation[\s\S]*loadActiveQuoteGrant/
+  );
+  assert.doesNotMatch(
+    service.quoteDraftServiceInternals.customerQuoteDetailProjection.toString(),
+    /assessmentBasis|assessment_basis|remote_assessment/i
   );
   assert.doesNotMatch(source, /account_type\s*=\s*['\"]homeowner['\"]/i);
   assert.match(source, /roles\.role = 'CUSTOMER_REPRESENTATIVE'/);

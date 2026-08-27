@@ -62,6 +62,45 @@ test("ordinary create derives actor, Job, and idempotency from authenticated bou
   assert.equal(res.statusCode, 201);
 });
 
+test("completion route passes one explicit bounded completion contract", async () => {
+  let received;
+  const handlers = createEvaluationHandlers({
+    getPool: () => ({ query() {} }),
+    sendPublicDatabaseError() { throw new Error("not expected"); },
+    service: {
+      async completeEvaluation(input) {
+        received = input;
+        return { ok: true, status: 200, code: "EVALUATION_COMPLETED" };
+      },
+    },
+  });
+  const res = response();
+  await handlers.completeEvaluation({
+    user: { id: 41 },
+    params: { evaluationId: "evaluation-from-path" },
+    headers: { "idempotency-key": "completion-key" },
+    body: {
+      expectedVersion: 3,
+      completionMode: "REMOTE",
+      assessmentMethod: "VIDEO",
+      assessmentBasis: "Reviewed live video with the customer.",
+      actorUserId: 999,
+    },
+  }, res);
+
+  assert.deepEqual(received, {
+    pool: { query: received.pool.query },
+    authenticatedActor: { id: 41 },
+    evaluationId: "evaluation-from-path",
+    expectedVersion: 3,
+    completionMode: "REMOTE",
+    assessmentMethod: "VIDEO",
+    assessmentBasis: "Reviewed live video with the customer.",
+    idempotencyKey: "completion-key",
+  });
+  assert.equal(res.statusCode, 200);
+});
+
 test("ordinary Job and Finding route families are bounded and authenticated", () => {
   const routes = [];
   const app = {

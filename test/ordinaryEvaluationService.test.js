@@ -6,8 +6,11 @@ const { join } = require("node:path");
 const test = require("node:test");
 
 const {
+  EVALUATION_COMPLETION_MODES,
   ORDINARY_EVALUATION_CAPABILITY,
+  REMOTE_ASSESSMENT_METHODS,
   createOrdinaryJobEvaluation,
+  validateCompletionContract,
   validateOrdinaryCompletionContent,
   validateOrdinaryEvaluationContent,
   validateEvaluationContent,
@@ -53,6 +56,64 @@ test("ordinary confirmation requires observations without requiring deferred dom
   assert.equal(
     validateOrdinaryCompletionContent(content({ observations: "" })).code,
     "EVALUATION_INCOMPLETE"
+  );
+});
+
+test("remote completion contract requires explicit bounded professional assessment details", () => {
+  for (const assessmentMethod of REMOTE_ASSESSMENT_METHODS) {
+    assert.deepEqual(
+      validateCompletionContract({
+        completionMode: EVALUATION_COMPLETION_MODES.REMOTE,
+        assessmentMethod,
+        assessmentBasis: "  Professional reviewed the available evidence.  ",
+      }),
+      {
+        completionMode: "REMOTE",
+        assessmentMethod,
+        assessmentBasis: "Professional reviewed the available evidence.",
+      }
+    );
+  }
+  assert.equal(
+    validateCompletionContract({ completionMode: "REMOTE" }).error.code,
+    "REMOTE_EVALUATION_METHOD_REQUIRED"
+  );
+  assert.equal(
+    validateCompletionContract({
+      completionMode: "REMOTE",
+      assessmentMethod: "IN_PERSON",
+      assessmentBasis: "Invalid method.",
+    }).error.code,
+    "INVALID_REMOTE_EVALUATION_METHOD"
+  );
+  for (const assessmentBasis of [null, "", "   "]) {
+    assert.equal(
+      validateCompletionContract({
+        completionMode: "REMOTE",
+        assessmentMethod: "PHONE",
+        assessmentBasis,
+      }).error.code,
+      "REMOTE_EVALUATION_BASIS_REQUIRED"
+    );
+  }
+  assert.equal(
+    validateCompletionContract({
+      completionMode: "REMOTE",
+      assessmentMethod: "PHONE",
+      assessmentBasis: "x".repeat(2001),
+    }).error.code,
+    "INVALID_REMOTE_EVALUATION_BASIS"
+  );
+  assert.equal(
+    validateCompletionContract({ completionMode: "REMOTE_LIKE" }).error.code,
+    "INVALID_EVALUATION_COMPLETION_MODE"
+  );
+  assert.equal(
+    validateCompletionContract({
+      assessmentMethod: "PHONE",
+      assessmentBasis: "Do not infer remote mode.",
+    }).error.code,
+    "REMOTE_EVALUATION_DETAILS_NOT_ALLOWED"
   );
 });
 

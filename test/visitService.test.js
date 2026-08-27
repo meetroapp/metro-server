@@ -198,6 +198,116 @@ test("canonical Visit DTO is an explicit allowlist with truthful actor actions",
   assert.equal(JSON.stringify(dto).includes("must-not-leak"), false);
 });
 
+test("Evaluation Visit completion links the existing Job draft through one idempotent provenance command", async () => {
+  const statements = [];
+  const client = {
+    async query(sql, values) {
+      statements.push({ sql, values });
+      if (/FROM canonical_evaluation_remote_provenance/.test(sql)) {
+        return { rows: [] };
+      }
+      if (/SELECT subjects\.evaluation_id/.test(sql)) {
+        return { rows: [{ evaluation_id: "evaluation-id" }] };
+      }
+      if (/FROM canonical_visit_evaluation_links[\s\S]*FOR UPDATE/.test(sql)) {
+        return { rows: [] };
+      }
+      if (/INSERT INTO canonical_visit_command_idempotency/.test(sql)) {
+        return { rows: [{ id: "link-command-id" }] };
+      }
+      if (/INSERT INTO canonical_visit_evaluation_links/.test(sql)) {
+        return { rows: [{ visit_id: "visit-id" }] };
+      }
+      if (/UPDATE canonical_visit_command_idempotency/.test(sql)) {
+        return { rows: [{ id: "link-command-id" }] };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    },
+  };
+  const linked = await visitServiceInternals.linkDraftEvaluationOnVisitCompletion({
+    client,
+    context: {
+      canonical_evaluation_id: "evaluation-id",
+      canonical_evaluation_status: "draft",
+    },
+    visitId: "visit-id",
+    jobId: "job-id",
+    participantId: "professional-participant",
+    idempotencyKey: "visit-complete-key",
+  });
+  assert.deepEqual(linked, { linked: true, evaluationId: "evaluation-id" });
+  const commandInsert = statements.find(({ sql }) =>
+    /INSERT INTO canonical_visit_command_idempotency/.test(sql)
+  );
+  assert.equal(commandInsert.values[3], "visit.link_evaluation");
+  assert.equal(commandInsert.values[4], "visit:visit-id:evaluation-link");
+  assert.equal(commandInsert.values[5], "visit-complete-key");
+  assert.equal(
+    statements.filter(({ sql }) => /INSERT INTO canonical_visit_evaluation_links/.test(sql)).length,
+    1
+  );
+});
+
+test("Evaluation Visit completion fails closed on conflicting provenance", async () => {
+  const client = {
+    async query(sql) {
+      if (/FROM canonical_evaluation_remote_provenance/.test(sql)) {
+        return { rows: [] };
+      }
+      if (/SELECT subjects\.evaluation_id/.test(sql)) {
+        return { rows: [{ evaluation_id: "evaluation-id" }] };
+      }
+      if (/FROM canonical_visit_evaluation_links[\s\S]*FOR UPDATE/.test(sql)) {
+        return {
+          rows: [{ visit_id: "different-visit", evaluation_id: "evaluation-id" }],
+        };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    },
+  };
+  const result = await visitServiceInternals.linkDraftEvaluationOnVisitCompletion({
+    client,
+    context: {
+      canonical_evaluation_id: "evaluation-id",
+      canonical_evaluation_status: "draft",
+    },
+    visitId: "visit-id",
+    jobId: "job-id",
+    participantId: "professional-participant",
+    idempotencyKey: "visit-complete-key",
+  });
+  assert.equal(result.error.code, "EVALUATION_VISIT_PROVENANCE_CONFLICT");
+});
+
+test("Evaluation Visit completion rejects a remote-completed Evaluation before physical linkage", async () => {
+  const statements = [];
+  const client = {
+    async query(sql) {
+      statements.push(sql);
+      if (/FROM canonical_evaluation_remote_provenance/.test(sql)) {
+        return { rows: [{ id: "remote-provenance" }] };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    },
+  };
+  const result = await visitServiceInternals.linkDraftEvaluationOnVisitCompletion({
+    client,
+    context: {
+      canonical_evaluation_id: "evaluation-id",
+      canonical_evaluation_status: "completed",
+    },
+    visitId: "visit-id",
+    jobId: "job-id",
+    participantId: "professional-participant",
+    idempotencyKey: "visit-complete-key",
+  });
+  assert.equal(result.error.code, "EVALUATION_REMOTE_PROVENANCE_CONFLICT");
+  assert.equal(
+    statements.some((sql) => /INSERT INTO canonical_visit_evaluation_links/.test(sql)),
+    false
+  );
+});
+
 test("Visit runtime registers routes without grants or adjacent lifecycle mutation", () => {
   assert.match(indexSource, /registerVisitRoutes\(\{/);
   assert.doesNotMatch(

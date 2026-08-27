@@ -1450,6 +1450,154 @@ function currentSchedule(row) {
   };
 }
 
+async function linkDraftEvaluationOnVisitCompletion({
+  client,
+  context,
+  visitId,
+  jobId,
+  participantId,
+  idempotencyKey,
+}) {
+  const evaluationId = context?.canonical_evaluation_id || null;
+  if (!evaluationId) {
+    return { linked: false, evaluationId: null };
+  }
+
+  const remoteProvenance = await client.query(
+    `SELECT id
+     FROM canonical_evaluation_remote_provenance
+     WHERE evaluation_id = $1
+       AND job_id = $2
+     LIMIT 1`,
+    [evaluationId, jobId]
+  );
+  if (remoteProvenance.rows[0]) {
+    return {
+      error: failure(
+        409,
+        "EVALUATION_REMOTE_PROVENANCE_CONFLICT",
+        "This Evaluation was completed through a remote assessment and cannot be linked to a Visit."
+      ),
+    };
+  }
+  if (context?.canonical_evaluation_status !== "draft") {
+    return { linked: false, evaluationId: null };
+  }
+
+  const subject = await client.query(
+    `SELECT subjects.evaluation_id
+     FROM canonical_evaluation_job_subjects subjects
+     INNER JOIN canonical_evaluations evaluations
+       ON evaluations.id = subjects.evaluation_id
+       AND evaluations.status = 'draft'
+     WHERE subjects.evaluation_id = $1
+       AND subjects.job_id = $2
+     LIMIT 1`,
+    [evaluationId, jobId]
+  );
+  if (!subject.rows[0]) {
+    return {
+      error: failure(
+        409,
+        "EVALUATION_VISIT_PROVENANCE_CONFLICT",
+        "The Evaluation Visit cannot be linked to the current Evaluation."
+      ),
+    };
+  }
+
+  const existing = await client.query(
+    `SELECT visit_id, evaluation_id
+     FROM canonical_visit_evaluation_links
+     WHERE job_id = $1
+       AND (visit_id = $2 OR evaluation_id = $3)
+     ORDER BY created_at ASC, visit_id ASC
+     FOR UPDATE`,
+    [jobId, visitId, evaluationId]
+  );
+  if (
+    existing.rows.some(
+      (row) => row.visit_id !== visitId || row.evaluation_id !== evaluationId
+    )
+  ) {
+    return {
+      error: failure(
+        409,
+        "EVALUATION_VISIT_PROVENANCE_CONFLICT",
+        "The Evaluation already has different Visit provenance."
+      ),
+    };
+  }
+  if (existing.rows.length === 1) {
+    return { linked: false, evaluationId };
+  }
+
+  const idempotency = await reserveCommand({
+    client,
+    participantId,
+    jobId,
+    commandName: VISIT_COMMANDS.LINK_EVALUATION,
+    commandScope: `visit:${visitId}:evaluation-link`,
+    idempotencyKey,
+    requestFingerprint: fingerprint({
+      commandName: VISIT_COMMANDS.LINK_EVALUATION,
+      jobId,
+      visitId,
+      evaluationId,
+    }),
+  });
+  if (idempotency.error) return { error: idempotency.error };
+  if (idempotency.replay) {
+    return { linked: false, evaluationId };
+  }
+
+  let inserted;
+  try {
+    inserted = await client.query(
+      `INSERT INTO canonical_visit_evaluation_links (
+         visit_id, job_id, evaluation_id,
+         linked_by_participant_id, command_idempotency_id
+       ) VALUES ($1, $2, $3, $4, $5)
+       RETURNING visit_id`,
+      [
+        visitId,
+        jobId,
+        evaluationId,
+        participantId,
+        idempotency.reservation.id,
+      ]
+    );
+  } catch (error) {
+    if (
+      /Physical and remote Evaluation provenance are mutually exclusive/i.test(
+        String(error?.message || "")
+      ) ||
+      error?.constraint === "canonical_evaluation_provenance_claims_pkey"
+    ) {
+      return {
+        error: failure(
+          409,
+          "EVALUATION_REMOTE_PROVENANCE_CONFLICT",
+          "This Evaluation was completed through a remote assessment and cannot be linked to a Visit."
+        ),
+      };
+    }
+    throw error;
+  }
+  if (!inserted.rows[0]) {
+    throw new Error("Canonical Evaluation Visit linkage failed.");
+  }
+  await completeCommand(client, idempotency.reservation.id, {
+    ok: true,
+    success: true,
+    status: 200,
+    code: "VISIT_EVALUATION_LINKED",
+    visitId,
+    evaluationId,
+    jobId,
+  });
+  return { linked: true, evaluationId };
+}
+
 async function runVersionCommand({
   input,
   validated,
@@ -1635,6 +1783,20 @@ async function runVersionCommand({
       participantId,
       commandId: idempotency.reservation.id,
     });
+    if (
+      commandName === VISIT_COMMANDS.COMPLETE &&
+      current.purpose === "EVALUATION"
+    ) {
+      const linkage = await linkDraftEvaluationOnVisitCompletion({
+        client,
+        context: authorized.context,
+        visitId,
+        jobId,
+        participantId,
+        idempotencyKey: validated.idempotencyKey,
+      });
+      if (linkage.error) return { abort: linkage.error };
+    }
     await invokeFailure(input.failureInjector, "after_write");
     const row = await loadVisit(client, jobId, visitId);
     const result = commandResult(
@@ -1976,6 +2138,7 @@ module.exports = {
   rescheduleVisit,
   visitServiceInternals: Object.freeze({
     canonicalTimeZone,
+    linkDraftEvaluationOnVisitCompletion,
     normalizedSchedule,
     strictInstant,
     visitEventProjection,

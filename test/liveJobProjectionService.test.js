@@ -86,6 +86,12 @@ test("newly selected Job requires Evaluation without fabricating scheduling", ()
     projection.availableActions.map((action) => action.code),
     ["VIEW_CONCERN", "MESSAGE_CUSTOMER", "START_EVALUATION"]
   );
+  assert.equal(projection.stage.label, "Evaluation draft available");
+  assert.equal(projection.nextAction.label, "Open or continue the Evaluation");
+  assert.equal(
+    projection.availableActions.find((action) => action.code === "START_EVALUATION").label,
+    "Open Evaluation"
+  );
   assert.equal(
     projection.availableActions.some((action) => /SCHEDULE/.test(action.code)),
     false
@@ -105,6 +111,22 @@ test("draft Evaluation remains professional work in progress", () => {
   assert.equal(projection.freshness.evaluationVersion, 3);
   assert.equal(
     projection.availableActions.some((action) => action.code === "COMPLETE_EVALUATION"),
+    false
+  );
+});
+
+test("completed Evaluation Visit provenance unlocks the draft finalization action", () => {
+  const projection = derive({
+    evaluation: {
+      id: "evaluation",
+      status: "draft",
+      version: 3,
+      observations: "Leak observed",
+      evaluation_visit_id: "evaluation-visit",
+    },
+  });
+  assert.equal(
+    projection.availableActions.some((action) => action.code === "COMPLETE_EVALUATION"),
     true
   );
 });
@@ -119,6 +141,29 @@ test("completed Evaluation without Findings requires Findings", () => {
     nextAction: "REVIEW_FINDINGS",
     blocker: "FINDINGS_NOT_RECORDED",
   });
+});
+
+test("completed physical and remote assessments retain one simple operational stage", () => {
+  for (const [completionMode, reason] of [
+    ["PHYSICAL", "ON_SITE_ASSESSMENT_COMPLETED"],
+    ["REMOTE", "REMOTE_ASSESSMENT_COMPLETED"],
+  ]) {
+    const projection = derive({
+      evaluation: {
+        id: "evaluation",
+        status: "completed",
+        version: 2,
+        completion_mode: completionMode,
+      },
+    });
+    assert.equal(projection.stage.code, "FINDINGS_NEEDED");
+    assert.equal(projection.freshness.evaluationCompletionMode, completionMode);
+    assert.equal(projection.reasonCodes.includes(reason), true);
+    assert.doesNotMatch(
+      `${projection.stage.label} ${projection.nextAction.label} ${projection.nextAction.description}`,
+      /canonical|provenance|authority|claim|idempotency/i
+    );
+  }
 });
 
 test("proposed Findings require professional confirmation", () => {

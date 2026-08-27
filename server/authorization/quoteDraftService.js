@@ -911,20 +911,70 @@ async function requireSavedEvaluation({ client, context, logger }) {
        ON versions.evaluation_id = evaluations.id
        AND versions.version = aggregates.current_version
        AND versions.status = evaluations.status
+     INNER JOIN canonical_evaluation_job_subjects subjects
+       ON subjects.evaluation_id = evaluations.id
+       AND subjects.job_id = $5
+       AND subjects.job_request_id = $3
+       AND subjects.relationship_id = $1
+     LEFT JOIN canonical_visit_evaluation_links visit_links
+       ON visit_links.evaluation_id = evaluations.id
+       AND visit_links.job_id = subjects.job_id
+     LEFT JOIN canonical_visits visits
+       ON visits.id = visit_links.visit_id
+       AND visits.job_id = visit_links.job_id
+     LEFT JOIN LATERAL (
+       SELECT visit_versions.state, visit_versions.completed_at
+       FROM canonical_visit_versions visit_versions
+       WHERE visit_versions.visit_id = visits.id
+         AND visit_versions.job_id = visits.job_id
+       ORDER BY visit_versions.version DESC
+       LIMIT 1
+     ) completed_visit ON TRUE
+     LEFT JOIN canonical_evaluation_remote_provenance remote
+       ON remote.evaluation_id = evaluations.id
+       AND remote.evaluation_version = aggregates.current_version
+       AND remote.job_id = subjects.job_id
+       AND remote.professional_participant_id = $6
+     LEFT JOIN commercial_command_idempotency completion_command
+       ON completion_command.id = remote.completion_command_idempotency_id
+       AND completion_command.actor_user_id = evaluations.professional_user_id
+       AND completion_command.command_name = 'evaluation.complete'
+       AND completion_command.command_scope =
+         'evaluation:' || evaluations.id::text
+       AND completion_command.aggregate_id = evaluations.id
+       AND completion_command.result_reference IS NOT NULL
+       AND completion_command.completed_at IS NOT NULL
      WHERE evaluations.relationship_id = $1
        AND evaluations.professional_user_id = $2
-       AND evaluations.status IN ('draft', 'completed')
+       AND evaluations.status = 'completed'
+       AND (
+         (
+           visit_links.evaluation_id IS NOT NULL
+           AND visits.purpose = 'EVALUATION'
+           AND completed_visit.state = 'COMPLETED'
+           AND completed_visit.completed_at IS NOT NULL
+           AND remote.id IS NULL
+         )
+         OR
+         (
+           remote.id IS NOT NULL
+           AND completion_command.id IS NOT NULL
+           AND visit_links.evaluation_id IS NULL
+         )
+       )
      LIMIT 1`,
     [
       Number(context.relationship_id),
       Number(context.actor_user_id),
       Number(context.job_request_id),
       OWNING_ENGINE,
+      context.job_id,
+      context.actor_participant_id,
     ]
   );
   const evaluation = result.rows[0] || null;
   if (evaluation) return null;
-  logger.warn("Quote issuance blocked until Evaluation is saved", {
+  logger.warn("Quote issuance blocked until Evaluation is finalized", {
     code: "QUOTE_EVALUATION_REQUIRED",
     jobId: context.job_id,
     relationshipId: Number(context.relationship_id),
@@ -932,7 +982,7 @@ async function requireSavedEvaluation({ client, context, logger }) {
   return failure(
     409,
     "QUOTE_EVALUATION_REQUIRED",
-    "A saved Evaluation is required before the Quote can be issued."
+    "A completed Evaluation with a confirmed on-site visit or remote assessment is required before the Quote can be issued."
   );
 }
 

@@ -19,6 +19,12 @@ const {
   listEvaluationsForJob,
   updateEvaluationDraft,
 } = require("../server/authorization/evaluationService");
+const {
+  quoteDraftServiceInternals,
+} = require("../server/authorization/quoteDraftService");
+const {
+  visitServiceInternals,
+} = require("../server/workflow/visitService");
 const { getMigrationFiles, runMigrationCollection } = require("../scripts/run-migrations");
 
 const databaseUrl = process.env.ORDINARY_EVALUATION_RUNTIME_DATABASE_URL;
@@ -273,7 +279,7 @@ test(
         targetMetadata()
       );
       assert.equal(migrated.success, true, JSON.stringify(migrated));
-      assert.equal(migrated.applied.length, 45);
+      assert.equal(migrated.applied.length, 57);
 
       const identities = await createIdentities(pool, suffix);
       const legacy = await pool.query(
@@ -311,7 +317,7 @@ test(
       assert.deepEqual(bootstrap.rows[0], {
         participants: 2,
         roles: 2,
-        grants: 20,
+        grants: 41,
         professional_evaluation_grants: 1,
         homeowner_evaluation_grants: 0,
       });
@@ -372,16 +378,36 @@ test(
       assert.equal(listed.ok, true);
       assert.equal(listed.evaluations.length, 1);
 
+      const omittedMode = await completeEvaluation({
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+        evaluationId: created.evaluation.id,
+        expectedVersion: 2,
+        idempotencyKey: `ordinary-evaluation-complete-without-mode-${suffix}`,
+        logger,
+      });
+      assert.equal(omittedMode.code, "COMPLETED_EVALUATION_VISIT_REQUIRED");
+
       const completed = await completeEvaluation({
         pool,
         authenticatedActor: { id: identities.professionalId },
         evaluationId: created.evaluation.id,
         expectedVersion: 2,
+        completionMode: "REMOTE",
+        assessmentMethod: "PHONE",
+        assessmentBasis:
+          "Reviewed the appliance symptoms and operating history with the customer by phone.",
         idempotencyKey: `ordinary-evaluation-complete-${suffix}`,
         logger,
       });
       assert.equal(completed.ok, true);
       assert.equal(completed.evaluation.status, "completed");
+      assert.equal(completed.evaluation.completionMode, "REMOTE");
+      assert.equal(completed.evaluation.assessmentMethod, "PHONE");
+      assert.equal(
+        completed.evaluation.assessmentBasis,
+        "Reviewed the appliance symptoms and operating history with the customer by phone."
+      );
       assert.equal(completed.aggregate.version, 3);
       assert.equal(completed.evaluation.capabilities.quoteReady, false);
       const completedReplay = await completeEvaluation({
@@ -389,10 +415,235 @@ test(
         authenticatedActor: { id: identities.professionalId },
         evaluationId: created.evaluation.id,
         expectedVersion: 2,
+        completionMode: "REMOTE",
+        assessmentMethod: "PHONE",
+        assessmentBasis:
+          "Reviewed the appliance symptoms and operating history with the customer by phone.",
         idempotencyKey: `ordinary-evaluation-complete-${suffix}`,
         logger,
       });
       assert.equal(completedReplay.replayed, true);
+
+      const provenance = await pool.query(
+        `SELECT remote.evaluation_id, remote.evaluation_version,
+          remote.job_id, remote.professional_participant_id,
+          remote.assessment_method, remote.assessment_basis,
+          remote.completion_command_idempotency_id,
+          commands.command_name, commands.command_scope,
+          commands.aggregate_id, commands.completed_at,
+          (SELECT count(*) FROM canonical_visits WHERE job_id = $2)::integer
+            AS visit_count
+         FROM canonical_evaluation_remote_provenance remote
+         INNER JOIN commercial_command_idempotency commands
+           ON commands.id = remote.completion_command_idempotency_id
+         WHERE remote.evaluation_id = $1`,
+        [created.evaluation.id, fixture.jobId]
+      );
+      assert.deepEqual(provenance.rows[0], {
+        evaluation_id: created.evaluation.id,
+        evaluation_version: 3,
+        job_id: fixture.jobId,
+        professional_participant_id: fixture.professionalParticipantId,
+        assessment_method: "PHONE",
+        assessment_basis:
+          "Reviewed the appliance symptoms and operating history with the customer by phone.",
+        completion_command_idempotency_id:
+          provenance.rows[0].completion_command_idempotency_id,
+        command_name: "evaluation.complete",
+        command_scope: `evaluation:${created.evaluation.id}`,
+        aggregate_id: created.evaluation.id,
+        completed_at: provenance.rows[0].completed_at,
+        visit_count: 0,
+      });
+
+      const professionalRead = await getEvaluation({
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+        evaluationId: created.evaluation.id,
+        logger,
+      });
+      assert.equal(professionalRead.evaluation.completionMode, "REMOTE");
+      assert.equal(professionalRead.evaluation.assessmentMethod, "PHONE");
+      assert.match(professionalRead.evaluation.assessmentBasis, /operating history/);
+
+      const quoteGate = await quoteDraftServiceInternals.requireSavedEvaluation({
+        client: pool,
+        context: {
+          job_id: fixture.jobId,
+          job_request_id: fixture.requestId,
+          relationship_id: fixture.relationshipId,
+          actor_user_id: identities.professionalId,
+          actor_participant_id: fixture.professionalParticipantId,
+        },
+        logger,
+      });
+      assert.equal(quoteGate, null);
+
+      const physicalLinkAfterRemote =
+        await visitServiceInternals.linkDraftEvaluationOnVisitCompletion({
+          client: pool,
+          context: {
+            canonical_evaluation_id: created.evaluation.id,
+            canonical_evaluation_status: "completed",
+          },
+          visitId: randomUUID(),
+          jobId: fixture.jobId,
+          participantId: fixture.professionalParticipantId,
+          idempotencyKey: `remote-physical-link-conflict-${suffix}`,
+        });
+      assert.equal(
+        physicalLinkAfterRemote.error.code,
+        "EVALUATION_REMOTE_PROVENANCE_CONFLICT"
+      );
+
+      for (const changed of [
+        { completionMode: "PHYSICAL" },
+        {
+          completionMode: "REMOTE",
+          assessmentMethod: "VIDEO",
+          assessmentBasis:
+            "Reviewed the appliance symptoms and operating history with the customer by phone.",
+        },
+        {
+          completionMode: "REMOTE",
+          assessmentMethod: "PHONE",
+          assessmentBasis: "A changed professional basis.",
+        },
+      ]) {
+        const conflict = await completeEvaluation({
+          pool,
+          authenticatedActor: { id: identities.professionalId },
+          evaluationId: created.evaluation.id,
+          expectedVersion: 2,
+          idempotencyKey: `ordinary-evaluation-complete-${suffix}`,
+          logger,
+          ...changed,
+        });
+        assert.equal(conflict.code, "COMMERCIAL_IDEMPOTENCY_KEY_CONFLICT");
+      }
+
+      const secondCompletion = await completeEvaluation({
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+        evaluationId: created.evaluation.id,
+        expectedVersion: 3,
+        completionMode: "REMOTE",
+        assessmentMethod: "PHONE",
+        assessmentBasis: "A second completion attempt.",
+        idempotencyKey: `ordinary-evaluation-complete-second-${suffix}`,
+        logger,
+      });
+      assert.equal(secondCompletion.code, "EVALUATION_COMPLETED");
+
+      for (const assessmentMethod of [
+        "VIDEO",
+        "CUSTOMER_PHOTOS",
+        "DOCUMENT_REVIEW",
+        "OTHER_REMOTE",
+      ]) {
+        const methodFixture = await createLifecycleFixture(
+          pool,
+          identities,
+          `${suffix}-${assessmentMethod.toLowerCase()}`
+        );
+        const methodDraft = await createOrdinaryJobEvaluation({
+          ...createInput,
+          jobId: methodFixture.jobId,
+          content: evaluationContent(`Prepared ${assessmentMethod} assessment.`),
+          idempotencyKey: `ordinary-evaluation-create-${assessmentMethod}-${suffix}`,
+        });
+        const methodCompletion = await completeEvaluation({
+          pool,
+          authenticatedActor: { id: identities.professionalId },
+          evaluationId: methodDraft.evaluation.id,
+          expectedVersion: 1,
+          completionMode: "REMOTE",
+          assessmentMethod,
+          assessmentBasis: `Professional completed the ${assessmentMethod} assessment.`,
+          idempotencyKey: `ordinary-evaluation-complete-${assessmentMethod}-${suffix}`,
+          logger,
+        });
+        assert.equal(methodCompletion.ok, true);
+        assert.equal(methodCompletion.evaluation.assessmentMethod, assessmentMethod);
+      }
+
+      const staleFixture = await createLifecycleFixture(
+        pool,
+        identities,
+        `${suffix}-stale-completion`
+      );
+      const staleDraft = await createOrdinaryJobEvaluation({
+        ...createInput,
+        jobId: staleFixture.jobId,
+        idempotencyKey: `ordinary-evaluation-create-stale-${suffix}`,
+      });
+      const staleCompletion = await completeEvaluation({
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+        evaluationId: staleDraft.evaluation.id,
+        expectedVersion: 2,
+        completionMode: "REMOTE",
+        assessmentMethod: "PHONE",
+        assessmentBasis: "Stale completion attempt.",
+        idempotencyKey: `ordinary-evaluation-complete-stale-${suffix}`,
+        logger,
+      });
+      assert.equal(staleCompletion.code, "STALE_EVALUATION_VERSION");
+
+      const atomicFixture = await createLifecycleFixture(
+        pool,
+        identities,
+        `${suffix}-atomic-rollback`
+      );
+      const atomicDraft = await createOrdinaryJobEvaluation({
+        ...createInput,
+        jobId: atomicFixture.jobId,
+        idempotencyKey: `ordinary-evaluation-create-atomic-${suffix}`,
+      });
+      await pool.query(
+        `INSERT INTO canonical_evaluation_provenance_claims (
+           evaluation_id, provenance_kind
+         ) VALUES ($1, 'PHYSICAL')`,
+        [atomicDraft.evaluation.id]
+      );
+      const atomicKey = `ordinary-evaluation-complete-atomic-${suffix}`;
+      const atomicFailure = await completeEvaluation({
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+        evaluationId: atomicDraft.evaluation.id,
+        expectedVersion: 1,
+        completionMode: "REMOTE",
+        assessmentMethod: "VIDEO",
+        assessmentBasis: "Forced provenance conflict for transaction rollback.",
+        idempotencyKey: atomicKey,
+        logger,
+      });
+      assert.equal(
+        atomicFailure.code,
+        "REMOTE_EVALUATION_PHYSICAL_PROVENANCE_CONFLICT"
+      );
+      const atomicState = await pool.query(
+        `SELECT evaluations.status, aggregates.current_version,
+          (SELECT count(*) FROM canonical_evaluation_versions versions
+           WHERE versions.evaluation_id = evaluations.id)::integer AS versions,
+          (SELECT count(*) FROM canonical_evaluation_remote_provenance remote
+           WHERE remote.evaluation_id = evaluations.id)::integer AS remote_rows,
+          (SELECT count(*) FROM commercial_command_idempotency commands
+           WHERE commands.command_name = 'evaluation.complete'
+             AND commands.idempotency_key = $2)::integer AS completion_commands
+         FROM canonical_evaluations evaluations
+         INNER JOIN commercial_authority_aggregates aggregates
+           ON aggregates.id = evaluations.id
+         WHERE evaluations.id = $1`,
+        [atomicDraft.evaluation.id, atomicKey]
+      );
+      assert.deepEqual(atomicState.rows[0], {
+        status: "draft",
+        current_version: 1,
+        versions: 1,
+        remote_rows: 0,
+        completion_commands: 0,
+      });
 
       const completedEdit = await updateEvaluationDraft({
         pool,
@@ -423,6 +674,10 @@ test(
         logger,
       });
       assert.equal(homeownerRead.code, "EVALUATION_UNAVAILABLE");
+      assert.doesNotMatch(
+        JSON.stringify(homeownerRead),
+        /operating history|assessmentBasis|assessment_basis/i
+      );
 
       const browserDeclaredV2 = await createEvaluation({
         pool,
@@ -579,7 +834,7 @@ test(
         [created.evaluation.id]
       );
       assert.deepEqual(preservation.rows[0], {
-        ledger: 44,
+        ledger: 57,
         ordinary_versions: 3,
         findings: 0,
         concern_links: 0,

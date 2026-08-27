@@ -14,7 +14,11 @@ const {
 const {
   completeEvaluation,
   createOrdinaryJobEvaluation,
+  updateEvaluationDraft,
 } = require("../server/authorization/evaluationService");
+const {
+  quoteDraftServiceInternals,
+} = require("../server/authorization/quoteDraftService");
 const {
   completeVisit,
   confirmVisit,
@@ -112,14 +116,14 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 56);
+      assert.equal(migrations.length, 57);
       assert.equal(
         migrations.at(-1).filename,
-        "202608250001_correct_evaluation_visit_authority_and_negotiation.sql"
+        "202608260001_create_evaluation_remote_provenance.sql"
       );
       const migrated = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(migrated.success, true, migrated.errorCode);
-      assert.equal(migrated.applied.length, 56);
+      assert.equal(migrated.applied.length, 57);
 
       const identities = await createVisitTestIdentities(pool, suffix);
       const directFixture = await createVisitLifecycleFixture(
@@ -136,6 +140,11 @@ test(
         pool,
         identities,
         `${suffix}-reasoned`
+      );
+      const scheduledCreationFixture = await createVisitLifecycleFixture(
+        pool,
+        identities,
+        `${suffix}-scheduled-creation`
       );
 
       const grants = await pool.query(
@@ -180,6 +189,34 @@ test(
       assert.equal(directOpportunity.purpose, "EVALUATION");
       assert.equal(directOpportunity.evaluationId, null);
 
+      const beforeCompletion = await createOrdinaryJobEvaluation({
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+        jobId: directFixture.jobId,
+        content: evaluationContent("Prepared before the Evaluation Visit existed."),
+        expectedVersion: 0,
+        idempotencyKey: `r3-evaluation-before-completion-${suffix}`,
+        logger: quiet,
+      });
+      assert.equal(beforeCompletion.code, "EVALUATION_CREATED");
+      assert.equal(beforeCompletion.evaluation.status, "draft");
+      assert.equal(beforeCompletion.evaluation.capabilities.canComplete, false);
+      assert.equal(beforeCompletion.aggregate.sourceContext.evaluationVisitId, null);
+      const beforeCompletionReplay = await createOrdinaryJobEvaluation({
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+        jobId: directFixture.jobId,
+        content: evaluationContent("Prepared before the Evaluation Visit existed."),
+        expectedVersion: 0,
+        idempotencyKey: `r3-evaluation-before-completion-${suffix}`,
+        logger: quiet,
+      });
+      assert.equal(beforeCompletionReplay.replayed, true);
+      assert.equal(
+        beforeCompletionReplay.evaluation.id,
+        beforeCompletion.evaluation.id
+      );
+
       const noVisitEvaluation = await createOrdinaryJobEvaluation({
         pool,
         authenticatedActor: { id: identities.professionalId },
@@ -218,6 +255,19 @@ test(
       assert.equal(directProposed.visit.state, "PROPOSED");
       assert.equal(directProposed.visit.currentVersion, 1);
       assert.equal(directProposed.visit.evaluationId, null);
+      const proposedCompletionDenied = await completeEvaluation({
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+        evaluationId: beforeCompletion.evaluation.id,
+        expectedVersion: 1,
+        completionMode: "PHYSICAL",
+        idempotencyKey: `r5-physical-proposed-denied-${suffix}`,
+        logger: quiet,
+      });
+      assert.equal(
+        proposedCompletionDenied.code,
+        "COMPLETED_EVALUATION_VISIT_REQUIRED"
+      );
 
       const directProposalReplay = await command(
         proposeVisit,
@@ -256,6 +306,29 @@ test(
       );
       assert.equal(directConfirmed.visit.state, "SCHEDULED");
       assert.equal(directConfirmed.visit.currentVersion, 2);
+      const scheduledDraft = await updateEvaluationDraft({
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+        evaluationId: beforeCompletion.evaluation.id,
+        content: evaluationContent("Continued while the Visit was scheduled."),
+        expectedVersion: 1,
+        idempotencyKey: `r5-evaluation-during-scheduled-${suffix}`,
+        logger: quiet,
+      });
+      assert.equal(scheduledDraft.code, "EVALUATION_DRAFT_UPDATED");
+      assert.equal(scheduledDraft.aggregate.version, 2);
+      const scheduledCompletionDenied = await completeEvaluation({
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+        evaluationId: beforeCompletion.evaluation.id,
+        expectedVersion: 2,
+        idempotencyKey: `r5-physical-scheduled-denied-${suffix}`,
+        logger: quiet,
+      });
+      assert.equal(
+        scheduledCompletionDenied.code,
+        "COMPLETED_EVALUATION_VISIT_REQUIRED"
+      );
       const directConfirmReplay = await command(
         confirmVisit,
         pool,
@@ -270,18 +343,7 @@ test(
       assert.equal(directConfirmReplay.replayed, true);
       assert.equal(directConfirmReplay.visit.currentVersion, 2);
 
-      const beforeCompletion = await createOrdinaryJobEvaluation({
-        pool,
-        authenticatedActor: { id: identities.professionalId },
-        jobId: directFixture.jobId,
-        visitId: directProposed.visit.id,
-        content: evaluationContent("Attempted while the Visit is scheduled."),
-        expectedVersion: 0,
-        idempotencyKey: `r3-evaluation-before-completion-${suffix}`,
-        logger: quiet,
-      });
-      assert.equal(beforeCompletion.code, "COMPLETED_EVALUATION_VISIT_REQUIRED");
-
+      const visitCompletionKey = randomUUID();
       const completedVisit = await command(
         completeVisit,
         pool,
@@ -291,60 +353,102 @@ test(
           visitId: directProposed.visit.id,
           expectedVersion: 2,
         },
-        randomUUID(),
+        visitCompletionKey,
         completionClock
       );
       assert.equal(completedVisit.visit.state, "COMPLETED");
       assert.equal(completedVisit.visit.currentVersion, 3);
+      assert.equal(completedVisit.visit.evaluationId, beforeCompletion.evaluation.id);
+      const completedVisitReplay = await command(
+        completeVisit,
+        pool,
+        identities.professionalId,
+        {
+          jobId: directFixture.jobId,
+          visitId: directProposed.visit.id,
+          expectedVersion: 2,
+        },
+        visitCompletionKey,
+        completionClock
+      );
+      assert.equal(completedVisitReplay.replayed, true);
+      assert.equal(completedVisitReplay.visit.currentVersion, 3);
       assert.deepEqual(await lifecycleCounts(pool, directFixture.jobId), {
         visits: 1,
         visit_versions: 3,
         visit_events: 3,
-        evaluation_links: 0,
-        evaluations: 0,
+        evaluation_links: 1,
+        evaluations: 1,
         quotes: 0,
         invoices: 0,
       });
 
-      const createEvaluationKey = `r3-evaluation-after-visit-${suffix}`;
-      const createdEvaluation = await createOrdinaryJobEvaluation({
+      const continuedEvaluation = await updateEvaluationDraft({
         pool,
         authenticatedActor: { id: identities.professionalId },
-        jobId: directFixture.jobId,
-        visitId: directProposed.visit.id,
-        content: evaluationContent("Documented only after the completed Evaluation Visit."),
-        expectedVersion: 0,
-        idempotencyKey: createEvaluationKey,
+        evaluationId: beforeCompletion.evaluation.id,
+        content: evaluationContent("Documented after the completed Evaluation Visit."),
+        expectedVersion: 2,
+        idempotencyKey: `r4-evaluation-after-visit-${suffix}`,
         logger: quiet,
       });
-      assert.equal(createdEvaluation.code, "EVALUATION_CREATED");
+      assert.equal(continuedEvaluation.code, "EVALUATION_DRAFT_UPDATED");
+      assert.equal(continuedEvaluation.evaluation.capabilities.canComplete, true);
       assert.equal(
-        createdEvaluation.aggregate.sourceContext.evaluationVisitId,
+        continuedEvaluation.aggregate.sourceContext.evaluationVisitId,
         directProposed.visit.id
       );
-      const createdReplay = await createOrdinaryJobEvaluation({
-        pool,
-        authenticatedActor: { id: identities.professionalId },
-        jobId: directFixture.jobId,
-        visitId: directProposed.visit.id,
-        content: evaluationContent("Documented only after the completed Evaluation Visit."),
-        expectedVersion: 0,
-        idempotencyKey: createEvaluationKey,
-        logger: quiet,
-      });
-      assert.equal(createdReplay.replayed, true);
-      assert.equal(createdReplay.evaluation.id, createdEvaluation.evaluation.id);
 
       const completedEvaluation = await completeEvaluation({
         pool,
         authenticatedActor: { id: identities.professionalId },
-        evaluationId: createdEvaluation.evaluation.id,
-        expectedVersion: 1,
+        evaluationId: beforeCompletion.evaluation.id,
+        expectedVersion: 3,
         idempotencyKey: `r3-complete-evaluation-${suffix}`,
         logger: quiet,
       });
       assert.equal(completedEvaluation.code, "EVALUATION_COMPLETED");
       assert.equal(completedEvaluation.evaluation.status, "completed");
+      assert.equal(completedEvaluation.evaluation.completionMode, "PHYSICAL");
+      const physicalContext = await pool.query(
+        `SELECT jobs.source_request_relationship_id AS relationship_id,
+          relationship_participants.id AS actor_participant_id
+         FROM jobs
+         INNER JOIN relationship_participants
+           ON relationship_participants.job_id = jobs.id
+           AND relationship_participants.user_id = $2
+         WHERE jobs.id = $1`,
+        [directFixture.jobId, identities.professionalId]
+      );
+      assert.equal(
+        await quoteDraftServiceInternals.requireSavedEvaluation({
+          client: pool,
+          context: {
+            job_id: directFixture.jobId,
+            job_request_id: directFixture.requestId,
+            relationship_id: Number(physicalContext.rows[0].relationship_id),
+            actor_user_id: identities.professionalId,
+            actor_participant_id: physicalContext.rows[0].actor_participant_id,
+          },
+          logger: quiet,
+        }),
+        null
+      );
+      const remoteAfterPhysical = await completeEvaluation({
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+        evaluationId: beforeCompletion.evaluation.id,
+        expectedVersion: 4,
+        completionMode: "REMOTE",
+        assessmentMethod: "PHONE",
+        assessmentBasis: "A physical Visit already completed this Evaluation.",
+        idempotencyKey: `r5-remote-after-physical-${suffix}`,
+        logger: quiet,
+      });
+      assert.equal(
+        remoteAfterPhysical.code,
+        "REMOTE_EVALUATION_PHYSICAL_PROVENANCE_CONFLICT"
+      );
       assert.deepEqual(await lifecycleCounts(pool, directFixture.jobId), {
         visits: 1,
         visit_versions: 3,
@@ -362,6 +466,17 @@ test(
         proposal(negotiatedFixture),
         randomUUID()
       );
+      const proposedStateDraft = await createOrdinaryJobEvaluation({
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+        jobId: negotiatedFixture.jobId,
+        content: evaluationContent("Prepared while the Visit proposal awaited review."),
+        expectedVersion: 0,
+        idempotencyKey: `r5-evaluation-created-while-proposed-${suffix}`,
+        logger: quiet,
+      });
+      assert.equal(proposedStateDraft.code, "EVALUATION_CREATED");
+      assert.equal(proposedStateDraft.aggregate.sourceContext.evaluationVisitId, null);
       const missingLegacyReason = await command(
         requestVisitChange,
         pool,
@@ -520,6 +635,37 @@ test(
       assert.equal(professionalRevision.visit.state, "PROPOSED");
       assert.equal(professionalRevision.visit.currentVersion, 4);
 
+      const scheduledCreationProposal = await command(
+        proposeVisit,
+        pool,
+        identities.professionalId,
+        proposal(scheduledCreationFixture),
+        randomUUID()
+      );
+      const scheduledCreationVisit = await command(
+        confirmVisit,
+        pool,
+        identities.homeownerId,
+        {
+          jobId: scheduledCreationFixture.jobId,
+          visitId: scheduledCreationProposal.visit.id,
+          expectedVersion: 1,
+        },
+        randomUUID()
+      );
+      assert.equal(scheduledCreationVisit.visit.state, "SCHEDULED");
+      const scheduledStateDraft = await createOrdinaryJobEvaluation({
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+        jobId: scheduledCreationFixture.jobId,
+        content: evaluationContent("Prepared after the Visit was scheduled."),
+        expectedVersion: 0,
+        idempotencyKey: `r5-evaluation-created-while-scheduled-${suffix}`,
+        logger: quiet,
+      });
+      assert.equal(scheduledStateDraft.code, "EVALUATION_CREATED");
+      assert.equal(scheduledStateDraft.aggregate.sourceContext.evaluationVisitId, null);
+
       const professionalCannotSelfConfirm = await command(
         confirmVisit,
         pool,
@@ -594,7 +740,7 @@ test(
         visit_versions: 5,
         visit_events: 5,
         evaluation_links: 0,
-        evaluations: 0,
+        evaluations: 1,
         quotes: 0,
         invoices: 0,
       });

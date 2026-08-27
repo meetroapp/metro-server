@@ -44,6 +44,20 @@ const EVALUATION_EVIDENCE_TYPES = Object.freeze({
   COMPLETED: "evaluation_completed",
 });
 
+const EVALUATION_COMPLETION_MODES = Object.freeze({
+  PHYSICAL: "PHYSICAL",
+  REMOTE: "REMOTE",
+});
+
+const REMOTE_ASSESSMENT_METHODS = Object.freeze([
+  "PHONE",
+  "VIDEO",
+  "CUSTOMER_PHOTOS",
+  "DOCUMENT_REVIEW",
+  "OTHER_REMOTE",
+]);
+const REMOTE_ASSESSMENT_METHOD_SET = new Set(REMOTE_ASSESSMENT_METHODS);
+
 const CAPABILITY_MILESTONE_ID = "MC-WORKFLOW-002B";
 const ORDINARY_EVALUATION_CAPABILITY = "evaluation.perform";
 const ALLOWED_EMERGENCY_EVALUATION_STATUSES = Object.freeze([
@@ -434,18 +448,18 @@ function validateOrdinaryCreateInput(input) {
   const actor = validateAuthenticatedActor(input.authenticatedActor);
   if (actor.error) return actor;
   const jobId = normalizedUuid(input.jobId);
-  const visitId = normalizedUuid(input.visitId);
+  const visitId = input.visitId == null ? null : normalizedUuid(input.visitId);
   if (!jobId) {
     return {
       error: failure(400, "INVALID_JOB_ID", "A valid Job ID is required."),
     };
   }
-  if (!visitId) {
+  if (input.visitId != null && !visitId) {
     return {
       error: failure(
         400,
         "INVALID_EVALUATION_VISIT_ID",
-        "A completed Evaluation Visit is required."
+        "The Evaluation Visit ID is invalid."
       ),
     };
   }
@@ -473,7 +487,97 @@ function validateOrdinaryCreateInput(input) {
   };
 }
 
-function validateExistingInput(input, { requireContent }) {
+function validateCompletionContract(input) {
+  const suppliedMode = input.completionMode == null
+    ? null
+    : String(input.completionMode).trim().toUpperCase();
+  if (
+    suppliedMode != null &&
+    !Object.values(EVALUATION_COMPLETION_MODES).includes(suppliedMode)
+  ) {
+    return {
+      error: failure(
+        400,
+        "INVALID_EVALUATION_COMPLETION_MODE",
+        "The Evaluation completion mode is invalid."
+      ),
+    };
+  }
+
+  if (suppliedMode === EVALUATION_COMPLETION_MODES.REMOTE) {
+    const assessmentMethod = input.assessmentMethod == null
+      ? ""
+      : String(input.assessmentMethod).trim().toUpperCase();
+    if (!assessmentMethod) {
+      return {
+        error: failure(
+          400,
+          "REMOTE_EVALUATION_METHOD_REQUIRED",
+          "A remote assessment method is required."
+        ),
+      };
+    }
+    if (!REMOTE_ASSESSMENT_METHOD_SET.has(assessmentMethod)) {
+      return {
+        error: failure(
+          400,
+          "INVALID_REMOTE_EVALUATION_METHOD",
+          "The remote assessment method is invalid."
+        ),
+      };
+    }
+    if (input.assessmentBasis == null || typeof input.assessmentBasis !== "string") {
+      return {
+        error: failure(
+          400,
+          "REMOTE_EVALUATION_BASIS_REQUIRED",
+          "A professional remote assessment basis is required."
+        ),
+      };
+    }
+    const assessmentBasis = input.assessmentBasis.trim();
+    if (!assessmentBasis) {
+      return {
+        error: failure(
+          400,
+          "REMOTE_EVALUATION_BASIS_REQUIRED",
+          "A professional remote assessment basis is required."
+        ),
+      };
+    }
+    if (assessmentBasis.length > 2000) {
+      return {
+        error: failure(
+          400,
+          "INVALID_REMOTE_EVALUATION_BASIS",
+          "The remote assessment basis is too long."
+        ),
+      };
+    }
+    return {
+      completionMode: suppliedMode,
+      assessmentMethod,
+      assessmentBasis,
+    };
+  }
+
+  if (input.assessmentMethod != null || input.assessmentBasis != null) {
+    return {
+      error: failure(
+        400,
+        "REMOTE_EVALUATION_DETAILS_NOT_ALLOWED",
+        "Remote assessment details require explicit REMOTE completion."
+      ),
+    };
+  }
+  return {
+    completionMode: suppliedMode,
+    assessmentMethod: null,
+    assessmentBasis: null,
+  };
+}
+
+function validateExistingInput(input, { requireContent, completion = false }) {
   const allowedFields = new Set([
     "pool",
     "authenticatedActor",
@@ -483,6 +587,11 @@ function validateExistingInput(input, { requireContent }) {
     "logger",
   ]);
   if (requireContent) allowedFields.add("content");
+  if (completion) {
+    allowedFields.add("completionMode");
+    allowedFields.add("assessmentMethod");
+    allowedFields.add("assessmentBasis");
+  }
   const inputError = validateCommandInput(input, allowedFields);
   if (inputError) return { error: inputError };
   const actor = validateAuthenticatedActor(input.authenticatedActor);
@@ -511,12 +620,17 @@ function validateExistingInput(input, { requireContent }) {
   }
   const content = requireContent ? validateEvaluationContent(input.content) : null;
   if (content?.error) return content;
+  const completionContract = completion ? validateCompletionContract(input) : null;
+  if (completionContract?.error) return completionContract;
   return {
     actorId: actor.id,
     idempotencyKey: idempotency.idempotencyKey,
     evaluationId,
     expectedVersion,
     content: content?.content,
+    completionMode: completionContract?.completionMode || null,
+    assessmentMethod: completionContract?.assessmentMethod || null,
+    assessmentBasis: completionContract?.assessmentBasis || null,
   };
 }
 
@@ -818,6 +932,86 @@ async function requireCompletedEvaluationVisitEvidence({
   return result.rows[0] || null;
 }
 
+async function loadOrdinaryEvaluationProvenance({
+  client,
+  evaluationId,
+  jobId,
+}) {
+  const result = await client.query(
+    `SELECT
+       EXISTS (
+         SELECT 1
+         FROM canonical_visit_evaluation_links links
+         WHERE links.evaluation_id = $1
+           AND links.job_id = $2
+       ) AS has_physical_link,
+       EXISTS (
+         SELECT 1
+         FROM canonical_evaluation_remote_provenance remote
+         WHERE remote.evaluation_id = $1
+           AND remote.job_id = $2
+       ) AS has_remote_provenance`,
+    [evaluationId, jobId]
+  );
+  return result.rows[0] || {
+    has_physical_link: false,
+    has_remote_provenance: false,
+  };
+}
+
+async function insertRemoteEvaluationProvenance({
+  client,
+  evaluationId,
+  evaluationVersion,
+  jobId,
+  professionalParticipantId,
+  assessmentMethod,
+  assessmentBasis,
+  completionCommandId,
+}) {
+  const result = await client.query(
+    `INSERT INTO canonical_evaluation_remote_provenance (
+       id, evaluation_id, evaluation_version, job_id,
+       professional_participant_id, assessment_method, assessment_basis,
+       completion_command_idempotency_id
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     RETURNING assessment_method, assessment_basis`,
+    [
+      randomUUID(),
+      evaluationId,
+      evaluationVersion,
+      jobId,
+      professionalParticipantId,
+      assessmentMethod,
+      assessmentBasis,
+      completionCommandId,
+    ]
+  );
+  return result.rows[0] || null;
+}
+
+function evaluationProvenanceFailure(error, completionMode) {
+  if (!error) return null;
+  const message = String(error.message || "");
+  const constraint = String(error.constraint || "");
+  const isXorConflict =
+    /Physical and remote Evaluation provenance are mutually exclusive/i.test(message) ||
+    constraint === "canonical_evaluation_provenance_claims_pkey";
+  if (!isXorConflict) return null;
+  if (completionMode === EVALUATION_COMPLETION_MODES.REMOTE) {
+    return failure(
+      409,
+      "REMOTE_EVALUATION_PHYSICAL_PROVENANCE_CONFLICT",
+      "Remote completion conflicts with the Evaluation's physical Visit record."
+    );
+  }
+  return failure(
+    409,
+    "PHYSICAL_EVALUATION_REMOTE_PROVENANCE_CONFLICT",
+    "Physical completion conflicts with the Evaluation's remote assessment record."
+  );
+}
+
 function parseArray(value) {
   if (Array.isArray(value)) return value;
   if (typeof value !== "string") return [];
@@ -865,6 +1059,16 @@ function sourceContextFromRow(row) {
 
 function evaluationProjection(row) {
   const status = row.evaluation_status || row.status;
+  const ordinaryEvaluation =
+    row.source_context_type === "ordinary_request" || Boolean(row.job_id);
+  const physicalProvenanceAvailable = Boolean(row.evaluation_visit_id);
+  const completionMode = status === EVALUATION_STATUS.COMPLETED
+    ? row.remote_assessment_method
+      ? EVALUATION_COMPLETION_MODES.REMOTE
+      : physicalProvenanceAvailable
+        ? EVALUATION_COMPLETION_MODES.PHYSICAL
+        : null
+    : null;
   const projection = {
     authoritySource: AUTHORITY_SOURCE,
     confirmed: true,
@@ -881,10 +1085,13 @@ function evaluationProjection(row) {
       createdAt: row.evaluation_created_at || row.created_at,
       updatedAt: row.evaluation_updated_at || row.updated_at,
       completedAt: row.completed_at || null,
+      completionMode,
       content: contentFromRow(row),
       capabilities: {
         canEditDraft: status === EVALUATION_STATUS.DRAFT,
-        canComplete: status === EVALUATION_STATUS.DRAFT,
+        canComplete:
+          status === EVALUATION_STATUS.DRAFT &&
+          (!ordinaryEvaluation || physicalProvenanceAvailable),
         canRevise: false,
         canShareWithCustomer: false,
         quoteReady: false,
@@ -909,6 +1116,10 @@ function evaluationProjection(row) {
         sequence: Number(concern.sequence),
       })
     );
+    if (completionMode === EVALUATION_COMPLETION_MODES.REMOTE) {
+      projection.evaluation.assessmentMethod = row.remote_assessment_method;
+      projection.evaluation.assessmentBasis = row.remote_assessment_basis;
+    }
   }
   return projection;
 }
@@ -1058,7 +1269,14 @@ async function insertEvaluationEvidence({
   return result.rows[0] || null;
 }
 
-function combinedRow({ aggregate, evaluation, version, context, visitId = null }) {
+function combinedRow({
+  aggregate,
+  evaluation,
+  version,
+  context,
+  visitId = null,
+  remoteProvenance = null,
+}) {
   return {
     evaluation_id: aggregate.id,
     current_version: aggregate.current_version,
@@ -1070,6 +1288,8 @@ function combinedRow({ aggregate, evaluation, version, context, visitId = null }
     job_request_id: context.job_request_id || null,
     relationship_id: context.relationship_id,
     evaluation_visit_id: visitId,
+    remote_assessment_method: remoteProvenance?.assessment_method || null,
+    remote_assessment_basis: remoteProvenance?.assessment_basis || null,
     evaluation_status: evaluation.status,
     evaluation_created_at: evaluation.created_at,
     evaluation_updated_at: evaluation.updated_at,
@@ -1091,6 +1311,8 @@ async function loadEvaluation(client, evaluationId, actorUserId, { lock = false 
       ordinary_subject.job_id,
       ordinary_subject.job_request_id,
       ordinary_visit_link.visit_id AS evaluation_visit_id,
+      remote_provenance.assessment_method AS remote_assessment_method,
+      remote_provenance.assessment_basis AS remote_assessment_basis,
       actor_participant.id AS actor_participant_id,
       CASE
         WHEN a.source_context_type = 'ordinary_request' THEN COALESCE(
@@ -1151,6 +1373,9 @@ async function loadEvaluation(client, evaluationId, actorUserId, { lock = false 
     LEFT JOIN canonical_visit_evaluation_links AS ordinary_visit_link
       ON ordinary_visit_link.evaluation_id = ordinary_subject.evaluation_id
       AND ordinary_visit_link.job_id = ordinary_subject.job_id
+    LEFT JOIN canonical_evaluation_remote_provenance AS remote_provenance
+      ON remote_provenance.evaluation_id = ordinary_subject.evaluation_id
+      AND remote_provenance.job_id = ordinary_subject.job_id
     LEFT JOIN jobs AS ordinary_job
       ON ordinary_job.id = ordinary_subject.job_id
       AND ordinary_job.job_request_id = ordinary_subject.job_request_id
@@ -1420,19 +1645,21 @@ async function createOrdinaryJobEvaluation(input = {}) {
       return { ...idempotency.replay, replayed: true };
     }
 
-    const completedVisit = await loadCompletedEvaluationVisit(client, {
-      jobId: validated.jobId,
-      visitId: validated.visitId,
-      requireUnlinked: true,
-      lock: true,
-    });
-    if (!completedVisit) {
+    const completedVisit = validated.visitId
+      ? await loadCompletedEvaluationVisit(client, {
+          jobId: validated.jobId,
+          visitId: validated.visitId,
+          requireUnlinked: true,
+          lock: true,
+        })
+      : null;
+    if (validated.visitId && !completedVisit) {
       await rollback(client);
       transactionStarted = false;
       return failure(
         409,
         "COMPLETED_EVALUATION_VISIT_REQUIRED",
-        "A completed, unlinked Evaluation Visit is required before documenting the Evaluation."
+        "The supplied Evaluation Visit must be completed and available for this Evaluation."
       );
     }
 
@@ -1524,42 +1751,44 @@ async function createOrdinaryJobEvaluation(input = {}) {
       throw new Error("Canonical ordinary Evaluation creation failed.");
     }
 
-    const linkCommand = await reserveVisitEvaluationLinkCommand({
-      client,
-      context,
-      visitId: completedVisit.visit_id,
-      evaluationId,
-      idempotencyKey: validated.idempotencyKey,
-    });
-    if (linkCommand.error || linkCommand.replay) {
-      throw new Error("Canonical Evaluation Visit linkage reservation failed.");
-    }
-    const linkResult = await client.query(
-      `INSERT INTO canonical_visit_evaluation_links (
-         visit_id, job_id, evaluation_id,
-         linked_by_participant_id, command_idempotency_id
-       ) VALUES ($1, $2, $3, $4, $5)
-       RETURNING visit_id`,
-      [
-        completedVisit.visit_id,
-        context.job_id,
-        evaluationId,
-        context.actor_participant_id,
-        linkCommand.reservation.id,
-      ]
-    );
-    if (!linkResult.rows[0]) {
-      throw new Error("Canonical Evaluation Visit linkage failed.");
-    }
-    await completeVisitEvaluationLinkCommand(
-      client,
-      linkCommand.reservation.id,
-      {
+    if (completedVisit) {
+      const linkCommand = await reserveVisitEvaluationLinkCommand({
+        client,
+        context,
         visitId: completedVisit.visit_id,
         evaluationId,
-        jobId: context.job_id,
+        idempotencyKey: validated.idempotencyKey,
+      });
+      if (linkCommand.error || linkCommand.replay) {
+        throw new Error("Canonical Evaluation Visit linkage reservation failed.");
       }
-    );
+      const linkResult = await client.query(
+        `INSERT INTO canonical_visit_evaluation_links (
+           visit_id, job_id, evaluation_id,
+           linked_by_participant_id, command_idempotency_id
+         ) VALUES ($1, $2, $3, $4, $5)
+         RETURNING visit_id`,
+        [
+          completedVisit.visit_id,
+          context.job_id,
+          evaluationId,
+          context.actor_participant_id,
+          linkCommand.reservation.id,
+        ]
+      );
+      if (!linkResult.rows[0]) {
+        throw new Error("Canonical Evaluation Visit linkage failed.");
+      }
+      await completeVisitEvaluationLinkCommand(
+        client,
+        linkCommand.reservation.id,
+        {
+          visitId: completedVisit.visit_id,
+          evaluationId,
+          jobId: context.job_id,
+        }
+      );
+    }
 
     const evidence = await insertEvaluationEvidence({
       client,
@@ -1581,7 +1810,7 @@ async function createOrdinaryJobEvaluation(input = {}) {
       evaluation,
       version,
       context,
-      visitId: completedVisit.visit_id,
+      visitId: completedVisit?.visit_id || null,
     });
     const result = successResult({
       status: 201,
@@ -1620,7 +1849,10 @@ async function createOrdinaryJobEvaluation(input = {}) {
 }
 
 async function mutateEvaluation(input, { completion = false } = {}) {
-  const validated = validateExistingInput(input, { requireContent: !completion });
+  const validated = validateExistingInput(input, {
+    requireContent: !completion,
+    completion,
+  });
   if (validated.error) return validated.error;
   const logger = safeLogger(input.logger);
   const commandName = completion
@@ -1631,6 +1863,7 @@ async function mutateEvaluation(input, { completion = false } = {}) {
     : EVALUATION_EVIDENCE_TYPES.DRAFT_UPDATED;
   const client = await databaseClient(input.pool);
   let transactionStarted = false;
+  let effectiveCompletionMode = validated.completionMode;
 
   try {
     await client.query("BEGIN");
@@ -1639,7 +1872,14 @@ async function mutateEvaluation(input, { completion = false } = {}) {
       command: commandName,
       evaluationId: validated.evaluationId,
       expectedVersion: validated.expectedVersion,
-      ...(completion ? {} : { content: validated.content }),
+      ...(completion
+        ? {
+            completionMode:
+              validated.completionMode || EVALUATION_COMPLETION_MODES.PHYSICAL,
+            assessmentMethod: validated.assessmentMethod,
+            assessmentBasis: validated.assessmentBasis,
+          }
+        : { content: validated.content }),
     });
     const idempotency = await reserveIdempotency({
       client,
@@ -1719,21 +1959,56 @@ async function mutateEvaluation(input, { completion = false } = {}) {
         transactionStarted = false;
         return authorityError;
       }
-      if (
-        completion &&
-        !(await requireCompletedEvaluationVisitEvidence({
+      if (completion) {
+        effectiveCompletionMode =
+          validated.completionMode || EVALUATION_COMPLETION_MODES.PHYSICAL;
+        const provenance = await loadOrdinaryEvaluationProvenance({
           client,
-          jobId: context.job_id,
           evaluationId: validated.evaluationId,
-        }))
-      ) {
-        await rollback(client);
-        transactionStarted = false;
-        return failure(
-          409,
-          "COMPLETED_EVALUATION_VISIT_REQUIRED",
-          "Completed Evaluation Visit provenance is required before completing the Evaluation."
-        );
+          jobId: context.job_id,
+        });
+        if (effectiveCompletionMode === EVALUATION_COMPLETION_MODES.PHYSICAL) {
+          if (provenance.has_remote_provenance) {
+            await rollback(client);
+            transactionStarted = false;
+            return failure(
+              409,
+              "PHYSICAL_EVALUATION_REMOTE_PROVENANCE_CONFLICT",
+              "Physical completion conflicts with the Evaluation's remote assessment record."
+            );
+          }
+          if (
+            !(await requireCompletedEvaluationVisitEvidence({
+              client,
+              jobId: context.job_id,
+              evaluationId: validated.evaluationId,
+            }))
+          ) {
+            await rollback(client);
+            transactionStarted = false;
+            return failure(
+              409,
+              "COMPLETED_EVALUATION_VISIT_REQUIRED",
+              "Completed Evaluation Visit provenance is required before completing the Evaluation."
+            );
+          }
+        } else if (provenance.has_physical_link) {
+          await rollback(client);
+          transactionStarted = false;
+          return failure(
+            409,
+            "REMOTE_EVALUATION_PHYSICAL_PROVENANCE_CONFLICT",
+            "Remote completion conflicts with the Evaluation's physical Visit record."
+          );
+        } else if (provenance.has_remote_provenance) {
+          await rollback(client);
+          transactionStarted = false;
+          return failure(
+            409,
+            "EVALUATION_COMPLETED",
+            "The Evaluation is already completed."
+          );
+        }
       }
     } else {
       context = await resolveEmergencyWriteContext(
@@ -1745,6 +2020,15 @@ async function mutateEvaluation(input, { completion = false } = {}) {
         await rollback(client);
         transactionStarted = false;
         return failure(404, "EVALUATION_UNAVAILABLE", "The Evaluation is unavailable.");
+      }
+      if (completion && validated.completionMode != null) {
+        await rollback(client);
+        transactionStarted = false;
+        return failure(
+          409,
+          "EVALUATION_COMPLETION_MODE_UNAVAILABLE",
+          "This Evaluation does not use ordinary physical or remote completion."
+        );
       }
     }
     if (current.evaluation_status !== EVALUATION_STATUS.DRAFT) {
@@ -1863,7 +2147,20 @@ async function mutateEvaluation(input, { completion = false } = {}) {
     });
     if (!evidence) throw new Error("Canonical Evaluation evidence creation failed.");
 
-    const row = combinedRow({ aggregate, evaluation, version, context });
+    const row = combinedRow({
+      aggregate,
+      evaluation,
+      version,
+      context,
+      visitId: current.evaluation_visit_id || null,
+      remoteProvenance:
+        completion && effectiveCompletionMode === EVALUATION_COMPLETION_MODES.REMOTE
+          ? {
+              assessment_method: validated.assessmentMethod,
+              assessment_basis: validated.assessmentBasis,
+            }
+          : null,
+    });
     const result = successResult({
       status: 200,
       code: completion ? "EVALUATION_COMPLETED" : "EVALUATION_DRAFT_UPDATED",
@@ -1879,6 +2176,26 @@ async function mutateEvaluation(input, { completion = false } = {}) {
       ))
     ) {
       throw new Error("Canonical Evaluation idempotency completion failed.");
+    }
+
+    if (
+      completion &&
+      sourceContext.type === "ordinary_job" &&
+      effectiveCompletionMode === EVALUATION_COMPLETION_MODES.REMOTE
+    ) {
+      const remoteProvenance = await insertRemoteEvaluationProvenance({
+        client,
+        evaluationId: validated.evaluationId,
+        evaluationVersion: nextVersion,
+        jobId: context.job_id,
+        professionalParticipantId: context.actor_participant_id,
+        assessmentMethod: validated.assessmentMethod,
+        assessmentBasis: validated.assessmentBasis,
+        completionCommandId: idempotency.reservation.id,
+      });
+      if (!remoteProvenance) {
+        throw new Error("Canonical remote Evaluation provenance creation failed.");
+      }
     }
 
     await client.query("COMMIT");
@@ -1902,7 +2219,15 @@ async function mutateEvaluation(input, { completion = false } = {}) {
     }
     return result;
   } catch (error) {
-    if (transactionStarted) await rollback(client);
+    if (transactionStarted) {
+      await rollback(client);
+      transactionStarted = false;
+    }
+    const provenanceFailure = evaluationProvenanceFailure(
+      error,
+      effectiveCompletionMode
+    );
+    if (provenanceFailure) return provenanceFailure;
     throw error;
   } finally {
     if (client !== input.pool && typeof client.release === "function") client.release();
@@ -2090,9 +2415,11 @@ module.exports = {
   ALLOWED_EMERGENCY_EVALUATION_STATUSES,
   CAPABILITY_MILESTONE_ID,
   EVALUATION_COMMANDS,
+  EVALUATION_COMPLETION_MODES,
   EVALUATION_EVIDENCE_TYPES,
   EVALUATION_STATUS,
   ORDINARY_EVALUATION_CAPABILITY,
+  REMOTE_ASSESSMENT_METHODS,
   completeEvaluation,
   createEvaluation,
   createOrdinaryJobEvaluation,
@@ -2100,6 +2427,7 @@ module.exports = {
   listEvaluationsForEmergencyRequest,
   listEvaluationsForJob,
   updateEvaluationDraft,
+  validateCompletionContract,
   validateCompletionContent,
   validateEvaluationContent,
   validateOrdinaryCompletionContent,
