@@ -88,8 +88,45 @@ test("saved total-only customer package hides internal rows and exposes 75% depo
   const text = customerPackageLines(customerPackage).join("\n");
   assert.doesNotMatch(text, /^Labor:|^Materials:/m);
   assert.match(text, /Labor and standard materials included/);
-  assert.match(text, /75% deposit due on approval: \$712\.50/);
+  assert.match(text, /Deposit\n75% due on approval: \$712\.50/);
   assert.match(text, /Remaining balance: \$237\.50/);
+});
+
+test("saved customer package and PDF remove only deposit wording owned by the structured summary", async () => {
+  const base = {
+    pricingDisplayMode: "TOTAL_ONLY",
+    materialsDisplayMode: "INCLUDED_IN_TOTAL",
+    depositMode: "PERCENT",
+    depositPercent: "75",
+  };
+  const generated = buildBusinessDocumentCustomerPackage(document({
+    ...base,
+    terms: "75% deposit required · 75% deposit due on approval — $510.00. Remaining balance — $170.00.",
+  }), { business_name: "Business" });
+  assert.equal(generated.totalMinor, 68000);
+  assert.equal(generated.deposit.dueMinor, 51000);
+  assert.equal(generated.deposit.remainingMinor, 17000);
+  assert.equal(generated.paymentTerms, null);
+  assert.doesNotMatch(customerPackageLines(generated).join("\n"), /Payment Terms/);
+  const generatedPdf = (await renderBusinessDocumentCustomerPdf(generated)).buffer.toString("latin1");
+  assert.match(generatedPdf, /Deposit/);
+  assert.match(generatedPdf, /75% due on approval/);
+  assert.match(generatedPdf, /\$510\.00/);
+  assert.match(generatedPdf, /\$170\.00/);
+  assert.doesNotMatch(generatedPdf, /Payment Terms|Confirm terms before delivery/);
+
+  for (const [terms, expected] of [
+    ["75% deposit required. Remaining balance due upon completion.", "Remaining balance due upon completion."],
+    ["75% deposit required. Balance due after final walkthrough.", "Balance due after final walkthrough."],
+    ["75% deposit required. Payments accepted by check or ACH.", "Payments accepted by check or ACH."],
+    ["75% deposit required before scheduling.", "75% deposit required before scheduling."],
+  ]) {
+    const customerPackage = buildBusinessDocumentCustomerPackage(document({
+      ...base,
+      terms,
+    }), { business_name: "Business" });
+    assert.equal(customerPackage.paymentTerms, expected, terms);
+  }
 });
 
 test("saved total-only PDF agrees with customer package without leaking internal breakdown", async () => {
@@ -104,7 +141,7 @@ test("saved total-only PDF agrees with customer package without leaking internal
   const pdfText = artifact.buffer.toString("latin1");
   assert.match(pdfText, /PROJECT PRICE/);
   assert.match(pdfText, /Labor and standard materials included/);
-  assert.match(pdfText, /75% deposit due on approval/);
+  assert.match(pdfText, /75% due on approval/);
   assert.match(pdfText, /\$712\.50/);
   assert.match(pdfText, /\$237\.50/);
   assert.match(pdfText, /\/F1 10\.5 Tf/);

@@ -384,10 +384,14 @@ function renderPreparedCustomerPdf(customerPackage, photos, logo = null, options
   const savedStatus = "Ready for Customer Review";
   const summaryEntries = customerPackage.document.type === "QUOTE"
     ? [
-        ["Payment Terms", customerPackage.paymentTerms || "Confirm terms before delivery."],
+        customerPackage.paymentTerms
+          ? ["Payment Terms", customerPackage.paymentTerms]
+          : customerPackage.deposit
+            ? null
+            : ["Payment Terms", "Confirm terms before delivery."],
         ["Estimated Duration", customerPackage.estimatedDuration || "Not confirmed."],
         ["Acceptance / Status", savedStatus],
-      ]
+      ].filter(Boolean)
     : [
         ["Payment Terms", customerPackage.paymentTerms || "Not confirmed."],
         ["Due Date", customerPackage.document.dueDate || "Not confirmed."],
@@ -464,8 +468,8 @@ function renderPreparedCustomerPdf(customerPackage, photos, logo = null, options
   section("Pricing", customerPackage.pricingPresentation?.note);
   if (customerPackage.document.type === "QUOTE" && customerPackage.deposit) {
     const label = customerPackage.deposit.mode === "PERCENT"
-      ? `${customerPackage.deposit.percent}% deposit due on approval`
-      : "Deposit due on approval";
+      ? `${customerPackage.deposit.percent}% due on approval`
+      : "Due on approval";
     section("Deposit", `${label} — ${money(customerPackage.deposit.dueMinor, customerPackage.currency)}\nRemaining balance — ${money(customerPackage.deposit.remainingMinor, customerPackage.currency)}`);
   }
   summaryGrid(compactSummaryEntries, summaryColumns);

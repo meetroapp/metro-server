@@ -125,6 +125,50 @@ function customerPricing(content = {}) {
   };
 }
 
+function normalizedGeneratedTerm(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replaceAll(",", "")
+    .replace(/[–—]/g, "-")
+    .replace(/\s+/g, " ")
+    .replace(/[.;:]+$/g, "");
+}
+
+function sameMajorAmount(value, minor) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && Math.round(parsed * 100) === minor;
+}
+
+function isGeneratedDepositTerm(value, deposit) {
+  if (!deposit) return false;
+  const term = normalizedGeneratedTerm(value);
+  const remaining = term.match(/^remaining balance\s*-\s*\$?([0-9]+(?:\.[0-9]+)?)$/);
+  if (remaining) return sameMajorAmount(remaining[1], deposit.remainingMinor);
+  if (deposit.mode === "PERCENT") {
+    const percent = term.match(/^([0-9]+(?:\.[0-9]+)?)% deposit(?: required| due on approval)?(?:\s*-\s*\$?([0-9]+(?:\.[0-9]+)?))?$/);
+    return Boolean(percent) && Number(percent[1]) === deposit.percent &&
+      (!percent[2] || sameMajorAmount(percent[2], deposit.dueMinor));
+  }
+  const fixed = term.match(/^(?:deposit(?: required| due on approval)?(?:\s*-\s*\$?([0-9]+(?:\.[0-9]+)?))?|\$?([0-9]+(?:\.[0-9]+)?) deposit(?: required| due on approval)?)$/);
+  const amount = fixed?.[1] || fixed?.[2];
+  return Boolean(fixed) && (!amount || sameMajorAmount(amount, deposit.dueMinor));
+}
+
+function independentQuotePaymentTerms(value, deposit) {
+  return String(value || "")
+    .split(/\s*·\s*|\r?\n+/)
+    .map((group) => group.trim())
+    .filter(Boolean)
+    .map((group) => group
+      .split(/(?<=[.!?])\s+(?=[A-Za-z0-9$])/)
+      .map((term) => term.trim())
+      .filter((term) => term && !isGeneratedDepositTerm(term, deposit))
+      .join(" "))
+    .filter(Boolean)
+    .join(" · ");
+}
+
 function safeAgreement(value = {}) {
   const exclusions = Array.isArray(value.exclusions)
     ? value.exclusions.map((item) => cleanText(item, 3000)).filter(Boolean).slice(0, 100)
@@ -238,7 +282,12 @@ function buildBusinessDocumentCustomerPackage(document, business = {}) {
     currency: /^[A-Z]{3}$/.test(String(content.currency || "").toUpperCase())
       ? String(content.currency).toUpperCase()
       : "USD",
-    paymentTerms: cleanText(content.paymentTerms || content.terms, 8000) || null,
+    paymentTerms: cleanText(
+      isQuote && pricing.deposit
+        ? independentQuotePaymentTerms(content.paymentTerms || content.terms, pricing.deposit)
+        : content.paymentTerms || content.terms,
+      8000
+    ) || null,
     ...(content.pricingDisplayMode || content.materialsDisplayMode ? {
       pricingPresentation: Object.freeze({
         displayMode: pricing.pricingDisplayMode,
@@ -288,9 +337,9 @@ function customerPackageLines(customerPackage, customerMessage = "") {
     `${customerPackage.document.type === "QUOTE" ? "Project Price" : "Total Due"}: ${formatMoney(customerPackage.totalMinor, customerPackage.currency)}`,
     customerPackage.pricingPresentation?.note || null,
     customerPackage.deposit
-      ? `${customerPackage.deposit.mode === "PERCENT" ? `${customerPackage.deposit.percent}% deposit due on approval` : "Deposit due on approval"}: ${formatMoney(customerPackage.deposit.dueMinor, customerPackage.currency)}\nRemaining balance: ${formatMoney(customerPackage.deposit.remainingMinor, customerPackage.currency)}`
+      ? `Deposit\n${customerPackage.deposit.mode === "PERCENT" ? `${customerPackage.deposit.percent}% due on approval` : "Due on approval"}: ${formatMoney(customerPackage.deposit.dueMinor, customerPackage.currency)}\nRemaining balance: ${formatMoney(customerPackage.deposit.remainingMinor, customerPackage.currency)}`
       : null,
-    customerPackage.paymentTerms ? `Deposit / Payment Terms\n${customerPackage.paymentTerms}` : null,
+    customerPackage.paymentTerms ? `Payment Terms\n${customerPackage.paymentTerms}` : null,
     [...new Set([...(customerPackage.exclusions || []), ...(agreement.exclusions || [])])].length
       ? `Not Included / Exclusions\n${[...new Set([...(customerPackage.exclusions || []), ...(agreement.exclusions || [])])].map((item) => `- ${item}`).join("\n")}`
       : null,
@@ -351,5 +400,6 @@ module.exports = {
   buildCustomerPackageEmail,
   customerPackageHash,
   customerPackageLines,
+  independentQuotePaymentTerms,
   safeAgreement,
 };
