@@ -77,6 +77,7 @@ test("Approved Work authority DTO is allowlisted and hides grant internals", () 
     "purpose",
     "state",
     "activatedAt",
+    "deposit",
     "customerCapabilities",
     "professionalCapabilities",
     "actions",
@@ -106,6 +107,58 @@ test("activation source contains no dispatch or adjacent lifecycle mutation", ()
   );
   assert.doesNotMatch(
     source,
-    /crew|employee|vehicle|dispatch|route optimization|geofenc|availability|payment|deposit|FOLLOW_UP/
+    /crew|employee|vehicle|dispatch|route optimization|geofenc|availability|FOLLOW_UP/
   );
+});
+
+test("an unsatisfied canonical deposit locks Approved Work proposal authority", () => {
+  const context = {
+    job_id: "job",
+    quote_id: "quote",
+    approved_quote_decision_id: "decision",
+    issued_quote_version: 4,
+    customer_participant_id: "customer",
+    professional_participant_id: "professional",
+  };
+  const grants = [
+    ...CUSTOMER_APPROVED_WORK_VISIT_CAPABILITIES.map((capability) => ({
+      grantee_participant_id: "customer",
+      capability,
+    })),
+    ...PROFESSIONAL_APPROVED_WORK_VISIT_CAPABILITIES.map((capability) => ({
+      grantee_participant_id: "professional",
+      capability,
+    })),
+  ];
+  const result = approvedWorkVisitServiceInternals.authorityProjection(
+    context,
+    { created_at: "2026-08-13T18:00:00.000Z" },
+    grants,
+    {
+      depositGate: {
+        allowed: false,
+        state: "PARTIALLY_SATISFIED",
+        source: { currency: "USD" },
+        obligation: {
+          id: "obligation",
+          latest_required_minor: 51000,
+          latest_applied_minor: 20000,
+          latest_remaining_minor: 31000,
+          latest_version: 2,
+        },
+      },
+    }
+  );
+  assert.equal(result.authority.state, "LOCKED");
+  assert.equal(result.authority.actions.canProposeApprovedWorkVisit, false);
+  assert.deepEqual(result.authority.deposit, {
+    state: "PARTIALLY_SATISFIED",
+    obligationId: "obligation",
+    requiredMinor: 51000,
+    appliedMinor: 20000,
+    remainingMinor: 31000,
+    currency: "USD",
+    latestVersion: 2,
+    schedulingLocked: true,
+  });
 });

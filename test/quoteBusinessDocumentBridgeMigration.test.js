@@ -16,8 +16,8 @@ test("working-Quote bridge migration is the 52nd additive migration", () => {
   const migrations = readdirSync(join(__dirname, "..", "migrations"))
     .filter((name) => /^\d+.*\.sql$/.test(name))
     .sort();
-  assert.equal(migrations.length, 58);
-  assert.equal(migrations.at(-7), migrationName);
+  assert.equal(migrations.length, 59);
+  assert.equal(migrations.at(-8), migrationName);
 });
 
 test("bridge provenance is one-to-one, business-owned, numbered, and hash-bound", () => {

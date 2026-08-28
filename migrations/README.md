@@ -76,6 +76,7 @@ Current inventory:
 56. `202608250001_correct_evaluation_visit_authority_and_negotiation.sql`
 57. `202608260001_create_evaluation_remote_provenance.sql`
 58. `202608270001_add_canonical_visit_start_authority.sql`
+59. `202608280001_create_pre_work_deposit_payment_authority.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -107,6 +108,15 @@ acknowledgment evidence. It expands the existing append-only Visit aggregate,
 creates no grants or business rows, performs no backfill, and preserves legacy
 SCHEDULED-to-COMPLETED history without fabricating Visit starts. Runtime and
 client Visit-start behavior remain separately governed work.
+
+`202608280001_create_pre_work_deposit_payment_authority.sql` adds exact
+accepted-Quote-scoped pre-work deposit obligations, immutable obligation
+versions and events, manual-external/future-processor receipt evidence,
+explicit payment allocations, append-only allocation reversals, and bounded
+command-idempotency persistence. It creates no obligation, receipt, allocation,
+payment, Visit, scheduling grant, Work, or Invoice row; performs no backfill;
+and leaves runtime payment confirmation and scheduling enforcement as separately
+governed work.
 
 `202608210001_create_business_document_working_drafts.sql` adds private,
 noncanonical Quote/Invoice working drafts, independently governed media role and

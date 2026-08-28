@@ -8,6 +8,10 @@ const {
 const {
   hasActiveLifecycleGrant,
 } = require("../authorization/lifecycleAuthorityService");
+const {
+  evaluateApprovedWorkDepositGateWithClient,
+  schedulingGateFailure,
+} = require("../finance/preWorkDepositService");
 
 const {
   databaseClient,
@@ -250,7 +254,33 @@ function capabilitiesFor(rows, participantId, expected) {
   return expected.filter((capability) => actual.has(capability));
 }
 
-function authorityProjection(context, activation, grantRows, { replayed = false } = {}) {
+function depositGateProjection(gate) {
+  return {
+    state: gate?.state || "UNAVAILABLE",
+    obligationId: gate?.obligation?.id || null,
+    requiredMinor: gate?.obligation
+      ? Number(gate.obligation.latest_required_minor)
+      : gate?.requirement?.requiredMinor || 0,
+    appliedMinor: gate?.obligation
+      ? Number(gate.obligation.latest_applied_minor)
+      : 0,
+    remainingMinor: gate?.obligation
+      ? Number(gate.obligation.latest_remaining_minor)
+      : gate?.requirement?.requiredMinor || 0,
+    currency: gate?.source?.currency || null,
+    latestVersion: gate?.obligation
+      ? Number(gate.obligation.latest_version)
+      : null,
+    schedulingLocked: gate?.allowed !== true,
+  };
+}
+
+function authorityProjection(
+  context,
+  activation,
+  grantRows,
+  { replayed = false, depositGate = { allowed: true, state: "NOT_REQUIRED" } } = {}
+) {
   const customerCapabilities = capabilitiesFor(
     grantRows,
     context.customer_participant_id,
@@ -266,13 +296,16 @@ function authorityProjection(context, activation, grantRows, { replayed = false 
     customerCapabilities.length === CUSTOMER_APPROVED_WORK_VISIT_CAPABILITIES.length &&
     professionalCapabilities.length === PROFESSIONAL_APPROVED_WORK_VISIT_CAPABILITIES.length
   );
+  const active = complete && depositGate.allowed === true;
   return {
     ok: true,
     success: true,
     status: 200,
-    code: complete
+    code: active
       ? "APPROVED_WORK_VISIT_AUTHORITY_ACTIVE"
-      : "APPROVED_WORK_VISIT_AUTHORITY_AVAILABLE",
+      : depositGate.allowed === true
+        ? "APPROVED_WORK_VISIT_AUTHORITY_AVAILABLE"
+        : "APPROVED_WORK_VISIT_AUTHORITY_LOCKED",
     authority: {
       authoritySource: APPROVED_WORK_VISIT_AUTHORITY_SOURCE,
       jobId: context.job_id,
@@ -280,13 +313,18 @@ function authorityProjection(context, activation, grantRows, { replayed = false 
       approvedQuoteDecisionId: context.approved_quote_decision_id,
       issuedQuoteVersion: Number(context.issued_quote_version),
       purpose: "APPROVED_WORK",
-      state: complete ? "ACTIVE" : "AVAILABLE",
+      state: active
+        ? "ACTIVE"
+        : depositGate.allowed === true
+          ? "AVAILABLE"
+          : "LOCKED",
       activatedAt: activation?.created_at || null,
+      deposit: depositGateProjection(depositGate),
       customerCapabilities,
       professionalCapabilities,
       actions: {
-        canActivate: !activation,
-        canProposeApprovedWorkVisit: complete,
+        canActivate: !activation && depositGate.allowed === true,
+        canProposeApprovedWorkVisit: active,
       },
     },
     ...(replayed ? { replayed: true } : {}),
@@ -368,7 +406,12 @@ async function getApprovedWorkVisitAuthority(input = {}) {
       context.approved_quote_decision_id
     );
     const grants = await loadActiveCapabilities(client, context);
-    return authorityProjection(context, activation, grants);
+    const depositGate = await evaluateApprovedWorkDepositGateWithClient({
+      client,
+      jobId: context.job_id,
+      approvedQuoteDecisionId: context.approved_quote_decision_id,
+    });
+    return authorityProjection(context, activation, grants, { depositGate });
   });
 }
 
@@ -454,6 +497,15 @@ async function activateApprovedWorkVisitAuthority(input = {}) {
       logger: validated.logger,
     });
     if (authorityError) return { abort: authorityError };
+    const depositGate = await evaluateApprovedWorkDepositGateWithClient({
+      client,
+      jobId: context.job_id,
+      approvedQuoteDecisionId: context.approved_quote_decision_id,
+      lock: true,
+    });
+    if (!depositGate.allowed) {
+      return { abort: schedulingGateFailure(depositGate) };
+    }
 
     const requestFingerprint = fingerprint({
       command: "approved_work.visit.activate",
@@ -527,7 +579,10 @@ async function activateApprovedWorkVisitAuthority(input = {}) {
     }
 
     const grants = await loadActiveCapabilities(client, context);
-    const result = authorityProjection(context, activation, grants, { replayed });
+    const result = authorityProjection(context, activation, grants, {
+      replayed,
+      depositGate,
+    });
     if (result.authority.state !== "ACTIVE") {
       throw new Error("Approved Work Visit authority activation is incomplete.");
     }

@@ -8,6 +8,10 @@ const {
 const {
   hasActiveLifecycleGrant,
 } = require("../authorization/lifecycleAuthorityService");
+const {
+  evaluateApprovedWorkDepositGateWithClient,
+  schedulingGateFailure,
+} = require("../finance/preWorkDepositService");
 
 const {
   databaseClient,
@@ -1308,6 +1312,17 @@ async function proposeVisit(input = {}) {
       allowEvaluationVisitScope: purpose === "EVALUATION",
     });
     if (authorized.error) return { abort: authorized.error };
+    if (purpose === "APPROVED_WORK") {
+      const depositGate = await evaluateApprovedWorkDepositGateWithClient({
+        client,
+        jobId,
+        approvedQuoteDecisionId,
+        lock: true,
+      });
+      if (!depositGate.allowed) {
+        return { abort: schedulingGateFailure(depositGate) };
+      }
+    }
     const participantId = authorized.context.actor_participant_id;
     const subjectValid = await validateProposedSubjects({
       client,
@@ -1722,6 +1737,25 @@ async function runVersionCommand({
           "Visit authority is required."
         ),
       };
+    }
+    if (
+      current.purpose === "APPROVED_WORK" &&
+      [
+        VISIT_COMMANDS.CONFIRM,
+        VISIT_COMMANDS.CHANGE_REQUEST,
+        VISIT_COMMANDS.RESCHEDULE,
+        VISIT_COMMANDS.START,
+      ].includes(commandName)
+    ) {
+      const depositGate = await evaluateApprovedWorkDepositGateWithClient({
+        client,
+        jobId,
+        approvedQuoteDecisionId: current.approved_quote_decision_id,
+        lock: true,
+      });
+      if (!depositGate.allowed) {
+        return { abort: schedulingGateFailure(depositGate) };
+      }
     }
     const participantId = authorized.context.actor_participant_id;
     const idempotency = await reserveCommand({

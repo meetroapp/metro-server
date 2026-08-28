@@ -7,6 +7,9 @@ const {
 const {
   deriveQuoteDepositGate,
 } = require("../authorization/quoteDecisionHandoff");
+const {
+  preWorkDepositServiceInternals: { deriveDepositRequirement },
+} = require("../finance/preWorkDepositService");
 
 const LIVE_JOB_CONTRACT_VERSION = 1;
 
@@ -334,6 +337,7 @@ function result({
     nextAction: projectedNextAction(action, actionProjection),
     availableActions: baseAvailableActions(state, capabilities, stage),
     reasonCodes: reasons,
+    deposit: state.deposit || null,
     freshness: {
       derivedAt,
       jobCreatedAt: state.jobCreatedAt || null,
@@ -345,6 +349,7 @@ function result({
       workstreamVersion: currentVersion(state.workstreams),
       activityVersion: currentVersion(state.activities),
       obligationVersion: currentVersion(state.obligations),
+      depositVersion: Number(state.deposit?.latestVersion) || 0,
       invoiceVersion: Number(state.invoice?.version) || 0,
       evaluationCount: state.evaluation ? 1 : 0,
       findingCount: state.findings.length,
@@ -472,9 +477,14 @@ function deriveCanonicalLiveJob(state = {}, { derivedAt = new Date().toISOString
         totalMinor: Number(approvedQuote.total_minor),
       })
     : { state: "NONE" };
+  const approvedQuoteDepositRequirement = approvedQuote
+    ? deriveDepositRequirement({
+        customerTermsSnapshot: approvedQuote.customer_terms_snapshot,
+        totalMinor: Number(approvedQuote.total_minor),
+      })
+    : { kind: "NOT_REQUIRED" };
   const approvedWorkSchedule = approvedWorkScheduling.find(
     (item) =>
-      ["AVAILABLE", "ACTIVE"].includes(item.authorityState) &&
       quotes.some(
         (quote) =>
           quote.id === item.quoteId &&
@@ -482,36 +492,79 @@ function deriveCanonicalLiveJob(state = {}, { derivedAt = new Date().toISOString
           quote.customer_decision === "APPROVED"
       )
   );
-  const schedulableApprovedQuote = approvedWorkSchedule
+  const schedulableApprovedQuote = approvedWorkSchedule &&
+    ["AVAILABLE", "ACTIVE"].includes(approvedWorkSchedule.authorityState)
     ? quotes.find((quote) => quote.id === approvedWorkSchedule.quoteId)
     : null;
+  const canonicalDeposit = approvedWorkSchedule?.deposit || (
+    approvedQuoteDepositRequirement.kind === "NOT_REQUIRED"
+      ? {
+          state: "NOT_REQUIRED",
+          materialized: false,
+          requiredMinor: 0,
+          appliedMinor: 0,
+          remainingMinor: 0,
+          latestVersion: null,
+          schedulingLocked: false,
+        }
+      : approvedQuoteDepositRequirement.kind === "REQUIRED"
+        ? {
+            state: "DUE",
+            materialized: false,
+            requiredMinor: approvedQuoteDepositRequirement.requiredMinor,
+            appliedMinor: 0,
+            remainingMinor: approvedQuoteDepositRequirement.requiredMinor,
+            latestVersion: null,
+            schedulingLocked: true,
+          }
+        : {
+            state: "TERMS_UNVERIFIED",
+            materialized: false,
+            requiredMinor: null,
+            appliedMinor: 0,
+            remainingMinor: null,
+            latestVersion: null,
+            schedulingLocked: true,
+          }
+  );
+  scopedState.deposit = canonicalDeposit;
   if (
     approvedQuote &&
-    ["DEPOSIT_DUE", "DEPOSIT_TERMS_UNVERIFIED"].includes(approvedQuoteDeposit.state)
+    canonicalDeposit.schedulingLocked
   ) {
-    const exactDeposit = approvedQuoteDeposit.state === "DEPOSIT_DUE";
-    const dueLabel = exactDeposit
-      ? `${(approvedQuoteDeposit.dueMinor / 100).toFixed(2)} ${approvedQuote.currency}`
+    const exactDeposit = Number.isSafeInteger(canonicalDeposit.requiredMinor);
+    const remainingKnown = Number.isSafeInteger(canonicalDeposit.remainingMinor);
+    const partiallyReceived = canonicalDeposit.state === "PARTIALLY_SATISFIED";
+    const dueLabel = remainingKnown
+      ? `${(canonicalDeposit.remainingMinor / 100).toFixed(2)} ${approvedQuote.currency}`
       : null;
     return result({
       stage: "QUOTE_APPROVED_DEPOSIT_DUE",
-      stageLabel: exactDeposit
-        ? `Work approved — ${approvedQuoteDeposit.percent}% deposit due`
+      stageLabel: partiallyReceived
+        ? "Work approved — deposit partially received"
+        : exactDeposit && approvedQuoteDeposit.percent
+          ? `Work approved — ${approvedQuoteDeposit.percent}% deposit due`
         : "Work approved — deposit terms need review",
       responsibility: "PROFESSIONAL",
       blocker: "QUOTE_DEPOSIT_NOT_SATISFIED",
       action: "REVIEW_APPROVED_QUOTE_TERMS",
       actionProjection: {
         label: "Review approved proposal terms",
-        description: exactDeposit
-          ? `A ${dueLabel} deposit is due before approved-work scheduling can proceed.`
+        description: remainingKnown
+          ? partiallyReceived
+            ? `${dueLabel} remains due before approved-work scheduling can proceed.`
+            : `A ${dueLabel} deposit is due before approved-work scheduling can proceed.`
           : "Deposit terms are present but cannot be represented as satisfied payment authority.",
       },
       reasons: [
-        exactDeposit
-          ? "APPROVED_QUOTE_DEPOSIT_DUE"
-          : "APPROVED_QUOTE_DEPOSIT_TERMS_UNVERIFIED",
-        "PAYMENT_AUTHORITY_NOT_AVAILABLE",
+        partiallyReceived
+          ? "APPROVED_QUOTE_DEPOSIT_PARTIALLY_SATISFIED"
+          : canonicalDeposit.state === "TERMS_UNVERIFIED"
+            ? "APPROVED_QUOTE_DEPOSIT_TERMS_UNVERIFIED"
+            : canonicalDeposit.materialized
+              ? "APPROVED_QUOTE_DEPOSIT_DUE"
+              : "APPROVED_QUOTE_DEPOSIT_RECONCILIATION_REQUIRED",
+        "APPROVED_WORK_SCHEDULING_DEPOSIT_LOCKED",
       ],
       state: scopedState,
       derivedAt,
@@ -1029,7 +1082,14 @@ async function loadCanonicalState(pool, context) {
            decisions.id AS approved_quote_decision_id,
            activations.id AS activation_id,
            COALESCE(active_grants.grant_count, 0)::integer AS active_grant_count,
-           latest_visit.state AS visit_state
+           latest_visit.state AS visit_state,
+           deposit_obligations.id AS deposit_obligation_id,
+           deposit_versions.version AS deposit_version,
+           deposit_versions.state AS deposit_state,
+           deposit_versions.required_minor AS deposit_required_minor,
+           deposit_versions.applied_minor AS deposit_applied_minor,
+           deposit_versions.remaining_minor AS deposit_remaining_minor,
+           deposit_obligations.currency AS deposit_currency
          FROM canonical_quotes
          INNER JOIN canonical_quote_customer_decisions decisions
            ON decisions.quote_id = canonical_quotes.id
@@ -1053,6 +1113,22 @@ async function loadCanonicalState(pool, context) {
          LEFT JOIN canonical_approved_work_visit_authority_activations activations
            ON activations.approved_quote_decision_id = decisions.id
            AND activations.job_id = canonical_quotes.job_id
+         LEFT JOIN canonical_pre_work_deposit_obligations deposit_obligations
+           ON deposit_obligations.customer_decision_id = decisions.id
+           AND deposit_obligations.quote_id = canonical_quotes.id
+           AND deposit_obligations.issued_quote_version = decisions.issued_quote_version
+           AND deposit_obligations.job_id = canonical_quotes.job_id
+           AND deposit_obligations.relationship_id = canonical_quotes.relationship_id
+         LEFT JOIN LATERAL (
+           SELECT versions.version, versions.state, versions.required_minor,
+             versions.applied_minor, versions.remaining_minor
+           FROM canonical_pre_work_deposit_versions versions
+           WHERE versions.obligation_id = deposit_obligations.id
+             AND versions.job_id = deposit_obligations.job_id
+             AND versions.relationship_id = deposit_obligations.relationship_id
+             AND versions.currency = deposit_obligations.currency
+           ORDER BY versions.version DESC LIMIT 1
+         ) deposit_versions ON TRUE
          LEFT JOIN LATERAL (
            SELECT count(DISTINCT (grants.grantee_participant_id, grants.capability)) AS grant_count
            FROM lifecycle_authority_grants grants
@@ -1180,15 +1256,46 @@ async function loadCanonicalState(pool, context) {
           (row) => row.quote_id === quote.id && row.approved_quote_decision_id === quote.customer_decision_id
         );
         if (!authority || !context.active_capabilities.includes("quote.read")) return null;
+        const requirement = deriveDepositRequirement({
+          customerTermsSnapshot: quote.customer_terms_snapshot,
+          totalMinor: Number(quote.total_minor),
+        });
+        const depositState = authority.deposit_state || (
+          requirement.kind === "NOT_REQUIRED" ? "NOT_REQUIRED" :
+            requirement.kind === "REQUIRED" ? "DUE" : "TERMS_UNVERIFIED"
+        );
+        const deposit = {
+          obligationId: authority.deposit_obligation_id || null,
+          materialized: Boolean(authority.deposit_obligation_id),
+          state: depositState,
+          currency: authority.deposit_currency || quote.currency || null,
+          requiredMinor: authority.deposit_required_minor == null
+            ? requirement.kind === "NOT_REQUIRED" ? 0 : requirement.requiredMinor ?? null
+            : Number(authority.deposit_required_minor),
+          appliedMinor: authority.deposit_applied_minor == null
+            ? 0
+            : Number(authority.deposit_applied_minor),
+          remainingMinor: authority.deposit_remaining_minor == null
+            ? requirement.kind === "NOT_REQUIRED" ? 0 : requirement.requiredMinor ?? null
+            : Number(authority.deposit_remaining_minor),
+          latestVersion: authority.deposit_version == null
+            ? null
+            : Number(authority.deposit_version),
+          schedulingLocked: !["NOT_REQUIRED", "SATISFIED"].includes(depositState),
+        };
+        const underlyingAuthorityState = authority.activation_id
+          ? Number(authority.active_grant_count) === 8
+            ? "ACTIVE"
+            : "UNAVAILABLE"
+          : "AVAILABLE";
         return {
           quoteId: quote.id,
           approvedQuoteDecisionId: quote.customer_decision_id,
-          authorityState: authority.activation_id
-            ? Number(authority.active_grant_count) === 8
-              ? "ACTIVE"
-              : "UNAVAILABLE"
-            : "AVAILABLE",
+          authorityState: deposit.schedulingLocked
+            ? "LOCKED"
+            : underlyingAuthorityState,
           visitState: authority.visit_state || null,
+          deposit,
         };
       })
       .filter(Boolean),

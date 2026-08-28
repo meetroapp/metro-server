@@ -29,6 +29,11 @@ const {
 const {
   createProfessionalQuoteDecisionAlertWithClient,
 } = require("../conversations/conversationMessageService");
+const {
+  preWorkDepositServiceInternals: {
+    materializeApprovedDecisionDepositWithClient,
+  },
+} = require("../finance/preWorkDepositService");
 
 const {
   completeIdempotency,
@@ -3395,6 +3400,16 @@ async function decideIssuedQuote(input = {}, decision) {
       ]
     );
     await invokeFailure(input.failureInjector, "after_write");
+    if (decision === "APPROVED") {
+      const deposit = await materializeApprovedDecisionDepositWithClient({
+        client,
+        jobId: context.job_id,
+        decisionId: decisionResult.rows[0].id,
+        actorParticipantId: context.actor_participant_id,
+        idempotencyKey: `approval:${decisionResult.rows[0].id}`,
+      });
+      if (deposit.error) return { abort: deposit.error };
+    }
     const quote = await loadQuoteProjection(client, quoteId);
     await createProfessionalQuoteDecisionAlertWithClient({
       client,

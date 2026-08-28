@@ -269,7 +269,20 @@ test("approved Quote with an unpaid canonical deposit stays blocked before sched
       currency: "USD",
       customer_terms_snapshot: { paymentTerms: "75% deposit" },
     }],
-    approvedWorkScheduling: approvedWorkScheduling(),
+    approvedWorkScheduling: approvedWorkScheduling({
+      authorityState: "LOCKED",
+      deposit: {
+        obligationId: null,
+        materialized: false,
+        state: "DUE",
+        currency: "USD",
+        requiredMinor: 51000,
+        appliedMinor: 0,
+        remainingMinor: 51000,
+        latestVersion: null,
+        schedulingLocked: true,
+      },
+    }),
   });
   assertProjection(projection, {
     stage: "QUOTE_APPROVED_DEPOSIT_DUE",
@@ -279,7 +292,49 @@ test("approved Quote with an unpaid canonical deposit stays blocked before sched
   });
   assert.match(projection.stage.label, /75% deposit due/i);
   assert.match(projection.nextAction.description, /510\.00 USD deposit is due/i);
-  assert.equal(projection.reasonCodes.includes("PAYMENT_AUTHORITY_NOT_AVAILABLE"), true);
+  assert.deepEqual(projection.reasonCodes, [
+    "APPROVED_QUOTE_DEPOSIT_RECONCILIATION_REQUIRED",
+    "APPROVED_WORK_SCHEDULING_DEPOSIT_LOCKED",
+  ]);
+  assert.equal(projection.deposit.state, "DUE");
+  assert.equal(projection.deposit.requiredMinor, 51000);
+});
+
+test("partial canonical deposit state stays coherent with locked scheduling", () => {
+  const projection = derive({
+    quotes: [{
+      id: "approved-parent",
+      version: 4,
+      status: "ISSUED",
+      customer_decision: "APPROVED",
+      scope_item_count: 2,
+      total_minor: 68000,
+      currency: "USD",
+      customer_terms_snapshot: { paymentTerms: "75% deposit" },
+    }],
+    approvedWorkScheduling: approvedWorkScheduling({
+      authorityState: "LOCKED",
+      deposit: {
+        obligationId: "deposit-obligation",
+        materialized: true,
+        state: "PARTIALLY_SATISFIED",
+        currency: "USD",
+        requiredMinor: 51000,
+        appliedMinor: 20000,
+        remainingMinor: 31000,
+        latestVersion: 2,
+        schedulingLocked: true,
+      },
+    }),
+  });
+  assert.equal(projection.stage.code, "QUOTE_APPROVED_DEPOSIT_DUE");
+  assert.equal(projection.stage.label, "Work approved — deposit partially received");
+  assert.match(projection.nextAction.description, /310\.00 USD remains due/);
+  assert.deepEqual(projection.reasonCodes, [
+    "APPROVED_QUOTE_DEPOSIT_PARTIALLY_SATISFIED",
+    "APPROVED_WORK_SCHEDULING_DEPOSIT_LOCKED",
+  ]);
+  assert.equal(projection.deposit.appliedMinor, 20000);
 });
 
 test("scheduled approved work remains primary over a supplemental Draft", () => {
@@ -625,6 +680,17 @@ test("canonical state projects exact approved-work authority without changing Qu
     approvedQuoteDecisionId: "approved-decision",
     authorityState: "AVAILABLE",
     visitState: null,
+    deposit: {
+      obligationId: null,
+      materialized: false,
+      state: "NOT_REQUIRED",
+      currency: null,
+      requiredMinor: 0,
+      appliedMinor: 0,
+      remainingMinor: 0,
+      latestVersion: null,
+      schedulingLocked: false,
+    },
   }]);
 });
 

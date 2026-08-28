@@ -159,6 +159,9 @@ const {
   registerApprovedWorkVisitRoutes,
 } = require("./server/workflow/approvedWorkVisits");
 const {
+  registerPreWorkDepositRoutes,
+} = require("./server/finance/preWorkDeposits");
+const {
   registerProfessionalScheduleRoutes,
 } = require("./server/workflow/professionalSchedule");
 const {
@@ -918,6 +921,13 @@ registerEvaluationVisitRoutes({
 });
 
 registerApprovedWorkVisitRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerPreWorkDepositRoutes({
   app,
   authMiddleware,
   getPool,
