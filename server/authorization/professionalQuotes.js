@@ -93,6 +93,7 @@ function createProfessionalQuotesHandlers({
           authenticatedActor: req.user,
           quoteId: req.params.quoteId,
           expectedIssuedVersion: req.body?.expectedIssuedVersion,
+          deliveryIntent: req.body?.deliveryIntent,
           idempotencyKey: req.headers?.["idempotency-key"],
         }));
       } catch (error) {

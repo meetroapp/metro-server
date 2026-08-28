@@ -1,6 +1,12 @@
 "use strict";
 
 const { hasActiveLifecycleGrant } = require("../authorization/lifecycleAuthorityService");
+const {
+  quoteDeliveryRequestFingerprint,
+} = require("../authorization/quoteDeliveryAuthority");
+const {
+  deriveQuoteDepositGate,
+} = require("../authorization/quoteDecisionHandoff");
 
 const LIVE_JOB_CONTRACT_VERSION = 1;
 
@@ -33,8 +39,10 @@ const STAGE_DEFINITIONS = Object.freeze({
   RECOMMENDATIONS_NEEDED: "Recommendations needed",
   QUOTE_NEEDED: "Proposal needed",
   QUOTE_DRAFT: "Proposal in progress",
+  QUOTE_DELIVERY_PENDING: "Proposal issued — delivery pending",
   WAITING_FOR_CUSTOMER_DECISION: "Waiting for customer decision",
   QUOTE_DECLINED: "Proposal declined",
+  QUOTE_APPROVED_DEPOSIT_DUE: "Work approved — deposit due",
   QUOTE_APPROVED: "Work approved",
   WORK_READY: "Work ready",
   WORK_IN_PROGRESS: "Work in progress",
@@ -57,8 +65,10 @@ const BLOCKER_DEFINITIONS = Object.freeze({
   FINDINGS_NOT_RECORDED: "Findings have not been recorded yet.",
   FINDINGS_AWAITING_CONFIRMATION: "Proposed findings still need professional review.",
   QUOTE_NOT_ISSUED: "The proposal is still being prepared.",
+  QUOTE_NOT_DELIVERED: "The issued proposal has not been delivered to the customer.",
   CUSTOMER_DECISION_PENDING: "The customer has not decided on the proposal yet.",
   CUSTOMER_DECLINED_QUOTE: "The customer declined the current proposal.",
+  QUOTE_DEPOSIT_NOT_SATISFIED: "The approved proposal's deposit requirement is not yet satisfied.",
   WORKSTREAM_BLOCKED: "At least one part of the work is blocked.",
   UNRESOLVED_OBLIGATION: "An open work obligation needs attention.",
   NEXT_WORKFLOW_AUTHORITY_NOT_AVAILABLE: "The next work-planning step is not available yet.",
@@ -86,6 +96,10 @@ const NEXT_ACTION_DEFINITIONS = Object.freeze({
     label: "Review the draft proposal",
     description: "Review scope and professional pricing before the proposal is issued.",
   },
+  REVIEW_QUOTE_DELIVERY: {
+    label: "Review proposal delivery",
+    description: "The proposal is issued but still needs canonical delivery to the customer.",
+  },
   WAIT_FOR_CUSTOMER_DECISION: {
     label: "Wait for the customer decision",
     description: "The issued proposal is with the customer for review.",
@@ -93,6 +107,10 @@ const NEXT_ACTION_DEFINITIONS = Object.freeze({
   REVIEW_DECLINED_QUOTE: {
     label: "Review the declined proposal",
     description: "Review the customer decision before preparing any revision.",
+  },
+  REVIEW_APPROVED_QUOTE_TERMS: {
+    label: "Review approved proposal terms",
+    description: "The customer approved the proposal. Confirm the required deposit before scheduling approved work.",
   },
   REVIEW_ACTIVE_WORK: {
     label: "Review active work",
@@ -253,8 +271,10 @@ function baseAvailableActions(state, capabilities, stage) {
   if (
     [
       "QUOTE_DRAFT",
+      "QUOTE_DELIVERY_PENDING",
       "WAITING_FOR_CUSTOMER_DECISION",
       "QUOTE_DECLINED",
+      "QUOTE_APPROVED_DEPOSIT_DUE",
       "QUOTE_APPROVED",
     ].includes(stage) &&
     capabilities.has("quote.read")
@@ -446,6 +466,12 @@ function deriveCanonicalLiveJob(state = {}, { derivedAt = new Date().toISOString
   const approvedQuote = quotes.find(
     (quote) => quote.status === "ISSUED" && quote.customer_decision === "APPROVED"
   );
+  const approvedQuoteDeposit = approvedQuote
+    ? deriveQuoteDepositGate({
+        customerTermsSnapshot: approvedQuote.customer_terms_snapshot,
+        totalMinor: Number(approvedQuote.total_minor),
+      })
+    : { state: "NONE" };
   const approvedWorkSchedule = approvedWorkScheduling.find(
     (item) =>
       ["AVAILABLE", "ACTIVE"].includes(item.authorityState) &&
@@ -459,6 +485,39 @@ function deriveCanonicalLiveJob(state = {}, { derivedAt = new Date().toISOString
   const schedulableApprovedQuote = approvedWorkSchedule
     ? quotes.find((quote) => quote.id === approvedWorkSchedule.quoteId)
     : null;
+  if (
+    approvedQuote &&
+    ["DEPOSIT_DUE", "DEPOSIT_TERMS_UNVERIFIED"].includes(approvedQuoteDeposit.state)
+  ) {
+    const exactDeposit = approvedQuoteDeposit.state === "DEPOSIT_DUE";
+    const dueLabel = exactDeposit
+      ? `${(approvedQuoteDeposit.dueMinor / 100).toFixed(2)} ${approvedQuote.currency}`
+      : null;
+    return result({
+      stage: "QUOTE_APPROVED_DEPOSIT_DUE",
+      stageLabel: exactDeposit
+        ? `Work approved — ${approvedQuoteDeposit.percent}% deposit due`
+        : "Work approved — deposit terms need review",
+      responsibility: "PROFESSIONAL",
+      blocker: "QUOTE_DEPOSIT_NOT_SATISFIED",
+      action: "REVIEW_APPROVED_QUOTE_TERMS",
+      actionProjection: {
+        label: "Review approved proposal terms",
+        description: exactDeposit
+          ? `A ${dueLabel} deposit is due before approved-work scheduling can proceed.`
+          : "Deposit terms are present but cannot be represented as satisfied payment authority.",
+      },
+      reasons: [
+        exactDeposit
+          ? "APPROVED_QUOTE_DEPOSIT_DUE"
+          : "APPROVED_QUOTE_DEPOSIT_TERMS_UNVERIFIED",
+        "PAYMENT_AUTHORITY_NOT_AVAILABLE",
+      ],
+      state: scopedState,
+      derivedAt,
+    });
+  }
+
   if (
     schedulableApprovedQuote &&
     approvedWorkSchedule
@@ -512,8 +571,28 @@ function deriveCanonicalLiveJob(state = {}, { derivedAt = new Date().toISOString
   }
 
   const pendingIssuedQuote = quotes.find(
-    (quote) => quote.status === "ISSUED" && !quote.customer_decision
+    (quote) =>
+      quote.status === "ISSUED" &&
+      !quote.customer_decision &&
+      quote.delivery_confirmed === true
   );
+  const undeliveredIssuedQuote = quotes.find(
+    (quote) =>
+      quote.status === "ISSUED" &&
+      !quote.customer_decision &&
+      quote.delivery_confirmed !== true
+  );
+  if (undeliveredIssuedQuote) {
+    return result({
+      stage: "QUOTE_DELIVERY_PENDING",
+      responsibility: "PROFESSIONAL",
+      blocker: "QUOTE_NOT_DELIVERED",
+      action: "REVIEW_QUOTE_DELIVERY",
+      reasons: ["ISSUED_QUOTE_WITHOUT_QUALIFYING_DELIVERY"],
+      state: scopedState,
+      derivedAt,
+    });
+  }
   if (pendingIssuedQuote) {
     return result({
       stage: "WAITING_FOR_CUSTOMER_DECISION",
@@ -651,6 +730,7 @@ async function loadAuthorizedJob(pool, jobId, actorUserId) {
       jobs.created_at AS job_created_at,
       request_relationships.status AS relationship_status,
       request_relationships.professional_user_id AS selected_professional_user_id,
+      request_relationships.homeowner_id AS customer_user_id,
       users.account_type AS actor_account_type,
       relationship_participants.id AS actor_participant_id,
       EXISTS (
@@ -793,22 +873,52 @@ async function loadCanonicalState(pool, context) {
            canonical_quotes.parent_quote_id, canonical_quotes.lineage_type,
            canonical_quote_versions.version, canonical_quote_versions.status,
            canonical_quote_versions.scope_item_count,
+           canonical_quote_versions.customer_terms_snapshot,
+           canonical_quote_versions.total_minor,
+           canonical_quote_versions.currency,
            decisions.decision AS customer_decision,
            decisions.id AS customer_decision_id,
-           decisions.issued_quote_version AS customer_decision_quote_version
+           decisions.issued_quote_version AS customer_decision_quote_version,
+           delivery.delivery_request_fingerprint
          FROM canonical_quotes
          INNER JOIN LATERAL (
-           SELECT version, status, scope_item_count
+           SELECT version, status, scope_item_count, customer_terms_snapshot,
+             total_minor, currency
            FROM canonical_quote_versions
            WHERE quote_id = canonical_quotes.id
            ORDER BY version DESC LIMIT 1
          ) AS canonical_quote_versions ON TRUE
          LEFT JOIN canonical_quote_customer_decisions decisions
            ON decisions.quote_id = canonical_quotes.id
+         LEFT JOIN LATERAL (
+           SELECT messages.delivery_request_fingerprint
+           FROM messages
+           INNER JOIN conversations
+             ON conversations.id = messages.conversation_id
+             AND conversations.relationship_id = canonical_quotes.relationship_id
+             AND conversations.homeowner_id = $3
+             AND conversations.professional_user_id = $2
+             AND conversations.status = 'active'
+           WHERE messages.quote_id = canonical_quotes.id
+             AND messages.job_id = canonical_quotes.job_id
+             AND messages.sender_id = $2
+             AND messages.receiver_id = $3
+             AND messages.message_type = 'quote_shared'
+             AND messages.workflow_type = 'QUOTE_SHARED'
+             AND messages.workflow_status = 'SENT'
+             AND messages.workflow_payload ->> 'quoteId' = canonical_quotes.id::text
+             AND messages.workflow_payload ->> 'jobId' = canonical_quotes.job_id::text
+           ORDER BY messages.id ASC
+           LIMIT 1
+         ) delivery ON TRUE
          WHERE canonical_quotes.job_id = $1
          ORDER BY canonical_quotes.updated_at DESC, canonical_quotes.created_at DESC,
            canonical_quotes.id DESC`,
-        [jobId]
+        [
+          jobId,
+          Number(context.selected_professional_user_id),
+          Number(context.customer_user_id),
+        ]
       ),
       () => pool.query(
         `/* live_job:workstreams */
@@ -1040,6 +1150,16 @@ async function loadCanonicalState(pool, context) {
     invoice,
   ] = results;
 
+  const quoteRows = quotes.rows.map((quote) => ({
+    ...quote,
+    delivery_confirmed:
+      quote.delivery_request_fingerprint === quoteDeliveryRequestFingerprint({
+        actorId: Number(context.selected_professional_user_id),
+        quoteId: quote.id,
+        expectedIssuedVersion: Number(quote.version),
+      }),
+  }));
+
   return {
     jobCreatedAt: context.job_created_at,
     hasConversation: positiveInteger(context.conversation_id) !== null,
@@ -1047,13 +1167,13 @@ async function loadCanonicalState(pool, context) {
     evaluation: evaluation.rows[0] || null,
     findings: findings.rows,
     recommendations: recommendations.rows,
-    quotes: quotes.rows,
+    quotes: quoteRows,
     workstreams: workstreams.rows,
     activities: activities.rows,
     obligations: obligations.rows,
     completion: completion.rows[0] || null,
     invoice: invoice.rows[0] || null,
-    approvedWorkScheduling: quotes.rows
+    approvedWorkScheduling: quoteRows
       .filter((quote) => quote.customer_decision === "APPROVED")
       .map((quote) => {
         const authority = approvedWorkScheduling.rows.find(

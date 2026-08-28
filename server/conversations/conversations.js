@@ -1,5 +1,9 @@
 "use strict";
 
+const {
+  quoteDeliveryRequestFingerprint,
+} = require("../authorization/quoteDeliveryAuthority");
+
 const CONVERSATION_STATUSES = Object.freeze({
   ACTIVE: "active",
   CLOSED: "closed",
@@ -347,6 +351,29 @@ function normalizeMessageWorkflowPayload(value) {
     : {};
 }
 
+function canonicalQuoteDecisionForMessage(row = {}) {
+  const decision = ["APPROVED", "DECLINED"].includes(row.canonical_quote_decision)
+    ? row.canonical_quote_decision
+    : null;
+  const decisionVersion = Number(row.canonical_quote_decision_version);
+  const currentVersion = Number(row.canonical_quote_current_version);
+  if (
+    !decision ||
+    !Number.isSafeInteger(decisionVersion) ||
+    decisionVersion < 1 ||
+    decisionVersion !== currentVersion ||
+    Number(row.canonical_quote_customer_user_id) !== Number(row.receiver_id) ||
+    row.delivery_request_fingerprint !== quoteDeliveryRequestFingerprint({
+      actorId: Number(row.sender_id),
+      quoteId: row.quote_id,
+      expectedIssuedVersion: decisionVersion,
+    })
+  ) return null;
+  const decidedAt = new Date(row.canonical_quote_decided_at);
+  if (Number.isNaN(decidedAt.getTime())) return null;
+  return { decision, decidedAt: decidedAt.toISOString(), version: decisionVersion };
+}
+
 function normalizeQuoteSharedPayload(row = {}) {
   const payload = normalizeMessageWorkflowPayload(row.workflow_payload);
   if (
@@ -389,15 +416,18 @@ function normalizeQuoteSharedPayload(row = {}) {
   const lineageLabel = ["Original", "Revised", "Additional"].includes(payload.lineageLabel)
     ? payload.lineageLabel
     : null;
-  const businessStatus = ["WAITING_ON_CUSTOMER", "APPROVED", "DECLINED"].includes(payload.businessStatus)
+  const persistedBusinessStatus = ["WAITING_ON_CUSTOMER", "APPROVED", "DECLINED"].includes(payload.businessStatus)
     ? payload.businessStatus
     : null;
+  const canonicalDecision = canonicalQuoteDecisionForMessage(row);
+  const businessStatus = canonicalDecision?.decision || persistedBusinessStatus;
   if (totalMinor === null || !currency || !lineageLabel || !businessStatus) return {};
 
   return {
     schemaVersion: 1,
     quoteId: row.quote_id,
     jobId: row.job_id,
+    quoteNumber: text(row.canonical_quote_number, 80) || "Quote",
     lineageLabel,
     businessStatus,
     totalMinor,
@@ -406,7 +436,7 @@ function normalizeQuoteSharedPayload(row = {}) {
     conditions,
     exclusions,
     issuedAt: text(payload.issuedAt, 80),
-    decidedAt: text(payload.decidedAt, 80),
+    decidedAt: canonicalDecision?.decidedAt || text(payload.decidedAt, 80),
     business: {
       displayName: text(payload.business?.displayName, 200) || "Professional",
     },

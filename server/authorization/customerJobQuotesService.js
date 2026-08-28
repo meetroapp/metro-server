@@ -3,6 +3,9 @@
 const {
   commercialAuthorityInternals,
 } = require("./commercialAuthorityService");
+const {
+  quoteDeliveryFingerprintMap,
+} = require("./quoteDeliveryAuthority");
 
 const {
   databaseClient,
@@ -156,6 +159,7 @@ async function loadCustomerJobContext(client, { actorId, jobId }) {
       jobs.job_request_id,
       jobs.source_request_relationship_id AS relationship_id,
       relationships.status AS relationship_status,
+      relationships.professional_user_id,
       participants.id AS actor_participant_id,
       posts.title AS job_title,
       posts.category AS job_service,
@@ -232,7 +236,15 @@ function customerContextUnavailable(context) {
 
 async function loadCustomerQuotePage(
   client,
-  { actorId, jobId, limit, cursor, relationshipId, participantId }
+  {
+    actorId,
+    jobId,
+    limit,
+    cursor,
+    relationshipId,
+    participantId,
+    deliveryFingerprints,
+  }
 ) {
   const result = await client.query(
     `SELECT
@@ -344,6 +356,27 @@ async function loadCustomerQuotePage(
       )
       AND EXISTS (
         SELECT 1
+        FROM messages deliveries
+        INNER JOIN conversations delivery_conversations
+          ON delivery_conversations.id = deliveries.conversation_id
+          AND delivery_conversations.relationship_id = quotes.relationship_id
+          AND delivery_conversations.homeowner_id = $2
+          AND delivery_conversations.professional_user_id = relationships.professional_user_id
+          AND delivery_conversations.status = 'active'
+        WHERE deliveries.quote_id = quotes.id
+          AND deliveries.job_id = quotes.job_id
+          AND deliveries.sender_id = relationships.professional_user_id
+          AND deliveries.receiver_id = $2
+          AND deliveries.message_type = 'quote_shared'
+          AND deliveries.workflow_type = 'QUOTE_SHARED'
+          AND deliveries.workflow_status = 'SENT'
+          AND deliveries.delivery_request_fingerprint =
+            COALESCE($9::jsonb ->> quotes.id::text, '')
+          AND deliveries.workflow_payload ->> 'quoteId' = quotes.id::text
+          AND deliveries.workflow_payload ->> 'jobId' = quotes.job_id::text
+      )
+      AND EXISTS (
+        SELECT 1
         FROM lifecycle_authority_grants grants
         LEFT JOIN lifecycle_authority_grant_revocations revocations
           ON revocations.authority_grant_id = grants.id
@@ -406,9 +439,36 @@ async function loadCustomerQuotePage(
       cursor?.activityAt ?? null,
       cursor?.quoteId ?? null,
       limit + 1,
+      JSON.stringify(deliveryFingerprints),
     ]
   );
   return result.rows;
+}
+
+async function loadIssuedQuoteDeliveryFingerprints(client, context) {
+  const result = await client.query(
+    `SELECT quotes.id, aggregates.current_version
+     FROM canonical_quotes quotes
+     INNER JOIN commercial_authority_aggregates aggregates
+       ON aggregates.id = quotes.id
+       AND aggregates.aggregate_type = 'quote'
+       AND aggregates.owning_engine = 'authorization_engine'
+     INNER JOIN canonical_quote_versions versions
+       ON versions.quote_id = quotes.id
+       AND versions.job_id = quotes.job_id
+       AND versions.version = aggregates.current_version
+       AND versions.status = 'ISSUED'
+     INNER JOIN canonical_quote_issuances issuances
+       ON issuances.quote_id = quotes.id
+       AND issuances.job_id = quotes.job_id
+       AND issuances.quote_version = aggregates.current_version
+     WHERE quotes.job_id = $1
+       AND quotes.relationship_id = $2
+       AND quotes.status = 'ISSUED'
+       AND quotes.issued_at IS NOT NULL`,
+    [context.job_id, Number(context.relationship_id)]
+  );
+  return quoteDeliveryFingerprintMap(result.rows, Number(context.professional_user_id));
 }
 
 function lineageLabel(type) {
@@ -452,10 +512,12 @@ async function getCustomerJobQuotes(input = {}) {
         "The customer Quotes are unavailable."
       );
     }
+    const deliveryFingerprints = await loadIssuedQuoteDeliveryFingerprints(client, context);
     const rows = await loadCustomerQuotePage(client, {
       ...validated,
       relationshipId: Number(context.relationship_id),
       participantId: context.actor_participant_id,
+      deliveryFingerprints,
     });
     const hasMore = rows.length > validated.limit;
     const pageRows = hasMore ? rows.slice(0, validated.limit) : rows;
@@ -495,6 +557,7 @@ module.exports = {
     decodeCursor,
     encodeCursor,
     lineageLabel,
+    loadIssuedQuoteDeliveryFingerprints,
     quoteProjection,
   }),
 };

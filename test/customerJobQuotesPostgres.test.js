@@ -24,6 +24,7 @@ const {
 const {
   getCustomerJobQuotes,
 } = require("../server/authorization/customerJobQuotesService");
+const { sendQuoteInMeetro } = require("../server/authorization/quoteDeliveryService");
 const {
   getMigrationFiles,
   runMigrationCollection,
@@ -46,6 +47,19 @@ function command(service, pool, actorId, values, key) {
     logger: quiet,
     ...values,
   });
+}
+
+async function deliver(pool, identities, quote, key) {
+  const result = await sendQuoteInMeetro({
+    pool,
+    authenticatedActor: { id: identities.professionalId },
+    quoteId: quote.id,
+    expectedIssuedVersion: quote.currentVersion,
+    idempotencyKey: key,
+    logger: quiet,
+  });
+  assert.equal(result.ok, true, result.code);
+  return result;
 }
 
 async function saveEvaluation(pool, identities, fixture, suffix) {
@@ -170,6 +184,19 @@ test(
       );
       assert.equal(originalIssued.ok, true, originalIssued.code);
 
+      const undeliveredRead = await getCustomerJobQuotes({
+        pool,
+        authenticatedActor: { id: identities.homeownerId },
+        jobId: fixture.jobId,
+      });
+      assert.deepEqual(undeliveredRead.quotes, []);
+      await deliver(
+        pool,
+        identities,
+        originalIssued.quote,
+        `customer-discovery-delivery-${suffix}`
+      );
+
       const waitingRead = await getCustomerJobQuotes({
         pool,
         authenticatedActor: { id: identities.homeownerId },
@@ -243,6 +270,12 @@ test(
         `customer-discovery-additional-issue-${suffix}`
       );
       assert.equal(additionalIssued.ok, true, additionalIssued.code);
+      await deliver(
+        pool,
+        identities,
+        additionalIssued.quote,
+        `customer-discovery-additional-delivery-${suffix}`
+      );
 
       const multipleRead = await getCustomerJobQuotes({
         pool,

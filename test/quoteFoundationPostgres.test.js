@@ -33,6 +33,7 @@ const {
   listDraftQuotesByJob,
   removeDraftScopeItem,
 } = require("../server/authorization/quoteDraftService");
+const { sendQuoteInMeetro } = require("../server/authorization/quoteDeliveryService");
 const { getMigrationFiles, runMigrationCollection } = require("../scripts/run-migrations");
 
 const cleanDatabaseUrl = process.env.QUOTE_FOUNDATION_DATABASE_URL;
@@ -295,6 +296,15 @@ async function createSimpleIssuedQuote(
     expectedVersion: scoped.quote.currentVersion,
   }, `simple-issue-${suffix}`);
   assert.equal(issued.ok, true, issued.code);
+  const delivered = await sendQuoteInMeetro({
+    pool,
+    authenticatedActor: { id: identities.professionalId },
+    quoteId: issued.quote.id,
+    expectedIssuedVersion: issued.quote.currentVersion,
+    idempotencyKey: `simple-delivery-${suffix}`,
+    logger: quiet,
+  });
+  assert.equal(delivered.ok, true, delivered.code);
   return issued.quote;
 }
 
@@ -810,7 +820,7 @@ test("clean disposable PostgreSQL certifies canonical $920 Draft and issued Quot
     assert.equal((await quoteCommand(approveIssuedQuote, pool, identities.homeownerId, {
       quoteId: quote.id,
       expectedIssuedVersion: quote.currentVersion,
-    }, `draft-approve-${suffix}`)).code, "ISSUED_QUOTE_VERSION_REQUIRED");
+    }, `draft-approve-${suffix}`)).code, "QUOTE_UNAVAILABLE");
     assert.equal((await quoteCommand(issueQuote, pool, identities.homeownerId, issueInput, `homeowner-issue-${suffix}`)).code, "QUOTE_AUTHORITY_REQUIRED");
     assert.equal((await quoteCommand(issueQuote, pool, identities.outsiderId, issueInput, `outsider-issue-${suffix}`)).code, "QUOTE_AUTHORITY_REQUIRED");
     assert.equal((await quoteCommand(issueQuote, pool, identities.professionalId, {
@@ -863,6 +873,15 @@ test("clean disposable PostgreSQL certifies canonical $920 Draft and issued Quot
     );
     const successfulIssue = issueAttempts.find((attempt) => attempt.result.code === "QUOTE_ISSUED");
     const issued = successfulIssue.result.quote;
+    const deliveredIssued = await sendQuoteInMeetro({
+      pool,
+      authenticatedActor: { id: identities.professionalId },
+      quoteId: issued.id,
+      expectedIssuedVersion: issued.currentVersion,
+      idempotencyKey: `primary-delivery-${suffix}`,
+      logger: quiet,
+    });
+    assert.equal(deliveredIssued.ok, true, deliveredIssued.code);
     assert.equal((await quoteCommand(issueQuote, pool, identities.professionalId, issueInput, successfulIssue.key)).replayed, true);
     assert.equal((await quoteCommand(issueQuote, pool, identities.professionalId, {
       ...issueInput,
@@ -1003,23 +1022,23 @@ test("clean disposable PostgreSQL certifies canonical $920 Draft and issued Quot
       authenticatedActor: { id: identities.occupantId },
       quoteId: issued.id,
       logger: quiet,
-    })).code, "CUSTOMER_QUOTE_AUTHORITY_REQUIRED");
+    })).code, "QUOTE_UNAVAILABLE");
     assert.equal((await quoteCommand(approveIssuedQuote, pool, identities.occupantId, {
       quoteId: issued.id,
       expectedIssuedVersion: issued.currentVersion,
-    }, `occupant-approve-${suffix}`)).code, "CUSTOMER_QUOTE_AUTHORITY_REQUIRED");
+    }, `occupant-approve-${suffix}`)).code, "QUOTE_UNAVAILABLE");
     assert.equal((await quoteCommand(declineIssuedQuote, pool, identities.occupantId, {
       quoteId: issued.id,
       expectedIssuedVersion: issued.currentVersion,
-    }, `occupant-decline-${suffix}`)).code, "CUSTOMER_QUOTE_AUTHORITY_REQUIRED");
+    }, `occupant-decline-${suffix}`)).code, "QUOTE_UNAVAILABLE");
     assert.equal((await quoteCommand(approveIssuedQuote, pool, identities.professionalId, {
       quoteId: issued.id,
       expectedIssuedVersion: issued.currentVersion,
-    }, `professional-approve-${suffix}`)).code, "CUSTOMER_QUOTE_AUTHORITY_REQUIRED");
+    }, `professional-approve-${suffix}`)).code, "QUOTE_UNAVAILABLE");
     assert.equal((await quoteCommand(approveIssuedQuote, pool, identities.outsiderId, {
       quoteId: issued.id,
       expectedIssuedVersion: issued.currentVersion,
-    }, `outsider-approve-${suffix}`)).code, "CUSTOMER_QUOTE_AUTHORITY_REQUIRED");
+    }, `outsider-approve-${suffix}`)).code, "QUOTE_UNAVAILABLE");
 
     const approvalKey = `customer-approve-${suffix}`;
     await assert.rejects(
@@ -1072,7 +1091,7 @@ test("clean disposable PostgreSQL certifies canonical $920 Draft and issued Quot
     assert.equal((await quoteCommand(approveIssuedQuote, pool, identities.homeownerId, {
       quoteId: issued.id,
       expectedIssuedVersion: issued.currentVersion - 1,
-    }, `stale-approve-${suffix}`)).code, "ISSUED_QUOTE_VERSION_REQUIRED");
+    }, `stale-approve-${suffix}`)).code, "QUOTE_UNAVAILABLE");
     const decisionProof = await pool.query(
       `SELECT decisions.decision, decisions.issued_quote_version,
         decisions.customer_participant_id, decisions.issued_integrity_hash,
@@ -1347,7 +1366,7 @@ test("clean disposable PostgreSQL certifies canonical $920 Draft and issued Quot
     assert.equal((await quoteCommand(approveIssuedQuote, pool, identities.homeownerId, {
       quoteId: crossDraft.quote.id,
       expectedIssuedVersion: crossIncluded.quote.currentVersion,
-    }, `revoked-expired-customer-approve-${suffix}`)).code, "CUSTOMER_QUOTE_AUTHORITY_REQUIRED");
+    }, `revoked-expired-customer-approve-${suffix}`)).code, "QUOTE_UNAVAILABLE");
     assert.equal((await quoteCommand(issueQuote, pool, identities.professionalId, {
       quoteId: crossDraft.quote.id,
       expectedVersion: crossIncluded.quote.currentVersion,
@@ -1488,11 +1507,11 @@ test("disposable PostgreSQL upgrades 31 to 32 with rollback and no retroactive Q
       authenticatedActor: { id: identities.homeownerId },
       quoteId: scopeOnlyDraft.quote.id,
       logger: quiet,
-    })).code, "CUSTOMER_QUOTE_AUTHORITY_REQUIRED");
+    })).code, "QUOTE_UNAVAILABLE");
     assert.equal((await quoteCommand(approveIssuedQuote, pool, identities.homeownerId, {
       quoteId: scopeOnlyDraft.quote.id,
       expectedIssuedVersion: 1,
-    }, `role-only-customer-approve-${suffix}`)).code, "CUSTOMER_QUOTE_AUTHORITY_REQUIRED");
+    }, `role-only-customer-approve-${suffix}`)).code, "QUOTE_UNAVAILABLE");
     const scopeOnlyLine = await quoteCommand(addDraftScopeItem, pool, identities.professionalId, {
       quoteId: scopeOnlyDraft.quote.id,
       expectedVersion: 1,

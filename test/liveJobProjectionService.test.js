@@ -257,6 +257,31 @@ test("approved Quote with available authority projects executable work without a
   assert.equal(projection.nextAction.label, "Schedule approved work");
 });
 
+test("approved Quote with an unpaid canonical deposit stays blocked before scheduling", () => {
+  const projection = derive({
+    quotes: [{
+      id: "approved-parent",
+      version: 4,
+      status: "ISSUED",
+      customer_decision: "APPROVED",
+      scope_item_count: 2,
+      total_minor: 68000,
+      currency: "USD",
+      customer_terms_snapshot: { paymentTerms: "75% deposit" },
+    }],
+    approvedWorkScheduling: approvedWorkScheduling(),
+  });
+  assertProjection(projection, {
+    stage: "QUOTE_APPROVED_DEPOSIT_DUE",
+    responsibility: "PROFESSIONAL",
+    blocker: "QUOTE_DEPOSIT_NOT_SATISFIED",
+    nextAction: "REVIEW_APPROVED_QUOTE_TERMS",
+  });
+  assert.match(projection.stage.label, /75% deposit due/i);
+  assert.match(projection.nextAction.description, /510\.00 USD deposit is due/i);
+  assert.equal(projection.reasonCodes.includes("PAYMENT_AUTHORITY_NOT_AVAILABLE"), true);
+});
+
 test("scheduled approved work remains primary over a supplemental Draft", () => {
   const projection = derive({
     quotes: [
@@ -314,9 +339,27 @@ test("approved Quote without canonical scheduling authority never fabricates sch
   assert.equal(projection.availableActions.some((action) => /SCHEDULE|VISIT/.test(action.code)), false);
 });
 
-test("issued Quote without decision waits on the customer", () => {
+test("issued Quote without qualifying delivery remains professional delivery work", () => {
   const projection = derive({
     quotes: [{ id: "quote", version: 3, status: "ISSUED", scope_item_count: 2 }],
+  });
+  assertProjection(projection, {
+    stage: "QUOTE_DELIVERY_PENDING",
+    responsibility: "PROFESSIONAL",
+    nextAction: "REVIEW_QUOTE_DELIVERY",
+    blocker: "QUOTE_NOT_DELIVERED",
+  });
+});
+
+test("issued Quote with exact canonical delivery waits on the customer", () => {
+  const projection = derive({
+    quotes: [{
+      id: "quote",
+      version: 3,
+      status: "ISSUED",
+      scope_item_count: 2,
+      delivery_confirmed: true,
+    }],
   });
   assertProjection(projection, {
     stage: "WAITING_FOR_CUSTOMER_DECISION",

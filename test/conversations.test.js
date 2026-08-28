@@ -23,6 +23,9 @@ const {
   serializeConversationSummaryForProfessional,
   validateConversationStatus,
 } = require("../server/conversations/conversations");
+const {
+  quoteDeliveryRequestFingerprint,
+} = require("../server/authorization/quoteDeliveryAuthority");
 
 test("conversation statuses expose the governed shared lifecycle", () => {
   assert.deepEqual(CONVERSATION_STATUSES, {
@@ -617,6 +620,62 @@ test("conversation message serializer exposes only the canonical public contract
       false
     );
   }
+});
+
+test("delivered Quote message reconciles only the exact canonical customer decision", () => {
+  const quoteId = "f08a4f3b-8a21-4da8-a6b0-4258f5a8df9b";
+  const jobId = "072c8736-5d97-4253-ba3e-dd1bce281a20";
+  const row = {
+    id: 203,
+    sender_id: 24,
+    receiver_id: 12,
+    message_text: "All Handyman Services shared a Quote.",
+    image_url: null,
+    message_type: "quote_shared",
+    workflow_type: "QUOTE_SHARED",
+    workflow_status: "SENT",
+    workflow_payload: {
+      schemaVersion: 1,
+      quoteId,
+      jobId,
+      lineageLabel: "Original",
+      businessStatus: "WAITING_ON_CUSTOMER",
+      totalMinor: 68000,
+      currency: "USD",
+      scopeItems: [],
+      conditions: [],
+      exclusions: [],
+      issuedAt: "2026-08-27T21:37:29.830Z",
+      decidedAt: null,
+      business: { displayName: "All Handyman Services" },
+      job: { title: "Inspect damaged cabinet door and trim", service: "handyman" },
+    },
+    quote_id: quoteId,
+    job_id: jobId,
+    canonical_quote_number: "Q-0000001",
+    canonical_quote_decision: "APPROVED",
+    canonical_quote_decision_version: 2,
+    canonical_quote_current_version: 2,
+    canonical_quote_customer_user_id: 12,
+    canonical_quote_decided_at: "2026-08-28T14:00:00.000Z",
+    delivery_request_fingerprint: quoteDeliveryRequestFingerprint({
+      actorId: 24,
+      quoteId,
+      expectedIssuedVersion: 2,
+    }),
+    created_at: "2026-08-27T21:37:30.000Z",
+  };
+  const serialized = serializeConversationMessage(row, 24);
+  assert.equal(serialized.workflow.payload.businessStatus, "APPROVED");
+  assert.equal(serialized.workflow.payload.decidedAt, "2026-08-28T14:00:00.000Z");
+  assert.equal(serialized.workflow.payload.quoteNumber, "Q-0000001");
+
+  const stale = serializeConversationMessage({
+    ...row,
+    canonical_quote_decision_version: 1,
+  }, 24);
+  assert.equal(stale.workflow.payload.businessStatus, "WAITING_ON_CUSTOMER");
+  assert.equal(stale.workflow.payload.decidedAt, null);
 });
 
 test("conversation message serializer normalizes malformed workflow payloads", () => {

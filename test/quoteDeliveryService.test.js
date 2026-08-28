@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const {
+  DELIVERY_INTENT,
   quoteDeliveryInternals,
 } = require("../server/authorization/quoteDeliveryService");
 const {
@@ -198,6 +199,7 @@ test("server-owned delivery snapshot allowlists customer-safe Quote truth", () =
     schemaVersion: 1,
     quoteId: QUOTE_ID,
     jobId: JOB_ID,
+    quoteNumber: "Quote",
     lineageLabel: "Original",
     businessStatus: "WAITING_ON_CUSTOMER",
     totalMinor: 92000,
@@ -243,6 +245,53 @@ test("send authority is exact to active Conversation participants", () => {
   assert.equal(quoteDeliveryInternals.hasSendAuthority({ ...deliveryContext, conversation_id: null }, 65), false);
 });
 
+test("COPY is an explicit distinct command and requires exact prior delivery", () => {
+  const initial = quoteDeliveryInternals.requestFingerprint({
+    actorId: 65,
+    quoteId: QUOTE_ID,
+    expectedIssuedVersion: 3,
+  });
+  const explicitInitial = quoteDeliveryInternals.requestFingerprint({
+    actorId: 65,
+    quoteId: QUOTE_ID,
+    expectedIssuedVersion: 3,
+    deliveryIntent: DELIVERY_INTENT.INITIAL,
+  });
+  const copy = quoteDeliveryInternals.requestFingerprint({
+    actorId: 65,
+    quoteId: QUOTE_ID,
+    expectedIssuedVersion: 3,
+    deliveryIntent: DELIVERY_INTENT.COPY,
+  });
+  assert.equal(initial, explicitInitial);
+  assert.notEqual(copy, initial);
+
+  const prior = { messageId: 71 };
+  assert.deepEqual(
+    quoteDeliveryInternals.deliveryCommandPlan({
+      deliveryIntent: DELIVERY_INTENT.INITIAL,
+      existingDelivery: prior,
+    }),
+    { action: "RECOVER", delivery: prior }
+  );
+  assert.deepEqual(
+    quoteDeliveryInternals.deliveryCommandPlan({
+      deliveryIntent: DELIVERY_INTENT.COPY,
+      existingDelivery: prior,
+    }),
+    { action: "INSERT" }
+  );
+  const missingPrior = quoteDeliveryInternals.deliveryCommandPlan({
+    deliveryIntent: DELIVERY_INTENT.COPY,
+    existingDelivery: null,
+  });
+  assert.equal(missingPrior.action, "REJECT");
+  assert.equal(missingPrior.error.code, "QUOTE_COPY_REQUIRES_PRIOR_DELIVERY");
+  assert.equal(quoteDeliveryInternals.normalizeDeliveryIntent(), DELIVERY_INTENT.INITIAL);
+  assert.equal(quoteDeliveryInternals.normalizeDeliveryIntent("COPY"), DELIVERY_INTENT.COPY);
+  assert.equal(quoteDeliveryInternals.normalizeDeliveryIntent("REVISE"), null);
+});
+
 test("existing exact Quote delivery is projected as replay evidence for recovery", async () => {
   const queries = [];
   const existing = await quoteDeliveryInternals.loadExistingQuoteDelivery(
@@ -273,9 +322,12 @@ test("existing exact Quote delivery is projected as replay evidence for recovery
     sentAt: "2026-08-15T12:00:00.000Z",
     replayed: true,
   });
-  assert.deepEqual(queries[0].values, [17, 65, 64, QUOTE_ID, JOB_ID]);
+  assert.equal(queries[0].values.length, 6);
+  assert.deepEqual(queries[0].values.slice(0, 5), [17, 65, 64, QUOTE_ID, JOB_ID]);
+  assert.match(queries[0].values[5], /^[0-9a-f]{64}$/);
   assert.match(queries[0].sql, /message_type = 'quote_shared'/);
   assert.match(queries[0].sql, /workflow_status = 'SENT'/);
+  assert.match(queries[0].sql, /delivery_request_fingerprint = \$6/);
 });
 
 test("shared professional Quote authority rejects an inactive exact relationship", async () => {

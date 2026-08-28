@@ -25,6 +25,7 @@ function context(overrides = {}) {
     job_request_id: 16,
     relationship_id: 21,
     relationship_status: "active",
+    professional_user_id: 88,
     actor_participant_id: IDS.participant,
     job_title: "Synthetic sink repair",
     job_service: "Handyman",
@@ -112,10 +113,11 @@ function poolWith({ jobContext = context(), rows = orderedQuotes() } = {}) {
         return { rows: jobContext ? [jobContext] : [] };
       }
       if (text.includes("SELECT\n      quotes.id")) {
-        const [, actorId, relationshipId, participantId, priority, activityAt, quoteId, queryLimit] = params;
+        const [, actorId, relationshipId, participantId, priority, activityAt, quoteId, queryLimit, deliveryFingerprints] = params;
         assert.equal(actorId, 77);
         assert.equal(relationshipId, 21);
         assert.equal(participantId, IDS.participant);
+        assert.equal(typeof deliveryFingerprints, "string");
         let selected = rows.filter((row) => row.status === "ISSUED" && row.job_id === IDS.job);
         if (priority != null) {
           selected = selected.filter((row) =>
@@ -125,6 +127,9 @@ function poolWith({ jobContext = context(), rows = orderedQuotes() } = {}) {
           );
         }
         return { rows: selected.slice(0, queryLimit) };
+      }
+      if (text.startsWith("SELECT quotes.id, aggregates.current_version")) {
+        return { rows: rows.map((row) => ({ id: row.id, current_version: 2 })) };
       }
       throw new Error(`Unexpected customer Job Quotes query: ${text.slice(0, 100)}`);
     },
@@ -270,7 +275,7 @@ test("authentication, exact Job identity, bounds, cursor scope, and caller-suppl
   }
 });
 
-test("bounded keyset ordering has no duplicates or omissions and uses one summary query per page", async () => {
+test("bounded keyset ordering has no duplicates or omissions and uses one delivery-gated page query", async () => {
   const rows = orderedQuotes();
   const firstPool = poolWith({ rows });
   const first = await getCustomerJobQuotes({
@@ -294,7 +299,7 @@ test("bounded keyset ordering has no duplicates or omissions and uses one summar
   assert.equal(second.pagination.hasMore, false);
   for (const pool of [firstPool, secondPool]) {
     assert.equal(pool.calls.filter(({ text }) => text.includes("SELECT\n      quotes.id")).length, 1);
-    assert.equal(pool.calls.length, 4);
+    assert.equal(pool.calls.length, 5);
   }
 });
 
@@ -316,7 +321,9 @@ test("discovery query is read-only, excludes Drafts, and derives authority from 
   assert.match(sql, /quotes\.job_id = \$1/);
   assert.match(sql, /relationships\.id = \$3/);
   assert.match(sql, /customer\.id = \$4/);
+  assert.match(sql, /deliveries\.delivery_request_fingerprint/);
+  assert.match(sql, /delivery_conversations\.relationship_id = quotes\.relationship_id/);
   assert.doesNotMatch(sql, /SELECT\s+\*/i);
   assert.doesNotMatch(sql, /(?:INSERT INTO|UPDATE|DELETE FROM)\s+/i);
-  assert.doesNotMatch(sql, /customer_name|professional_name|conversation|email/i);
+  assert.doesNotMatch(sql, /customer_name|professional_name|email/i);
 });

@@ -3,6 +3,9 @@
 const {
   commercialAuthorityInternals,
 } = require("./commercialAuthorityService");
+const {
+  quoteDeliveryFingerprintMap,
+} = require("./quoteDeliveryAuthority");
 
 const {
   databaseClient,
@@ -18,6 +21,7 @@ const CURSOR_VERSION = 1;
 const FILTERS = Object.freeze({
   all: null,
   draft: "DRAFT",
+  delivery_pending: "DELIVERY_PENDING",
   waiting_on_customer: "WAITING_ON_CUSTOMER",
   approved: "APPROVED",
   declined: "DECLINED",
@@ -69,7 +73,7 @@ function decodeCursor(value) {
       !Object.hasOwn(FILTERS, parsed.classification) ||
       !Number.isInteger(parsed.priority) ||
       parsed.priority < 1 ||
-      parsed.priority > 4 ||
+      parsed.priority > 5 ||
       iso(parsed.activityAt) !== parsed.activityAt ||
       !normalizedUuid(parsed.quoteId)
     ) return undefined;
@@ -160,6 +164,7 @@ const AUTHORIZED_QUOTES_CTE = `
       customers.username AS customer_name,
       CASE
         WHEN quotes.status = 'DRAFT' AND decisions.id IS NULL THEN 'DRAFT'
+        WHEN quotes.status = 'ISSUED' AND delivery.id IS NULL THEN 'DELIVERY_PENDING'
         WHEN quotes.status = 'ISSUED' AND decisions.id IS NULL THEN 'WAITING_ON_CUSTOMER'
         WHEN quotes.status = 'ISSUED' AND decisions.decision = 'APPROVED'
           AND decisions.issued_quote_version = aggregates.current_version THEN 'APPROVED'
@@ -169,11 +174,12 @@ const AUTHORIZED_QUOTES_CTE = `
       END AS classification,
       CASE
         WHEN quotes.status = 'DRAFT' AND decisions.id IS NULL THEN 1
-        WHEN quotes.status = 'ISSUED' AND decisions.id IS NULL THEN 2
+        WHEN quotes.status = 'ISSUED' AND delivery.id IS NULL THEN 2
+        WHEN quotes.status = 'ISSUED' AND decisions.id IS NULL THEN 3
         WHEN quotes.status = 'ISSUED' AND decisions.decision = 'APPROVED'
-          AND decisions.issued_quote_version = aggregates.current_version THEN 3
-        WHEN quotes.status = 'ISSUED' AND decisions.decision = 'DECLINED'
           AND decisions.issued_quote_version = aggregates.current_version THEN 4
+        WHEN quotes.status = 'ISSUED' AND decisions.decision = 'DECLINED'
+          AND decisions.issued_quote_version = aggregates.current_version THEN 5
         ELSE NULL
       END AS classification_priority,
       GREATEST(
@@ -263,6 +269,29 @@ const AUTHORIZED_QUOTES_CTE = `
     LEFT JOIN participant_role_revocations professional_role_revocations
       ON professional_role_revocations.role_assignment_id = professional_roles.id
     INNER JOIN users customers ON customers.id = relationships.homeowner_id
+    LEFT JOIN LATERAL (
+      SELECT deliveries.id
+      FROM messages deliveries
+      INNER JOIN conversations delivery_conversations
+        ON delivery_conversations.id = deliveries.conversation_id
+        AND delivery_conversations.relationship_id = quotes.relationship_id
+        AND delivery_conversations.homeowner_id = relationships.homeowner_id
+        AND delivery_conversations.professional_user_id = $1
+        AND delivery_conversations.status = 'active'
+      WHERE deliveries.quote_id = quotes.id
+        AND deliveries.job_id = quotes.job_id
+        AND deliveries.sender_id = $1
+        AND deliveries.receiver_id = relationships.homeowner_id
+        AND deliveries.message_type = 'quote_shared'
+        AND deliveries.workflow_type = 'QUOTE_SHARED'
+        AND deliveries.workflow_status = 'SENT'
+        AND deliveries.delivery_request_fingerprint =
+          COALESCE($2::jsonb ->> quotes.id::text, '')
+        AND deliveries.workflow_payload ->> 'quoteId' = quotes.id::text
+        AND deliveries.workflow_payload ->> 'jobId' = quotes.job_id::text
+      ORDER BY deliveries.id ASC
+      LIMIT 1
+    ) delivery ON TRUE
     LEFT JOIN canonical_quote_customer_decisions decisions
       ON decisions.quote_id = quotes.id
     WHERE professional_role_revocations.id IS NULL
@@ -295,28 +324,33 @@ const AUTHORIZED_QUOTES_CTE = `
       )
   )`;
 
-async function loadSummary(client, actorId) {
+async function loadSummary(client, actorId, deliveryFingerprints) {
   const result = await client.query(
     `WITH ${AUTHORIZED_QUOTES_CTE}
     SELECT
       COUNT(*) FILTER (WHERE classification = 'DRAFT') AS drafts,
+      COUNT(*) FILTER (WHERE classification = 'DELIVERY_PENDING') AS delivery_pending,
       COUNT(*) FILTER (WHERE classification = 'WAITING_ON_CUSTOMER') AS waiting_on_customer,
       COUNT(*) FILTER (WHERE classification = 'APPROVED') AS approved,
       COUNT(*) FILTER (WHERE classification = 'DECLINED') AS declined
     FROM authorized_quotes
     WHERE classification IS NOT NULL`,
-    [actorId]
+    [actorId, JSON.stringify(deliveryFingerprints)]
   );
   const row = result.rows[0] || {};
   return {
     drafts: Number(row.drafts || 0),
+    deliveryPending: Number(row.delivery_pending || 0),
     waitingOnCustomer: Number(row.waiting_on_customer || 0),
     approved: Number(row.approved || 0),
     declined: Number(row.declined || 0),
   };
 }
 
-async function loadPage(client, { actorId, classificationValue, cursor, limit }) {
+async function loadPage(
+  client,
+  { actorId, classificationValue, cursor, limit, deliveryFingerprints }
+) {
   const result = await client.query(
     `WITH ${AUTHORIZED_QUOTES_CTE}
     SELECT
@@ -326,17 +360,18 @@ async function loadPage(client, { actorId, classificationValue, cursor, limit })
       classification_priority, last_activity_at, can_manage_scope, can_view_job
     FROM authorized_quotes
     WHERE classification IS NOT NULL
-      AND ($2::text IS NULL OR classification = $2)
+      AND ($3::text IS NULL OR classification = $3)
       AND (
-        $3::integer IS NULL
-        OR classification_priority > $3
-        OR (classification_priority = $3 AND last_activity_at < $4::timestamptz)
-        OR (classification_priority = $3 AND last_activity_at = $4::timestamptz AND id > $5::uuid)
+        $4::integer IS NULL
+        OR classification_priority > $4
+        OR (classification_priority = $4 AND last_activity_at < $5::timestamptz)
+        OR (classification_priority = $4 AND last_activity_at = $5::timestamptz AND id > $6::uuid)
       )
     ORDER BY classification_priority ASC, last_activity_at DESC, id ASC
-    LIMIT $6`,
+    LIMIT $7`,
     [
       actorId,
+      JSON.stringify(deliveryFingerprints),
       classificationValue,
       cursor?.priority ?? null,
       cursor?.activityAt ?? null,
@@ -345,6 +380,26 @@ async function loadPage(client, { actorId, classificationValue, cursor, limit })
     ]
   );
   return result.rows;
+}
+
+async function loadProfessionalQuoteDeliveryFingerprints(client, actorId) {
+  const result = await client.query(
+    `SELECT quotes.id, aggregates.current_version
+     FROM canonical_quotes quotes
+     INNER JOIN commercial_authority_aggregates aggregates
+       ON aggregates.id = quotes.id
+       AND aggregates.aggregate_type = 'quote'
+       AND aggregates.owning_engine = 'authorization_engine'
+     INNER JOIN request_relationships relationships
+       ON relationships.id = quotes.relationship_id
+       AND relationships.professional_user_id = $1
+       AND relationships.status = 'active'
+       AND relationships.emergency_request_id IS NULL
+     WHERE quotes.status = 'ISSUED'
+       AND quotes.issued_at IS NOT NULL`,
+    [actorId]
+  );
+  return quoteDeliveryFingerprintMap(result.rows, actorId);
 }
 
 function lineageLabel(type) {
@@ -389,8 +444,12 @@ async function getProfessionalQuotes(input = {}) {
   const validated = validatedInput(input);
   if (validated.error) return validated.error;
   return runReadTransaction(input.pool, async (client) => {
-    const summary = await loadSummary(client, validated.actorId);
-    const rows = await loadPage(client, validated);
+    const deliveryFingerprints = await loadProfessionalQuoteDeliveryFingerprints(
+      client,
+      validated.actorId
+    );
+    const summary = await loadSummary(client, validated.actorId, deliveryFingerprints);
+    const rows = await loadPage(client, { ...validated, deliveryFingerprints });
     const hasMore = rows.length > validated.limit;
     const pageRows = hasMore ? rows.slice(0, validated.limit) : rows;
     const last = pageRows[pageRows.length - 1];
@@ -423,6 +482,7 @@ module.exports = {
     decodeCursor,
     encodeCursor,
     lineageLabel,
+    loadProfessionalQuoteDeliveryFingerprints,
     quoteProjection,
   }),
 };

@@ -71,7 +71,7 @@ test("server arithmetic proves 24000 materials plus 68000 labor equals 92000", (
 test("Recommendation text is descriptive input and never parsed for pricing", () => {
   const source = readFileSync(join(__dirname, "..", "server", "authorization", "quoteDraftService.js"), "utf8");
   assert.doesNotMatch(source, /parseFloat|parseInt|currency.*statement|statement.*(?:amount|price|minor)/i);
-  assert.doesNotMatch(source, /messages|conversation|job\.complete|procurement\.|payment\.|invoice\./i);
+  assert.doesNotMatch(source, /job\.complete|procurement\.|payment\.|invoice\./i);
   assert.doesNotMatch(source, /(?:INSERT INTO|UPDATE|DELETE FROM)\s+(?:jobs|canonical_workstreams|canonical_evaluation_finding_versions|canonical_recommendation_versions)\b/i);
 });
 

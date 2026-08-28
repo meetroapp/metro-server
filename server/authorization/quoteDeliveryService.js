@@ -1,6 +1,5 @@
 "use strict";
 
-const { createHash } = require("node:crypto");
 const { isDeepStrictEqual } = require("node:util");
 
 const {
@@ -21,6 +20,15 @@ const {
   getCommunicationAttentionWindowWithClient,
   resolveCommunicationRecipient,
 } = require("../alerts/communicationAlertService");
+const {
+  COMMAND_NAME,
+  COPY_COMMAND_NAME,
+  DELIVERY_INTENT,
+  MESSAGE_TYPE,
+  WORKFLOW_STATUS,
+  WORKFLOW_TYPE,
+  quoteDeliveryRequestFingerprint,
+} = require("./quoteDeliveryAuthority");
 
 const {
   databaseClient,
@@ -43,11 +51,7 @@ const {
   requireQuoteAuthority,
 } = quoteDraftServiceInternals;
 
-const MESSAGE_TYPE = "quote_shared";
-const WORKFLOW_TYPE = "QUOTE_SHARED";
-const WORKFLOW_STATUS = "SENT";
 const DELIVERY_STATE = "SENT_IN_MEETRO";
-const COMMAND_NAME = "professional.quote.send_in_meetro";
 const SNAPSHOT_SCHEMA_VERSION = 1;
 
 function safeLogger(value) {
@@ -210,6 +214,7 @@ function buildSafeSnapshot(quote, deliveryContext) {
     schemaVersion: SNAPSHOT_SCHEMA_VERSION,
     quoteId: customer.quoteId,
     jobId: customer.jobId,
+    quoteNumber: safeText(quote.documentNumber, "Quote", 80),
     lineageLabel: customer.lineageLabel,
     businessStatus: customer.businessStatus,
     totalMinor: customer.totalMinor,
@@ -268,6 +273,11 @@ async function loadExistingQuoteDelivery(client, quote, deliveryContext) {
   if (!hasSendAuthority(deliveryContext, Number(deliveryContext?.professional_user_id))) {
     return null;
   }
+  const fingerprint = quoteDeliveryRequestFingerprint({
+    actorId: Number(deliveryContext.professional_user_id),
+    quoteId: quote.id,
+    expectedIssuedVersion: quote.currentVersion,
+  });
   const result = await client.query(
     `SELECT id, conversation_id, sender_id, receiver_id, quote_id, job_id, created_at
      FROM messages
@@ -279,6 +289,7 @@ async function loadExistingQuoteDelivery(client, quote, deliveryContext) {
        AND message_type = 'quote_shared'
        AND workflow_type = 'QUOTE_SHARED'
        AND workflow_status = 'SENT'
+       AND delivery_request_fingerprint = $6
      ORDER BY id ASC
      LIMIT 1`,
     [
@@ -287,6 +298,7 @@ async function loadExistingQuoteDelivery(client, quote, deliveryContext) {
       Number(deliveryContext.homeowner_id),
       quote.id,
       quote.jobId,
+      fingerprint,
     ]
   );
   return result.rows[0]
@@ -351,13 +363,47 @@ async function getProfessionalQuoteDelivery(input = {}) {
   });
 }
 
-function requestFingerprint({ actorId, quoteId, expectedIssuedVersion }) {
-  return createHash("sha256").update(JSON.stringify({
-    command: COMMAND_NAME,
+function requestFingerprint({
+  actorId,
+  quoteId,
+  expectedIssuedVersion,
+  deliveryIntent = DELIVERY_INTENT.INITIAL,
+}) {
+  return quoteDeliveryRequestFingerprint({
     actorId,
     quoteId,
     expectedIssuedVersion,
-  })).digest("hex");
+    deliveryIntent,
+  });
+}
+
+function normalizeDeliveryIntent(value) {
+  if (value == null) return DELIVERY_INTENT.INITIAL;
+  return Object.values(DELIVERY_INTENT).includes(value) ? value : null;
+}
+
+function deliveryCommandPlan({ deliveryIntent, existingDelivery }) {
+  if (deliveryIntent === DELIVERY_INTENT.INITIAL) {
+    return existingDelivery
+      ? { action: "RECOVER", delivery: existingDelivery }
+      : { action: "INSERT" };
+  }
+  if (deliveryIntent === DELIVERY_INTENT.COPY) {
+    return existingDelivery
+      ? { action: "INSERT" }
+      : {
+          action: "REJECT",
+          error: failure(
+            409,
+            "QUOTE_COPY_REQUIRES_PRIOR_DELIVERY",
+            "The Quote must have an exact prior delivery before another copy can be sent."
+          ),
+        };
+  }
+  return {
+    action: "REJECT",
+    error: failure(400, "INVALID_QUOTE_DELIVERY_INTENT", "The Quote delivery intent is invalid."),
+  };
 }
 
 function messageDeliveryEvidence(message, { replayed = false } = {}) {
@@ -389,15 +435,28 @@ async function findExistingDelivery(client, actorId, quoteId, idempotencyKey) {
 }
 
 async function sendQuoteInMeetro(input = {}) {
-  const validated = validateInput(input, ["quoteId", "expectedIssuedVersion", "idempotencyKey"]);
+  const validated = validateInput(input, [
+    "quoteId",
+    "expectedIssuedVersion",
+    "idempotencyKey",
+    "deliveryIntent",
+  ]);
   if (validated.error) return validated.error;
   const expectedIssuedVersion = positiveInteger(input.expectedIssuedVersion);
   const idempotency = validateIdempotencyKey(input.idempotencyKey);
+  const deliveryIntent = normalizeDeliveryIntent(input.deliveryIntent);
   if (!expectedIssuedVersion || idempotency.error) {
     return idempotency.error || failure(400, "INVALID_QUOTE_DELIVERY", "The Quote delivery request is invalid.");
   }
+  if (!deliveryIntent) {
+    return failure(400, "INVALID_QUOTE_DELIVERY_INTENT", "The Quote delivery intent is invalid.");
+  }
   const logger = safeLogger(input.logger);
-  const fingerprint = requestFingerprint({ ...validated, expectedIssuedVersion });
+  const fingerprint = requestFingerprint({
+    ...validated,
+    expectedIssuedVersion,
+    deliveryIntent,
+  });
 
   return runTransaction(input.pool, "READ COMMITTED", async (client) => {
     const loaded = await loadAuthorizedDelivery({
@@ -432,13 +491,18 @@ async function sendQuoteInMeetro(input = {}) {
     if (loaded.quote.currentVersion !== expectedIssuedVersion) {
       return { abort: failure(409, "STALE_QUOTE_VERSION", "The Quote version is stale.") };
     }
-    if (loaded.deliveryContext.existing_delivery) {
+    const plan = deliveryCommandPlan({
+      deliveryIntent,
+      existingDelivery: loaded.deliveryContext.existing_delivery,
+    });
+    if (plan.action === "REJECT") return { abort: plan.error };
+    if (plan.action === "RECOVER") {
       return {
         ok: true,
         success: true,
         status: 200,
         code: "QUOTE_SENT_IN_MEETRO",
-        delivery: loaded.deliveryContext.existing_delivery,
+        delivery: plan.delivery,
       };
     }
 
@@ -455,7 +519,9 @@ async function sendQuoteInMeetro(input = {}) {
       conversationId: conversation.id,
       recipientUserId: receiverId,
     });
-    const messageText = `${loaded.snapshot.business.displayName} shared a Quote.`;
+    const messageText = deliveryIntent === DELIVERY_INTENT.COPY
+      ? `${loaded.snapshot.business.displayName} sent another copy of a Quote.`
+      : `${loaded.snapshot.business.displayName} shared a Quote.`;
     const inserted = await client.query(
       `INSERT INTO messages (
         quote_request_id, conversation_id, sender_id, receiver_id,
@@ -524,13 +590,23 @@ async function sendQuoteInMeetro(input = {}) {
       recipientLastReadMessageId: recipientAttentionWindow.lastReadMessageId,
       message,
     });
-    logger.info("Quote sent in Meetro", {
-      code: "QUOTE_SENT_IN_MEETRO",
-      quoteId: loaded.quote.id,
-      jobId: loaded.quote.jobId,
-      conversationId: conversation.id,
-      messageId: Number(message.id),
-    });
+    logger.info(
+      deliveryIntent === DELIVERY_INTENT.COPY
+        ? "Quote copy sent in Meetro"
+        : "Quote sent in Meetro",
+      {
+        code: deliveryIntent === DELIVERY_INTENT.COPY
+          ? "QUOTE_COPY_SENT_IN_MEETRO"
+          : "QUOTE_SENT_IN_MEETRO",
+        command: deliveryIntent === DELIVERY_INTENT.COPY
+          ? COPY_COMMAND_NAME
+          : COMMAND_NAME,
+        quoteId: loaded.quote.id,
+        jobId: loaded.quote.jobId,
+        conversationId: conversation.id,
+        messageId: Number(message.id),
+      }
+    );
     return {
       ok: true,
       success: true,
@@ -543,6 +619,8 @@ async function sendQuoteInMeetro(input = {}) {
 
 module.exports = {
   COMMAND_NAME,
+  COPY_COMMAND_NAME,
+  DELIVERY_INTENT,
   DELIVERY_STATE,
   MESSAGE_TYPE,
   WORKFLOW_STATUS,
@@ -552,9 +630,11 @@ module.exports = {
   quoteDeliveryInternals: Object.freeze({
     buildSafeSnapshot,
     deliveryProjection,
+    deliveryCommandPlan,
     hasSendAuthority,
     loadExistingQuoteDelivery,
     messageDeliveryEvidence,
+    normalizeDeliveryIntent,
     requestFingerprint,
     validIssuedQuote,
   }),

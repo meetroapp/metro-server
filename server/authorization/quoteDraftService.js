@@ -23,6 +23,12 @@ const {
     loadOwnedCustomerParty,
   },
 } = require("../relationships/customerPartyService");
+const {
+  quoteDeliveryRequestFingerprint,
+} = require("./quoteDeliveryAuthority");
+const {
+  createProfessionalQuoteDecisionAlertWithClient,
+} = require("../conversations/conversationMessageService");
 
 const {
   completeIdempotency,
@@ -917,6 +923,10 @@ async function loadCustomerQuoteContext(client, quoteId, actorUserId, { lock = f
       aggregates.current_version,
       jobs.lifecycle_contract_version,
       relationships.status AS relationship_status,
+      relationships.homeowner_id AS customer_user_id,
+      relationships.professional_user_id,
+      COALESCE(NULLIF(TRIM(customer_users.username), ''), 'Customer') AS customer_display_name,
+      posts.title AS job_title,
       participants.id AS actor_participant_id,
       participants.user_id AS actor_user_id,
       decisions.id AS decision_id,
@@ -941,11 +951,16 @@ async function loadCustomerQuoteContext(client, quoteId, actorUserId, { lock = f
       AND aggregates.aggregate_type = 'quote'
       AND aggregates.owning_engine = $3
     INNER JOIN jobs ON jobs.id = quotes.job_id
+    INNER JOIN posts
+      ON posts.id = jobs.job_request_id
+      AND posts.id = quotes.job_request_id
     INNER JOIN request_relationships relationships
       ON relationships.id = quotes.relationship_id
       AND relationships.id = jobs.source_request_relationship_id
       AND relationships.post_id = quotes.job_request_id
       AND relationships.emergency_request_id IS NULL
+    INNER JOIN users customer_users
+      ON customer_users.id = relationships.homeowner_id
     LEFT JOIN relationship_participants participants
       ON participants.job_id = quotes.job_id
       AND participants.request_relationship_id = quotes.relationship_id
@@ -1058,7 +1073,7 @@ async function requireCustomerQuoteAuthority({ client, context, capability, logg
     return failure(404, "QUOTE_UNAVAILABLE", "The Quote is unavailable.");
   }
   if (context.relationship_status !== "active") {
-    return failure(409, "QUOTE_CONTEXT_INACTIVE", "The Quote context is inactive.");
+    return failure(404, "QUOTE_UNAVAILABLE", "The Quote is unavailable.");
   }
   if (!context.actor_participant_id || context.actor_is_customer_representative !== true) {
     logger.warn("Customer Quote authority denied", {
@@ -1066,7 +1081,7 @@ async function requireCustomerQuoteAuthority({ client, context, capability, logg
       capability,
       jobId: context.job_id,
     });
-    return failure(403, "CUSTOMER_QUOTE_AUTHORITY_REQUIRED", "Customer Quote authority is required.");
+    return failure(404, "QUOTE_UNAVAILABLE", "The Quote is unavailable.");
   }
   const granted = await hasActiveLifecycleGrant({
     client,
@@ -1082,9 +1097,58 @@ async function requireCustomerQuoteAuthority({ client, context, capability, logg
       capability,
       jobId: context.job_id,
     });
-    return failure(403, "CUSTOMER_QUOTE_AUTHORITY_REQUIRED", "Customer Quote authority is required.");
+    return failure(404, "QUOTE_UNAVAILABLE", "The Quote is unavailable.");
   }
   return null;
+}
+
+async function loadQualifyingCustomerQuoteDelivery(
+  client,
+  context,
+  expectedIssuedVersion
+) {
+  const requestFingerprint = quoteDeliveryRequestFingerprint({
+    actorId: Number(context.professional_user_id),
+    quoteId: context.id,
+    expectedIssuedVersion,
+  });
+  const result = await client.query(
+    `SELECT deliveries.id, deliveries.conversation_id, deliveries.created_at
+     FROM messages deliveries
+     INNER JOIN request_relationships deliveries_relationship
+       ON deliveries_relationship.id = $3
+       AND deliveries_relationship.homeowner_id = $4
+       AND deliveries_relationship.professional_user_id = $5
+       AND deliveries_relationship.status = 'active'
+       AND deliveries_relationship.emergency_request_id IS NULL
+     INNER JOIN conversations delivery_conversations
+       ON delivery_conversations.id = deliveries.conversation_id
+       AND delivery_conversations.relationship_id = deliveries_relationship.id
+       AND delivery_conversations.homeowner_id = $4
+       AND delivery_conversations.professional_user_id = $5
+       AND delivery_conversations.status = 'active'
+     WHERE deliveries.quote_id = $1
+       AND deliveries.job_id = $2
+       AND deliveries.sender_id = $5
+       AND deliveries.receiver_id = $4
+       AND deliveries.message_type = 'quote_shared'
+       AND deliveries.workflow_type = 'QUOTE_SHARED'
+       AND deliveries.workflow_status = 'SENT'
+       AND deliveries.delivery_request_fingerprint = $6
+       AND deliveries.workflow_payload ->> 'quoteId' = $1::text
+       AND deliveries.workflow_payload ->> 'jobId' = $2::text
+     ORDER BY deliveries.id ASC
+     LIMIT 1`,
+    [
+      context.id,
+      context.job_id,
+      Number(context.relationship_id),
+      Number(context.customer_user_id),
+      Number(context.professional_user_id),
+      requestFingerprint,
+    ]
+  );
+  return result.rows[0] || null;
 }
 
 async function requireQuoteAuthority({ client, context, capability, logger }) {
@@ -3173,6 +3237,14 @@ async function getCustomerIssuedQuote(input = {}) {
   if (context.status !== QUOTE_STATUS.ISSUED) {
     return failure(404, "QUOTE_UNAVAILABLE", "The Quote is unavailable.");
   }
+  const delivery = await loadQualifyingCustomerQuoteDelivery(
+    input.pool,
+    context,
+    Number(context.current_version)
+  );
+  if (!delivery) {
+    return failure(404, "QUOTE_UNAVAILABLE", "The Quote is unavailable.");
+  }
   const quote = await loadQuoteProjection(input.pool, quoteId);
   const decisionPending = quote.decisionState == null;
   const [canApprove, canDecline] = decisionPending
@@ -3234,7 +3306,38 @@ async function decideIssuedQuote(input = {}, decision) {
     if (authorityError) return { abort: authorityError };
     const authorityGrantId = await loadActiveQuoteGrant(client, context, capability);
     if (!authorityGrantId) {
-      return { abort: failure(403, "CUSTOMER_QUOTE_AUTHORITY_REQUIRED", "Customer Quote authority is required.") };
+      return { abort: failure(404, "QUOTE_UNAVAILABLE", "The Quote is unavailable.") };
+    }
+    logger.info("Customer Quote decision attempted", {
+      code: "QUOTE_DECISION_ATTEMPTED",
+      quoteId,
+      jobId: context.job_id,
+      decision,
+      expectedIssuedVersion,
+    });
+    if (
+      context.status !== QUOTE_STATUS.ISSUED ||
+      Number(context.current_version) !== expectedIssuedVersion
+    ) {
+      return { abort: failure(404, "QUOTE_UNAVAILABLE", "The Quote is unavailable.") };
+    }
+    const issuance = await client.query(
+      `SELECT quote_version, source_snapshot_integrity_hash
+       FROM canonical_quote_issuances
+       WHERE quote_id = $1 AND quote_version = $2 AND job_id = $3
+       LIMIT 1`,
+      [quoteId, expectedIssuedVersion, context.job_id]
+    );
+    if (!issuance.rows[0]) {
+      return { abort: failure(404, "QUOTE_UNAVAILABLE", "The Quote is unavailable.") };
+    }
+    const delivery = await loadQualifyingCustomerQuoteDelivery(
+      client,
+      context,
+      expectedIssuedVersion
+    );
+    if (!delivery) {
+      return { abort: failure(404, "QUOTE_UNAVAILABLE", "The Quote is unavailable.") };
     }
     const requestFingerprint = fingerprint({
       command: commandName,
@@ -3262,19 +3365,6 @@ async function decideIssuedQuote(input = {}, decision) {
         }),
       };
     }
-    logger.info("Customer Quote decision attempted", {
-      code: "QUOTE_DECISION_ATTEMPTED",
-      quoteId,
-      jobId: context.job_id,
-      decision,
-      expectedIssuedVersion,
-    });
-    if (
-      context.status !== QUOTE_STATUS.ISSUED ||
-      Number(context.current_version) !== expectedIssuedVersion
-    ) {
-      return { abort: failure(409, "ISSUED_QUOTE_VERSION_REQUIRED", "The exact issued Quote version is required.") };
-    }
     if (context.decision_id) {
       logger.warn("Customer Quote decision conflict", {
         code: "QUOTE_DECISION_FINAL",
@@ -3283,16 +3373,6 @@ async function decideIssuedQuote(input = {}, decision) {
         existingDecision: context.decision,
       });
       return { abort: failure(409, "QUOTE_DECISION_FINAL", "The Quote already has a terminal customer decision.") };
-    }
-    const issuance = await client.query(
-      `SELECT quote_version, source_snapshot_integrity_hash
-       FROM canonical_quote_issuances
-       WHERE quote_id = $1 AND quote_version = $2 AND job_id = $3
-       LIMIT 1`,
-      [quoteId, expectedIssuedVersion, context.job_id]
-    );
-    if (!issuance.rows[0]) {
-      return { abort: failure(409, "ISSUED_QUOTE_VERSION_REQUIRED", "The exact issued Quote version is required.") };
     }
     const decisionResult = await client.query(
       `INSERT INTO canonical_quote_customer_decisions (
@@ -3316,6 +3396,13 @@ async function decideIssuedQuote(input = {}, decision) {
     );
     await invokeFailure(input.failureInjector, "after_write");
     const quote = await loadQuoteProjection(client, quoteId);
+    await createProfessionalQuoteDecisionAlertWithClient({
+      client,
+      context,
+      quote,
+      decisionRow: decisionResult.rows[0],
+      delivery,
+    });
     const customerDecision = {
       id: decisionResult.rows[0].id,
       quoteId,
@@ -3615,6 +3702,7 @@ module.exports = {
     businessDocumentQuoteReviewProjection,
     loadQuoteContext,
     loadQuoteProjection,
+    loadQualifyingCustomerQuoteDelivery,
     loadBusinessDocumentQuoteReviewIdentity,
     persistedSnapshotIsValid,
     normalizeCustomerTermsSnapshot,

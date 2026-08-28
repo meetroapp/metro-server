@@ -59,7 +59,12 @@ test("delivery handlers derive actor and Quote identity from authenticated routi
   const req = {
     user: { id: 41 },
     params: { quoteId: "11111111-1111-4111-8111-111111111111" },
-    body: { expectedIssuedVersion: 3, customerId: 999, conversationId: 888 },
+    body: {
+      expectedIssuedVersion: 3,
+      deliveryIntent: "COPY",
+      customerId: 999,
+      conversationId: 888,
+    },
     headers: { "idempotency-key": "send-key" },
   };
   const readRes = response();
@@ -77,6 +82,7 @@ test("delivery handlers derive actor and Quote identity from authenticated routi
       authenticatedActor: { id: 41 },
       quoteId: req.params.quoteId,
       expectedIssuedVersion: 3,
+      deliveryIntent: "COPY",
       idempotencyKey: "send-key",
     }],
   ]);

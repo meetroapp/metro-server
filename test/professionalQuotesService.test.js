@@ -11,6 +11,7 @@ const {
 const IDS = Object.freeze({
   draft: "10000000-0000-4000-8000-000000000001",
   waiting: "20000000-0000-4000-8000-000000000002",
+  deliveryPending: "25000000-0000-4000-8000-000000000025",
   approved: "30000000-0000-4000-8000-000000000003",
   declined: "40000000-0000-4000-8000-000000000004",
   supplemental: "50000000-0000-4000-8000-000000000005",
@@ -51,10 +52,19 @@ function orderedQuotes() {
   return [
     quote(),
     quote({
+      id: IDS.deliveryPending,
+      status: "ISSUED",
+      classification: "DELIVERY_PENDING",
+      classification_priority: 2,
+      issued_at: "2026-08-12T13:00:00.000Z",
+      last_activity_at: "2026-08-12T13:00:00.000Z",
+      can_manage_scope: true,
+    }),
+    quote({
       id: IDS.waiting,
       status: "ISSUED",
       classification: "WAITING_ON_CUSTOMER",
-      classification_priority: 2,
+      classification_priority: 3,
       issued_at: "2026-08-12T12:00:00.000Z",
       last_activity_at: "2026-08-12T12:00:00.000Z",
       can_manage_scope: true,
@@ -63,7 +73,7 @@ function orderedQuotes() {
       id: IDS.approved,
       status: "ISSUED",
       classification: "APPROVED",
-      classification_priority: 3,
+      classification_priority: 4,
       customer_decision: "APPROVED",
       issued_at: "2026-08-11T12:00:00.000Z",
       decided_at: "2026-08-13T13:00:00.000Z",
@@ -83,7 +93,7 @@ function orderedQuotes() {
       id: IDS.declined,
       status: "ISSUED",
       classification: "DECLINED",
-      classification_priority: 4,
+      classification_priority: 5,
       customer_decision: "DECLINED",
       issued_at: "2026-08-09T12:00:00.000Z",
       decided_at: "2026-08-10T13:00:00.000Z",
@@ -109,13 +119,15 @@ function poolWith(rows = orderedQuotes()) {
       if (text.includes("COUNT(*) FILTER")) {
         return { rows: [{
           drafts: rows.filter((row) => row.classification === "DRAFT").length,
+          delivery_pending: rows.filter((row) => row.classification === "DELIVERY_PENDING").length,
           waiting_on_customer: rows.filter((row) => row.classification === "WAITING_ON_CUSTOMER").length,
           approved: rows.filter((row) => row.classification === "APPROVED").length,
           declined: rows.filter((row) => row.classification === "DECLINED").length,
         }] };
       }
       if (text.includes("ORDER BY classification_priority")) {
-        const [, classification, priority, activityAt, quoteId, queryLimit] = params;
+        const [, deliveryFingerprints, classification, priority, activityAt, quoteId, queryLimit] = params;
+        assert.equal(typeof deliveryFingerprints, "string");
         let selected = rows.filter((row) => !classification || row.classification === classification);
         if (priority != null) {
           selected = selected.filter((row) =>
@@ -125,6 +137,13 @@ function poolWith(rows = orderedQuotes()) {
           );
         }
         return { rows: selected.slice(0, queryLimit) };
+      }
+      if (text.startsWith("SELECT quotes.id, aggregates.current_version")) {
+        return {
+          rows: rows
+            .filter((row) => row.status === "ISSUED")
+            .map((row) => ({ id: row.id, current_version: 2 })),
+        };
       }
       throw new Error(`Unexpected Professional Quotes query: ${text.slice(0, 100)}`);
     },
@@ -141,6 +160,7 @@ test("global read classifies canonical status and decision truth separately", as
   assert.equal(result.code, "PROFESSIONAL_QUOTES_LOADED");
   assert.deepEqual(result.summary, {
     drafts: 2,
+    deliveryPending: 1,
     waitingOnCustomer: 1,
     approved: 1,
     declined: 1,
@@ -148,6 +168,7 @@ test("global read classifies canonical status and decision truth separately", as
   assert.deepEqual(result.quotes.map(({ classification }) => classification), [
     "DRAFT",
     "DRAFT",
+    "DELIVERY_PENDING",
     "WAITING_ON_CUSTOMER",
     "APPROVED",
     "DECLINED",
@@ -208,6 +229,7 @@ test("classification filter retains canonical total summary", async () => {
   assert.deepEqual(result.quotes.map(({ classification }) => classification), ["APPROVED"]);
   assert.deepEqual(result.summary, {
     drafts: 2,
+    deliveryPending: 1,
     waitingOnCustomer: 1,
     approved: 1,
     declined: 1,
@@ -295,12 +317,12 @@ test("SQL enforces lifecycle-v2 professional role, active relationship, exact re
   assert.doesNotMatch(sql, /customers\.email|customers\.phone|service_address_line1/);
 });
 
-test("read uses one coherent read-only snapshot and two bounded data queries", async () => {
+test("read uses one coherent read-only snapshot and bounded identity, summary, and page queries", async () => {
   const pool = poolWith();
   await getProfessionalQuotes({ pool, authenticatedActor: { id: 77 } });
   assert.equal(pool.calls[0].text, "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
   assert.equal(pool.calls.at(-1).text, "COMMIT");
-  assert.equal(pool.calls.length, 4);
+  assert.equal(pool.calls.length, 5);
   assert.equal(pool.calls.filter(({ text }) => text.includes("COUNT(*) FILTER")).length, 1);
   assert.equal(pool.calls.filter(({ text }) => text.includes("ORDER BY classification_priority")).length, 1);
   const sql = pool.calls.map(({ text }) => text).join("\n");

@@ -12,6 +12,10 @@ const {
   getCommunicationAttentionWindowWithClient,
   resolveCommunicationRecipient,
 } = require("../alerts/communicationAlertService");
+const { createAlert } = require("../alerts/alertService");
+const {
+  deriveQuoteDepositGate,
+} = require("../authorization/quoteDecisionHandoff");
 
 const DEFAULT_MESSAGE_PAGE_SIZE = 50;
 const MAX_MESSAGE_PAGE_SIZE = 100;
@@ -19,6 +23,106 @@ const MAX_MESSAGE_TEXT_LENGTH = 5000;
 const CONVERSATION_MESSAGE_FIELDS = new Set([
   "message_text",
 ]);
+
+function boundedDecisionAlertText(value, maximum = 160) {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  return normalized ? normalized.slice(0, maximum) : null;
+}
+
+async function createProfessionalQuoteDecisionAlertWithClient({
+  client,
+  context,
+  quote,
+  decisionRow,
+  delivery,
+}) {
+  const approved = decisionRow?.decision === "APPROVED";
+  const declined = decisionRow?.decision === "DECLINED";
+  if (
+    !client || typeof client.query !== "function" ||
+    (!approved && !declined) ||
+    !decisionRow?.id ||
+    !quote?.id ||
+    !quote?.jobId ||
+    !Number.isSafeInteger(Number(quote.currentVersion)) ||
+    Number(quote.currentVersion) !== Number(decisionRow.issued_quote_version) ||
+    !Number.isSafeInteger(Number(context?.professional_user_id)) ||
+    !Number.isSafeInteger(Number(delivery?.conversation_id))
+  ) {
+    throw new TypeError("Canonical Quote decision attention identity is required.");
+  }
+
+  const deposit = approved
+    ? deriveQuoteDepositGate({
+        customerTermsSnapshot: quote.customerTermsSnapshot,
+        totalMinor: quote.totalMinor,
+      })
+    : { state: "NONE" };
+  const safePayload = {
+    shortPreview: boundedDecisionAlertText(context.job_title) || "Customer project",
+    projectTitle: boundedDecisionAlertText(context.job_title) || "Customer project",
+    customerLabel: boundedDecisionAlertText(context.customer_display_name) || "Customer",
+    quoteNumber: boundedDecisionAlertText(quote.documentNumber, 80) || "Quote",
+    quoteTotalMinor: Number(quote.totalMinor),
+    currency: boundedDecisionAlertText(quote.currency, 3) || "USD",
+    decision: decisionRow.decision,
+    issuedQuoteVersion: Number(decisionRow.issued_quote_version),
+    depositState: deposit.state,
+  };
+  if (deposit.state === "DEPOSIT_DUE") {
+    safePayload.depositPercent = deposit.percent;
+    safePayload.depositDueMinor = deposit.dueMinor;
+    safePayload.remainingMinor = deposit.remainingMinor;
+  }
+
+  const created = await createAlert({
+    client,
+    input: {
+      recipientUserId: Number(context.professional_user_id),
+      sourceDomain: "commercial",
+      sourceEventType: approved
+        ? "quote.customer_approved"
+        : "quote.customer_declined",
+      sourceEntityType: "quote",
+      sourceEntityId: quote.id,
+      sourceEventId: decisionRow.id,
+      category: "proposal",
+      priority: "high",
+      titleKey: approved
+        ? "alerts.commercial.quoteApproved.title"
+        : "alerts.commercial.quoteDeclined.title",
+      messageKey: approved
+        ? "alerts.commercial.quoteApproved.message"
+        : "alerts.commercial.quoteDeclined.message",
+      safePayload,
+      destination: {
+        type: "conversation",
+        payload: {
+          conversationId: Number(delivery.conversation_id),
+          jobId: quote.jobId,
+          quoteId: quote.id,
+        },
+      },
+      dedupeKey: [
+        "commercial",
+        "quote",
+        quote.id,
+        "version",
+        Number(decisionRow.issued_quote_version),
+        "decision",
+        decisionRow.decision,
+        "professional",
+        Number(context.professional_user_id),
+      ].join(":"),
+      availableAt: decisionRow.decided_at || null,
+      expiresAt: null,
+    },
+  });
+  if (!created.ok || !created.alert?.id) {
+    throw new Error("Canonical Quote decision attention could not be created.");
+  }
+  return { alertId: created.alert.id, created: created.created };
+}
 
 function requireDatabasePool(pool) {
   if (!pool || typeof pool.query !== "function") {
@@ -564,8 +668,31 @@ async function listConversationMessages({
       messages.quote_id,
       messages.invoice_id,
       messages.job_id,
+      messages.delivery_request_fingerprint,
+      quote_decisions.decision AS canonical_quote_decision,
+      quote_decisions.issued_quote_version AS canonical_quote_decision_version,
+      quote_decisions.decided_at AS canonical_quote_decided_at,
+      decision_customers.user_id AS canonical_quote_customer_user_id,
+      quote_aggregates.current_version AS canonical_quote_current_version,
+      quote_sources.document_number AS canonical_quote_number,
       messages.created_at
     FROM messages
+    INNER JOIN conversations message_conversations
+      ON message_conversations.id = messages.conversation_id
+    LEFT JOIN canonical_quote_customer_decisions quote_decisions
+      ON quote_decisions.quote_id = messages.quote_id
+      AND quote_decisions.job_id = messages.job_id
+      AND quote_decisions.relationship_id = message_conversations.relationship_id
+    LEFT JOIN relationship_participants decision_customers
+      ON decision_customers.id = quote_decisions.customer_participant_id
+      AND decision_customers.job_id = quote_decisions.job_id
+      AND decision_customers.request_relationship_id = quote_decisions.relationship_id
+    LEFT JOIN commercial_authority_aggregates quote_aggregates
+      ON quote_aggregates.id = messages.quote_id
+      AND quote_aggregates.aggregate_type = 'quote'
+    LEFT JOIN canonical_quote_business_document_sources quote_sources
+      ON quote_sources.quote_id = messages.quote_id
+      AND quote_sources.job_id = messages.job_id
     WHERE messages.conversation_id = $1
       AND (
         $2::boolean = FALSE
@@ -636,6 +763,7 @@ module.exports = {
   DEFAULT_MESSAGE_PAGE_SIZE,
   MAX_MESSAGE_TEXT_LENGTH,
   MAX_MESSAGE_PAGE_SIZE,
+  createProfessionalQuoteDecisionAlertWithClient,
   createConversationMessage,
   createBusinessDocumentDeliveryMessageWithClient,
   decodeMessageCursor,

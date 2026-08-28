@@ -20,6 +20,7 @@ const {
   createOrdinaryJobEvaluation,
 } = require("../server/authorization/evaluationService");
 const {
+  DELIVERY_INTENT,
   getProfessionalQuoteDelivery,
   sendQuoteInMeetro,
 } = require("../server/authorization/quoteDeliveryService");
@@ -321,11 +322,30 @@ test("disposable PostgreSQL certifies canonical Quote delivery and ordinary mess
     assert.equal(reshared.delivery.messageId, first.delivery.messageId);
     assert.equal(reshared.delivery.replayed, true);
 
+    const copyKey = `${key}-copy`;
+    const copyInput = {
+      ...input,
+      deliveryIntent: DELIVERY_INTENT.COPY,
+      idempotencyKey: copyKey,
+    };
+    const copy = await sendQuoteInMeetro(copyInput);
+    const copyReplay = await sendQuoteInMeetro(copyInput);
+    assert.equal(copy.ok, true, copy.code);
+    assert.notEqual(copy.delivery.messageId, first.delivery.messageId);
+    assert.equal(copyReplay.delivery.messageId, copy.delivery.messageId);
+    assert.equal(copyReplay.delivery.replayed, true);
+    const secondCopy = await sendQuoteInMeetro({
+      ...copyInput,
+      idempotencyKey: `${copyKey}-second`,
+    });
+    assert.equal(secondCopy.ok, true, secondCopy.code);
+    assert.notEqual(secondCopy.delivery.messageId, copy.delivery.messageId);
+
     const rows = await pool.query(
       `SELECT * FROM messages WHERE quote_id = $1 ORDER BY id ASC`,
       [quote.id]
     );
-    assert.equal(rows.rowCount, 1);
+    assert.equal(rows.rowCount, 3);
     assert.equal(rows.rows[0].conversation_id, fixture.conversationId);
     assert.equal(Number(rows.rows[0].sender_id), ids.professionalId);
     assert.equal(Number(rows.rows[0].receiver_id), ids.homeownerId);
@@ -387,6 +407,21 @@ test("disposable PostgreSQL certifies canonical Quote delivery and ordinary mess
     });
     assert.equal(draftResult.code, "QUOTE_NOT_DELIVERABLE");
 
+    const noPriorFixture = await createFixture(pool, ids, `${suffix}-copy-no-prior`);
+    const noPriorQuote = await createQuote(pool, ids, noPriorFixture, `${suffix}-copy-no-prior`);
+    const noPriorCopy = await sendQuoteInMeetro({
+      ...input,
+      quoteId: noPriorQuote.id,
+      expectedIssuedVersion: noPriorQuote.currentVersion,
+      deliveryIntent: DELIVERY_INTENT.COPY,
+      idempotencyKey: `delivery-copy-no-prior-${suffix}`,
+    });
+    assert.equal(noPriorCopy.code, "QUOTE_COPY_REQUIRES_PRIOR_DELIVERY");
+    assert.equal(
+      (await pool.query(`SELECT count(*)::integer AS count FROM messages WHERE quote_id = $1`, [noPriorQuote.id])).rows[0].count,
+      0
+    );
+
     const closedFixture = await createFixture(pool, ids, `${suffix}-closed`);
     const closedQuote = await createQuote(pool, ids, closedFixture, `${suffix}-closed`);
     await pool.query(`UPDATE conversations SET status = 'closed', closed_at = CURRENT_TIMESTAMP WHERE id = $1`, [closedFixture.conversationId]);
@@ -433,14 +468,18 @@ test("disposable PostgreSQL certifies canonical Quote delivery and ordinary mess
       logger: quiet,
     });
     assert.equal(approval.ok, true, approval.code);
-    const approvedReshare = await sendQuoteInMeetro({ ...input, idempotencyKey: `${key}-approved` });
+    const approvedReshare = await sendQuoteInMeetro({
+      ...input,
+      deliveryIntent: DELIVERY_INTENT.COPY,
+      idempotencyKey: `${key}-approved`,
+    });
     assert.equal(approvedReshare.ok, true, approvedReshare.code);
-    assert.equal(approvedReshare.delivery.messageId, first.delivery.messageId);
-    assert.equal(approvedReshare.delivery.replayed, true);
+    assert.notEqual(approvedReshare.delivery.messageId, first.delivery.messageId);
+    assert.equal(approvedReshare.delivery.replayed, false);
     const approvedMessage = await pool.query(`SELECT workflow_payload FROM messages WHERE id = $1`, [approvedReshare.delivery.messageId]);
     assert.equal(
       approvedMessage.rows[0].workflow_payload.businessStatus,
-      "WAITING_ON_CUSTOMER"
+      "APPROVED"
     );
 
     const after = await pool.query(
@@ -459,7 +498,7 @@ test("disposable PostgreSQL certifies canonical Quote delivery and ordinary mess
     assert.equal(after.rows[0].job_created_at.toISOString(), before.rows[0].job_created_at.toISOString());
     assert.equal(after.rows[0].visits, before.rows[0].visits);
     assert.equal(after.rows[0].decision, "APPROVED");
-    assert.equal((await pool.query(`SELECT count(*)::integer AS count FROM messages WHERE quote_id = $1`, [quote.id])).rows[0].count, 1);
+    assert.equal((await pool.query(`SELECT count(*)::integer AS count FROM messages WHERE quote_id = $1`, [quote.id])).rows[0].count, 4);
     assert.equal((await pool.query(`SELECT count(*)::integer AS count FROM schema_migrations`)).rows[0].count, migrations.length);
   } finally {
     await pool.end();

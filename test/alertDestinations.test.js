@@ -23,6 +23,23 @@ test("alert destinations accept only the exact nested canonical shape", () => {
   assert.equal(invalid({ type: "conversation", conversationId: 91 }), true);
   assert.equal(invalid(destination("conversation", { requestId: 91 })), true);
   assert.equal(invalid(destination("conversation", { emergencyRequestId: 91 })), true);
+  assert.deepEqual(
+    normalizeDestination(destination("conversation", {
+      conversationId: 91,
+      jobId: "072c8736-5d97-4253-ba3e-dd1bce281a20",
+      quoteId: "f08a4f3b-8a21-4da8-a6b0-4258f5a8df9b",
+    })).value.public,
+    {
+      type: "conversation",
+      conversationId: 91,
+      jobId: "072c8736-5d97-4253-ba3e-dd1bce281a20",
+      quoteId: "f08a4f3b-8a21-4da8-a6b0-4258f5a8df9b",
+    }
+  );
+  assert.equal(invalid(destination("conversation", {
+    conversationId: 91,
+    jobId: "072c8736-5d97-4253-ba3e-dd1bce281a20",
+  })), true);
 });
 
 test("alert destinations accept each proven Phase A canonical identity", () => {
