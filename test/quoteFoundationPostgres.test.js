@@ -9,7 +9,10 @@ const { assertSafeTestDatabaseUrl } = require("./helpers/databaseTargetSafety");
 const { createJobRequest } = require("../server/requests/jobRequestCreateService");
 const { submitProfessionalResponse } = require("../server/relationships/professionalResponseService");
 const { selectProfessionalResponse } = require("../server/relationships/requestSelectionService");
-const { createOrdinaryJobEvaluation } = require("../server/authorization/evaluationService");
+const {
+  completeEvaluation,
+  createOrdinaryJobEvaluation,
+} = require("../server/authorization/evaluationService");
 const { confirmFinding, submitFinding } = require("../server/authorization/findingService");
 const {
   createRecommendation,
@@ -23,6 +26,7 @@ const {
 const {
   addDraftScopeItem,
   approveIssuedQuote,
+  calculateTotals,
   createDraftQuote,
   createDerivedDraftQuote,
   declineIssuedQuote,
@@ -31,9 +35,13 @@ const {
   importBusinessDocumentDraftQuote,
   issueQuote,
   listDraftQuotesByJob,
+  quoteDraftServiceInternals,
   removeDraftScopeItem,
 } = require("../server/authorization/quoteDraftService");
 const { sendQuoteInMeetro } = require("../server/authorization/quoteDeliveryService");
+const {
+  getProfessionalDepositStatus,
+} = require("../server/finance/preWorkDepositService");
 const { getMigrationFiles, runMigrationCollection } = require("../scripts/run-migrations");
 
 const cleanDatabaseUrl = process.env.QUOTE_FOUNDATION_DATABASE_URL;
@@ -430,6 +438,375 @@ test("clean disposable PostgreSQL imports the historical empty-seed Working Quot
   }
 });
 
+test("derived Quote inherits exact issued customer terms through scope, issuance, approval, and deposit evaluation", { skip: !cleanDatabaseUrl }, async () => {
+  const pool = new Pool({ connectionString: cleanDatabaseUrl, max: 8 });
+  const suffix = randomUUID();
+  const depositTerms = {
+    ...customerTermsSnapshot,
+    paymentTerms: "75% deposit",
+  };
+  try {
+    const migrations = getMigrationFiles();
+    const applied = await runMigrationCollection(
+      pool,
+      migrations,
+      targetMetadata(cleanDatabaseUrl)
+    );
+    assert.equal(applied.success, true);
+
+    const identities = await createIdentities(pool, `${suffix}-terms`);
+    const fixture = await createLifecycleFixture(
+      pool,
+      identities,
+      `${suffix}-terms`,
+      "derived Quote customer-term inheritance"
+    );
+    const evaluation = await saveEvaluation(
+      pool,
+      identities,
+      fixture,
+      `${suffix}-terms`
+    );
+    const completedEvaluation = await completeEvaluation({
+      pool,
+      authenticatedActor: { id: identities.professionalId },
+      evaluationId: evaluation.id,
+      expectedVersion: 1,
+      completionMode: "REMOTE",
+      assessmentMethod: "PHONE",
+      assessmentBasis:
+        "Reviewed the derived Quote customer-term fixture with the customer by phone.",
+      idempotencyKey: `derived-terms-evaluation-complete-${suffix}`,
+      logger: quiet,
+    });
+    assert.equal(completedEvaluation.ok, true, completedEvaluation.code);
+    const parent = await createSimpleIssuedQuote(
+      pool,
+      identities,
+      fixture,
+      `${suffix}-terms`,
+      68000,
+      depositTerms
+    );
+    assert.equal(parent.totalMinor, 68000);
+    assert.deepEqual(parent.customerTermsSnapshot, depositTerms);
+    const parentApproval = await quoteCommand(
+      approveIssuedQuote,
+      pool,
+      identities.homeownerId,
+      {
+        quoteId: parent.id,
+        expectedIssuedVersion: parent.currentVersion,
+      },
+      `derived-terms-parent-approval-${suffix}`
+    );
+    assert.equal(parentApproval.ok, true, parentApproval.code);
+
+    const parentBefore = await pool.query(
+      `SELECT
+        (SELECT to_jsonb(quotes) FROM canonical_quotes quotes WHERE quotes.id = $1) AS quote,
+        (SELECT to_jsonb(versions) FROM canonical_quote_versions versions
+          WHERE versions.quote_id = $1 AND versions.version = $2) AS version,
+        (SELECT to_jsonb(decisions) FROM canonical_quote_customer_decisions decisions
+          WHERE decisions.quote_id = $1) AS decision`,
+      [parent.id, parent.currentVersion]
+    );
+
+    const workstream = await createWorkstream({
+      pool,
+      authenticatedActor: { id: identities.professionalId },
+      jobId: fixture.jobId,
+      title: "Approved cabinet door and trim work",
+      sequence: 1,
+      idempotencyKey: `derived-terms-workstream-${suffix}`,
+      logger: quiet,
+    });
+    assert.equal(workstream.ok, true, workstream.code);
+
+    const clientOverride = await createDerivedDraftQuote({
+      pool,
+      authenticatedActor: { id: identities.professionalId },
+      parentQuoteId: parent.id,
+      expectedIssuedVersion: parent.currentVersion,
+      lineageType: "REVISED_QUOTE",
+      reasonCategory: "SCOPE_CHANGE",
+      customerTermsSnapshot: {
+        ...depositTerms,
+        paymentTerms: "No deposit required.",
+      },
+      idempotencyKey: `derived-terms-client-override-${suffix}`,
+      logger: quiet,
+    });
+    assert.equal(clientOverride.code, "QUOTE_AUTHORITY_FIELD_REJECTED");
+    assert.equal(Number((await pool.query(
+      `SELECT count(*) AS count FROM canonical_quotes WHERE job_id = $1`,
+      [fixture.jobId]
+    )).rows[0].count), 1);
+
+    const derivedKey = `derived-terms-create-${suffix}`;
+    const derived = await quoteCommand(
+      createDerivedDraftQuote,
+      pool,
+      identities.professionalId,
+      {
+        parentQuoteId: parent.id,
+        expectedIssuedVersion: parent.currentVersion,
+        lineageType: "REVISED_QUOTE",
+        reasonCategory: "SCOPE_CHANGE",
+      },
+      derivedKey
+    );
+    assert.equal(derived.ok, true, derived.code);
+    assert.equal(derived.quote.currentVersion, 1);
+    assert.equal(derived.quote.totalMinor, 0);
+    assert.equal(derived.quote.scopeItemCount, 0);
+    assert.deepEqual(derived.quote.customerTermsSnapshot, depositTerms);
+    assert.equal((await quoteCommand(
+      createDerivedDraftQuote,
+      pool,
+      identities.professionalId,
+      {
+        parentQuoteId: parent.id,
+        expectedIssuedVersion: parent.currentVersion,
+        lineageType: "REVISED_QUOTE",
+        reasonCategory: "SCOPE_CHANGE",
+      },
+      derivedKey
+    )).replayed, true);
+    assert.equal((await quoteCommand(
+      createDerivedDraftQuote,
+      pool,
+      identities.professionalId,
+      {
+        parentQuoteId: parent.id,
+        expectedIssuedVersion: parent.currentVersion,
+        lineageType: "SUPPLEMENTAL_QUOTE",
+        reasonCategory: "SUPPLEMENTAL_WORK",
+      },
+      derivedKey
+    )).code, "COMMERCIAL_IDEMPOTENCY_KEY_CONFLICT");
+
+    const scoped = await quoteCommand(
+      addDraftScopeItem,
+      pool,
+      identities.professionalId,
+      {
+        quoteId: derived.quote.id,
+        expectedVersion: derived.quote.currentVersion,
+        item: scopeItem({
+          classification: "LABOR_SERVICE",
+          scopeSemantic: "FUTURE_WORK",
+          materialResponsibility: "NOT_APPLICABLE",
+          description: "Inspect damaged cabinet door and trim",
+          unitAmountMinor: 68000,
+          source: {
+            type: "WORKSTREAM",
+            workstreamId: workstream.workstream.id,
+            version: workstream.workstream.currentVersion,
+          },
+        }),
+      },
+      `derived-terms-scope-${suffix}`
+    );
+    assert.equal(scoped.ok, true, scoped.code);
+    assert.equal(scoped.quote.totalMinor, 68000);
+    assert.deepEqual(scoped.quote.customerTermsSnapshot, depositTerms);
+    assert.equal(
+      scoped.quote.scopeItems[0].source.workstreamId,
+      workstream.workstream.id
+    );
+
+    const issued = await quoteCommand(
+      issueQuote,
+      pool,
+      identities.professionalId,
+      {
+        quoteId: scoped.quote.id,
+        expectedVersion: scoped.quote.currentVersion,
+      },
+      `derived-terms-issue-${suffix}`
+    );
+    assert.equal(issued.ok, true, issued.code);
+    assert.equal(issued.quote.totalMinor, 68000);
+    assert.deepEqual(issued.quote.customerTermsSnapshot, depositTerms);
+    const delivered = await sendQuoteInMeetro({
+      pool,
+      authenticatedActor: { id: identities.professionalId },
+      quoteId: issued.quote.id,
+      expectedIssuedVersion: issued.quote.currentVersion,
+      idempotencyKey: `derived-terms-delivery-${suffix}`,
+      logger: quiet,
+    });
+    assert.equal(delivered.ok, true, delivered.code);
+    const approved = await quoteCommand(
+      approveIssuedQuote,
+      pool,
+      identities.homeownerId,
+      {
+        quoteId: issued.quote.id,
+        expectedIssuedVersion: issued.quote.currentVersion,
+      },
+      `derived-terms-approval-${suffix}`
+    );
+    assert.equal(approved.ok, true, approved.code);
+    assert.equal(approved.customerDecision.decision, "APPROVED");
+
+    const deposit = await getProfessionalDepositStatus({
+      pool,
+      authenticatedActor: { id: identities.professionalId },
+      jobId: fixture.jobId,
+    });
+    assert.equal(deposit.ok, true, deposit.code);
+    assert.equal(deposit.deposit.quoteId, issued.quote.id);
+    assert.equal(deposit.deposit.quoteTotalMinor, 68000);
+    assert.equal(deposit.deposit.depositRule.type, "PERCENT");
+    assert.equal(deposit.deposit.depositRule.percentBasisPoints, 7500);
+    assert.equal(deposit.deposit.requiredMinor, 51000);
+    assert.equal(deposit.deposit.appliedMinor, 0);
+    assert.equal(deposit.deposit.remainingMinor, 51000);
+    assert.equal(deposit.deposit.schedulingLocked, true);
+    assert.equal(deposit.deposit.paymentHistory.length, 0);
+    assert.equal(Number((await pool.query(
+      `SELECT count(*) AS count FROM canonical_pre_work_payment_receipts
+       WHERE job_id = $1`,
+      [fixture.jobId]
+    )).rows[0].count), 0);
+
+    const parentAfter = await pool.query(
+      `SELECT
+        (SELECT to_jsonb(quotes) FROM canonical_quotes quotes WHERE quotes.id = $1) AS quote,
+        (SELECT to_jsonb(versions) FROM canonical_quote_versions versions
+          WHERE versions.quote_id = $1 AND versions.version = $2) AS version,
+        (SELECT to_jsonb(decisions) FROM canonical_quote_customer_decisions decisions
+          WHERE decisions.quote_id = $1) AS decision`,
+      [parent.id, parent.currentVersion]
+    );
+    assert.deepEqual(parentAfter.rows[0], parentBefore.rows[0]);
+
+    const nullFixture = await createLifecycleFixture(
+      pool,
+      identities,
+      `${suffix}-null`,
+      "derived Quote exact historical null terms"
+    );
+    const nullEvaluation = await saveEvaluation(
+      pool,
+      identities,
+      nullFixture,
+      `${suffix}-null`
+    );
+    const completedNullEvaluation = await completeEvaluation({
+      pool,
+      authenticatedActor: { id: identities.professionalId },
+      evaluationId: nullEvaluation.id,
+      expectedVersion: 1,
+      completionMode: "REMOTE",
+      assessmentMethod: "PHONE",
+      assessmentBasis:
+        "Reviewed the exact historical null-terms fixture with the customer by phone.",
+      idempotencyKey: `derived-terms-null-evaluation-complete-${suffix}`,
+      logger: quiet,
+    });
+    assert.equal(completedNullEvaluation.ok, true, completedNullEvaluation.code);
+    const nullParent = await createSimpleIssuedQuote(
+      pool,
+      identities,
+      nullFixture,
+      `${suffix}-null`,
+      2000,
+      null
+    );
+    assert.equal(nullParent.customerTermsSnapshot, null);
+    const laterVersion = nullParent.currentVersion + 1;
+    const laterIssuedAt = new Date(Date.now() + 1000).toISOString();
+    const laterTotals = calculateTotals(nullParent.scopeItems);
+    const laterCommercial = quoteDraftServiceInternals.deriveCommercialSnapshots(
+      nullParent.scopeItems
+    );
+    const laterIntegrityHash = quoteDraftServiceInternals.integrityHash({
+      quoteId: nullParent.id,
+      version: laterVersion,
+      currency: nullParent.currency,
+      status: "ISSUED",
+      issuedAt: laterIssuedAt,
+      totals: laterTotals,
+      snapshots: nullParent.scopeItems,
+      ...laterCommercial,
+      integrityVersion: 2,
+      customerTermsSnapshot,
+    });
+    await pool.query(
+      `INSERT INTO canonical_quote_versions (
+        quote_id, version, job_id, status, currency,
+        materials_subtotal_minor, labor_service_subtotal_minor, total_minor,
+        scope_item_count, conditions_snapshot, exclusions_snapshot,
+        customer_terms_snapshot, issued_at, created_by_participant_id,
+        integrity_hash, integrity_version
+      )
+      SELECT quote_id, $2, job_id, status, currency,
+        materials_subtotal_minor, labor_service_subtotal_minor, total_minor,
+        scope_item_count, conditions_snapshot, exclusions_snapshot,
+        $3::jsonb, $4::timestamptz, created_by_participant_id, $5, 2
+      FROM canonical_quote_versions
+      WHERE quote_id = $1 AND version = $6`,
+      [
+        nullParent.id,
+        laterVersion,
+        JSON.stringify(customerTermsSnapshot),
+        laterIssuedAt,
+        laterIntegrityHash,
+        nullParent.currentVersion,
+      ]
+    );
+    await pool.query(
+      `INSERT INTO canonical_quote_scope_item_snapshots (
+        quote_id, quote_version, scope_item_id, scope_item_revision,
+        job_id, sequence, classification, scope_semantic,
+        material_responsibility, description, quantity, unit_amount_minor,
+        line_total_minor, included_in_total, source_type, source_version,
+        source_workstream_version, source_finding_id, source_recommendation_id,
+        source_workstream_id, source_activity_id, source_obligation_id,
+        created_by_participant_id
+      )
+      SELECT quote_id, $2, scope_item_id, scope_item_revision,
+        job_id, sequence, classification, scope_semantic,
+        material_responsibility, description, quantity, unit_amount_minor,
+        line_total_minor, included_in_total, source_type, source_version,
+        source_workstream_version, source_finding_id, source_recommendation_id,
+        source_workstream_id, source_activity_id, source_obligation_id,
+        created_by_participant_id
+      FROM canonical_quote_scope_item_snapshots
+      WHERE quote_id = $1 AND quote_version = $3`,
+      [nullParent.id, laterVersion, nullParent.currentVersion]
+    );
+    await pool.query(
+      `UPDATE commercial_authority_aggregates
+       SET current_version = $2 WHERE id = $1`,
+      [nullParent.id, laterVersion]
+    );
+    const exactHistorical = await quoteCommand(
+      createDerivedDraftQuote,
+      pool,
+      identities.professionalId,
+      {
+        parentQuoteId: nullParent.id,
+        expectedIssuedVersion: nullParent.currentVersion,
+        lineageType: "REVISED_QUOTE",
+        reasonCategory: "SCOPE_CHANGE",
+      },
+      `derived-terms-historical-${suffix}`
+    );
+    assert.equal(exactHistorical.ok, true, exactHistorical.code);
+    assert.equal(exactHistorical.quote.customerTermsSnapshot, null);
+    assert.notDeepEqual(
+      exactHistorical.quote.customerTermsSnapshot,
+      customerTermsSnapshot
+    );
+  } finally {
+    await pool.end();
+  }
+});
+
 test("clean disposable PostgreSQL certifies canonical $920 Draft and issued Quote", { skip: !cleanDatabaseUrl }, async () => {
   const pool = new Pool({ connectionString: cleanDatabaseUrl, max: 8 });
   const suffix = randomUUID();
@@ -764,13 +1141,10 @@ test("clean disposable PostgreSQL certifies canonical $920 Draft and issued Quot
     assert.equal(quote.totalMinor, 92000);
     assert.equal(quote.scopeItemCount, 11);
     assert.equal(quote.integrityVersion, 2);
-    assert.equal(
-      quote.versions.every((version) =>
-        version.integrityVersion === 2 &&
-        JSON.stringify(version.customerTermsSnapshot) === JSON.stringify(customerTermsSnapshot)
-      ),
-      true
-    );
+    for (const version of quote.versions) {
+      assert.equal(version.integrityVersion, 2);
+      assert.deepEqual(version.customerTermsSnapshot, customerTermsSnapshot);
+    }
     assert.equal(quote.scopeItems.find((row) => row.description.includes("ceiling fan")).includedInTotal, false);
     assert.equal(quote.scopeItems.find((row) => row.description.includes("separate proposal")).includedInTotal, false);
     assert.equal(quote.scopeItems.some((row) => row.source.recommendationId === r22.id), false);

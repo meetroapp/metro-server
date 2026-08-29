@@ -121,6 +121,7 @@ test("handlers forward only governed Draft inputs and idempotency", async () => 
   assert.equal(calls[8][1].expectedIssuedVersion, 2);
   assert.equal(calls[9][1].lineageType, "SUPPLEMENTAL_QUOTE");
   assert.equal(calls[9][1].reasonCategory, "SUPPLEMENTAL_WORK");
+  assert.equal(calls[9][1].customerTermsSnapshot, undefined);
   assert.equal(calls[9][1].totalMinor, undefined);
   assert.equal(calls[10][0], "import");
   assert.equal(calls[10][1].draftId, "draft");

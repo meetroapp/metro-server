@@ -1407,7 +1407,7 @@ async function loadCurrentSnapshots(client, quoteId, version) {
 
 async function loadQuoteVersionContract(client, quoteId, version, jobId) {
   const result = await client.query(
-    `SELECT integrity_version, customer_terms_snapshot
+    `SELECT status, integrity_version, customer_terms_snapshot
      FROM canonical_quote_versions
      WHERE quote_id = $1 AND version = $2 AND job_id = $3
      LIMIT 1`,
@@ -1415,7 +1415,10 @@ async function loadQuoteVersionContract(client, quoteId, version, jobId) {
   );
   const row = result.rows[0];
   if (!row) return { error: "INVALID_QUOTE_INTEGRITY_CONTRACT" };
-  return quoteIntegrityContract(row.integrity_version, row.customer_terms_snapshot);
+  return {
+    status: row.status,
+    ...quoteIntegrityContract(row.integrity_version, row.customer_terms_snapshot),
+  };
 }
 
 function calculateTotals(snapshots) {
@@ -3510,9 +3513,18 @@ async function createDerivedDraftQuote(input = {}) {
         }),
       };
     }
+    const parentVersionContract = await loadQuoteVersionContract(
+      client,
+      parentQuoteId,
+      expectedIssuedVersion,
+      context.job_id
+    );
+    if (parentVersionContract.error) {
+      return { abort: failure(409, "QUOTE_SNAPSHOT_INVALID", "The issued Quote snapshot is invalid.") };
+    }
     if (
       context.status !== QUOTE_STATUS.ISSUED ||
-      Number(context.current_version) !== expectedIssuedVersion
+      parentVersionContract.status !== QUOTE_STATUS.ISSUED
     ) {
       return { abort: failure(409, "ISSUED_QUOTE_VERSION_REQUIRED", "The exact issued Quote version is required.") };
     }
@@ -3590,6 +3602,7 @@ async function createDerivedDraftQuote(input = {}) {
       currency: context.currency,
       actorParticipantId: context.actor_participant_id,
       snapshots: [],
+      customerTermsSnapshot: parentVersionContract.customerTermsSnapshot,
     });
     if (!version.row) throw new Error("Derived Quote version creation failed.");
     const evidence = await insertQuoteEvidence({
