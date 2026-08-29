@@ -41,6 +41,11 @@ const WORKFLOW_TYPE = "INVOICE_SHARED";
 const WORKFLOW_STATUS = "SENT";
 const DEFAULT_WORKSPACE_LIMIT = 20;
 const MAX_WORKSPACE_LIMIT = 50;
+const MAX_EXTRA_WORK_ITEMS = 100;
+const INVOICE_LINE_SOURCE_TYPES = Object.freeze({
+  APPROVED_QUOTE_SCOPE: "APPROVED_QUOTE_SCOPE",
+  EXTRA_WORK: "EXTRA_WORK",
+});
 
 function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
@@ -69,6 +74,31 @@ function optionalText(value, maximum) {
 function nonNegativeInteger(value) {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function normalizeExtraWorkItems(value) {
+  if (value == null) return { items: [] };
+  if (!Array.isArray(value) || value.length > MAX_EXTRA_WORK_ITEMS) {
+    return { error: true };
+  }
+  const items = [];
+  for (const item of value) {
+    if (!isPlainObject(item)) return { error: true };
+    const allowed = new Set(["description", "quantity", "unitAmountMinor"]);
+    if (Object.keys(item).some((key) => !allowed.has(key))) return { error: true };
+    const description = safeText(item.description, 1000);
+    const quantity = positiveInteger(item.quantity);
+    const unitAmountMinor = nonNegativeInteger(item.unitAmountMinor);
+    const lineTotalMinor = quantity == null || unitAmountMinor == null
+      ? null
+      : quantity * unitAmountMinor;
+    if (
+      !description || !quantity || quantity > 10000 || unitAmountMinor == null ||
+      !Number.isSafeInteger(lineTotalMinor)
+    ) return { error: true };
+    items.push({ description, quantity, unitAmountMinor, lineTotalMinor });
+  }
+  return { items };
 }
 
 function dateOnly(value) {
@@ -237,7 +267,7 @@ function professionalAuthorized(context, actorId) {
   );
 }
 
-async function loadApprovedBillingLines(client, jobId) {
+async function loadEffectiveApprovedBillingLines(client, jobId) {
   const result = await client.query(
     `SELECT quotes.id AS quote_id,
       decisions.issued_quote_version AS quote_version,
@@ -287,6 +317,38 @@ async function loadApprovedBillingLines(client, jobId) {
     [jobId]
   );
   return result.rows;
+}
+
+async function loadApplicablePaymentsReceived(client, jobId, effectiveLines) {
+  const quoteVersions = [...new Map(effectiveLines.map((line) => [
+    `${line.quote_id}:${line.quote_version}`,
+    { quoteId: line.quote_id, quoteVersion: Number(line.quote_version) },
+  ])).values()];
+  if (!quoteVersions.length) return 0;
+  const result = await client.query(
+    `SELECT COALESCE(sum(current.applied_minor), 0)::bigint AS paid_minor
+     FROM canonical_pre_work_deposit_obligations obligations
+     INNER JOIN LATERAL (
+       SELECT versions.state, versions.applied_minor
+       FROM canonical_pre_work_deposit_versions versions
+       WHERE versions.obligation_id = obligations.id
+         AND versions.job_id = obligations.job_id
+       ORDER BY versions.version DESC LIMIT 1
+     ) current ON TRUE
+     WHERE obligations.job_id = $1
+       AND current.state NOT IN ('SUPERSEDED', 'VOIDED')
+       AND (obligations.quote_id, obligations.issued_quote_version) IN (
+         SELECT source.quote_id, source.quote_version
+         FROM jsonb_to_recordset($2::jsonb)
+           AS source(quote_id uuid, quote_version integer)
+       )`,
+    [jobId, JSON.stringify(quoteVersions.map((item) => ({
+      quote_id: item.quoteId,
+      quote_version: item.quoteVersion,
+    })))]
+  );
+  const paidMinor = Number(result.rows[0]?.paid_minor || 0);
+  return Number.isSafeInteger(paidMinor) && paidMinor >= 0 ? paidMinor : 0;
 }
 
 async function loadInvoiceContext(client, invoiceId, actorId, { lock = false } = {}) {
@@ -402,8 +464,9 @@ async function loadCustomerInvoiceContext(client, { invoiceId = null, jobId = nu
 
 async function loadInvoiceLines(client, invoiceId) {
   const result = await client.query(
-    `SELECT id, sequence, source_quote_id, source_quote_version,
-      lineage_label, description, quantity, unit_amount_minor, line_total_minor
+    `SELECT id, sequence, source_type, source_quote_id, source_quote_version,
+      source_scope_item_id, lineage_label, description, quantity,
+      unit_amount_minor, line_total_minor
     FROM canonical_invoice_line_item_snapshots
     WHERE invoice_id = $1
     ORDER BY sequence ASC, id ASC`,
@@ -434,7 +497,9 @@ function dueProjection(row) {
 function lineProjection(row, audience) {
   const value = {
     sequence: Number(row.sequence),
-    lineageLabel: row.lineage_label,
+    type: row.source_type === INVOICE_LINE_SOURCE_TYPES.EXTRA_WORK
+      ? "extraWork"
+      : "approvedWork",
     description: row.description,
     quantity: Number(row.quantity),
     unitAmountMinor: Number(row.unit_amount_minor),
@@ -442,8 +507,12 @@ function lineProjection(row, audience) {
   };
   if (audience === "professional") {
     value.lineItemId = row.id;
-    value.sourceQuoteId = row.source_quote_id;
-    value.sourceQuoteVersion = Number(row.source_quote_version);
+    if (row.source_type === INVOICE_LINE_SOURCE_TYPES.APPROVED_QUOTE_SCOPE) {
+      value.sourceQuoteId = row.source_quote_id;
+      value.sourceQuoteVersion = Number(row.source_quote_version);
+      value.sourceScopeItemId = row.source_scope_item_id;
+      value.lineageLabel = row.lineage_label;
+    }
   }
   return value;
 }
@@ -564,13 +633,19 @@ async function completeCommand(client, commandId, invoiceId, result) {
   if (updated.rowCount !== 1) throw new Error("Invoice command idempotency could not be completed.");
 }
 
-function createCommandFingerprint({ actorId, jobId, expectedCompletionVersion, due, customerNotes, terms }) {
-  return hash({ command: "invoice.create", actorId, jobId, expectedCompletionVersion, due, customerNotes, terms });
+function createCommandFingerprint({
+  actorId, jobId, expectedCompletionVersion, due, customerNotes, terms, extraWork,
+}) {
+  return hash({
+    command: "invoice.create", actorId, jobId, expectedCompletionVersion,
+    due, customerNotes, terms, extraWork,
+  });
 }
 
 async function createInvoice(input = {}) {
   const validated = validateInput(input, [
-    "jobId", "expectedCompletionVersion", "due", "customerNotes", "terms", "idempotencyKey",
+    "jobId", "expectedCompletionVersion", "due", "customerNotes", "terms",
+    "extraWork", "idempotencyKey",
   ], { job: true });
   if (validated.error) return validated.error;
   const expectedCompletionVersion = positiveInteger(input.expectedCompletionVersion);
@@ -580,18 +655,20 @@ async function createInvoice(input = {}) {
   const dueDate = dueMode === "SPECIFIC_DATE" ? dateOnly(due?.date) : null;
   const customerNotes = optionalText(input.customerNotes, 2000);
   const terms = optionalText(input.terms, 2000);
+  const extraWorkResult = normalizeExtraWorkItems(input.extraWork);
   if (
     !expectedCompletionVersion || idempotency.error ||
     !["DUE_ON_RECEIPT", "SPECIFIC_DATE"].includes(dueMode) ||
     (dueMode === "SPECIFIC_DATE" && (!dueDate || dueDate < today())) ||
     (dueMode === "DUE_ON_RECEIPT" && due?.date != null) ||
     (input.customerNotes != null && input.customerNotes !== "" && !customerNotes) ||
-    (input.terms != null && input.terms !== "" && !terms)
+    (input.terms != null && input.terms !== "" && !terms) || extraWorkResult.error
   ) return failure(400, "INVALID_INVOICE_CREATE_COMMAND", "The Invoice details are invalid.");
 
   const fingerprint = createCommandFingerprint({
     ...validated, expectedCompletionVersion,
     due: { mode: dueMode, date: dueDate }, customerNotes, terms,
+    extraWork: extraWorkResult.items,
   });
   return runTransaction(input.pool, "SERIALIZABLE", async (client) => {
     const context = await loadProfessionalJobContext(
@@ -624,14 +701,27 @@ async function createInvoice(input = {}) {
     if (existing.rows[0]) {
       return { abort: failure(409, "INVOICE_ALREADY_EXISTS", "This Job already has an Invoice.") };
     }
-    const billingLines = await loadApprovedBillingLines(client, validated.jobId);
+    const billingLines = await loadEffectiveApprovedBillingLines(client, validated.jobId);
     const currencies = new Set(billingLines.map((line) => line.currency));
-    const totalMinor = billingLines.reduce(
+    const approvedMinor = billingLines.reduce(
       (sum, line) => sum + Number(line.line_total_minor), 0
     );
-    if (!billingLines.length || currencies.size !== 1 || totalMinor <= 0 || !Number.isSafeInteger(totalMinor)) {
+    const extraWorkMinor = extraWorkResult.items.reduce(
+      (sum, line) => sum + line.lineTotalMinor, 0
+    );
+    const totalMinor = approvedMinor + extraWorkMinor;
+    if (
+      !billingLines.length || currencies.size !== 1 || approvedMinor <= 0 ||
+      !Number.isSafeInteger(approvedMinor) || !Number.isSafeInteger(extraWorkMinor) ||
+      totalMinor <= 0 || !Number.isSafeInteger(totalMinor)
+    ) {
       return { abort: failure(409, "INVOICE_BILLING_BASIS_UNAVAILABLE", "Approved billing details are unavailable.") };
     }
+    const paidMinor = Math.min(
+      totalMinor,
+      await loadApplicablePaymentsReceived(client, validated.jobId, billingLines)
+    );
+    const balanceMinor = totalMinor - paidMinor;
     const jobParty = await loadJobCustomerParty(
       client,
       validated.jobId,
@@ -666,7 +756,7 @@ async function createInvoice(input = {}) {
     const currency = [...currencies][0];
     const versionHash = invoiceVersionHash({
       invoiceId, version: 1, jobId: validated.jobId, status: "DRAFT", currency,
-      subtotalMinor: totalMinor, totalMinor, paidMinor: 0, balanceMinor: totalMinor,
+      subtotalMinor: totalMinor, totalMinor, paidMinor, balanceMinor,
       invoiceDate, due: { mode: dueMode, date: dueDate }, customerNotes, terms,
     });
     await client.query(
@@ -689,9 +779,9 @@ async function createInvoice(input = {}) {
         subtotal_minor, total_minor, paid_minor, balance_minor,
         invoice_date, due_mode, due_date, customer_notes, terms,
         created_by_participant_id, integrity_hash
-      ) VALUES ($1, 1, $2, 'DRAFT', $3, $4, $4, 0, $4,
-        $5, $6, $7, $8, $9, $10, $11)`,
-      [invoiceId, validated.jobId, currency, totalMinor, invoiceDate,
+      ) VALUES ($1, 1, $2, 'DRAFT', $3, $4, $4, $5, $6,
+        $7, $8, $9, $10, $11, $12, $13)`,
+      [invoiceId, validated.jobId, currency, totalMinor, paidMinor, balanceMinor, invoiceDate,
         dueMode, dueDate, customerNotes, terms,
         context.professional_participant_id, versionHash]
     );
@@ -699,15 +789,31 @@ async function createInvoice(input = {}) {
       await client.query(
         `INSERT INTO canonical_invoice_line_item_snapshots (
           id, invoice_id, invoice_version, job_id, sequence,
+          source_type,
           source_quote_id, source_quote_version, source_scope_item_id,
           lineage_label, description, quantity, unit_amount_minor,
           line_total_minor, created_by_participant_id
-        ) VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+        ) VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
         [randomUUID(), invoiceId, validated.jobId, index + 1,
+          INVOICE_LINE_SOURCE_TYPES.APPROVED_QUOTE_SCOPE,
           line.quote_id, line.quote_version, line.scope_item_id,
           line.lineage_label, line.description, line.quantity,
           line.unit_amount_minor, line.line_total_minor,
           context.professional_participant_id]
+      );
+    }
+    for (const [index, line] of extraWorkResult.items.entries()) {
+      await client.query(
+        `INSERT INTO canonical_invoice_line_item_snapshots (
+          id, invoice_id, invoice_version, job_id, sequence, source_type,
+          source_quote_id, source_quote_version, source_scope_item_id,
+          lineage_label, description, quantity, unit_amount_minor,
+          line_total_minor, created_by_participant_id
+        ) VALUES ($1, $2, 1, $3, $4, 'EXTRA_WORK',
+          NULL, NULL, NULL, NULL, $5, $6, $7, $8, $9)`,
+        [randomUUID(), invoiceId, validated.jobId, billingLines.length + index + 1,
+          line.description, line.quantity, line.unitAmountMinor,
+          line.lineTotalMinor, context.professional_participant_id]
       );
     }
     const loaded = await loadInvoiceContext(client, invoiceId, validated.actorId);
@@ -784,11 +890,18 @@ async function issueInvoice(input = {}) {
     }
     const nextVersion = expectedVersion + 1;
     const issuedAt = new Date().toISOString();
+    const issuedPaidMinor = Number(context.paid_minor);
+    const issuedBalanceMinor = Number(context.balance_minor);
+    const issuedStatus = issuedPaidMinor === Number(context.total_minor)
+      ? "PAID"
+      : issuedPaidMinor > 0
+        ? "PARTIALLY_PAID"
+        : "SENT";
     const versionHash = invoiceVersionHash({
       invoiceId: context.invoice_id, version: nextVersion,
-      jobId: context.job_id, status: "SENT", currency: context.currency,
+      jobId: context.job_id, status: issuedStatus, currency: context.currency,
       subtotalMinor: Number(context.subtotal_minor), totalMinor: Number(context.total_minor),
-      paidMinor: 0, balanceMinor: Number(context.total_minor),
+      paidMinor: issuedPaidMinor, balanceMinor: issuedBalanceMinor,
       invoiceDate: sqlDate(context.invoice_date),
       due: dueProjection(context), customerNotes: context.customer_notes,
       terms: context.terms, issuedAt,
@@ -799,10 +912,11 @@ async function issueInvoice(input = {}) {
         subtotal_minor, total_minor, paid_minor, balance_minor,
         invoice_date, due_mode, due_date, customer_notes, terms,
         created_by_participant_id, integrity_hash
-      ) VALUES ($1, $2, $3, 'SENT', $4, $5, $6, 0, $6,
-        $7, $8, $9, $10, $11, $12, $13)`,
-      [context.invoice_id, nextVersion, context.job_id, context.currency,
-        context.subtotal_minor, context.total_minor,
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+        $10, $11, $12, $13, $14, $15, $16)`,
+      [context.invoice_id, nextVersion, context.job_id, issuedStatus,
+        context.currency, context.subtotal_minor, context.total_minor,
+        issuedPaidMinor, issuedBalanceMinor,
         sqlDate(context.invoice_date), context.due_mode,
         context.due_date ? sqlDate(context.due_date) : null,
         context.customer_notes, context.terms,
@@ -815,8 +929,8 @@ async function issueInvoice(input = {}) {
       client, conversationId: conversation.id, recipientUserId: receiverId,
     });
     const provisional = {
-      ...context, version: nextVersion, status: "SENT",
-      paid_minor: 0, balance_minor: context.total_minor, issued_at: issuedAt,
+      ...context, version: nextVersion, status: issuedStatus,
+      paid_minor: issuedPaidMinor, balance_minor: issuedBalanceMinor, issued_at: issuedAt,
     };
     const invoice = await loadInvoiceProjection(client, provisional, "professional");
     const snapshot = invoiceMessageSnapshot(invoice);
@@ -1112,8 +1226,7 @@ async function getProfessionalInvoiceWorkspace(input = {}) {
         jobs.source_request_relationship_id AS relationship_id,
         completions.completion_version, completions.completed_at,
         posts.title AS service_title,
-        homeowner.username AS customer_name,
-        quote_totals.currency, quote_totals.total_minor
+        homeowner.username AS customer_name
       FROM current_completions completions
       INNER JOIN jobs ON jobs.id = completions.job_id
       INNER JOIN posts ON posts.id = jobs.job_request_id
@@ -1126,18 +1239,6 @@ async function getProfessionalInvoiceWorkspace(input = {}) {
         AND professional.request_relationship_id = relationships.id
         AND professional.user_id = $1
       LEFT JOIN canonical_invoices invoices ON invoices.job_id = jobs.id
-      LEFT JOIN LATERAL (
-        SELECT CASE WHEN count(DISTINCT versions.currency) = 1
-          THEN min(versions.currency) ELSE NULL END AS currency,
-          sum(versions.total_minor)::bigint AS total_minor
-        FROM canonical_quote_customer_decisions decisions
-        INNER JOIN canonical_quote_versions versions
-          ON versions.quote_id = decisions.quote_id
-          AND versions.version = decisions.issued_quote_version
-          AND versions.job_id = decisions.job_id
-          AND versions.status = 'ISSUED'
-        WHERE decisions.job_id = jobs.id AND decisions.decision = 'APPROVED'
-      ) quote_totals ON TRUE
       WHERE invoices.id IS NULL
         AND EXISTS (
           SELECT 1 FROM participant_role_assignments roles
@@ -1153,6 +1254,40 @@ async function getProfessionalInvoiceWorkspace(input = {}) {
       LIMIT $2`,
       [validated.actorId, limit]
     );
+    const readyJobs = [];
+    for (const row of ready.rows) {
+      const approvedLines = await loadEffectiveApprovedBillingLines(client, row.job_id);
+      const currencies = new Set(approvedLines.map((line) => line.currency));
+      const approvedMinor = approvedLines.reduce(
+        (sum, line) => sum + Number(line.line_total_minor), 0
+      );
+      const paymentsReceivedMinor = await loadApplicablePaymentsReceived(
+        client, row.job_id, approvedLines
+      );
+      const currency = currencies.size === 1 ? [...currencies][0] : null;
+      readyJobs.push({
+        jobId: row.job_id,
+        requestId: Number(row.request_id),
+        relationshipId: Number(row.relationship_id),
+        customerName: row.customer_name || "Customer",
+        serviceTitle: row.service_title || "Job",
+        completedAt: iso(row.completed_at),
+        completionVersion: Number(row.completion_version),
+        approvedAmount: currency && Number.isSafeInteger(approvedMinor)
+          ? { currency, totalMinor: approvedMinor }
+          : null,
+        paymentsReceivedMinor,
+        amountStillDueMinor: Number.isSafeInteger(approvedMinor)
+          ? Math.max(0, approvedMinor - paymentsReceivedMinor)
+          : null,
+        approvedWork: approvedLines.map((line) => ({
+          description: line.description,
+          quantity: Number(line.quantity),
+          unitAmountMinor: Number(line.unit_amount_minor),
+          lineTotalMinor: Number(line.line_total_minor),
+        })),
+      });
+    }
     const invoices = await client.query(
       `SELECT invoices.id AS invoice_id, invoices.invoice_number, invoices.job_id,
         invoices.job_request_id AS request_id, invoices.relationship_id,
@@ -1202,7 +1337,7 @@ async function getProfessionalInvoiceWorkspace(input = {}) {
       workspace: {
         contractVersion: CONTRACT_VERSION,
         summary: {
-          readyToInvoice: ready.rows.length,
+          readyToInvoice: readyJobs.length,
           drafts: rows.filter((row) => row.status === "DRAFT").length,
           waitingForPayment: rows.filter((row) => ["SENT", "PARTIALLY_PAID"].includes(row.status)).length,
           paid: rows.filter((row) => row.status === "PAID").length,
@@ -1211,18 +1346,7 @@ async function getProfessionalInvoiceWorkspace(input = {}) {
             : null,
           currency: summaryCurrency,
         },
-        readyJobs: ready.rows.map((row) => ({
-          jobId: row.job_id,
-          requestId: Number(row.request_id),
-          relationshipId: Number(row.relationship_id),
-          customerName: row.customer_name || "Customer",
-          serviceTitle: row.service_title || "Job",
-          completedAt: iso(row.completed_at),
-          completionVersion: Number(row.completion_version),
-          approvedAmount: row.currency && row.total_minor != null
-            ? { currency: row.currency, totalMinor: Number(row.total_minor) }
-            : null,
-        })),
+        readyJobs,
         invoices: rows,
         limit,
       },
@@ -1232,6 +1356,7 @@ async function getProfessionalInvoiceWorkspace(input = {}) {
 
 module.exports = {
   CONTRACT_VERSION,
+  INVOICE_LINE_SOURCE_TYPES,
   INVOICE_STATUSES,
   MESSAGE_TYPE,
   PAYMENT_METHODS,
@@ -1255,6 +1380,7 @@ module.exports = {
     invoiceProjection,
     invoiceVersionHash,
     lineProjection,
+    normalizeExtraWorkItems,
     paymentHash,
     paymentProjection,
     professionalAuthorized,

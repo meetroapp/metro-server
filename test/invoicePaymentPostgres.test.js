@@ -1,7 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { randomUUID } = require("node:crypto");
+const { createHash, randomUUID } = require("node:crypto");
 const test = require("node:test");
 const { Pool } = require("pg");
 const { assertSafeTestDatabaseUrl } = require("./helpers/databaseTargetSafety");
@@ -15,9 +15,12 @@ const {
 const {
   addDraftScopeItem,
   approveIssuedQuote,
+  createDerivedDraftQuote,
   createDraftQuote,
   issueQuote,
 } = require("../server/authorization/quoteDraftService");
+const { sendQuoteInMeetro } = require("../server/authorization/quoteDeliveryService");
+const { completeEvaluation } = require("../server/authorization/evaluationService");
 const {
   completeWorkstream,
   createWorkActivity,
@@ -56,7 +59,11 @@ function command(service, pool, actorId, values, idempotencyKey) {
   });
 }
 
-async function prepareCompletedJob(pool, suffix) {
+function hash(value) {
+  return createHash("sha256").update(String(value)).digest("hex");
+}
+
+async function prepareCompletedJob(pool, suffix, unitAmountMinor = 68000) {
   const identities = await createVisitTestIdentities(pool, suffix);
   const fixture = await createVisitLifecycleFixture(pool, identities, suffix);
   const workstream = await createVisitWorkstream(pool, identities, fixture, suffix, 1);
@@ -73,7 +80,7 @@ async function prepareCompletedJob(pool, suffix) {
       materialResponsibility: "NOT_APPLICABLE",
       description: "Complete the governed synthetic repair",
       quantity: 1,
-      unitAmountMinor: 92000,
+      unitAmountMinor,
       source: {
         type: "WORKSTREAM",
         workstreamId: workstream.id,
@@ -81,15 +88,77 @@ async function prepareCompletedJob(pool, suffix) {
       },
     },
   }, `invoice-quote-scope-${suffix}`);
-  await ensureVisitEvaluation(pool, identities, fixture, suffix);
+  const evaluation = await ensureVisitEvaluation(pool, identities, fixture, suffix);
+  const completedEvaluation = await command(
+    completeEvaluation,
+    pool,
+    identities.professionalId,
+    {
+      evaluationId: evaluation.id,
+      expectedVersion: 1,
+      completionMode: "REMOTE",
+      assessmentMethod: "PHONE",
+      assessmentBasis: "Reviewed the disposable Invoice authority fixture with the customer by phone.",
+    },
+    `invoice-evaluation-complete-${suffix}`
+  );
+  assert.equal(completedEvaluation.ok, true, completedEvaluation.code);
   const issued = await command(issueQuote, pool, identities.professionalId, {
     quoteId: scoped.quote.id,
     expectedVersion: scoped.quote.currentVersion,
   }, `invoice-quote-issue-${suffix}`);
-  await command(approveIssuedQuote, pool, identities.homeownerId, {
+  assert.equal(issued.ok, true, issued.code);
+  const delivered = await command(sendQuoteInMeetro, pool, identities.professionalId, {
+    quoteId: issued.quote.id,
+    expectedIssuedVersion: issued.quote.currentVersion,
+  }, `invoice-quote-deliver-${suffix}`);
+  assert.equal(delivered.ok, true, delivered.code);
+  const approved = await command(approveIssuedQuote, pool, identities.homeownerId, {
     quoteId: issued.quote.id,
     expectedIssuedVersion: issued.quote.currentVersion,
   }, `invoice-quote-approve-${suffix}`);
+  assert.equal(approved.ok, true, approved.code);
+
+  const revised = await command(createDerivedDraftQuote, pool, identities.professionalId, {
+    parentQuoteId: issued.quote.id,
+    expectedIssuedVersion: issued.quote.currentVersion,
+    lineageType: "REVISED_QUOTE",
+    reasonCategory: "SCOPE_CHANGE",
+  }, `invoice-quote-revise-${suffix}`);
+  assert.equal(revised.ok, true, revised.code);
+  const revisedScoped = await command(addDraftScopeItem, pool, identities.professionalId, {
+    quoteId: revised.quote.id,
+    expectedVersion: revised.quote.currentVersion,
+    item: {
+      classification: "LABOR_SERVICE",
+      scopeSemantic: "FUTURE_WORK",
+      materialResponsibility: "NOT_APPLICABLE",
+      description: "Complete the governed synthetic repair",
+      quantity: 1,
+      unitAmountMinor,
+      source: {
+        type: "WORKSTREAM",
+        workstreamId: workstream.id,
+        version: workstream.currentVersion,
+      },
+    },
+  }, `invoice-quote-revised-scope-${suffix}`);
+  assert.equal(revisedScoped.ok, true, revisedScoped.code);
+  const revisedIssued = await command(issueQuote, pool, identities.professionalId, {
+    quoteId: revisedScoped.quote.id,
+    expectedVersion: revisedScoped.quote.currentVersion,
+  }, `invoice-quote-revised-issue-${suffix}`);
+  assert.equal(revisedIssued.ok, true, revisedIssued.code);
+  const revisedDelivered = await command(sendQuoteInMeetro, pool, identities.professionalId, {
+    quoteId: revisedIssued.quote.id,
+    expectedIssuedVersion: revisedIssued.quote.currentVersion,
+  }, `invoice-quote-revised-deliver-${suffix}`);
+  assert.equal(revisedDelivered.ok, true, revisedDelivered.code);
+  const revisedApproved = await command(approveIssuedQuote, pool, identities.homeownerId, {
+    quoteId: revisedIssued.quote.id,
+    expectedIssuedVersion: revisedIssued.quote.currentVersion,
+  }, `invoice-quote-revised-approve-${suffix}`);
+  assert.equal(revisedApproved.ok, true, revisedApproved.code);
 
   const activity = await command(createWorkActivity, pool, identities.professionalId, {
     jobId: fixture.jobId,
@@ -122,7 +191,74 @@ async function prepareCompletedJob(pool, suffix) {
     expectedVersion: 0,
   }, `invoice-job-complete-${suffix}`);
   assert.equal(completion.code, "JOB_COMPLETED");
-  return { identities, fixture, quote: issued.quote, completion };
+  return {
+    identities,
+    fixture,
+    quote: revisedIssued.quote,
+    originalQuote: issued.quote,
+    completion,
+  };
+}
+
+async function insertSatisfiedPreworkDeposit(pool, fixture, quoteId, amountMinor) {
+  const sourceResult = await pool.query(
+    `SELECT decisions.id AS customer_decision_id,
+       decisions.quote_id, decisions.issued_quote_version,
+       decisions.job_id, decisions.relationship_id,
+       decisions.decision, decisions.customer_participant_id,
+       decisions.issued_integrity_hash, decisions.decided_at,
+       versions.currency, versions.total_minor, jobs.job_request_id
+     FROM canonical_quote_customer_decisions decisions
+     INNER JOIN canonical_quote_versions versions
+       ON versions.quote_id = decisions.quote_id
+       AND versions.version = decisions.issued_quote_version
+       AND versions.job_id = decisions.job_id
+     INNER JOIN jobs ON jobs.id = decisions.job_id
+     WHERE decisions.quote_id = $1`,
+    [quoteId]
+  );
+  const source = sourceResult.rows[0];
+  const commandId = randomUUID();
+  const obligationId = randomUUID();
+  const commandKey = randomUUID();
+  await pool.query(
+    `INSERT INTO canonical_pre_work_payment_command_idempotency (
+       id, job_id, actor_type, actor_participant_id,
+       command_name, command_scope, idempotency_key, request_fingerprint
+     ) VALUES ($1, $2, 'PARTICIPANT', $3,
+       'deposit.materialize', $4, $5, $6)`,
+    [commandId, source.job_id, fixture.homeownerParticipantId,
+      `decision:${source.customer_decision_id}`, commandKey, hash(commandKey)]
+  );
+  await pool.query(
+    `INSERT INTO canonical_pre_work_deposit_obligations (
+       id, job_id, job_request_id, relationship_id,
+       quote_id, issued_quote_version, customer_decision_id,
+       customer_decision, customer_participant_id, currency,
+       quote_total_minor, deposit_rule_type,
+       deposit_percent_basis_points, deposit_fixed_minor,
+       required_minor, source_integrity_hash, effective_at,
+       created_by_participant_id, created_command_idempotency_id
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+       $11, 'PERCENT', 7500, NULL, $12, $13, $14, $15, $16)`,
+    [obligationId, source.job_id, Number(source.job_request_id),
+      Number(source.relationship_id), source.quote_id,
+      Number(source.issued_quote_version), source.customer_decision_id,
+      source.decision, source.customer_participant_id, source.currency,
+      Number(source.total_minor), amountMinor, source.issued_integrity_hash,
+      source.decided_at, source.customer_participant_id, commandId]
+  );
+  await pool.query(
+    `INSERT INTO canonical_pre_work_deposit_versions (
+       obligation_id, version, job_id, relationship_id, currency,
+       state, required_minor, applied_minor, remaining_minor,
+       recorded_by_participant_id, command_idempotency_id, integrity_hash
+     ) VALUES ($1, 1, $2, $3, $4, 'SATISFIED', $5, $5, 0, $6, $7, $8)`,
+    [obligationId, source.job_id, Number(source.relationship_id), source.currency,
+      amountMinor, fixture.homeownerParticipantId, commandId,
+      hash(`deposit-version:${obligationId}:1:SATISFIED`)]
+  );
+  return { obligationId, commandId };
 }
 
 test(
@@ -133,14 +269,47 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 47);
+      assert.equal(migrations.length, 62);
       const migrated = await runMigrationCollection(pool, migrations, targetMetadata());
-      assert.equal(migrated.applied.length, 45);
+      assert.equal(migrated.applied.length, 62);
       const replay = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(replay.applied.length, 0);
-      assert.equal(replay.skipped.length, 45);
+      assert.equal(replay.skipped.length, 62);
 
-      const { identities, fixture, quote, completion } = await prepareCompletedJob(pool, suffix);
+      const { identities, fixture, quote, originalQuote, completion } =
+        await prepareCompletedJob(pool, suffix);
+      await insertSatisfiedPreworkDeposit(pool, fixture, quote.id, 51000);
+      const readyWorkspace = await getProfessionalInvoiceWorkspace({
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+      });
+      const readyJob = readyWorkspace.workspace.readyJobs.find(
+        (candidate) => candidate.jobId === fixture.jobId
+      );
+      assert.deepEqual(readyJob.approvedAmount, { currency: "USD", totalMinor: 68000 });
+      assert.equal(readyJob.paymentsReceivedMinor, 51000);
+      assert.equal(readyJob.amountStillDueMinor, 17000);
+      assert.equal(readyJob.approvedWork.length, 1);
+      const approvedQuoteTruth = await pool.query(
+        `SELECT quotes.id, decisions.decision, versions.total_minor
+         FROM canonical_quotes quotes
+         INNER JOIN canonical_quote_customer_decisions decisions
+           ON decisions.quote_id = quotes.id
+         INNER JOIN canonical_quote_versions versions
+           ON versions.quote_id = decisions.quote_id
+           AND versions.version = decisions.issued_quote_version
+         WHERE quotes.id = ANY($1::uuid[])
+         ORDER BY quotes.created_at`,
+        [[originalQuote.id, quote.id]]
+      );
+      assert.deepEqual(approvedQuoteTruth.rows.map((row) => ({
+        id: row.id,
+        decision: row.decision,
+        totalMinor: Number(row.total_minor),
+      })), [
+        { id: originalQuote.id, decision: "APPROVED", totalMinor: 68000 },
+        { id: quote.id, decision: "APPROVED", totalMinor: 68000 },
+      ]);
       const before = await pool.query(
         `SELECT jobs.id, jobs.lifecycle_contract_version, quotes.status AS quote_status,
           decisions.decision, (SELECT count(*)::integer FROM canonical_visits WHERE job_id = $1) AS visit_count
@@ -165,12 +334,66 @@ test(
         due: { mode: "DUE_ON_RECEIPT", date: null },
         customerNotes: "Thank you for your business.",
         terms: "Payment is due on receipt.",
+        extraWork: [{
+          description: "Additional reviewed cabinet alignment",
+          quantity: 1,
+          unitAmountMinor: 7500,
+        }],
       }, createKey);
       assert.equal(created.code, "INVOICE_CREATED");
       assert.equal(created.invoice.status, "DRAFT");
-      assert.equal(created.invoice.totalMinor, 92000);
-      assert.equal(created.invoice.balanceMinor, 92000);
-      assert.equal(created.invoice.lineItems[0].lineageLabel, "ORIGINAL");
+      assert.equal(created.invoice.totalMinor, 75500);
+      assert.equal(created.invoice.paidMinor, 51000);
+      assert.equal(created.invoice.balanceMinor, 24500);
+      assert.deepEqual(created.invoice.lineItems.map((item) => item.type), [
+        "approvedWork",
+        "extraWork",
+      ]);
+      assert.equal(created.invoice.lineItems[0].lineageLabel, "REVISED");
+      assert.equal(created.invoice.lineItems[1].description, "Additional reviewed cabinet alignment");
+      assert.equal("sourceQuoteId" in created.invoice.lineItems[1], false);
+
+      const lineSources = await pool.query(
+        `SELECT source_type, source_quote_id, source_quote_version,
+           source_scope_item_id, lineage_label
+         FROM canonical_invoice_line_item_snapshots
+         WHERE invoice_id = $1
+         ORDER BY sequence`,
+        [created.invoice.invoiceId]
+      );
+      assert.deepEqual(lineSources.rows.map((row) => row.source_type), [
+        "APPROVED_QUOTE_SCOPE",
+        "EXTRA_WORK",
+      ]);
+      assert.ok(lineSources.rows[0].source_quote_id);
+      assert.equal(lineSources.rows[1].source_quote_id, null);
+      assert.equal(lineSources.rows[1].source_quote_version, null);
+      assert.equal(lineSources.rows[1].source_scope_item_id, null);
+      assert.equal(lineSources.rows[1].lineage_label, null);
+      const preIssuePaymentCount = await pool.query(
+        `SELECT count(*)::integer AS count
+         FROM canonical_invoice_payments
+         WHERE invoice_id = $1`,
+        [created.invoice.invoiceId]
+      );
+      assert.equal(preIssuePaymentCount.rows[0].count, 0);
+      await assert.rejects(
+        pool.query(
+          `INSERT INTO canonical_invoice_line_item_snapshots (
+             id, invoice_id, invoice_version, job_id, sequence, source_type,
+             source_quote_id, source_quote_version, source_scope_item_id,
+             lineage_label, description, quantity, unit_amount_minor,
+             line_total_minor, created_by_participant_id
+           ) SELECT $1, invoice_id, invoice_version, job_id, 99, 'EXTRA_WORK',
+             source_quote_id, source_quote_version, source_scope_item_id,
+             lineage_label, 'Invalid mixed source', 1, 1, 1,
+             created_by_participant_id
+           FROM canonical_invoice_line_item_snapshots
+           WHERE invoice_id = $2 AND sequence = 1`,
+          [randomUUID(), created.invoice.invoiceId]
+        ),
+        (error) => error?.code === "23514"
+      );
 
       const customerDraft = await getCustomerInvoice({
         pool,
@@ -185,7 +408,9 @@ test(
         expectedVersion: created.invoice.currentVersion,
       }, issueKey);
       assert.equal(issued.code, "INVOICE_SENT_IN_MEETRO");
-      assert.equal(issued.invoice.status, "SENT");
+      assert.equal(issued.invoice.status, "PARTIALLY_PAID");
+      assert.equal(issued.invoice.paidMinor, 51000);
+      assert.equal(issued.invoice.balanceMinor, 24500);
       assert.equal(issued.delivery.messageType, "INVOICE_SHARED");
       const issueReplay = await command(issueInvoice, pool, identities.professionalId, {
         invoiceId: created.invoice.invoiceId,
@@ -240,18 +465,18 @@ test(
       const partial = await command(recordPayment, pool, identities.professionalId, {
         invoiceId: created.invoice.invoiceId,
         expectedVersion: issued.invoice.currentVersion,
-        amountMinor: 46000,
+        amountMinor: 12000,
         method: "CHECK",
         receivedDate: new Date().toISOString().slice(0, 10),
         customerReference: "Synthetic check 1042",
       }, partialKey);
       assert.equal(partial.invoice.status, "PARTIALLY_PAID");
-      assert.equal(partial.invoice.paidMinor, 46000);
-      assert.equal(partial.invoice.balanceMinor, 46000);
+      assert.equal(partial.invoice.paidMinor, 63000);
+      assert.equal(partial.invoice.balanceMinor, 12500);
       const partialReplay = await command(recordPayment, pool, identities.professionalId, {
         invoiceId: created.invoice.invoiceId,
         expectedVersion: issued.invoice.currentVersion,
-        amountMinor: 46000,
+        amountMinor: 12000,
         method: "CHECK",
         receivedDate: new Date().toISOString().slice(0, 10),
         customerReference: "Synthetic check 1042",
@@ -262,7 +487,7 @@ test(
       const overpayment = await command(recordPayment, pool, identities.professionalId, {
         invoiceId: created.invoice.invoiceId,
         expectedVersion: partial.invoice.currentVersion,
-        amountMinor: 46001,
+        amountMinor: 12501,
         method: "CASH",
         receivedDate: new Date().toISOString().slice(0, 10),
       }, `invoice-overpayment-${suffix}`);
@@ -271,7 +496,7 @@ test(
       const paid = await command(recordPayment, pool, identities.professionalId, {
         invoiceId: created.invoice.invoiceId,
         expectedVersion: partial.invoice.currentVersion,
-        amountMinor: 46000,
+        amountMinor: 12500,
         method: "BANK_TRANSFER",
         receivedDate: new Date().toISOString().slice(0, 10),
       }, `invoice-payment-final-${suffix}`);
@@ -317,6 +542,19 @@ test(
         [fixture.jobId, quote.id]
       );
       assert.deepEqual(after.rows, before.rows);
+      const approvedQuoteTruthAfter = await pool.query(
+        `SELECT quotes.id, decisions.decision, versions.total_minor
+         FROM canonical_quotes quotes
+         INNER JOIN canonical_quote_customer_decisions decisions
+           ON decisions.quote_id = quotes.id
+         INNER JOIN canonical_quote_versions versions
+           ON versions.quote_id = decisions.quote_id
+           AND versions.version = decisions.issued_quote_version
+         WHERE quotes.id = ANY($1::uuid[])
+         ORDER BY quotes.created_at`,
+        [[originalQuote.id, quote.id]]
+      );
+      assert.deepEqual(approvedQuoteTruthAfter.rows, approvedQuoteTruth.rows);
       await assert.rejects(
         pool.query(
           `UPDATE canonical_invoice_payments SET customer_reference = 'rewritten' WHERE id = $1`,

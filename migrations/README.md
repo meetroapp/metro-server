@@ -79,12 +79,21 @@ Current inventory:
 59. `202608280001_create_pre_work_deposit_payment_authority.sql`
 60. `202608280002_create_canonical_materials_work_preparation_authority.sql`
 61. `202608280003_create_canonical_approved_work_execution_authority.sql`
+62. `202608290001_add_invoice_line_source_authority.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
 
 This inventory records migration source files, not applied database state.
 Migration creation and governed migration execution remain separate operations.
+
+`202608290001_add_invoice_line_source_authority.sql` adds database-enforced
+Invoice line source truth for exact approved Quote scope and professionally
+reviewed Extra work. Existing Invoice lines retain their exact Quote lineage
+and migrate as `APPROVED_QUOTE_SCOPE`; Extra work must carry no Quote source.
+It also permits a draft Invoice to carry an already-received pre-work payment
+without creating a duplicate Invoice payment record. It creates no Invoice,
+payment, Quote, Job completion, or History row.
 
 `202608250001_correct_evaluation_visit_authority_and_negotiation.sql` adds the
 Job-scoped `evaluation_visit` authority shape, immutable

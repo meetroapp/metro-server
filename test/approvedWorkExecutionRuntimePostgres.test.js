@@ -195,10 +195,10 @@ test(
     const suffix = randomUUID().slice(0, 8);
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 61);
+      assert.equal(migrations.length, 62);
       const migrated = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(migrated.success, true, JSON.stringify(migrated));
-      assert.equal(migrated.applied.length, 61);
+      assert.equal(migrated.applied.length, 62);
 
       const identities = await createVisitTestIdentities(pool, `${suffix}-primary`);
       const fixture = await createVisitLifecycleFixture(pool, identities, `${suffix}-primary`);
@@ -840,7 +840,7 @@ test(
         targetMetadata()
       );
       assert.equal(replayMigrations.success, true, JSON.stringify(replayMigrations));
-      assert.equal(replayMigrations.skipped.length, 61);
+      assert.equal(replayMigrations.skipped.length, 62);
     } finally {
       await pool.end();
     }

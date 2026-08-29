@@ -47,6 +47,7 @@ function invoiceRow(overrides = {}) {
 const line = {
   id: "33333333-3333-4333-8333-333333333333",
   sequence: 1,
+  source_type: "APPROVED_QUOTE_SCOPE",
   source_quote_id: "44444444-4444-4444-8444-444444444444",
   source_quote_version: 3,
   lineage_label: "ORIGINAL",
@@ -55,6 +56,41 @@ const line = {
   unit_amount_minor: 92000,
   line_total_minor: 92000,
 };
+
+test("Extra work validation accepts exact reviewed money and rejects mixed authority", () => {
+  assert.deepEqual(invoicePaymentInternals.normalizeExtraWorkItems([
+    { description: "Additional cabinet alignment", quantity: 1, unitAmountMinor: 7500 },
+  ]), {
+    items: [{
+      description: "Additional cabinet alignment",
+      quantity: 1,
+      unitAmountMinor: 7500,
+      lineTotalMinor: 7500,
+    }],
+  });
+  assert.equal(invoicePaymentInternals.normalizeExtraWorkItems([
+    {
+      description: "Impersonated approved line",
+      quantity: 1,
+      unitAmountMinor: 7500,
+      sourceQuoteId: "44444444-4444-4444-8444-444444444444",
+    },
+  ]).error, true);
+});
+
+test("Invoice line projection uses simple approved work and extra work labels", () => {
+  assert.equal(invoicePaymentInternals.lineProjection(line, "professional").type, "approvedWork");
+  const extra = invoicePaymentInternals.lineProjection({
+    ...line,
+    source_type: "EXTRA_WORK",
+    source_quote_id: null,
+    source_quote_version: null,
+    source_scope_item_id: null,
+    lineage_label: null,
+  }, "professional");
+  assert.equal(extra.type, "extraWork");
+  assert.equal("sourceQuoteId" in extra, false);
+});
 
 test("customer Invoice projection excludes command and internal lineage authority", () => {
   const projected = invoicePaymentInternals.invoiceProjection(invoiceRow(), [line], [], "customer");

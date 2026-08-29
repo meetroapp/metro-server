@@ -279,7 +279,7 @@ test(
         targetMetadata()
       );
       assert.equal(migrated.success, true, JSON.stringify(migrated));
-      assert.equal(migrated.applied.length, 61);
+      assert.equal(migrated.applied.length, 62);
 
       const identities = await createIdentities(pool, suffix);
       const legacy = await pool.query(

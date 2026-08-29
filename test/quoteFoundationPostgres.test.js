@@ -321,13 +321,13 @@ test("clean disposable PostgreSQL imports the historical empty-seed Working Quot
   const suffix = randomUUID();
   try {
     const migrations = getMigrationFiles();
-    assert.equal(migrations.length, 61);
+    assert.equal(migrations.length, 62);
     const applied = await runMigrationCollection(pool, migrations, targetMetadata(cleanDatabaseUrl));
     assert.equal(applied.success, true);
-    assert.equal(applied.applied.length, 61);
+    assert.equal(applied.applied.length, 62);
     const replayedMigrations = await runMigrationCollection(pool, migrations, targetMetadata(cleanDatabaseUrl));
     assert.equal(replayedMigrations.success, true);
-    assert.equal(replayedMigrations.skipped.length, 61);
+    assert.equal(replayedMigrations.skipped.length, 62);
 
     const identities = await createIdentities(pool, suffix);
     const fixture = await createLifecycleFixture(pool, identities, `${suffix}-seed`, "historical empty seed working Quote bridge");
@@ -812,13 +812,13 @@ test("clean disposable PostgreSQL certifies canonical $920 Draft and issued Quot
   const suffix = randomUUID();
   try {
     const migrations = getMigrationFiles();
-    assert.equal(migrations.length, 61);
+    assert.equal(migrations.length, 62);
     const applied = await runMigrationCollection(pool, migrations, targetMetadata(cleanDatabaseUrl));
     assert.equal(applied.success, true);
-    assert.equal(applied.applied.length, 61);
+    assert.equal(applied.applied.length, 62);
     const replay = await runMigrationCollection(pool, migrations, targetMetadata(cleanDatabaseUrl));
     assert.equal(replay.success, true);
-    assert.equal(replay.skipped.length, 61);
+    assert.equal(replay.skipped.length, 62);
 
     const identities = await createIdentities(pool, suffix);
     const fixture = await createLifecycleFixture(pool, identities, `${suffix}-primary`, "A/C, disposal, lighting, fan and microwave work");

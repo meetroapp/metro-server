@@ -54,6 +54,7 @@ function createInvoicePaymentHandlers({
         due: req.body?.due,
         customerNotes: req.body?.customerNotes,
         terms: req.body?.terms,
+        extraWork: req.body?.extraWork,
         idempotencyKey: req.headers?.["idempotency-key"],
       })),
     getProfessionalInvoice: handle("get_professional_invoice", ["invoice"], (req) =>

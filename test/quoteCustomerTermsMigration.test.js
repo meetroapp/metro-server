@@ -17,9 +17,9 @@ test("customer terms migration is the 51st additive migration", () => {
   const migrations = readdirSync(join(__dirname, "..", "migrations"))
     .filter((name) => /^\d+.*\.sql$/.test(name))
     .sort();
-  assert.equal(migrations.length, 61);
+  assert.equal(migrations.length, 62);
   assert.equal(
-    migrations.at(-11),
+    migrations.at(-12),
     "202608230002_add_canonical_quote_customer_terms_snapshot.sql"
   );
 });
