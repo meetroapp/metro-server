@@ -28,6 +28,8 @@ function sendWorkflowResult(res, result) {
     "finding",
     "resolutionEvent",
     "eligibility",
+    "approvedWorkStart",
+    "approvedWorkStartEvent",
   ]) {
     if (result[field] !== undefined) payload[field] = result[field];
   }
@@ -121,6 +123,12 @@ function createWorkstreamHandlers({
         activityId: req.params.activityId,
         expectedVersion: req.body?.expectedVersion,
         targetStatus: req.body?.targetStatus,
+        ...(req.body?.approvedWorkExecutionId !== undefined
+          ? { approvedWorkExecutionId: req.body.approvedWorkExecutionId }
+          : {}),
+        ...(req.body?.expectedExecutionVersion !== undefined
+          ? { expectedExecutionVersion: req.body.expectedExecutionVersion }
+          : {}),
         idempotencyKey: req.headers?.["idempotency-key"],
       })
     ),

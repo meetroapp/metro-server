@@ -8,6 +8,10 @@ const {
 const {
   hasActiveLifecycleGrant,
 } = require("../authorization/lifecycleAuthorityService");
+const {
+  evaluateApprovedWorkStartReadinessWithClient,
+  recordApprovedWorkStartWithClient,
+} = require("./approvedWorkExecutionService");
 
 const {
   databaseClient,
@@ -114,11 +118,15 @@ function validateCommand(input, fields) {
   return { actorId: actor.id, idempotencyKey: idempotency.idempotencyKey };
 }
 
-async function runTransaction(pool, action) {
+async function runTransaction(pool, action, isolationLevel = null) {
   const client = await databaseClient(pool);
   let started = false;
   try {
-    await client.query("BEGIN");
+    await client.query(
+      isolationLevel
+        ? `BEGIN TRANSACTION ISOLATION LEVEL ${isolationLevel}`
+        : "BEGIN"
+    );
     started = true;
     const outcome = await action(client);
     if (outcome.abort) {
@@ -1094,19 +1102,31 @@ async function progressWorkActivity(input = {}) {
     "activityId",
     "expectedVersion",
     "targetStatus",
+    "approvedWorkExecutionId",
+    "expectedExecutionVersion",
   ]);
   if (validated.error) return validated.error;
   const jobId = normalizedUuid(input.jobId);
   const workstreamId = normalizedUuid(input.workstreamId);
   const activityId = normalizedUuid(input.activityId);
   const expectedVersion = positiveInteger(input.expectedVersion);
+  const approvedWorkExecutionId = input.approvedWorkExecutionId == null
+    ? null
+    : normalizedUuid(input.approvedWorkExecutionId);
+  const expectedExecutionVersion = input.expectedExecutionVersion == null
+    ? null
+    : positiveInteger(input.expectedExecutionVersion);
   const targetStatus = String(input.targetStatus || "").trim().toUpperCase();
   if (
     !jobId ||
     !workstreamId ||
     !activityId ||
     !expectedVersion ||
-    !["IN_PROGRESS", "DONE", "CANCELLED"].includes(targetStatus)
+    !["IN_PROGRESS", "DONE", "CANCELLED"].includes(targetStatus) ||
+    (input.approvedWorkExecutionId != null && !approvedWorkExecutionId) ||
+    (input.expectedExecutionVersion != null && !expectedExecutionVersion) ||
+    ((approvedWorkExecutionId == null) !== (expectedExecutionVersion == null)) ||
+    (targetStatus !== "IN_PROGRESS" && approvedWorkExecutionId != null)
   ) {
     return failure(400, "INVALID_ACTIVITY_PROGRESSION", "The Activity progression is invalid.");
   }
@@ -1136,6 +1156,8 @@ async function progressWorkActivity(input = {}) {
         activityId,
         expectedVersion,
         targetStatus,
+        approvedWorkExecutionId,
+        expectedExecutionVersion,
       }),
     });
     if (idempotency.error) return { abort: idempotency.error };
@@ -1167,8 +1189,47 @@ async function progressWorkActivity(input = {}) {
       return { abort: failure(409, "INVALID_WORK_ACTIVITY_TRANSITION", "The Work Activity transition is not permitted.") };
     }
 
+    let approvedWorkStart = null;
+    if (targetStatus === "IN_PROGRESS") {
+      const classificationResult = await client.query(
+        `SELECT classification
+         FROM canonical_work_activity_execution_classifications
+         WHERE activity_id = $1 AND workstream_id = $2 AND job_id = $3
+         LIMIT 1`,
+        [activityId, workstreamId, jobId]
+      );
+      const classification = classificationResult.rows[0]?.classification || null;
+      if (classification === "EXECUTION" && !approvedWorkExecutionId) {
+        return {
+          abort: failure(
+            409,
+            "APPROVED_WORK_EXECUTION_REQUIRED",
+            "Active Approved Work execution authority is required before Work can start."
+          ),
+        };
+      }
+      if (approvedWorkExecutionId) {
+        approvedWorkStart = await evaluateApprovedWorkStartReadinessWithClient({
+          client,
+          actorUserId: validated.actorId,
+          jobId,
+          executionId: approvedWorkExecutionId,
+          expectedExecutionVersion,
+          sourceType: "EXECUTION_ACTIVITY",
+          workstreamId,
+          activityId,
+          expectedActivityVersion: expectedVersion,
+          logger,
+        });
+        if (approvedWorkStart.error) return { abort: approvedWorkStart.error };
+      }
+    }
+
     const nextVersion = expectedVersion + 1;
     const performedAt = targetStatus === "DONE" ? new Date() : null;
+    const startedAt = targetStatus === "IN_PROGRESS" && approvedWorkStart
+      ? new Date()
+      : null;
     await client.query(
       `
       INSERT INTO canonical_work_activity_versions (
@@ -1207,11 +1268,34 @@ async function progressWorkActivity(input = {}) {
         }),
       ]
     );
+    let approvedWorkStartEvent = null;
+    if (approvedWorkStart) {
+      const recorded = await recordApprovedWorkStartWithClient({
+        client,
+        readiness: approvedWorkStart,
+        sourceType: "EXECUTION_ACTIVITY",
+        sourceId: activityId,
+        sourceVersion: nextVersion,
+        workstreamId,
+        startedAt,
+        idempotencyKey: validated.idempotencyKey,
+      });
+      if (recorded.error) return { abort: recorded.error };
+      approvedWorkStartEvent = recorded.startEvent;
+    }
     await invokeFailure(input.failureInjector, "after_write");
     const activity = activityProjection(
       await loadActivity(client, jobId, workstreamId, activityId)
     );
-    const result = commandResult("WORK_ACTIVITY_PROGRESSED", 200, "activity", activity);
+    const result = {
+      ...commandResult("WORK_ACTIVITY_PROGRESSED", 200, "activity", activity),
+      ...(approvedWorkStart
+        ? {
+          approvedWorkStart: approvedWorkStart.projection,
+          approvedWorkStartEvent,
+        }
+        : {}),
+    };
     await completeCommand(client, idempotency.reservation.id, result);
     return {
       result,
@@ -1227,7 +1311,7 @@ async function progressWorkActivity(input = {}) {
         temporaryIntervention: current.temporary_intervention,
       }),
     };
-  });
+  }, targetStatus === "IN_PROGRESS" ? "SERIALIZABLE" : null);
 }
 
 async function listWorkActivities(input = {}) {

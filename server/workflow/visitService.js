@@ -12,6 +12,10 @@ const {
   evaluateApprovedWorkDepositGateWithClient,
   schedulingGateFailure,
 } = require("../finance/preWorkDepositService");
+const {
+  evaluateApprovedWorkStartReadinessWithClient,
+  recordApprovedWorkStartWithClient,
+} = require("./approvedWorkExecutionService");
 
 const {
   databaseClient,
@@ -299,11 +303,15 @@ function integrityHash(kind, value) {
     .digest("hex");
 }
 
-async function runTransaction(pool, action) {
+async function runTransaction(pool, action, isolationLevel = null) {
   const client = await databaseClient(pool);
   let started = false;
   try {
-    await client.query("BEGIN");
+    await client.query(
+      isolationLevel
+        ? `BEGIN TRANSACTION ISOLATION LEVEL ${isolationLevel}`
+        : "BEGIN"
+    );
     started = true;
     const outcome = await action(client);
     if (outcome.abort) {
@@ -1702,6 +1710,8 @@ async function runVersionCommand({
   schedule = null,
   reason = null,
   acknowledgeScheduleVariance = null,
+  approvedWorkExecutionId = null,
+  expectedExecutionVersion = null,
   resultCode,
   requiredRole,
 }) {
@@ -1744,7 +1754,6 @@ async function runVersionCommand({
         VISIT_COMMANDS.CONFIRM,
         VISIT_COMMANDS.CHANGE_REQUEST,
         VISIT_COMMANDS.RESCHEDULE,
-        VISIT_COMMANDS.START,
       ].includes(commandName)
     ) {
       const depositGate = await evaluateApprovedWorkDepositGateWithClient({
@@ -1773,7 +1782,11 @@ async function runVersionCommand({
         schedule,
         reason,
         ...(commandName === VISIT_COMMANDS.START
-          ? { acknowledgeScheduleVariance }
+          ? {
+            acknowledgeScheduleVariance,
+            approvedWorkExecutionId,
+            expectedExecutionVersion,
+          }
           : {}),
       }),
     });
@@ -1804,6 +1817,28 @@ async function runVersionCommand({
           "INVALID_VISIT_TRANSITION",
           "The Visit transition is not permitted."
         ),
+      };
+    }
+    if (
+      commandName === VISIT_COMMANDS.START &&
+      current.purpose === "APPROVED_WORK" &&
+      (!approvedWorkExecutionId || !expectedExecutionVersion)
+    ) {
+      return {
+        abort: failure(
+          409,
+          "APPROVED_WORK_EXECUTION_REQUIRED",
+          "Active Approved Work execution authority is required before Work can start."
+        ),
+      };
+    }
+    if (
+      commandName === VISIT_COMMANDS.START &&
+      current.purpose !== "APPROVED_WORK" &&
+      (approvedWorkExecutionId || expectedExecutionVersion)
+    ) {
+      return {
+        abort: failure(400, "INVALID_VISIT_START", "The Visit start command is invalid."),
       };
     }
     if (
@@ -1882,6 +1917,20 @@ async function runVersionCommand({
         ),
       };
     }
+    let approvedWorkStart = null;
+    if (commandName === VISIT_COMMANDS.START && current.purpose === "APPROVED_WORK") {
+      approvedWorkStart = await evaluateApprovedWorkStartReadinessWithClient({
+        client,
+        actorUserId: validated.actorId,
+        jobId,
+        executionId: approvedWorkExecutionId,
+        expectedExecutionVersion,
+        sourceType: "APPROVED_WORK_VISIT",
+        approvedCustomerDecisionId: current.approved_quote_decision_id,
+        logger,
+      });
+      if (approvedWorkStart.error) return { abort: approvedWorkStart.error };
+    }
     const nextVersion = expectedVersion + 1;
     const resultingSchedule = schedule || currentSchedule(current);
     const cancelledAt = targetState === "CANCELLED" ? now : null;
@@ -1916,6 +1965,20 @@ async function runVersionCommand({
       participantId,
       commandId: idempotency.reservation.id,
     });
+    let approvedWorkStartEvent = null;
+    if (approvedWorkStart) {
+      const recorded = await recordApprovedWorkStartWithClient({
+        client,
+        readiness: approvedWorkStart,
+        sourceType: "APPROVED_WORK_VISIT",
+        sourceId: visitId,
+        sourceVersion: nextVersion,
+        startedAt: now,
+        idempotencyKey: validated.idempotencyKey,
+      });
+      if (recorded.error) return { abort: recorded.error };
+      approvedWorkStartEvent = recorded.startEvent;
+    }
     if (
       commandName === VISIT_COMMANDS.COMPLETE &&
       current.purpose === "EVALUATION"
@@ -1935,7 +1998,13 @@ async function runVersionCommand({
     const result = commandResult(
       resultCode,
       200,
-      visitProjection(row, authorized.context, now)
+      visitProjection(row, authorized.context, now),
+      approvedWorkStart
+        ? {
+          approvedWorkStart: approvedWorkStart.projection,
+          approvedWorkStartEvent,
+        }
+        : {}
     );
     await completeCommand(client, idempotency.reservation.id, result);
     return {
@@ -1950,7 +2019,7 @@ async function runVersionCommand({
         state: targetState,
       }),
     };
-  });
+  }, commandName === VISIT_COMMANDS.START ? "SERIALIZABLE" : null);
 }
 
 function validatedVersionCommand(input, fields, invalidCode) {
@@ -2240,13 +2309,30 @@ async function cancelVisit(input = {}) {
 async function startVisit(input = {}) {
   const command = validatedVersionCommand(
     input,
-    ["acknowledgeScheduleVariance"],
+    [
+      "acknowledgeScheduleVariance",
+      "approvedWorkExecutionId",
+      "expectedExecutionVersion",
+    ],
     "INVALID_VISIT_START"
   );
   if (command.error) return command.error;
   if (
     input.acknowledgeScheduleVariance != null &&
     typeof input.acknowledgeScheduleVariance !== "boolean"
+  ) {
+    return failure(400, "INVALID_VISIT_START", "The Visit start command is invalid.");
+  }
+  const approvedWorkExecutionId = input.approvedWorkExecutionId == null
+    ? null
+    : normalizedUuid(input.approvedWorkExecutionId);
+  const expectedExecutionVersion = input.expectedExecutionVersion == null
+    ? null
+    : positiveInteger(input.expectedExecutionVersion);
+  if (
+    (input.approvedWorkExecutionId != null && !approvedWorkExecutionId) ||
+    (input.expectedExecutionVersion != null && !expectedExecutionVersion) ||
+    ((approvedWorkExecutionId == null) !== (expectedExecutionVersion == null))
   ) {
     return failure(400, "INVALID_VISIT_START", "The Visit start command is invalid.");
   }
@@ -2259,6 +2345,8 @@ async function startVisit(input = {}) {
     targetState: "STARTED",
     eventType: "VISIT_STARTED",
     acknowledgeScheduleVariance: input.acknowledgeScheduleVariance === true,
+    approvedWorkExecutionId,
+    expectedExecutionVersion,
     resultCode: "VISIT_STARTED",
     requiredRole: "PROFESSIONAL",
   });

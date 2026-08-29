@@ -14,7 +14,14 @@ function sendVisitResult(res, result) {
     success: true,
     code: result.code,
   };
-  for (const field of ["visit", "visits", "event", "actions"]) {
+  for (const field of [
+    "visit",
+    "visits",
+    "event",
+    "actions",
+    "approvedWorkStart",
+    "approvedWorkStartEvent",
+  ]) {
     if (result[field] !== undefined) payload[field] = result[field];
   }
   if (result.replayed) payload.replayed = true;
@@ -123,6 +130,12 @@ function createVisitHandlers({
         ...versionCommand(req),
         acknowledgeScheduleVariance:
           req.body?.acknowledgeScheduleVariance,
+        ...(req.body?.approvedWorkExecutionId !== undefined
+          ? { approvedWorkExecutionId: req.body.approvedWorkExecutionId }
+          : {}),
+        ...(req.body?.expectedExecutionVersion !== undefined
+          ? { expectedExecutionVersion: req.body.expectedExecutionVersion }
+          : {}),
       })
     ),
     completeVisit: handle("complete_visit", (req) =>
