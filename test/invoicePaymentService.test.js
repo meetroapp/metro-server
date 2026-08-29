@@ -127,6 +127,19 @@ test("Invoice creation resolves governed Job and approved-Quote links before imm
   assert.doesNotMatch(createSource, /\bcustomerName\b|email_normalized|phone_normalized/);
 });
 
+test("Invoice readiness accepts only governed Complete Work evidence, never a raw execution close", () => {
+  const source = readFileSync(
+    join(__dirname, "..", "server", "finance", "invoicePaymentService.js"),
+    "utf8"
+  );
+  assert.match(source, /work_completion_execution_id/);
+  assert.match(source, /command_scope\s*=\s*\n\s*'execution:' \|\| executions\.id::text \|\| ':complete-work'/);
+  assert.match(source, /commands\.result_reference ->> 'code' = 'APPROVED_WORK_COMPLETED'/);
+  assert.match(source, /invoiceCompletionVersion/);
+  assert.match(source, /WITH completion_evidence AS/);
+  assert.match(source, /completionVersion: Number\(row\.completion_version\)/);
+});
+
 test("Invoice Conversation snapshot is customer-safe and exact-identity bound", () => {
   const invoice = invoicePaymentInternals.invoiceProjection(invoiceRow(), [line], [], "professional");
   const snapshot = invoicePaymentInternals.invoiceMessageSnapshot(invoice);

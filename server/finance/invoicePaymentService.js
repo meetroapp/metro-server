@@ -156,6 +156,9 @@ async function loadProfessionalJobContext(client, jobId, actorId, { lock = false
       completions.id AS completion_id,
       completions.version AS completion_version,
       completions.completed_at,
+      work_completion.execution_id AS work_completion_execution_id,
+      work_completion.execution_version AS work_completion_version,
+      work_completion.completed_at AS work_completed_at,
       posts.title AS job_title, posts.category AS job_service,
       homeowner.username AS customer_name,
       COALESCE(NULLIF(contractor_profiles.business_name, ''), professional_user.username)
@@ -194,6 +197,29 @@ async function loadProfessionalJobContext(client, jobId, actorId, { lock = false
     LEFT JOIN contractor_profiles ON contractor_profiles.user_id = relationships.professional_user_id
     LEFT JOIN conversations ON conversations.relationship_id = relationships.id
     LEFT JOIN canonical_job_completion_records completions ON completions.job_id = jobs.id
+    LEFT JOIN LATERAL (
+      SELECT executions.id AS execution_id,
+        current.version AS execution_version,
+        current.created_at AS completed_at
+      FROM canonical_approved_work_executions executions
+      INNER JOIN LATERAL (
+        SELECT version, state, command_idempotency_id, created_at
+        FROM canonical_approved_work_execution_versions versions
+        WHERE versions.execution_id = executions.id
+          AND versions.job_id = executions.job_id
+        ORDER BY version DESC LIMIT 1
+      ) current ON TRUE
+      INNER JOIN canonical_approved_work_execution_command_idempotency commands
+        ON commands.id = current.command_idempotency_id
+        AND commands.job_id = executions.job_id
+        AND commands.command_scope =
+          'execution:' || executions.id::text || ':complete-work'
+        AND commands.completed_at IS NOT NULL
+        AND commands.result_reference ->> 'code' = 'APPROVED_WORK_COMPLETED'
+      WHERE executions.job_id = jobs.id AND current.state = 'CLOSED'
+      ORDER BY current.created_at DESC, executions.id DESC
+      LIMIT 1
+    ) work_completion ON TRUE
     WHERE jobs.id = $1 AND jobs.lifecycle_contract_version = 2
     LIMIT 1
     ${lock ? "FOR UPDATE OF jobs, relationships" : ""}`,
@@ -583,7 +609,12 @@ async function createInvoice(input = {}) {
     });
     if (reserved.error) return { abort: reserved.error };
     if (reserved.replay) return reserved.replay;
-    if (!context.completion_id || Number(context.completion_version) !== expectedCompletionVersion) {
+    const invoiceCompletionVersion = context.completion_id
+      ? Number(context.completion_version)
+      : context.work_completion_execution_id
+        ? Number(context.work_completion_version)
+        : null;
+    if (!invoiceCompletionVersion || invoiceCompletionVersion !== expectedCompletionVersion) {
       return { abort: failure(409, "JOB_NOT_READY_TO_INVOICE", "The completed Job is not ready to invoice.") };
     }
     const existing = await client.query(
@@ -1048,12 +1079,42 @@ async function getProfessionalInvoiceWorkspace(input = {}) {
   if (!limit) return failure(400, "INVALID_INVOICE_WORKSPACE_LIMIT", "The Invoice workspace limit is invalid.");
   return runTransaction(input.pool, "REPEATABLE READ READ ONLY", async (client) => {
     const ready = await client.query(
-      `SELECT jobs.id AS job_id, jobs.job_request_id AS request_id,
+      `WITH completion_evidence AS (
+         SELECT completions.job_id, completions.version AS completion_version,
+           completions.completed_at, 1 AS precedence
+         FROM canonical_job_completion_records completions
+         UNION ALL
+         SELECT executions.job_id, current.version AS completion_version,
+           current.created_at AS completed_at, 2 AS precedence
+         FROM canonical_approved_work_executions executions
+         INNER JOIN LATERAL (
+           SELECT version, state, command_idempotency_id, created_at
+           FROM canonical_approved_work_execution_versions versions
+           WHERE versions.execution_id = executions.id
+             AND versions.job_id = executions.job_id
+           ORDER BY version DESC LIMIT 1
+         ) current ON TRUE
+         INNER JOIN canonical_approved_work_execution_command_idempotency commands
+           ON commands.id = current.command_idempotency_id
+           AND commands.job_id = executions.job_id
+           AND commands.command_scope =
+             'execution:' || executions.id::text || ':complete-work'
+           AND commands.completed_at IS NOT NULL
+           AND commands.result_reference ->> 'code' = 'APPROVED_WORK_COMPLETED'
+         WHERE current.state = 'CLOSED'
+       ), current_completions AS (
+         SELECT DISTINCT ON (job_id)
+           job_id, completion_version, completed_at
+         FROM completion_evidence
+         ORDER BY job_id, precedence ASC, completed_at DESC
+       )
+       SELECT jobs.id AS job_id, jobs.job_request_id AS request_id,
         jobs.source_request_relationship_id AS relationship_id,
-        completions.completed_at, posts.title AS service_title,
+        completions.completion_version, completions.completed_at,
+        posts.title AS service_title,
         homeowner.username AS customer_name,
         quote_totals.currency, quote_totals.total_minor
-      FROM canonical_job_completion_records completions
+      FROM current_completions completions
       INNER JOIN jobs ON jobs.id = completions.job_id
       INNER JOIN posts ON posts.id = jobs.job_request_id
       INNER JOIN request_relationships relationships
@@ -1157,7 +1218,7 @@ async function getProfessionalInvoiceWorkspace(input = {}) {
           customerName: row.customer_name || "Customer",
           serviceTitle: row.service_title || "Job",
           completedAt: iso(row.completed_at),
-          completionVersion: 1,
+          completionVersion: Number(row.completion_version),
           approvedAmount: row.currency && row.total_minor != null
             ? { currency: row.currency, totalMinor: Number(row.total_minor) }
             : null,

@@ -305,8 +305,8 @@ test(
         "BIND_WORKSTREAM",
         "CLASSIFY_ACTIVITY",
         "RECONCILE_LEGACY",
+        "COMPLETE_WORK",
         "SUPERSEDE",
-        "CLOSE",
       ]);
       const replayed = await command(
         materializeApprovedWorkExecution,

@@ -52,6 +52,7 @@ const STAGE_DEFINITIONS = Object.freeze({
   WORK_BLOCKED: "Work needs attention",
   WORK_REVIEW_NEEDED: "Work status needs review",
   WORKSTREAMS_COMPLETE_PENDING_JOB_COMPLETION: "Ready for completion review",
+  WORK_COMPLETED: "Work Completed",
   JOB_COMPLETED: "Work Completed",
 });
 
@@ -173,6 +174,7 @@ const ACTION_DEFINITIONS = Object.freeze({
 
 const DERIVATION_PRECEDENCE = Object.freeze([
   "JOB_COMPLETION",
+  "APPROVED_WORK_COMPLETION",
   "BLOCKED_WORK",
   "ACTIVE_WORK",
   "READY_WORK",
@@ -313,6 +315,7 @@ function baseAvailableActions(state, capabilities, stage) {
   if (stage === "JOB_COMPLETED" && capabilities.has("workstream.read")) {
     actions.push("VIEW_JOB_HISTORY");
   }
+  if (stage === "WORK_COMPLETED" && state.invoice) actions.push("VIEW_INVOICE");
   if (stage === "JOB_COMPLETED" && state.invoice) actions.push("VIEW_INVOICE");
   return [...new Set(actions)].map(availableAction);
 }
@@ -349,6 +352,8 @@ function result({
       workstreamVersion: currentVersion(state.workstreams),
       activityVersion: currentVersion(state.activities),
       obligationVersion: currentVersion(state.obligations),
+      approvedWorkExecutionVersion:
+        Number(state.approvedWorkCompletion?.execution_version) || 0,
       depositVersion: Number(state.deposit?.latestVersion) || 0,
       invoiceVersion: Number(state.invoice?.version) || 0,
       evaluationCount: state.evaluation ? 1 : 0,
@@ -398,6 +403,28 @@ function deriveCanonicalLiveJob(state = {}, { derivedAt = new Date().toISOString
         "JOB_COMPLETION_RECORDED",
         state.invoice ? `INVOICE_${state.invoice.status}` : "INVOICE_NOT_CREATED",
         "FINANCIAL_SETTLEMENT_REMAINS_SEPARATE",
+      ],
+      state: scopedState,
+      derivedAt,
+    });
+  }
+
+  if (state.approvedWorkCompletion?.state === "CLOSED") {
+    const invoiceAction = {
+      DRAFT: "REVIEW_DRAFT_INVOICE",
+      SENT: "WAIT_FOR_PAYMENT",
+      PARTIALLY_PAID: "REVIEW_BALANCE_DUE",
+      PAID: "REVIEW_PAID_INVOICE",
+    }[state.invoice?.status] || "READY_TO_INVOICE";
+    return result({
+      stage: "WORK_COMPLETED",
+      responsibility: "PROFESSIONAL",
+      action: invoiceAction,
+      reasons: [
+        "APPROVED_WORK_EXECUTION_COMPLETED",
+        state.invoice ? `INVOICE_${state.invoice.status}` : "INVOICE_NOT_CREATED",
+        "FINANCIAL_SETTLEMENT_REMAINS_SEPARATE",
+        "JOB_CLOSURE_REMAINS_SEPARATE",
       ],
       state: scopedState,
       derivedAt,
@@ -1187,6 +1214,35 @@ async function loadCanonicalState(pool, context) {
         ]
       ),
       () => pool.query(
+        `/* live_job:approved_work_completion */
+         SELECT executions.id AS execution_id,
+           executions.quote_id, executions.issued_quote_version,
+           executions.approved_customer_decision_id,
+           current.version AS execution_version,
+           current.state, current.created_at AS completed_at,
+           commands.id AS command_id
+         FROM canonical_approved_work_executions executions
+         INNER JOIN LATERAL (
+           SELECT version, state, command_idempotency_id, created_at
+           FROM canonical_approved_work_execution_versions versions
+           WHERE versions.execution_id = executions.id
+             AND versions.job_id = executions.job_id
+           ORDER BY version DESC LIMIT 1
+         ) current ON TRUE
+         INNER JOIN canonical_approved_work_execution_command_idempotency commands
+           ON commands.id = current.command_idempotency_id
+           AND commands.job_id = executions.job_id
+           AND commands.command_scope =
+             'execution:' || executions.id::text || ':complete-work'
+           AND commands.completed_at IS NOT NULL
+           AND commands.result_reference ->> 'code' = 'APPROVED_WORK_COMPLETED'
+         WHERE executions.job_id = $1
+           AND current.state = 'CLOSED'
+         ORDER BY current.created_at DESC, executions.id DESC
+         LIMIT 1`,
+        [jobId]
+      ),
+      () => pool.query(
         `/* live_job:completion */
          SELECT id, version, status, completed_at
          FROM canonical_job_completion_records
@@ -1222,6 +1278,7 @@ async function loadCanonicalState(pool, context) {
     activities,
     obligations,
     approvedWorkScheduling,
+    approvedWorkCompletion,
     completion,
     invoice,
   ] = results;
@@ -1247,6 +1304,7 @@ async function loadCanonicalState(pool, context) {
     workstreams: workstreams.rows,
     activities: activities.rows,
     obligations: obligations.rows,
+    approvedWorkCompletion: approvedWorkCompletion.rows[0] || null,
     completion: completion.rows[0] || null,
     invoice: invoice.rows[0] || null,
     approvedWorkScheduling: quoteRows

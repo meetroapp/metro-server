@@ -16,6 +16,7 @@ function sendApprovedWorkExecutionResult(res, result) {
     "executions",
     "binding",
     "classification",
+    "completion",
     "reconciliation",
   ]) {
     if (result[field] !== undefined) payload[field] = result[field];
@@ -120,6 +121,15 @@ function createApprovedWorkExecutionHandlers({
         idempotencyKey: req.headers?.["idempotency-key"],
       })
     ),
+    completeWork: handle("complete_approved_work", (req) =>
+      service.completeApprovedWork({
+        ...execution(req),
+        expectedExecutionVersion: req.body?.expectedExecutionVersion,
+        expectedWorkstreams: req.body?.expectedWorkstreams,
+        expectedActivities: req.body?.expectedActivities,
+        idempotencyKey: req.headers?.["idempotency-key"],
+      })
+    ),
   };
 }
 
@@ -158,6 +168,7 @@ function registerApprovedWorkExecutionRoutes({
   );
   app.post(`${execution}/legacy-reconciliation`, authMiddleware, handlers.reconcileLegacy);
   app.post(`${execution}/supersede`, authMiddleware, handlers.supersede);
+  app.post(`${execution}/complete-work`, authMiddleware, handlers.completeWork);
   app.post(`${execution}/close`, authMiddleware, handlers.close);
   return handlers;
 }

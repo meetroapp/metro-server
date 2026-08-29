@@ -41,6 +41,7 @@ test("routes register the bounded Job-scoped Approved Work execution family", ()
     "POST /jobs/:jobId/approved-work-executions/:executionId/activities/:activityId/classification",
     "POST /jobs/:jobId/approved-work-executions/:executionId/legacy-reconciliation",
     "POST /jobs/:jobId/approved-work-executions/:executionId/supersede",
+    "POST /jobs/:jobId/approved-work-executions/:executionId/complete-work",
     "POST /jobs/:jobId/approved-work-executions/:executionId/close",
   ]);
   assert.ok(routes.every((route) => route.handlers[0] === auth));
@@ -85,6 +86,42 @@ test("handlers map only bounded client fields and Idempotency-Key", async () => 
   assert.equal(input.idempotencyKey, "classification-1");
   assert.equal("executionState" in input, false);
   assert.equal("startedAt" in input, false);
+
+  req.headers["idempotency-key"] = "complete-work-1";
+  req.body = {
+    expectedExecutionVersion: 3,
+    expectedWorkstreams: [{
+      workstreamId: "00000000-0000-4000-8000-000000000004",
+      expectedVersion: 2,
+    }],
+    expectedActivities: [{
+      activityId: "00000000-0000-4000-8000-000000000003",
+      expectedVersion: 4,
+    }],
+    finalPaymentMinor: 17000,
+    closeJob: true,
+  };
+  await handlers.completeWork(req, response());
+  assert.equal(calls[1].operation, "completeApprovedWork");
+  assert.equal(typeof calls[1].input.pool.query, "function");
+  assert.deepEqual({ ...calls[1].input, pool: undefined }, {
+    pool: undefined,
+    authenticatedActor: req.user,
+    jobId: req.params.jobId,
+    executionId: req.params.executionId,
+    expectedExecutionVersion: 3,
+    expectedWorkstreams: [{
+      workstreamId: "00000000-0000-4000-8000-000000000004",
+      expectedVersion: 2,
+    }],
+    expectedActivities: [{
+      activityId: "00000000-0000-4000-8000-000000000003",
+      expectedVersion: 4,
+    }],
+    idempotencyKey: "complete-work-1",
+  });
+  assert.equal("finalPaymentMinor" in calls[1].input, false);
+  assert.equal("closeJob" in calls[1].input, false);
 });
 
 test("GET responses are private/no-store and create no write input", async () => {
@@ -127,3 +164,22 @@ test("public sender preserves bounded failures and strips undefined fields", () 
   });
 });
 
+test("public sender returns the bounded Work completion projection", () => {
+  const res = response();
+  sendApprovedWorkExecutionResult(res, {
+    ok: true,
+    status: 200,
+    code: "APPROVED_WORK_COMPLETED",
+    completion: {
+      state: "WORK_COMPLETED",
+      executionId: "execution",
+      nextAction: { code: "READY_TO_INVOICE" },
+    },
+  });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.payload.completion, {
+    state: "WORK_COMPLETED",
+    executionId: "execution",
+    nextAction: { code: "READY_TO_INVOICE" },
+  });
+});

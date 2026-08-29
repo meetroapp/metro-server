@@ -930,8 +930,15 @@ async function projectExecutionWithClient(client, execution, context, { detail =
   );
   const actions = [];
   if (execution.current_state === "ACTIVE") {
-    if (canExecute) actions.push("BIND_WORKSTREAM", "CLASSIFY_ACTIVITY", "RECONCILE_LEGACY");
-    if (canManage) actions.push("SUPERSEDE", "CLOSE");
+    if (canExecute) {
+      actions.push(
+        "BIND_WORKSTREAM",
+        "CLASSIFY_ACTIVITY",
+        "RECONCILE_LEGACY",
+        "COMPLETE_WORK"
+      );
+    }
+    if (canManage) actions.push("SUPERSEDE");
   }
   projection.safeNextActions = actions;
   if (!detail) return projection;
@@ -1556,6 +1563,480 @@ async function closeApprovedWorkExecution(input = {}) {
   return transitionExecution(input, "CLOSED");
 }
 
+function normalizeExpectedVersions(value, identityField, { allowEmpty = false } = {}) {
+  if (!Array.isArray(value) || (!allowEmpty && value.length === 0) || value.length > 500) {
+    return null;
+  }
+  const normalized = value.map((entry) => {
+    if (!isPlainObject(entry) || Object.keys(entry).some((key) => ![
+      identityField,
+      "expectedVersion",
+    ].includes(key))) return null;
+    const id = normalizedUuid(entry[identityField]);
+    const expectedVersion = positiveInteger(entry.expectedVersion);
+    return id && expectedVersion ? { id, expectedVersion } : null;
+  });
+  if (normalized.some((entry) => !entry) ||
+    new Set(normalized.map((entry) => entry.id)).size !== normalized.length) {
+    return null;
+  }
+  return normalized.sort((left, right) => left.id.localeCompare(right.id));
+}
+
+function expectedVersionsMatch(expected, rows) {
+  if (expected.length !== rows.length) return false;
+  const actual = new Map(rows.map((row) => [row.id, Number(row.current_version)]));
+  return expected.every((entry) => actual.get(entry.id) === entry.expectedVersion);
+}
+
+function workflowIntegrityHash(type, value) {
+  return fingerprint({ integrityVersion: 1, type, ...value });
+}
+
+async function loadCompletionWorkstreams(client, execution, { lock = false } = {}) {
+  const result = await client.query(
+    `SELECT workstreams.id, workstreams.job_id, workstreams.sequence,
+      versions.version AS current_version, versions.title,
+      versions.state, versions.created_at AS version_created_at
+     FROM canonical_approved_work_execution_workstreams bindings
+     INNER JOIN canonical_workstreams workstreams
+       ON workstreams.id = bindings.workstream_id
+       AND workstreams.job_id = bindings.job_id
+     INNER JOIN LATERAL (
+       SELECT version, title, state, created_at
+       FROM canonical_workstream_versions
+       WHERE workstream_id = workstreams.id AND job_id = workstreams.job_id
+       ORDER BY version DESC LIMIT 1
+     ) versions ON TRUE
+     WHERE bindings.execution_id = $1 AND bindings.job_id = $2
+     ORDER BY workstreams.sequence, workstreams.id
+     ${lock ? "FOR UPDATE OF workstreams" : ""}`,
+    [execution.id, execution.job_id]
+  );
+  return result.rows;
+}
+
+async function loadCompletionActivities(client, execution, { lock = false } = {}) {
+  const result = await client.query(
+    `SELECT activities.id, activities.workstream_id, activities.job_id,
+      activities.actor_participant_id,
+      classifications.classified_activity_version,
+      versions.version AS current_version, versions.activity_type,
+      versions.statement, versions.status,
+      versions.temporary_intervention, versions.temporary_details,
+      versions.customer_visible, versions.performed_at,
+      versions.created_at AS version_created_at
+     FROM canonical_work_activity_execution_classifications classifications
+     INNER JOIN canonical_approved_work_execution_workstreams bindings
+       ON bindings.execution_id = classifications.execution_id
+       AND bindings.workstream_id = classifications.workstream_id
+       AND bindings.job_id = classifications.job_id
+     INNER JOIN canonical_work_activities activities
+       ON activities.id = classifications.activity_id
+       AND activities.workstream_id = classifications.workstream_id
+       AND activities.job_id = classifications.job_id
+     INNER JOIN LATERAL (
+       SELECT version, activity_type, statement, status,
+         temporary_intervention, temporary_details, customer_visible,
+         performed_at, created_at
+       FROM canonical_work_activity_versions
+       WHERE activity_id = activities.id
+         AND workstream_id = activities.workstream_id
+         AND job_id = activities.job_id
+       ORDER BY version DESC LIMIT 1
+     ) versions ON TRUE
+     WHERE classifications.execution_id = $1
+       AND classifications.job_id = $2
+       AND classifications.classification = 'EXECUTION'
+     ORDER BY activities.workstream_id, activities.id
+     ${lock ? "FOR UPDATE OF activities" : ""}`,
+    [execution.id, execution.job_id]
+  );
+  return result.rows;
+}
+
+async function loadCompletionBlockers(client, jobId, workstreamIds) {
+  const result = await client.query(
+    `WITH latest_findings AS (
+       SELECT DISTINCT ON (versions.finding_id)
+         versions.finding_id, versions.confirmation_state,
+         versions.resolution_state
+       FROM canonical_finding_workstream_assignments assignments
+       INNER JOIN canonical_evaluation_finding_versions versions
+         ON versions.finding_id = assignments.finding_id
+         AND versions.job_id = assignments.job_id
+       WHERE assignments.job_id = $1
+         AND assignments.workstream_id = ANY($2::uuid[])
+       ORDER BY versions.finding_id, versions.version DESC
+     ), latest_obligations AS (
+       SELECT DISTINCT ON (versions.obligation_id)
+         versions.obligation_id, versions.status
+       FROM canonical_workstream_obligations obligations
+       INNER JOIN canonical_workstream_obligation_versions versions
+         ON versions.obligation_id = obligations.id
+         AND versions.workstream_id = obligations.workstream_id
+         AND versions.job_id = obligations.job_id
+       WHERE obligations.job_id = $1
+         AND obligations.workstream_id = ANY($2::uuid[])
+       ORDER BY versions.obligation_id, versions.version DESC
+     )
+     SELECT
+       (SELECT count(*) FROM latest_findings
+         WHERE confirmation_state = 'CONFIRMED'
+           AND resolution_state = 'OPEN')::integer AS open_findings,
+       (SELECT count(*) FROM latest_findings
+         WHERE confirmation_state = 'CONFIRMED'
+           AND resolution_state = 'PARTIALLY_RESOLVED')::integer AS partial_findings,
+       (SELECT count(*) FROM latest_obligations
+         WHERE status = 'OPEN')::integer AS open_obligations`,
+    [jobId, workstreamIds]
+  );
+  const row = result.rows[0] || {};
+  return {
+    openFindings: Number(row.open_findings || 0),
+    partialFindings: Number(row.partial_findings || 0),
+    openObligations: Number(row.open_obligations || 0),
+  };
+}
+
+function completionBlockerReasons(workstreams, blockers) {
+  const reasons = [];
+  if (workstreams.some((row) => row.state === "BLOCKED")) {
+    reasons.push("BLOCKED_WORKSTREAM");
+  }
+  if (workstreams.some((row) => !["OPEN", "ACTIVE", "COMPLETED"].includes(row.state))) {
+    reasons.push("INELIGIBLE_WORKSTREAM_STATE");
+  }
+  if (blockers.openFindings > 0) reasons.push("OPEN_FINDING");
+  if (blockers.partialFindings > 0) reasons.push("PARTIAL_FINDING");
+  if (blockers.openObligations > 0) reasons.push("OPEN_OBLIGATION");
+  return reasons;
+}
+
+async function completeApprovedWork(input = {}) {
+  const validated = validateInput(
+    input,
+    ["jobId", "executionId", "expectedExecutionVersion",
+      "expectedWorkstreams", "expectedActivities"],
+    { command: true }
+  );
+  if (validated.error) return validated.error;
+  const executionId = normalizedUuid(input.executionId);
+  const expectedExecutionVersion = positiveInteger(input.expectedExecutionVersion);
+  const expectedWorkstreams = normalizeExpectedVersions(
+    input.expectedWorkstreams,
+    "workstreamId"
+  );
+  const expectedActivities = normalizeExpectedVersions(
+    input.expectedActivities,
+    "activityId",
+    { allowEmpty: true }
+  );
+  if (!executionId || !expectedExecutionVersion || !expectedWorkstreams || !expectedActivities) {
+    return failure(
+      400,
+      "INVALID_APPROVED_WORK_COMPLETION",
+      "The Complete Work command is invalid."
+    );
+  }
+  return runTransaction(input.pool, "SERIALIZABLE", async (client) => {
+    const context = await loadProfessionalContext(
+      client,
+      validated.jobId,
+      validated.actorId,
+      { lock: true }
+    );
+    if (!context) return { abort: unavailable() };
+    const execution = await loadExecution(
+      client,
+      validated.jobId,
+      executionId,
+      { lock: true }
+    );
+    if (!execution) return { abort: unavailable() };
+    const authorityError = await requireExecutionAuthority(
+      client,
+      context,
+      CAPABILITIES.EXECUTE,
+      execution.approved_customer_decision_id
+    );
+    if (authorityError) return { abort: authorityError };
+    const requestFingerprint = fingerprint({
+      command: "approved_work.complete",
+      jobId: validated.jobId,
+      executionId,
+      expectedExecutionVersion,
+      expectedWorkstreams,
+      expectedActivities,
+    });
+    const idempotency = await reserveCommand(client, {
+      jobId: validated.jobId,
+      participantId: context.professional_participant_id,
+      commandName: COMMANDS.CLOSE,
+      commandScope: `execution:${executionId}:complete-work`,
+      idempotencyKey: validated.idempotencyKey,
+      requestFingerprint,
+    });
+    if (idempotency.error) return { abort: idempotency.error };
+    if (idempotency.replay) return { result: replayResult(idempotency.replay) };
+    if (Number(execution.current_version) !== expectedExecutionVersion) {
+      return {
+        abort: failure(
+          409,
+          "STALE_APPROVED_WORK_EXECUTION_VERSION",
+          "The Approved Work execution version is no longer current."
+        ),
+      };
+    }
+    if (execution.current_state !== "ACTIVE") {
+      return {
+        abort: failure(
+          409,
+          "APPROVED_WORK_EXECUTION_NOT_ACTIVE",
+          "Only active Approved Work can be completed."
+        ),
+      };
+    }
+    const source = await loadApprovedDecisionSource(
+      client,
+      validated.jobId,
+      execution.approved_customer_decision_id,
+      { lock: true }
+    );
+    if (!source || source.quote_id !== execution.quote_id ||
+      Number(source.issued_quote_version) !== Number(execution.issued_quote_version) ||
+      Number(source.relationship_id) !== Number(execution.relationship_id) ||
+      source.customer_participant_id !== execution.customer_participant_id ||
+      source.issued_integrity_hash !== execution.source_integrity_hash) {
+      return {
+        abort: failure(
+          409,
+          "APPROVED_WORK_EXECUTION_LINEAGE_INVALID",
+          "The approved Work lineage is no longer valid."
+        ),
+      };
+    }
+    const startEvidenceResult = await client.query(
+      `SELECT count(*)::integer AS count, min(started_at) AS first_started_at
+       FROM canonical_approved_work_execution_start_events
+       WHERE execution_id = $1 AND job_id = $2`,
+      [executionId, validated.jobId]
+    );
+    const startEvidence = {
+      count: Number(startEvidenceResult.rows[0]?.count || 0),
+      firstStartedAt: iso(startEvidenceResult.rows[0]?.first_started_at),
+    };
+    if (startEvidence.count < 1) {
+      return {
+        abort: failure(
+          409,
+          "APPROVED_WORK_NOT_STARTED",
+          "Approved Work must be started before it can be completed."
+        ),
+      };
+    }
+    const workstreams = await loadCompletionWorkstreams(client, execution, { lock: true });
+    const activities = await loadCompletionActivities(client, execution, { lock: true });
+    if (!expectedVersionsMatch(expectedWorkstreams, workstreams) ||
+      !expectedVersionsMatch(expectedActivities, activities)) {
+      return {
+        abort: failure(
+          409,
+          "STALE_APPROVED_WORK_COMPLETION_SNAPSHOT",
+          "The approved Work record changed before completion."
+        ),
+      };
+    }
+    if (activities.some((activity) => !["PLANNED", "IN_PROGRESS", "DONE"].includes(activity.status))) {
+      return {
+        abort: failure(
+          409,
+          "EXECUTION_ACTIVITY_NOT_COMPLETABLE",
+          "An execution Activity cannot be completed."
+        ),
+      };
+    }
+    const blockers = await loadCompletionBlockers(
+      client,
+      validated.jobId,
+      workstreams.map((row) => row.id)
+    );
+    const blockerReasons = completionBlockerReasons(workstreams, blockers);
+    if (blockerReasons.length > 0) {
+      return {
+        abort: {
+          ...failure(
+            409,
+            "APPROVED_WORK_COMPLETION_BLOCKED",
+            "Approved Work has a blocker that must be resolved before completion."
+          ),
+          reasons: blockerReasons,
+        },
+      };
+    }
+    const completedAt = new Date();
+    const activityReconciliation = [];
+    for (const activity of activities) {
+      const fromVersion = Number(activity.current_version);
+      if (activity.status === "DONE") {
+        activityReconciliation.push({
+          activityId: activity.id,
+          workstreamId: activity.workstream_id,
+          fromVersion,
+          toVersion: fromVersion,
+          status: "DONE",
+          changed: false,
+        });
+        continue;
+      }
+      const toVersion = fromVersion + 1;
+      await client.query(
+        `INSERT INTO canonical_work_activity_versions (
+           activity_id, version, workstream_id, job_id, activity_type,
+           statement, status, temporary_intervention, temporary_details,
+           customer_visible, performed_at, created_by_participant_id, integrity_hash
+         ) VALUES ($1,$2,$3,$4,$5,$6,'DONE',$7,$8,$9,$10,$11,$12)`,
+        [activity.id, toVersion, activity.workstream_id, validated.jobId,
+          activity.activity_type, activity.statement,
+          activity.temporary_intervention === true, activity.temporary_details,
+          activity.customer_visible === true, completedAt,
+          context.professional_participant_id,
+          workflowIntegrityHash("work_activity", {
+            activityId: activity.id,
+            version: toVersion,
+            workstreamId: activity.workstream_id,
+            jobId: validated.jobId,
+            activityType: activity.activity_type,
+            statement: activity.statement,
+            status: "DONE",
+            temporaryIntervention: activity.temporary_intervention === true,
+            temporaryDetails: activity.temporary_details,
+            customerVisible: activity.customer_visible === true,
+            performedAt: completedAt.toISOString(),
+            participantId: context.professional_participant_id,
+          })]
+      );
+      activityReconciliation.push({
+        activityId: activity.id,
+        workstreamId: activity.workstream_id,
+        fromVersion,
+        toVersion,
+        status: "DONE",
+        changed: true,
+      });
+    }
+    await invokeFailure(input.failureInjector, "after_activity_reconciliation");
+    const workstreamReconciliation = [];
+    for (const workstream of workstreams) {
+      const fromVersion = Number(workstream.current_version);
+      if (workstream.state === "COMPLETED") {
+        workstreamReconciliation.push({
+          workstreamId: workstream.id,
+          fromVersion,
+          toVersion: fromVersion,
+          state: "COMPLETED",
+          changed: false,
+        });
+        continue;
+      }
+      const toVersion = fromVersion + 1;
+      await client.query(
+        `INSERT INTO canonical_workstream_versions (
+           workstream_id, version, job_id, title, state,
+           created_by_participant_id, integrity_hash
+         ) VALUES ($1,$2,$3,$4,'COMPLETED',$5,$6)`,
+        [workstream.id, toVersion, validated.jobId, workstream.title,
+          context.professional_participant_id,
+          workflowIntegrityHash("workstream", {
+            workstreamId: workstream.id,
+            version: toVersion,
+            jobId: validated.jobId,
+            title: workstream.title,
+            state: "COMPLETED",
+            participantId: context.professional_participant_id,
+          })]
+      );
+      workstreamReconciliation.push({
+        workstreamId: workstream.id,
+        fromVersion,
+        toVersion,
+        state: "COMPLETED",
+        changed: true,
+      });
+    }
+    await invokeFailure(input.failureInjector, "after_workstream_reconciliation");
+    const executionVersion = expectedExecutionVersion + 1;
+    const completionIntegrityHash = fingerprint({
+      command: "approved_work.complete",
+      executionId,
+      executionVersion,
+      jobId: validated.jobId,
+      relationshipId: Number(execution.relationship_id),
+      quoteId: execution.quote_id,
+      issuedQuoteVersion: Number(execution.issued_quote_version),
+      approvedCustomerDecisionId: execution.approved_customer_decision_id,
+      participantId: context.professional_participant_id,
+      completedAt: completedAt.toISOString(),
+      activityReconciliation,
+      workstreamReconciliation,
+    });
+    await client.query(
+      `INSERT INTO canonical_approved_work_execution_versions (
+         execution_id, version, job_id, relationship_id,
+         customer_participant_id, state, successor_execution_id,
+         recorded_by_participant_id, command_idempotency_id, integrity_hash
+       ) VALUES ($1,$2,$3,$4,$5,'CLOSED',NULL,$6,$7,$8)`,
+      [executionId, executionVersion, validated.jobId,
+        Number(execution.relationship_id), execution.customer_participant_id,
+        context.professional_participant_id, idempotency.row.id,
+        completionIntegrityHash]
+    );
+    await invokeFailure(input.failureInjector, "after_execution_completion");
+    const transitioned = await loadExecution(client, validated.jobId, executionId);
+    const completion = {
+      contractVersion: CONTRACT_VERSION,
+      state: "WORK_COMPLETED",
+      jobId: validated.jobId,
+      relationshipId: Number(execution.relationship_id),
+      executionId,
+      executionVersion: Number(transitioned.current_version),
+      quoteId: execution.quote_id,
+      issuedQuoteVersion: Number(execution.issued_quote_version),
+      approvedCustomerDecisionId: execution.approved_customer_decision_id,
+      completedByParticipantId: context.professional_participant_id,
+      completedAt: iso(transitioned.current_version_created_at),
+      evidence: {
+        type: "APPROVED_WORK_EXECUTION_VERSION",
+        commandId: idempotency.row.id,
+        integrityHash: completionIntegrityHash,
+      },
+      startEvidence,
+      activities: activityReconciliation,
+      workstreams: workstreamReconciliation,
+      nextAction: { code: "READY_TO_INVOICE", label: "Ready to Invoice" },
+    };
+    const result = {
+      ok: true,
+      success: true,
+      status: 200,
+      code: "APPROVED_WORK_COMPLETED",
+      completion,
+      execution: await projectExecutionWithClient(client, transitioned, context),
+    };
+    await completeCommand(client, idempotency.row.id, result);
+    return {
+      result,
+      afterCommit: () => validated.logger.info("Approved Work completed", {
+        code: result.code,
+        actorUserId: validated.actorId,
+        jobId: validated.jobId,
+        executionId,
+        executionVersion,
+      }),
+    };
+  });
+}
+
 function childIdempotencyKey(rootKey, kind, identity) {
   return `reconcile:${fingerprint({ rootKey, kind, identity }).slice(0, 64)}`;
 }
@@ -1748,6 +2229,7 @@ module.exports = {
   bindWorkstreamToExecution,
   classifyWorkActivity,
   closeApprovedWorkExecution,
+  completeApprovedWork,
   evaluateApprovedWorkStartReadinessWithClient,
   getApprovedWorkExecution,
   listApprovedWorkExecutions,
@@ -1757,7 +2239,9 @@ module.exports = {
   supersedeApprovedWorkExecution,
   approvedWorkExecutionServiceInternals: Object.freeze({
     childIdempotencyKey,
+    completionBlockerReasons,
     executionBaseProjection,
     normalizeClassificationInput,
+    normalizeExpectedVersions,
   }),
 };
