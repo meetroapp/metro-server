@@ -471,6 +471,70 @@ test("active Workstream takes deterministic precedence over prior commercial rec
   });
 });
 
+test("approved Work stays ready until durable execution start evidence exists", () => {
+  const projection = derive({
+    approvedWorkExecution: {
+      execution_id: "execution",
+      execution_version: 1,
+      state: "ACTIVE",
+      start_event_count: 0,
+    },
+    workstreams: [{ id: "workstream", version: 1, state: "OPEN" }],
+    activities: [{ id: "activity", version: 1, status: "PLANNED" }],
+  });
+  assert.equal(projection.stage.code, "WORK_READY");
+  assert.equal(projection.reasonCodes.includes("APPROVED_WORK_EXECUTION_STARTED"), false);
+});
+
+test("durably started active Approved Work outranks lower-level ready and done states", () => {
+  for (const activities of [
+    [{ id: "activity-a", version: 3, status: "DONE" }],
+    [
+      { id: "activity-a", version: 3, status: "DONE" },
+      { id: "activity-b", version: 2, status: "IN_PROGRESS" },
+    ],
+    [
+      { id: "activity-a", version: 3, status: "DONE" },
+      { id: "activity-b", version: 3, status: "DONE" },
+    ],
+  ]) {
+    const projection = derive({
+      approvedWorkExecution: {
+        execution_id: "execution",
+        execution_version: 1,
+        state: "ACTIVE",
+        start_event_count: 1,
+      },
+      workstreams: [{ id: "workstream", version: 1, state: "OPEN" }],
+      activities,
+    });
+    assert.equal(projection.stage.code, "WORK_IN_PROGRESS");
+    assert.equal(projection.nextAction.code, "REVIEW_ACTIVE_WORK");
+    assert.deepEqual(projection.reasonCodes, ["APPROVED_WORK_EXECUTION_STARTED"]);
+    assert.equal(projection.freshness.approvedWorkExecutionVersion, 1);
+  }
+});
+
+test("internal completion without governed Work completion cannot project Work Completed", () => {
+  const activityOnly = derive({
+    workstreams: [{ id: "workstream", version: 1, state: "OPEN" }],
+    activities: [{ id: "activity", version: 3, status: "DONE" }],
+  });
+  assert.equal(activityOnly.stage.code, "WORK_READY");
+
+  const rawExecutionClose = derive({
+    approvedWorkExecution: {
+      execution_id: "execution",
+      execution_version: 2,
+      state: "CLOSED",
+      start_event_count: 1,
+    },
+    workstreams: [{ id: "workstream", version: 3, state: "COMPLETED" }],
+    activities: [{ id: "activity", version: 3, status: "DONE" }],
+  });
+  assert.equal(rawExecutionClose.stage.code, "WORKSTREAMS_COMPLETE_PENDING_JOB_COMPLETION");
+});
+
 test("blocked Workstream and open obligation identify a bounded blocker", () => {
   const blocked = derive({
     workstreams: [{ id: "workstream", version: 2, state: "BLOCKED" }],
@@ -558,6 +622,36 @@ test("governed Approved Work completion projects Work Completed without Job clos
     "FINANCIAL_SETTLEMENT_REMAINS_SEPARATE",
     "JOB_CLOSURE_REMAINS_SEPARATE",
   ]);
+});
+
+test("governed completion and later lifecycle truth outrank historical start evidence", () => {
+  const approvedWorkExecution = {
+    execution_id: "execution",
+    execution_version: 1,
+    state: "ACTIVE",
+    start_event_count: 1,
+  };
+  const workCompleted = derive({
+    approvedWorkExecution,
+    approvedWorkCompletion: {
+      execution_id: "execution",
+      execution_version: 2,
+      state: "CLOSED",
+    },
+    invoice: { id: "invoice", version: 1, status: "DRAFT" },
+    workstreams: [{ id: "workstream", version: 1, state: "OPEN" }],
+  });
+  assert.equal(workCompleted.stage.code, "WORK_COMPLETED");
+  assert.equal(workCompleted.nextAction.code, "REVIEW_DRAFT_INVOICE");
+
+  const jobCompleted = derive({
+    approvedWorkExecution,
+    completion: { id: "completion", version: 1, status: "COMPLETED" },
+    invoice: { id: "invoice", version: 2, status: "PAID" },
+    workstreams: [{ id: "workstream", version: 1, state: "OPEN" }],
+  });
+  assert.equal(jobCompleted.stage.code, "JOB_COMPLETED");
+  assert.equal(jobCompleted.nextAction.code, "REVIEW_PAID_INVOICE");
 });
 
 test("completed Job financial next actions come from canonical Invoice truth", () => {
@@ -665,7 +759,7 @@ test("authorized lifecycle-v2 professional receives the read-only canonical proj
   assert.equal(result.code, "LIVE_JOB_STATE_LOADED");
   assert.equal(result.liveJob.stage.code, "EVALUATION_NEEDED");
   assert.equal(result.liveJob.requestId, 41);
-  assert.equal(queries.filter((sql) => sql.includes("live_job:")).length, 12);
+  assert.equal(queries.filter((sql) => sql.includes("live_job:")).length, 13);
   assert.equal(queries.some((sql) => /\bINSERT\b|\bUPDATE\b|\bDELETE\b/.test(sql)), false);
 });
 
@@ -722,6 +816,41 @@ test("canonical state projects exact approved-work authority without changing Qu
       schedulingLocked: false,
     },
   }]);
+});
+
+test("canonical state loads active execution with durable start-event evidence read only", async () => {
+  const queries = [];
+  const pool = {
+    async query(sql) {
+      const source = String(sql);
+      queries.push(source);
+      if (source.includes("live_job:approved_work_execution */")) {
+        return {
+          rows: [{
+            execution_id: "execution",
+            execution_version: 1,
+            state: "ACTIVE",
+            start_event_count: 1,
+          }],
+        };
+      }
+      if (source.includes("live_job:")) return { rows: [] };
+      throw new Error(`Unexpected query: ${source}`);
+    },
+  };
+  const canonical = await loadCanonicalState(pool, {
+    job_id: "11111111-1111-4111-8111-111111111111",
+    relationship_id: 72,
+    actor_participant_id: "22222222-2222-4222-8222-222222222222",
+    active_capabilities: BASE_CAPABILITIES,
+  });
+  assert.deepEqual(canonical.approvedWorkExecution, {
+    execution_id: "execution",
+    execution_version: 1,
+    state: "ACTIVE",
+    start_event_count: 1,
+  });
+  assert.equal(queries.some((sql) => /\bINSERT\b|\bUPDATE\b|\bDELETE\b/.test(sql)), false);
 });
 
 test("missing lifecycle read grants produce 403 without loading child records", async () => {

@@ -353,7 +353,8 @@ function result({
       activityVersion: currentVersion(state.activities),
       obligationVersion: currentVersion(state.obligations),
       approvedWorkExecutionVersion:
-        Number(state.approvedWorkCompletion?.execution_version) || 0,
+        Number(state.approvedWorkCompletion?.execution_version) ||
+        Number(state.approvedWorkExecution?.execution_version) || 0,
       depositVersion: Number(state.deposit?.latestVersion) || 0,
       invoiceVersion: Number(state.invoice?.version) || 0,
       evaluationCount: state.evaluation ? 1 : 0,
@@ -446,6 +447,10 @@ function deriveCanonicalLiveJob(state = {}, { derivedAt = new Date().toISOString
   }
 
   if (
+    (
+      state.approvedWorkExecution?.state === "ACTIVE" &&
+      Number(state.approvedWorkExecution.start_event_count) > 0
+    ) ||
     workstreams.some((workstream) => workstream.state === "ACTIVE") ||
     activities.some((activity) => activity.status === "IN_PROGRESS")
   ) {
@@ -453,7 +458,10 @@ function deriveCanonicalLiveJob(state = {}, { derivedAt = new Date().toISOString
       stage: "WORK_IN_PROGRESS",
       responsibility: "PROFESSIONAL",
       action: "REVIEW_ACTIVE_WORK",
-      reasons: ["ACTIVE_WORK_PRESENT"],
+      reasons: state.approvedWorkExecution?.state === "ACTIVE" &&
+        Number(state.approvedWorkExecution.start_event_count) > 0
+        ? ["APPROVED_WORK_EXECUTION_STARTED"]
+        : ["ACTIVE_WORK_PRESENT"],
       state: scopedState,
       derivedAt,
     });
@@ -1214,6 +1222,38 @@ async function loadCanonicalState(pool, context) {
         ]
       ),
       () => pool.query(
+        `/* live_job:approved_work_execution */
+         SELECT executions.id AS execution_id,
+           executions.quote_id, executions.issued_quote_version,
+           executions.approved_customer_decision_id,
+           current.version AS execution_version,
+           current.state,
+           COALESCE(start_events.count, 0)::integer AS start_event_count,
+           start_events.first_started_at,
+           start_events.latest_started_at
+         FROM canonical_approved_work_executions executions
+         INNER JOIN LATERAL (
+           SELECT version, state
+           FROM canonical_approved_work_execution_versions versions
+           WHERE versions.execution_id = executions.id
+             AND versions.job_id = executions.job_id
+           ORDER BY version DESC LIMIT 1
+         ) current ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT count(*)::integer AS count,
+             min(events.started_at) AS first_started_at,
+             max(events.started_at) AS latest_started_at
+           FROM canonical_approved_work_execution_start_events events
+           WHERE events.execution_id = executions.id
+             AND events.job_id = executions.job_id
+         ) start_events ON TRUE
+         WHERE executions.job_id = $1
+           AND current.state = 'ACTIVE'
+         ORDER BY executions.created_at DESC, executions.id DESC
+         LIMIT 1`,
+        [jobId]
+      ),
+      () => pool.query(
         `/* live_job:approved_work_completion */
          SELECT executions.id AS execution_id,
            executions.quote_id, executions.issued_quote_version,
@@ -1278,6 +1318,7 @@ async function loadCanonicalState(pool, context) {
     activities,
     obligations,
     approvedWorkScheduling,
+    approvedWorkExecution,
     approvedWorkCompletion,
     completion,
     invoice,
@@ -1304,6 +1345,7 @@ async function loadCanonicalState(pool, context) {
     workstreams: workstreams.rows,
     activities: activities.rows,
     obligations: obligations.rows,
+    approvedWorkExecution: approvedWorkExecution.rows[0] || null,
     approvedWorkCompletion: approvedWorkCompletion.rows[0] || null,
     completion: completion.rows[0] || null,
     invoice: invoice.rows[0] || null,

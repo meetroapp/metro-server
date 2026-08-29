@@ -32,6 +32,7 @@ const {
   bindWorkstreamToExecution,
   classifyWorkActivity,
   completeApprovedWork,
+  getApprovedWorkExecution,
   materializeApprovedWorkExecution,
 } = require("../server/workflow/approvedWorkExecutionService");
 const { getCanonicalLiveJob } = require("../server/workflow/liveJobProjectionService");
@@ -368,11 +369,56 @@ test(
       assert.equal(started.ok, true, started.code);
       assert.equal(started.approvedWorkStartEvent.sourceType, "EXECUTION_ACTIVITY");
       activeActivity = started.activity;
+
+      activeActivity = await progress(
+        pool, identities, fixture, workstreamA, activeActivity, "DONE", `${suffix}-active-finish`
+      );
       const expectedActivities = [
         { activityId: doneActivity.id, expectedVersion: 3 },
-        { activityId: activeActivity.id, expectedVersion: 2 },
+        { activityId: activeActivity.id, expectedVersion: 3 },
         { activityId: plannedActivity.id, expectedVersion: 1 },
       ];
+
+      const activeProjection = await getCanonicalLiveJob({
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+        jobId: fixture.jobId,
+        logger: quiet,
+      });
+      assert.equal(activeProjection.ok, true, activeProjection.code);
+      assert.equal(activeProjection.liveJob.stage.code, "WORK_IN_PROGRESS");
+      assert.deepEqual(activeProjection.liveJob.reasonCodes, [
+        "APPROVED_WORK_EXECUTION_STARTED",
+      ]);
+      const activeExecution = await getApprovedWorkExecution({
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+        jobId: fixture.jobId,
+        executionId: execution.id,
+        logger: quiet,
+      });
+      assert.equal(activeExecution.ok, true, activeExecution.code);
+      assert.equal(activeExecution.execution.state, "ACTIVE");
+      assert.equal(activeExecution.execution.startEvents.count, 1);
+      assert.equal(activeExecution.execution.safeNextActions.includes("COMPLETE_WORK"), true);
+      assert.equal(activeExecution.execution.safeNextActions.includes("START_WORK"), false);
+      const preCompletionFinancial = await latestTruth(
+        pool,
+        fixture,
+        execution,
+        [doneActivity.id, activeActivity.id, plannedActivity.id],
+        [workstreamA.id, workstreamB.id]
+      );
+      assert.deepEqual(preCompletionFinancial.workstreams.map((row) => row.state), ["OPEN", "OPEN"]);
+      assert.deepEqual(
+        preCompletionFinancial.activities.map((row) => row.status).sort(),
+        ["DONE", "DONE", "PLANNED"]
+      );
+      assert.deepEqual(preCompletionFinancial.financial, {
+        invoices: 0,
+        invoice_payments: 0,
+        job_completions: 0,
+      });
 
       const wrongProfessional = await command(
         completeApprovedWork,
@@ -494,7 +540,7 @@ test(
         })),
         [
           { fromVersion: 3, toVersion: 3, changed: false },
-          { fromVersion: 2, toVersion: 3, changed: true },
+          { fromVersion: 3, toVersion: 3, changed: false },
           { fromVersion: 1, toVersion: 2, changed: true },
         ]
       );
