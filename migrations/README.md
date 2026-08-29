@@ -77,6 +77,8 @@ Current inventory:
 57. `202608260001_create_evaluation_remote_provenance.sql`
 58. `202608270001_add_canonical_visit_start_authority.sql`
 59. `202608280001_create_pre_work_deposit_payment_authority.sql`
+60. `202608280002_create_canonical_materials_work_preparation_authority.sql`
+61. `202608280003_create_canonical_approved_work_execution_authority.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -117,6 +119,28 @@ command-idempotency persistence. It creates no obligation, receipt, allocation,
 payment, Visit, scheduling grant, Work, or Invoice row; performs no backfill;
 and leaves runtime payment confirmation and scheduling enforcement as separately
 governed work.
+
+`202608280002_create_canonical_materials_work_preparation_authority.sql` adds
+exact accepted-Quote-scoped Work Preparation plans and immutable versions,
+stable item identities and plan-version snapshots, append-only internal
+material purchase and correction evidence, ordered preparation/readiness
+events, governed evidence references, bounded command idempotency, and static
+future capability vocabulary. Committed evidence structurally records either
+no-deposit-required authority from the accepted decision or one exact
+SATISFIED Migration 59 obligation version. It creates no Job-scoped business
+rows, performs no backfill, does not invent Quote detail for TOTAL_ONLY pricing,
+and leaves runtime planning, purchase, preparation, Work-start, and projection
+behavior as separately governed work.
+
+`202608280003_create_canonical_approved_work_execution_authority.sql` adds an
+exact approved-decision execution aggregate, append-only execution versions,
+immutable Workstream bindings, explicit EXECUTION/NON_EXECUTION Activity
+classification, TOTAL_ONLY-safe DECISION_WIDE scope, exact included Quote-scope
+lineage, and Activity/Approved Work Visit start-evidence foundations. It also
+adds a deferred consistency guard preventing future Work Preparation versions
+from combining policy NONE with required Work-start items. It creates no
+execution business rows or grants, performs no backfill, and legacy Workstreams
+and Activities remain unbound and unclassified.
 
 `202608210001_create_business_document_working_drafts.sql` adds private,
 noncanonical Quote/Invoice working drafts, independently governed media role and

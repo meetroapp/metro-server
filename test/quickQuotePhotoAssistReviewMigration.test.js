@@ -27,7 +27,7 @@ test(
   () => {
     const migrations = getMigrationFiles();
 
-  assert.equal(migrations.length, 59);
+  assert.equal(migrations.length, 61);
 
     const migrationIndex =
       migrations.findIndex(

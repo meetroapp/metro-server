@@ -12,14 +12,16 @@ const migration58Name =
   "202608270001_add_canonical_visit_start_authority.sql";
 const migration59Name =
   "202608280001_create_pre_work_deposit_payment_authority.sql";
+const migration60Name =
+  "202608280002_create_canonical_materials_work_preparation_authority.sql";
 const sql = readFileSync(join(migrationsDirectory, migration59Name), "utf8");
 
-test("migration 59 follows frozen Visit Start authority", () => {
+test("migration 59 remains frozen between Visit Start and Materials authority", () => {
   const migrations = getMigrationFiles();
-  assert.equal(migrations.length, 59);
+  assert.equal(migrations.length, 61);
   assert.deepEqual(
-    migrations.slice(-2).map(({ filename }) => filename),
-    [migration58Name, migration59Name]
+    migrations.slice(-4, -1).map(({ filename }) => filename),
+    [migration58Name, migration59Name, migration60Name]
   );
   assert.doesNotMatch(sql, /^\s*(?:BEGIN|COMMIT|ROLLBACK)\s*;/im);
 });
