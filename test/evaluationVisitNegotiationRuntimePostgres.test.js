@@ -116,7 +116,7 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300006_create_business_job_assignment_authority.sql");
+  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300007_create_business_job_field_operations_authority.sql");
       const visitStartIndex = migrations.findIndex(
         ({ filename }) => filename ===
           "202608270001_add_canonical_visit_start_authority.sql"

@@ -17,9 +17,9 @@ test("business Contact foundation is the 53rd additive migration", () => {
   const migrations = readdirSync(migrationsDirectory)
     .filter((name) => /^\d+.*\.sql$/.test(name))
     .sort();
-  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300006_create_business_job_assignment_authority.sql");
-  assert.equal(migrations.at(-19), "202608230003_create_canonical_quote_business_document_sources.sql");
-  assert.equal(migrations.at(-18), migrationName);
+  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300007_create_business_job_field_operations_authority.sql");
+  assert.equal(migrations.at(-20), "202608230003_create_canonical_quote_business_document_sources.sql");
+  assert.equal(migrations.at(-19), migrationName);
 });
 
 test("Contact identity is a stable business-owned UUID with explicit party and lifecycle state", () => {

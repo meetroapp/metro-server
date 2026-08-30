@@ -29,9 +29,9 @@ function checksum(filename) {
 
 test("migration 58 follows frozen migrations 56 and 57", () => {
   const migrations = getMigrationFiles();
-  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300006_create_business_job_assignment_authority.sql");
+  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300007_create_business_job_field_operations_authority.sql");
   assert.deepEqual(
-    migrations.slice(-15, -12).map(({ filename }) => filename),
+    migrations.slice(-16, -13).map(({ filename }) => filename),
     [migration56Name, migration57Name, migration58Name]
   );
   assert.doesNotMatch(sql, /^\s*(?:BEGIN|COMMIT|ROLLBACK)\s*;/im);

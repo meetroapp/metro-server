@@ -88,12 +88,19 @@ Current inventory:
 68. `202608300004_create_meetro_business_trial_authority.sql`
 69. `202608300005_create_business_team_membership_authority.sql`
 70. `202608300006_create_business_job_assignment_authority.sql`
+71. `202608300007_create_business_job_field_operations_authority.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
 
 This inventory records migration source files, not applied database state.
 Migration creation and governed migration execution remain separate operations.
+
+`202608300007_create_business_job_field_operations_authority.sql` adds exact
+active-assignment-bound Field Employee status commands, append-only transition
+evidence, and internal employee-to-business Job messages. It creates no field
+status or message rows, does not use customer conversations, and does not
+mutate Job, commercial, Billing, subscription, trial, or provider authority.
 
 `202608300006_create_business_job_assignment_authority.sql` adds exact
 business/Job/Team-member assignment identity, replay-safe command evidence,
