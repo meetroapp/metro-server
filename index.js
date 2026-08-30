@@ -134,6 +134,9 @@ const {
   registerTeamRoutes,
 } = require("./server/team/team");
 const {
+  registerJobAssignmentRoutes,
+} = require("./server/team/jobAssignments");
+const {
   activateReservedMeetroBusinessTrial,
 } = require("./server/subscriptions/subscriptionService");
 
@@ -898,6 +901,13 @@ registerSubscriptionRoutes({
 });
 
 registerTeamRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerJobAssignmentRoutes({
   app,
   authMiddleware,
   getPool,

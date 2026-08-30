@@ -87,12 +87,20 @@ Current inventory:
 67. `202608300003_add_professional_subscription_plan.sql`
 68. `202608300004_create_meetro_business_trial_authority.sql`
 69. `202608300005_create_business_team_membership_authority.sql`
+70. `202608300006_create_business_job_assignment_authority.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
 
 This inventory records migration source files, not applied database state.
 Migration creation and governed migration execution remain separate operations.
+
+`202608300006_create_business_job_assignment_authority.sql` adds exact
+business/Job/Team-member assignment identity, replay-safe command evidence,
+append-only assigned/reassigned/unassigned events, and database-enforced
+business ownership and preset-role boundaries. It creates no assignment,
+Alert, message, Visit, time entry, Billing record, subscription, or provider
+transaction and performs no backfill.
 
 `202608300005_create_business_team_membership_authority.sql` adds durable
 business Team memberships, preset role authority, invitation history, exact

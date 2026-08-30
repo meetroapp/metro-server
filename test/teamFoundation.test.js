@@ -62,6 +62,10 @@ test("preset roles expose bounded server permissions and never custom permission
   assert.equal(permissionForRole("MANAGER", "TEAM_MANAGE_ROLES"), false);
   assert.equal(permissionForRole("BOOKKEEPER_FINANCE", "FINANCE_WORKSPACE"), true);
   assert.equal(permissionForRole("FIELD_EMPLOYEE", "ASSIGNED_WORK"), true);
+  assert.equal(permissionForRole("FIELD_EMPLOYEE", "EMPLOYEE_SCHEDULE"), true);
+  assert.equal(permissionForRole("OWNER", "JOB_ASSIGNMENT_MANAGE"), true);
+  assert.equal(permissionForRole("MANAGER", "JOB_ASSIGNMENT_MANAGE"), true);
+  assert.equal(permissionForRole("BOOKKEEPER_FINANCE", "JOB_ASSIGNMENT_VIEW"), false);
   assert.equal(Object.hasOwn(ROLE_PERMISSIONS, "CUSTOM"), false);
 });
 
