@@ -1171,10 +1171,24 @@ app.post("/auth/signup", async (req, res) => {
 
     const result = await requestPool.query(
       `
-      INSERT INTO users
-      (username, email, password_hash, role, account_type, business_name, business_category)
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
-      RETURNING id, username, email, role, account_type, business_name, business_category, profile_photo_url, token_version, created_at
+      WITH created_user AS (
+        INSERT INTO users
+        (username, email, password_hash, role, account_type, business_name, business_category)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING id, username, email, role, account_type, business_name,
+                  business_category, profile_photo_url, token_version, created_at
+      ), created_professional_profile AS (
+        INSERT INTO contractor_profiles
+        (user_id, business_name, category, phone, location, bio, image_url, profile_details)
+        SELECT id, business_name, business_category, '', '', '', '', '{}'::jsonb
+        FROM created_user
+        WHERE account_type = 'professional'
+        RETURNING user_id
+      )
+      SELECT created_user.*
+      FROM created_user
+      LEFT JOIN created_professional_profile
+        ON created_professional_profile.user_id = created_user.id
       `,
       [
         finalUsername,

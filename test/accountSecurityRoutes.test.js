@@ -120,7 +120,7 @@ async function createFakePool() {
         return { rows: user ? [{ id: user.id }] : [] };
       }
 
-      if (sql.startsWith("INSERT INTO users")) {
+      if (sql.includes("INSERT INTO users")) {
         const id = Math.max(...users.keys()) + 1;
         const user = {
           id,
@@ -135,6 +135,14 @@ async function createFakePool() {
           token_version: 0,
         };
         users.set(id, user);
+        if (user.account_type === "professional") {
+          contractorProfiles.set(id, {
+            id: contractorProfiles.size + 1,
+            user_id: id,
+            business_name: user.business_name,
+            category: user.business_category,
+          });
+        }
         return { rows: [user] };
       }
 
@@ -336,6 +344,7 @@ test("valid signup hashes the password and issues JWT only after email verificat
   assert.equal(Object.hasOwn(signup.json, "user"), false);
   const stored = [...pool.users.values()].find((user) => user.email === "new@example.test");
   assert.ok(stored);
+  assert.equal(pool.contractorProfiles.has(stored.id), false);
   assert.notEqual(stored.password_hash, "ValidSignup12");
   assert.equal(await bcrypt.compare("ValidSignup12", stored.password_hash), true);
 
@@ -388,6 +397,22 @@ test("signup delivery failure truthfully preserves the created account and resen
   assert.equal(signup.json.verificationRequired, true);
   assert.equal(signup.json.verificationEmailSent, false);
   assert.equal(signup.json.verification.resendAvailable, true);
+  const professional = [...pool.users.values()].find(
+    (user) => user.email === "recovery-business@example.test"
+  );
+  assert.ok(professional);
+  assert.deepEqual(pool.contractorProfiles.get(professional.id), {
+    id: 1,
+    user_id: professional.id,
+    business_name: "Recovery Business",
+    category: "contractor",
+  });
+  const signupAuthorityStatement = pool.calls.find(
+    (call) => call.text.includes("INSERT INTO users")
+  )?.text || "";
+  assert.match(signupAuthorityStatement, /WITH created_user AS/);
+  assert.match(signupAuthorityStatement, /INSERT INTO contractor_profiles/);
+  assert.match(signupAuthorityStatement, /WHERE account_type = 'professional'/);
   assert.equal(signup.json.verification.retryAfterSeconds, 0);
   assert.equal(typeof signup.json.challengeId, "string");
   assert.equal(JSON.stringify(signup.json).includes("private_provider_failure"), false);
