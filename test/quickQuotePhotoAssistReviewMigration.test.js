@@ -27,7 +27,7 @@ test(
   () => {
     const migrations = getMigrationFiles();
 
-  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300001_create_professional_subscription_foundation.sql");
+  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300002_add_stripe_subscription_authority.sql");
 
     const migrationIndex =
       migrations.findIndex(

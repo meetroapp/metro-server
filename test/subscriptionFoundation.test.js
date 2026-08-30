@@ -85,18 +85,28 @@ test("Plan B permits five total seats but rejects a sixth", () => {
 
 test("staging QA compatibility cannot activate in production", () => {
   assert.equal(stagingQaAccess({ NODE_ENV: "staging" }), true);
+  assert.equal(stagingQaAccess({ NODE_ENV: "staging", SUBSCRIPTION_STAGING_QA_ACCESS: "enabled" }), true);
+  assert.equal(stagingQaAccess({ NODE_ENV: "staging", SUBSCRIPTION_STAGING_QA_ACCESS: "disabled" }), false);
   assert.equal(stagingQaAccess({ NODE_ENV: "production", SUBSCRIPTION_STAGING_QA_ACCESS: "enabled" }), false);
+  assert.equal(stagingQaAccess({ NODE_ENV: "development", SUBSCRIPTION_STAGING_QA_ACCESS: "enabled" }), false);
+  assert.equal(stagingQaAccess({ NODE_ENV: "test", SUBSCRIPTION_STAGING_QA_ACCESS: "enabled" }), false);
 });
 
 test("homeowners are not subject to professional subscription", async () => {
-  const pool = { query: async () => ({ rows: [{ id: 7, account_type: "homeowner", contractor_profile_id: null }] }) };
+  const calls = [];
+  const pool = { query: async (sql) => {
+    calls.push(sql);
+    return { rows: [{ id: 7, account_type: "homeowner", contractor_profile_id: null }] };
+  } };
   const result = await getSubscriptionState({ pool, authenticatedActor: { id: 7 } });
   assert.equal(result.applicable, false);
   assert.equal(result.entitled, true);
   assert.deepEqual(result.catalog, []);
+  assert.equal(calls.length, 1);
+  assert.doesNotMatch(calls[0], /professional_subscription|invoice|quote|job|alerts/i);
 });
 
-test("professional state is server-owned and staging QA access is explicit", async () => {
+function stagingProfessionalPool() {
   const calls = [];
   const pool = { query: async (sql) => {
     calls.push(sql);
@@ -105,10 +115,35 @@ test("professional state is server-owned and staging QA access is explicit", asy
     if (sql.includes("FROM professional_subscriptions")) return { rows: [] };
     throw new Error("Unexpected SQL");
   } };
+  return { calls, pool };
+}
+
+test("staging QA professional receives full server-owned access without purchase authority", async () => {
+  const { calls, pool } = stagingProfessionalPool();
   const result = await getSubscriptionState({ pool, authenticatedActor: { id: 8 }, environment: { NODE_ENV: "staging" } });
   assert.equal(result.entitled, true);
-  assert.equal(result.qaAccess.productionAllowed, false);
-  assert.equal(calls.some((sql) => /canonical_invoices|deposit|payments|alerts/i.test(sql)), false);
+  assert.equal(result.subscription, null);
+  assert.deepEqual(result.qaAccess, {
+    source: "STAGING_EXISTING_PROFESSIONAL_COMPATIBILITY",
+    environment: "staging",
+    productionAllowed: false,
+  });
+  assert.equal(calls.filter((sql) => /INSERT INTO professional_subscription_accounts/i.test(sql)).length, 1);
+  assert.equal(calls.some((sql) => /INSERT INTO professional_subscriptions|professional_subscription_provider_events/i.test(sql)), false);
+  assert.equal(calls.some((sql) => /canonical_invoices|invoice_payments|deposit|canonical_quotes|\bjobs\b|\balerts\b/i.test(sql)), false);
+});
+
+test("production ignores the staging QA setting and creates no fallback entitlement", async () => {
+  const { calls, pool } = stagingProfessionalPool();
+  const result = await getSubscriptionState({
+    pool,
+    authenticatedActor: { id: 8 },
+    environment: { NODE_ENV: "production", SUBSCRIPTION_STAGING_QA_ACCESS: "enabled" },
+  });
+  assert.equal(result.entitled, false);
+  assert.equal(result.subscription, null);
+  assert.equal(result.qaAccess, null);
+  assert.equal(calls.some((sql) => /INSERT INTO professional_subscriptions|professional_subscription_provider_events/i.test(sql)), false);
 });
 
 test("unconfigured Apple verification fails closed", async () => {

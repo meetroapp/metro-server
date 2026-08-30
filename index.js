@@ -265,7 +265,11 @@ function createCorsOptions(env = process.env) {
 }
 
 app.use(cors(createCorsOptions()));
-app.use(express.json());
+app.use(express.json({
+  verify(req, res, buffer) {
+    if (req.originalUrl === "/subscriptions/stripe/webhook") req.rawBody = Buffer.from(buffer);
+  },
+}));
 
 function jsonSyntaxErrorHandler(err, req, res, next) {
   if (err instanceof SyntaxError && "body" in err) {

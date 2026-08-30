@@ -9,6 +9,7 @@ const PLAN_DEFINITIONS = Object.freeze({
     seatLimit: 2,
     trialDays: 14,
     productEnvironmentKey: "APPLE_COMMUNITY_2_USER_MONTHLY_PRODUCT_ID",
+    stripePriceEnvironmentKey: "STRIPE_COMMUNITY_2_USER_MONTHLY_PRICE_ID",
   }),
   COMMUNITY_5_USER_MONTHLY: Object.freeze({
     code: "COMMUNITY_5_USER_MONTHLY",
@@ -18,6 +19,7 @@ const PLAN_DEFINITIONS = Object.freeze({
     seatLimit: 5,
     trialDays: 14,
     productEnvironmentKey: "APPLE_COMMUNITY_5_USER_MONTHLY_PRODUCT_ID",
+    stripePriceEnvironmentKey: "STRIPE_COMMUNITY_5_USER_MONTHLY_PRICE_ID",
   }),
 });
 
@@ -27,7 +29,10 @@ function configuredProductId(value) {
 }
 
 function getSubscriptionCatalog(environment = process.env) {
-  return Object.values(PLAN_DEFINITIONS).map((plan) => ({
+  return Object.values(PLAN_DEFINITIONS).map((plan) => {
+    const appleProductId = configuredProductId(environment[plan.productEnvironmentKey]);
+    const stripePriceId = configuredProductId(environment[plan.stripePriceEnvironmentKey]);
+    return ({
     code: plan.code,
     amountMinor: plan.amountMinor,
     currency: plan.currency,
@@ -35,9 +40,21 @@ function getSubscriptionCatalog(environment = process.env) {
     seatLimit: plan.seatLimit,
     trialDays: plan.trialDays,
     provider: "APPLE_APP_STORE",
-    providerProductId: configuredProductId(environment[plan.productEnvironmentKey]),
-    providerConfigured: Boolean(configuredProductId(environment[plan.productEnvironmentKey])),
-  }));
+    providerProductId: appleProductId,
+    providerConfigured: Boolean(appleProductId),
+    providers: {
+      APPLE_APP_STORE: { configured: Boolean(appleProductId), productId: appleProductId },
+      STRIPE: { configured: Boolean(stripePriceId), priceId: stripePriceId },
+    },
+  });
+  });
+}
+
+function planForStripePriceId(priceId, environment = process.env) {
+  const normalized = configuredProductId(priceId);
+  return normalized
+    ? getSubscriptionCatalog(environment).find((plan) => plan.providers.STRIPE.priceId === normalized) || null
+    : null;
 }
 
 function planForCode(code, environment = process.env) {
@@ -56,4 +73,5 @@ module.exports = {
   getSubscriptionCatalog,
   planForCode,
   planForProductId,
+  planForStripePriceId,
 };

@@ -2,6 +2,7 @@
 
 const subscriptionService = require("./subscriptionService");
 const { createAppleSubscriptionVerifier } = require("./appleSubscriptionVerifier");
+const { createStripeSubscriptionProvider } = require("./stripeSubscriptionProvider");
 
 function send(res, result) {
   if (!result?.ok) {
@@ -21,7 +22,9 @@ function createSubscriptionHandlers({
   service = subscriptionService,
   environment = process.env,
   verifierFactory = createAppleSubscriptionVerifier,
+  stripeProviderFactory = createStripeSubscriptionProvider,
 }) {
+  const stripeProvider = stripeProviderFactory(environment);
   const handle = (operation, action) => async (req, res) => {
     res.setHeader?.("Cache-Control", "private, no-store");
     try {
@@ -102,6 +105,39 @@ function createSubscriptionHandlers({
     verifyPurchase: verify("PURCHASE_OR_REFRESH"),
     restore: verify("RESTORE"),
     appleNotification,
+    createStripeCheckout: handle("create_stripe_subscription_checkout", (req) => service.createStripeCheckout({
+      pool: getPool(req), authenticatedActor: req.user, planCode: req.body?.planCode, stripeProvider, environment,
+    })),
+    manage: handle("manage_professional_subscription", (req) => service.createSubscriptionManagement({
+      pool: getPool(req), authenticatedActor: req.user, stripeProvider, environment,
+    })),
+    stripeWebhook: async (req, res) => {
+      res.setHeader?.("Cache-Control", "no-store");
+      let event;
+      try {
+        event = stripeProvider.constructEvent(req.rawBody, req.get?.("stripe-signature") || req.headers?.["stripe-signature"]);
+      } catch {
+        return send(res, { ok: false, status: 400, code: "STRIPE_WEBHOOK_NOT_VERIFIED", message: "Stripe webhook signature verification failed." });
+      }
+      try {
+        const directTypes = new Set([
+          "customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted",
+          "customer.subscription.paused", "customer.subscription.resumed",
+        ]);
+        let subscriptionId = directTypes.has(event.type) ? event.data?.object?.id : null;
+        if (!subscriptionId && ["invoice.paid", "invoice.payment_failed"].includes(event.type)) {
+          subscriptionId = typeof event.data?.object?.subscription === "string"
+            ? event.data.object.subscription : event.data?.object?.subscription?.id;
+        }
+        if (!subscriptionId) return send(res, { ok: true, status: 200, code: "STRIPE_EVENT_VERIFIED_IGNORED" });
+        const subscription = await stripeProvider.retrieveSubscription(subscriptionId);
+        return send(res, await service.processStripeSubscriptionEvent({
+          pool: getPool(req), event, subscription, providerRetrieved: true, environment,
+        }));
+      } catch (error) {
+        return sendPublicDatabaseError({ res, error, operation: "process_stripe_subscription_webhook", code: "STRIPE_WEBHOOK_PROCESSING_FAILED", message: "The verified Stripe event could not be processed." });
+      }
+    },
   };
 }
 
@@ -115,6 +151,9 @@ function registerSubscriptionRoutes(options) {
   app.post("/subscriptions/apple/verify", authMiddleware, handlers.verifyPurchase);
   app.post("/subscriptions/apple/restore", authMiddleware, handlers.restore);
   app.post("/subscriptions/apple/notifications", handlers.appleNotification);
+  app.post("/subscriptions/stripe/checkout", authMiddleware, handlers.createStripeCheckout);
+  app.post("/subscriptions/manage", authMiddleware, handlers.manage);
+  app.post("/subscriptions/stripe/webhook", handlers.stripeWebhook);
   return handlers;
 }
 

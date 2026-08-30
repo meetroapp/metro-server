@@ -83,6 +83,7 @@ Current inventory:
 63. `202608290002_add_deposit_request_document_authority.sql`
 64. `202608290003_add_canonical_alert_event_identity.sql`
 65. `202608300001_create_professional_subscription_foundation.sql`
+66. `202608300002_add_stripe_subscription_authority.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -95,6 +96,12 @@ business-owned professional subscription account, one effective verified Apple
 subscription authority, and replay-safe provider-event identity. It creates no
 subscription, transaction, entitlement, Job billing, or Alert rows and performs
 no backfill.
+
+`202608300002_add_stripe_subscription_authority.sql` extends that single
+business-owned authority to verified Stripe Billing subscriptions and stores
+the Stripe customer binding used for Checkout and Billing Portal. It creates
+no subscription, provider transaction, entitlement, Job billing, or Alert rows
+and performs no backfill.
 
 `202608290002_add_deposit_request_document_authority.sql` adds the distinct
 `DEPOSIT_REQUEST` private working-document purpose, binds it to one exact
