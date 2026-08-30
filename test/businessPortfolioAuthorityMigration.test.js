@@ -31,8 +31,8 @@ test("Portfolio authority migration is additive, ordered, and ledger-safe", () =
   const migrations = getMigrationFiles();
   const filenames = migrations.map(({ filename }) => filename);
 
-  assert.equal(filenames.length, 71);
-  assert.equal(filenames.at(-1), "202608300007_create_business_job_field_operations_authority.sql");
+  assert.equal(filenames.length, 72);
+  assert.equal(filenames.at(-1), "202608300008_create_business_time_evidence_authority.sql");
   assert.ok(filenames.includes(migrationFilename));
   assert.equal(
     filenames.filter((filename) => filename.startsWith("202608120001_")).length,

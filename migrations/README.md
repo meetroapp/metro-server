@@ -89,12 +89,21 @@ Current inventory:
 69. `202608300005_create_business_team_membership_authority.sql`
 70. `202608300006_create_business_job_assignment_authority.sql`
 71. `202608300007_create_business_job_field_operations_authority.sql`
+72. `202608300008_create_business_time_evidence_authority.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
 
 This inventory records migration source files, not applied database state.
 Migration creation and governed migration execution remain separate operations.
+
+`202608300008_create_business_time_evidence_authority.sql` adds replay-safe
+Clock In / Clock Out commands, one-active-timer enforcement, server-timestamped
+time sessions, append-only time events, exact Team membership authority, exact
+active Job assignment binding for `JOB_WORK`, and optional clock-boundary
+location evidence. It creates no timers or evidence rows, performs no backfill,
+creates no customer Alert, and does not mutate Job, commercial, Billing,
+subscription, trial, provider, payroll, or field-status authority.
 
 `202608300007_create_business_job_field_operations_authority.sql` adds exact
 active-assignment-bound Field Employee status commands, append-only transition

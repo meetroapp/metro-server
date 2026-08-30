@@ -14,22 +14,22 @@ test("customer-party linkage remains the 55th additive migration", () => {
   const migrations = readdirSync(migrationsDirectory)
     .filter((name) => /^\d+.*\.sql$/.test(name))
     .sort();
-  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300007_create_business_job_field_operations_authority.sql");
+  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300008_create_business_time_evidence_authority.sql");
   assert.equal(
-    migrations.at(-18),
+    migrations.at(-19),
     "202608230005_create_business_customer_relationship_foundation.sql"
   );
-  assert.equal(migrations.at(-17), migrationName);
+  assert.equal(migrations.at(-18), migrationName);
   assert.equal(
-    migrations.at(-16),
+    migrations.at(-17),
     "202608250001_correct_evaluation_visit_authority_and_negotiation.sql"
   );
   assert.equal(
-    migrations.at(-15),
+    migrations.at(-16),
     "202608260001_create_evaluation_remote_provenance.sql"
   );
   assert.equal(
-    migrations.at(-14),
+    migrations.at(-15),
     "202608270001_add_canonical_visit_start_authority.sql"
   );
 });

@@ -321,7 +321,7 @@ test("clean disposable PostgreSQL imports the historical empty-seed Working Quot
   const suffix = randomUUID();
   try {
     const migrations = getMigrationFiles();
-  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300007_create_business_job_field_operations_authority.sql");
+  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300008_create_business_time_evidence_authority.sql");
     const applied = await runMigrationCollection(pool, migrations, targetMetadata(cleanDatabaseUrl));
     assert.equal(applied.success, true);
     assert.equal(applied.applied.length, migrations.length);
@@ -812,7 +812,7 @@ test("clean disposable PostgreSQL certifies canonical $920 Draft and issued Quot
   const suffix = randomUUID();
   try {
     const migrations = getMigrationFiles();
-    assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300007_create_business_job_field_operations_authority.sql");
+    assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300008_create_business_time_evidence_authority.sql");
     const applied = await runMigrationCollection(pool, migrations, targetMetadata(cleanDatabaseUrl));
     assert.equal(applied.success, true);
     assert.equal(applied.applied.length, migrations.length);

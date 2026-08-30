@@ -19,9 +19,9 @@ const sql = readFileSync(join(migrationsDirectory, migration57Name), "utf8");
 
 test("migration 57 follows frozen migration 56 and remains before migration 58", () => {
   const migrations = getMigrationFiles();
-  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300007_create_business_job_field_operations_authority.sql");
-  assert.equal(migrations.at(-16).filename, migration56Name);
-  assert.equal(migrations.at(-15).filename, migration57Name);
+  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300008_create_business_time_evidence_authority.sql");
+  assert.equal(migrations.at(-17).filename, migration56Name);
+  assert.equal(migrations.at(-16).filename, migration57Name);
   assert.doesNotMatch(sql, /^\s*(?:BEGIN|COMMIT|ROLLBACK)\s*;/im);
 });
 
