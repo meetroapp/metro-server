@@ -16,6 +16,7 @@ const {
   normalizeEmail,
   normalizeRole,
   permissionForRole,
+  serializeMembershipWithIdentity,
 } = require("../server/team/teamService");
 const { createTeamHandlers, registerTeamRoutes } = require("../server/team/team");
 
@@ -76,6 +77,27 @@ test("invitation identities and role input normalize fail closed", () => {
   assert.equal(normalizeRole("custom_admin", { invitableOnly: true }), null);
   assert.equal(digestInvitationToken("a".repeat(32)).length, 64);
   assert.equal(digestInvitationToken("short"), null);
+});
+
+test("membership serialization preserves durable membership identity over user identity", () => {
+  const membershipId = "d5d34bb1-2c69-4dc8-af8d-31cf2d4f669b";
+  const result = serializeMembershipWithIdentity({
+    id: membershipId,
+    contractor_profile_id: 17,
+    user_id: 42,
+    role: "FIELD_EMPLOYEE",
+    status: "ACTIVE",
+    version: 1,
+  }, {
+    id: 42,
+    username: "Field Employee",
+    email: "employee@example.test",
+  });
+
+  assert.equal(result.id, membershipId);
+  assert.equal(result.userId, 42);
+  assert.equal(result.displayName, "Field Employee");
+  assert.equal(result.email, "employee@example.test");
 });
 
 test("malformed business and member authority fails before transactions", async () => {

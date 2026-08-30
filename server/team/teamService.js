@@ -87,6 +87,14 @@ function serializeMembership(row = {}) {
   };
 }
 
+function serializeMembershipWithIdentity(row = {}, identity = {}) {
+  return serializeMembership({
+    ...row,
+    username: identity.username,
+    email: identity.email,
+  });
+}
+
 function serializeInvitation(row = {}, token = null) {
   const status = row.status === "PENDING" && new Date(row.expires_at).getTime() <= Date.now()
     ? "EXPIRED"
@@ -349,7 +357,7 @@ async function acceptTeamInvitation({ pool, authenticatedActor, token }) {
     return failure(400, "TEAM_INVITATION_INVALID", "Invitation token is invalid.");
   }
   return withTransaction(pool, async (client) => {
-    const identity = await client.query("SELECT id, email FROM users WHERE id = $1", [actorId]);
+    const identity = await client.query("SELECT id, username, email FROM users WHERE id = $1", [actorId]);
     if (!identity.rows[0]) return failure(401, "AUTHENTICATION_REQUIRED", "Authentication required.");
     const invitationResult = await client.query(
       `SELECT * FROM business_team_invitations WHERE token_digest = $1 FOR UPDATE`,
@@ -403,7 +411,7 @@ async function acceptTeamInvitation({ pool, authenticatedActor, token }) {
       ok: true,
       status: 200,
       code: "BUSINESS_TEAM_INVITATION_ACCEPTED",
-      membership: serializeMembership({ ...membership.rows[0], ...identity.rows[0] }),
+      membership: serializeMembershipWithIdentity(membership.rows[0], identity.rows[0]),
     };
   });
 }
@@ -456,7 +464,7 @@ async function updateTeamMemberRole({ pool, authenticatedActor, businessId, memb
     );
     if (!result.rows[0]) return failure(404, "TEAM_MEMBER_NOT_FOUND", "Active Team member not found.");
     const identity = await client.query("SELECT username, email FROM users WHERE id = $1", [result.rows[0].user_id]);
-    return { ok: true, status: 200, code: "BUSINESS_TEAM_ROLE_UPDATED", membership: serializeMembership({ ...result.rows[0], ...identity.rows[0] }) };
+    return { ok: true, status: 200, code: "BUSINESS_TEAM_ROLE_UPDATED", membership: serializeMembershipWithIdentity(result.rows[0], identity.rows[0]) };
   });
 }
 
@@ -493,7 +501,7 @@ async function deactivateTeamMember({ pool, authenticatedActor, businessId, memb
       [normalizedMembershipId]
     );
     const identity = await client.query("SELECT username, email FROM users WHERE id = $1", [result.rows[0].user_id]);
-    return { ok: true, status: 200, code: "BUSINESS_TEAM_MEMBER_DEACTIVATED", membership: serializeMembership({ ...result.rows[0], ...identity.rows[0] }) };
+    return { ok: true, status: 200, code: "BUSINESS_TEAM_MEMBER_DEACTIVATED", membership: serializeMembershipWithIdentity(result.rows[0], identity.rows[0]) };
   });
 }
 
@@ -552,5 +560,6 @@ module.exports = {
   normalizeRole,
   permissionForRole,
   revokeTeamInvitation,
+  serializeMembershipWithIdentity,
   updateTeamMemberRole,
 };
