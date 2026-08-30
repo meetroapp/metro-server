@@ -13,6 +13,9 @@ const {
   buildSecurityVerificationEmail,
 } = require("../server/email/securityVerificationEmail");
 const {
+  buildTeamInvitationEmail,
+} = require("../server/email/teamInvitationEmail");
+const {
   TWO_FACTOR_FAILURE,
   createTwoFactorChallengeStore,
 } = require("../server/security/twoFactorChallenges");
@@ -92,6 +95,67 @@ test("verification email builder rejects invalid codes and never adds sensitive 
   assert.match(email.text, /Meetro Community/);
   assert.match(email.html, /Meetro Community/);
   assert.doesNotMatch(`${email.text}${email.html}`, /authorization|bearer|database|server error/i);
+});
+
+test("Resend sends a governed Team invitation with exact Business, role, and Join Team link", async () => {
+  let request;
+  const provider = createEmailDelivery({
+    env: {
+      EMAIL_PROVIDER: "resend",
+      RESEND_API_KEY: "resend-secret-value",
+      SECURITY_EMAIL_FROM: "Meetro <team@example.test>",
+      SECURITY_EMAIL_REPLY_TO: "support@example.test",
+    },
+    fetchImpl: async (url, options) => {
+      request = { url, options, body: JSON.parse(options.body) };
+      return { ok: true, status: 200 };
+    },
+  });
+
+  const result = await provider.sendTeamInvitationEmail({
+    recipientEmail: "liam@example.test",
+    businessName: "All Handyman Services",
+    role: "FIELD_EMPLOYEE",
+    joinUrl: "https://staging.example.test/login#teamMembers?invitation=safe-token",
+    idempotencyKey: "team-invitation-safe-test",
+  });
+
+  assert.deepEqual(result, { accepted: true, status: "accepted" });
+  assert.equal(request.url, RESEND_EMAIL_ENDPOINT);
+  assert.deepEqual(request.body.to, ["liam@example.test"]);
+  assert.match(request.body.subject, /All Handyman Services/);
+  assert.match(request.body.text, /Field Employee/);
+  assert.match(request.body.text, /Join Team/);
+  assert.match(request.body.text, /safe-token/);
+  assert.match(request.body.html, /safe-token/);
+  assert.match(request.body.text, /do not need to purchase a Meetro subscription/i);
+  assert.equal(
+    request.options.headers["Idempotency-Key"],
+    "team-invitation-safe-test"
+  );
+  assert.doesNotMatch(
+    `${request.body.text}${request.body.html}`,
+    /resend-secret-value/
+  );
+});
+
+test("Team invitation email builder rejects missing governed values", () => {
+  assert.throws(
+    () => buildTeamInvitationEmail({
+      businessName: "",
+      role: "FIELD_EMPLOYEE",
+      joinUrl: "https://example.test",
+    }),
+    /Business name/
+  );
+  assert.throws(
+    () => buildTeamInvitationEmail({
+      businessName: "Example",
+      role: "FIELD_EMPLOYEE",
+      joinUrl: "javascript:alert(1)",
+    }),
+    /valid Team invitation URL/
+  );
 });
 
 test("configured Resend delivery accepts a governed business-document PDF with provider idempotency", async () => {

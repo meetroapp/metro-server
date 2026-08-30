@@ -17,6 +17,7 @@ const {
   normalizeEmail,
   normalizeRole,
   permissionForRole,
+  resendTeamInvitation,
   serializeMembershipWithIdentity,
 } = require("../server/team/teamService");
 const { createTeamHandlers, registerTeamRoutes } = require("../server/team/team");
@@ -155,6 +156,199 @@ test("malformed business and member authority fails before transactions", async 
   assert.equal(invalidMember.code, "TEAM_MEMBER_INVALID");
 });
 
+test("resend rotates the secret on the same pending invitation without creating another seat or invitation", async () => {
+  const invitationId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const queries = [];
+
+  const client = {
+    async query(text, params) {
+      queries.push({ text, params });
+
+      if (text === "BEGIN" || text === "COMMIT" || text === "ROLLBACK") {
+        return { rows: [] };
+      }
+
+      if (/FROM business_team_memberships memberships/.test(text)) {
+        return {
+          rows: [{
+            id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            contractor_profile_id: 17,
+            user_id: 7,
+            role: "OWNER",
+            status: "ACTIVE",
+            business_name: "All Handyman Services",
+            category: "Handyman",
+          }],
+        };
+      }
+
+      if (/FROM business_team_invitations invitations/.test(text)) {
+        return {
+          rows: [{
+            id: invitationId,
+            contractor_profile_id: 17,
+            business_name: "All Handyman Services",
+            email_normalized: "liam@example.test",
+            display_name: "Liam Molina",
+            role: "FIELD_EMPLOYEE",
+            status: "PENDING",
+            token_digest: "old-digest",
+            expires_at: new Date(Date.now() + 60_000),
+            created_at: new Date(),
+            version: 1,
+          }],
+        };
+      }
+
+      if (/UPDATE business_team_invitations[\s\S]+SET token_digest/.test(text)) {
+        return {
+          rows: [{
+            id: invitationId,
+            contractor_profile_id: 17,
+            email_normalized: "liam@example.test",
+            display_name: "Liam Molina",
+            role: "FIELD_EMPLOYEE",
+            status: "PENDING",
+            token_digest: params[0],
+            expires_at: new Date(Date.now() + 60_000),
+            created_at: new Date(),
+            version: 1,
+          }],
+        };
+      }
+
+      throw new Error(`Unexpected query: ${text}`);
+    },
+    release() {},
+  };
+
+  const pool = {
+    async connect() {
+      return client;
+    },
+  };
+
+  const result = await resendTeamInvitation({
+    pool,
+    authenticatedActor: { id: 7 },
+    businessId: 17,
+    invitationId,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.code, "BUSINESS_TEAM_INVITATION_RESEND_READY");
+  assert.equal(result.invitation.id, invitationId);
+  assert.equal(result.invitation.email, "liam@example.test");
+  assert.equal(result.invitation.businessName, "All Handyman Services");
+  assert.match(result.invitation.token, /^[A-Za-z0-9_-]{32,200}$/);
+
+  const sql = queries.map((entry) => entry.text).join("\n");
+  assert.match(sql, /SET token_digest/);
+  assert.doesNotMatch(sql, /INSERT INTO business_team_invitations/i);
+  assert.doesNotMatch(sql, /INSERT INTO business_team_memberships/i);
+});
+
+test("Team invite handler reports delivery failure truthfully while preserving successful canonical invitation creation", async () => {
+  const service = {
+    async inviteTeamMember() {
+      return {
+        ok: true,
+        status: 201,
+        code: "BUSINESS_TEAM_INVITATION_CREATED",
+        invitation: {
+          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          businessId: 17,
+          businessName: "All Handyman Services",
+          email: "liam@example.test",
+          displayName: "Liam Molina",
+          role: "FIELD_EMPLOYEE",
+          status: "PENDING",
+          token: "t".repeat(43),
+        },
+        seatAuthority: {
+          source: "MEETRO_BUSINESS_TRIAL",
+          seatLimit: 2,
+          reservedSeats: 2,
+          seatsAvailable: 0,
+        },
+      };
+    },
+  };
+
+  const emailDelivery = {
+    async sendTeamInvitationEmail(payload) {
+      assert.equal(payload.recipientEmail, "liam@example.test");
+      assert.equal(payload.businessName, "All Handyman Services");
+      assert.equal(payload.role, "FIELD_EMPLOYEE");
+      assert.match(
+        payload.joinUrl,
+        /^https:\/\/meetro-client-staging\.vercel\.app\/login#teamMembers\?invitation=/
+      );
+      return {
+        accepted: false,
+        status: "provider_unavailable",
+      };
+    },
+  };
+
+  const handlers = createTeamHandlers({
+    getPool: () => ({}),
+    sendPublicDatabaseError() {
+      throw new Error("unexpected database failure");
+    },
+    service,
+    emailDelivery,
+    environment: {
+      TEAM_INVITATION_CLIENT_BASE_URL:
+        "https://meetro-client-staging.vercel.app",
+    },
+  });
+
+  let statusCode = null;
+  let responseBody = null;
+
+  const req = {
+    user: { id: 7 },
+    body: {
+      businessId: 17,
+      email: "liam@example.test",
+      displayName: "Liam Molina",
+      role: "FIELD_EMPLOYEE",
+    },
+  };
+
+  const res = {
+    setHeader() {},
+    status(code) {
+      statusCode = code;
+      return this;
+    },
+    json(body) {
+      responseBody = body;
+      return this;
+    },
+  };
+
+  await handlers.invite(req, res);
+
+  assert.equal(statusCode, 201);
+  assert.equal(responseBody.success, true);
+  assert.equal(
+    responseBody.invitation.id,
+    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+  );
+  assert.equal(responseBody.seatAuthority.reservedSeats, 2);
+  assert.equal(responseBody.invitation.emailDeliveryStatus, "failed");
+  assert.equal(
+    responseBody.invitation.emailDelivery.status,
+    "provider_unavailable"
+  );
+  assert.match(
+    responseBody.invitation.joinUrl,
+    /^https:\/\/meetro-client-staging\.vercel\.app\/login#teamMembers\?invitation=/
+  );
+});
+
 test("Team routes are authenticated and expose only governed commands", () => {
   const routes = [];
   const app = {};
@@ -174,6 +368,7 @@ test("Team routes are authenticated and expose only governed commands", () => {
     "GET /team",
     "POST /team/invitations",
     "POST /team/invitations/accept",
+    "POST /team/invitations/:invitationId/resend",
     "POST /team/invitations/:invitationId/revoke",
     "PATCH /team/members/:membershipId/role",
     "POST /team/members/:membershipId/deactivate",

@@ -371,13 +371,122 @@ async function inviteTeamMember({ pool, authenticatedActor, businessId, email, d
       ok: true,
       status: 201,
       code: "BUSINESS_TEAM_INVITATION_CREATED",
-      invitation: serializeInvitation(result.rows[0], token),
+      invitation: serializeInvitation({
+        ...result.rows[0],
+        business_name: actor.membership.business_name,
+      }, token),
       seatAuthority: {
         source: authority.source,
         seatLimit: authority.seatLimit,
         reservedSeats: usage.reservedSeats + 1,
         seatsAvailable: Math.max(0, authority.seatLimit - usage.reservedSeats - 1),
       },
+    };
+  });
+}
+
+async function resendTeamInvitation({
+  pool,
+  authenticatedActor,
+  businessId,
+  invitationId,
+}) {
+  const actorId = positiveInteger(authenticatedActor?.id);
+  const normalizedBusinessId = positiveInteger(businessId);
+  const normalizedInvitationId = uuid(invitationId);
+
+  if (!pool || !actorId) {
+    return failure(401, "AUTHENTICATION_REQUIRED", "Authentication required.");
+  }
+  if (!normalizedBusinessId || !normalizedInvitationId) {
+    return failure(400, "TEAM_INVITATION_INVALID", "Invitation identity is invalid.");
+  }
+
+  return withTransaction(pool, async (client) => {
+    const actor = await loadActorMembership(
+      client,
+      actorId,
+      normalizedBusinessId
+    );
+    if (!actor.ok) return actor;
+
+    if (!permissionForRole(actor.membership.role, "TEAM_INVITE")) {
+      return failure(
+        403,
+        "TEAM_PERMISSION_REQUIRED",
+        "Your Team role cannot resend invitations."
+      );
+    }
+
+    const invitationResult = await client.query(
+      `SELECT invitations.*, profiles.business_name
+         FROM business_team_invitations invitations
+         JOIN contractor_profiles profiles
+           ON profiles.id = invitations.contractor_profile_id
+        WHERE invitations.id = $1
+          AND invitations.contractor_profile_id = $2
+        FOR UPDATE`,
+      [normalizedInvitationId, actor.membership.contractor_profile_id]
+    );
+
+    const invitation = invitationResult.rows[0];
+    if (!invitation) {
+      return failure(
+        404,
+        "TEAM_INVITATION_NOT_FOUND",
+        "Team invitation not found."
+      );
+    }
+
+    if (invitation.status !== "PENDING") {
+      return failure(
+        409,
+        "TEAM_INVITATION_NOT_PENDING",
+        "This invitation is no longer pending."
+      );
+    }
+
+    if (new Date(invitation.expires_at).getTime() <= Date.now()) {
+      return failure(
+        410,
+        "TEAM_INVITATION_EXPIRED",
+        "This invitation has expired."
+      );
+    }
+
+    const token = randomBytes(32).toString("base64url");
+    const tokenDigest = digestInvitationToken(token);
+
+    const rotated = await client.query(
+      `UPDATE business_team_invitations
+          SET token_digest = $1
+        WHERE id = $2
+          AND contractor_profile_id = $3
+          AND status = 'PENDING'
+        RETURNING *`,
+      [
+        tokenDigest,
+        normalizedInvitationId,
+        actor.membership.contractor_profile_id,
+      ]
+    );
+
+    if (!rotated.rows[0]) {
+      return failure(
+        409,
+        "TEAM_INVITATION_NOT_PENDING",
+        "This invitation is no longer pending."
+      );
+    }
+
+    return {
+      ok: true,
+      status: 200,
+      code: "BUSINESS_TEAM_INVITATION_RESEND_READY",
+      invitation: serializeInvitation({
+        ...rotated.rows[0],
+        business_name: invitation.business_name,
+      }, token),
     };
   });
 }
@@ -596,6 +705,7 @@ module.exports = {
   normalizeEmail,
   normalizeRole,
   permissionForRole,
+  resendTeamInvitation,
   revokeTeamInvitation,
   serializeMembershipWithIdentity,
   updateTeamMemberRole,

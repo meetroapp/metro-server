@@ -2,6 +2,7 @@
 
 const { buildSecurityVerificationEmail } = require("./securityVerificationEmail");
 const { buildPasswordResetEmail } = require("./passwordResetEmail");
+const { buildTeamInvitationEmail } = require("./teamInvitationEmail");
 
 const RESEND_EMAIL_ENDPOINT = "https://api.resend.com/emails";
 
@@ -27,6 +28,9 @@ function createResendEmailProvider({
         return { accepted: false, status: "configuration_error" };
       },
       async sendBusinessDocumentEmail() {
+        return { accepted: false, status: "configuration_error" };
+      },
+      async sendTeamInvitationEmail() {
         return { accepted: false, status: "configuration_error" };
       },
     });
@@ -109,6 +113,24 @@ function createResendEmailProvider({
         html,
         idempotencyKey,
         attachments: attachment ? [attachment] : [],
+      });
+    },
+    async sendTeamInvitationEmail({
+      recipientEmail,
+      businessName,
+      role,
+      joinUrl,
+      idempotencyKey,
+    }) {
+      const email = buildTeamInvitationEmail({
+        businessName,
+        role,
+        joinUrl,
+      });
+      return sendEmail({
+        recipientEmail,
+        ...email,
+        idempotencyKey,
       });
     },
   });

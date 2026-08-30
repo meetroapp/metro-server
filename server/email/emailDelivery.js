@@ -15,6 +15,9 @@ function createUnavailableDelivery(status) {
     async sendBusinessDocumentEmail() {
       return { accepted: false, status };
     },
+    async sendTeamInvitationEmail() {
+      return { accepted: false, status };
+    },
   });
 }
 

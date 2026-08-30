@@ -917,6 +917,7 @@ registerTeamRoutes({
   authMiddleware,
   getPool,
   sendPublicDatabaseError,
+  emailDelivery,
 });
 
 registerJobAssignmentRoutes({
