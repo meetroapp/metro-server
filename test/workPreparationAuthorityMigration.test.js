@@ -18,9 +18,9 @@ const sql = readFileSync(join(migrationsDirectory, migration60Name), "utf8");
 
 test("migration 60 follows frozen Migration 59 and is locally inventoried", () => {
   const migrations = getMigrationFiles();
-  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300004_create_meetro_business_trial_authority.sql");
+  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300005_create_business_team_membership_authority.sql");
   assert.deepEqual(
-    migrations.slice(-10, -7).map(({ filename }) => filename),
+    migrations.slice(-11, -8).map(({ filename }) => filename),
     [migration59Name, migration60Name, migration61Name]
   );
   assert.doesNotMatch(sql, /^\s*(?:BEGIN|COMMIT|ROLLBACK)\s*;/im);

@@ -17,9 +17,9 @@ test("Customer Relationship foundation is the 54th additive migration", () => {
   const migrations = readdirSync(migrationsDirectory)
     .filter((name) => /^\d+.*\.sql$/.test(name))
     .sort();
-  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300004_create_meetro_business_trial_authority.sql");
-  assert.equal(migrations.at(-16), "202608230004_create_business_contact_foundation.sql");
-  assert.equal(migrations.at(-15), migrationName);
+  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300005_create_business_team_membership_authority.sql");
+  assert.equal(migrations.at(-17), "202608230004_create_business_contact_foundation.sql");
+  assert.equal(migrations.at(-16), migrationName);
 });
 
 test("relationship identity is a stable owner-scoped UUID for exactly one Contact", () => {

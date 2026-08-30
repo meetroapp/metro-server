@@ -86,12 +86,20 @@ Current inventory:
 66. `202608300002_add_stripe_subscription_authority.sql`
 67. `202608300003_add_professional_subscription_plan.sql`
 68. `202608300004_create_meetro_business_trial_authority.sql`
+69. `202608300005_create_business_team_membership_authority.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
 
 This inventory records migration source files, not applied database state.
 Migration creation and governed migration execution remain separate operations.
+
+`202608300005_create_business_team_membership_authority.sql` adds durable
+business Team memberships, preset role authority, invitation history, exact
+user acceptance, and pending-seat reservation evidence. It backfills only each
+existing business owner as the required OWNER seat; it creates no employee
+account, invitation, subscription, provider transaction, Job assignment,
+message, time entry, Billing record, or Alert.
 
 `202608300004_create_meetro_business_trial_authority.sql` adds the one-time,
 server-governed 14-day Meetro Business Trial reservation, activation, expiry,

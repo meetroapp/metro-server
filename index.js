@@ -131,6 +131,9 @@ const {
   registerSubscriptionRoutes,
 } = require("./server/subscriptions/subscriptions");
 const {
+  registerTeamRoutes,
+} = require("./server/team/team");
+const {
   activateReservedMeetroBusinessTrial,
 } = require("./server/subscriptions/subscriptionService");
 
@@ -894,6 +897,13 @@ registerSubscriptionRoutes({
   sendPublicDatabaseError,
 });
 
+registerTeamRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
 registerIntelligenceRoutes({
   app,
   authMiddleware,
@@ -1194,6 +1204,13 @@ app.post("/auth/signup", async (req, res) => {
         FROM created_professional_profile
         ON CONFLICT (user_id) DO NOTHING
         RETURNING user_id
+      ), created_owner_membership AS (
+        INSERT INTO business_team_memberships
+          (contractor_profile_id, user_id, role, status, activated_at, created_by_user_id)
+        SELECT id, user_id, 'OWNER', 'ACTIVE', CURRENT_TIMESTAMP, user_id
+        FROM created_professional_profile
+        ON CONFLICT (contractor_profile_id, user_id) DO NOTHING
+        RETURNING user_id
       )
       SELECT created_user.*
       FROM created_user
@@ -1201,6 +1218,8 @@ app.post("/auth/signup", async (req, res) => {
         ON created_professional_profile.user_id = created_user.id
       LEFT JOIN reserved_business_trial
         ON reserved_business_trial.user_id = created_user.id
+      LEFT JOIN created_owner_membership
+        ON created_owner_membership.user_id = created_user.id
       `,
       [
         finalUsername,
