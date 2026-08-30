@@ -18,6 +18,7 @@
     "node": ">=20.9.0"
   },
   "dependencies": {
+    "@apple/app-store-server-library": "^3.1.0",
     "bcrypt": "^6.0.0",
     "cloudinary": "^2.10.0",
     "cors": "^2.8.6",

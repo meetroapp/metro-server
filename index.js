@@ -127,6 +127,9 @@ const {
 const {
   registerAlertRoutes,
 } = require("./server/alerts/alerts");
+const {
+  registerSubscriptionRoutes,
+} = require("./server/subscriptions/subscriptions");
 
 const {
   registerIntelligenceRoutes,
@@ -871,6 +874,13 @@ registerQuoteDraftRoutes({
 });
 
 registerAlertRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerSubscriptionRoutes({
   app,
   authMiddleware,
   getPool,
