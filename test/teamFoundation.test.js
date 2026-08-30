@@ -36,6 +36,57 @@ const businessProfileSource = fs.readFileSync(
   "utf8"
 );
 
+test("pending Team invitation credentials may rotate without weakening canonical invitation history", () => {
+  const tokenRotationMigration = fs.readFileSync(
+    path.join(
+      __dirname,
+      "..",
+      "migrations",
+      "202608300010_allow_pending_team_invitation_token_rotation.sql"
+    ),
+    "utf8"
+  );
+
+  assert.match(
+    tokenRotationMigration,
+    /CREATE OR REPLACE FUNCTION protect_business_team_invitation_history/i
+  );
+
+  assert.doesNotMatch(
+    tokenRotationMigration,
+    /NEW\.token_digest IS DISTINCT FROM OLD\.token_digest/
+  );
+
+  assert.match(
+    tokenRotationMigration,
+    /NEW\.contractor_profile_id IS DISTINCT FROM OLD\.contractor_profile_id/
+  );
+  assert.match(
+    tokenRotationMigration,
+    /NEW\.email_normalized IS DISTINCT FROM OLD\.email_normalized/
+  );
+  assert.match(
+    tokenRotationMigration,
+    /NEW\.role IS DISTINCT FROM OLD\.role/
+  );
+  assert.match(
+    tokenRotationMigration,
+    /NEW\.invited_by_user_id IS DISTINCT FROM OLD\.invited_by_user_id/
+  );
+  assert.match(
+    tokenRotationMigration,
+    /NEW\.expires_at IS DISTINCT FROM OLD\.expires_at/
+  );
+  assert.match(
+    tokenRotationMigration,
+    /OLD\.status <> 'PENDING'/
+  );
+  assert.match(
+    tokenRotationMigration,
+    /NEW\.version := OLD\.version \+ 1/
+  );
+});
+
 test("Migration 69 defines durable Team invitation and membership authority", () => {
   assert.match(migrationSql, /CREATE TABLE IF NOT EXISTS business_team_invitations/i);
   assert.match(migrationSql, /CREATE TABLE IF NOT EXISTS business_team_memberships/i);
