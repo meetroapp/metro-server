@@ -3,7 +3,14 @@
 const crypto = require("node:crypto");
 
 const { normalizeRequestPhotoCollection, parseStoredRequestPhotos } = require("../media/requestPhoto");
-const { serializeOwnedRequest, validateRequestPayload } = require("./requestLifecycle");
+const {
+  professionalCanSeeRequest,
+  serializeOwnedRequest,
+  validateRequestPayload,
+} = require("./requestLifecycle");
+const {
+  projectNewLeadAlertsWithClient,
+} = require("../alerts/opportunityAlertService");
 const { resolveLifecycleContractVersion } = require("./lifecycleContract");
 const { createReportedConcern } = require("./reportedConcernService");
 const {
@@ -477,6 +484,13 @@ async function createJobRequest({
       client,
       reservationId: idempotency.reservation.id,
       post,
+    });
+
+    await projectNewLeadAlertsWithClient({
+      client,
+      request: post,
+      sourceEventId: idempotency.reservation.id,
+      professionalCanSeeRequest,
     });
 
     await client.query("COMMIT");

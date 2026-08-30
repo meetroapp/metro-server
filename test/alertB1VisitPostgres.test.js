@@ -384,6 +384,8 @@ test(
             alert.destination.jobId === approvedFixture.jobId,
           true
         );
+        assert.equal(Number.isSafeInteger(alert.destination.requestId), true);
+        assert.equal(Number.isSafeInteger(alert.destination.conversationId), true);
       }
     } finally {
       await pool.end();

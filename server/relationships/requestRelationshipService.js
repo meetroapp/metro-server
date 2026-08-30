@@ -1,6 +1,10 @@
 "use strict";
 
 const {
+  projectEmergencyResponseAlertWithClient,
+} = require("../alerts/opportunityAlertService");
+
+const {
   parsePositiveInteger,
   validateEmergencyResponsePayload,
 } = require("./requestRelationships");
@@ -11,6 +15,7 @@ async function createProfessionalEmergencyResponse({
   emergencyRequestId: rawEmergencyRequestId,
   payload,
   professionalCanSeeEmergencyOpportunity,
+  projectEmergencyResponseAlert = projectEmergencyResponseAlertWithClient,
 }) {
   const emergencyRequestId = parsePositiveInteger(rawEmergencyRequestId);
   const responseValidation = validateEmergencyResponsePayload(payload);
@@ -194,6 +199,14 @@ async function createProfessionalEmergencyResponse({
         code: "EMERGENCY_RESPONSE_NOT_PENDING",
         message: "This Emergency response is no longer pending.",
       };
+    }
+
+    if (relationship.created) {
+      await projectEmergencyResponseAlert({
+        client,
+        emergencyRequest,
+        relationship,
+      });
     }
 
     await client.query("COMMIT");

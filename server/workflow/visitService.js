@@ -363,10 +363,21 @@ async function loadJobContext(client, jobId, actorUserId, { lock = false } = {})
     /* visit:job_context */
     SELECT
       jobs.id AS job_id,
+      jobs.job_request_id AS request_id,
       jobs.lifecycle_contract_version,
       relationships.status AS relationship_status,
       relationships.homeowner_id AS homeowner_user_id,
       relationships.professional_user_id AS selected_professional_user_id,
+      (
+        SELECT conversations.id
+        FROM conversations
+        WHERE conversations.relationship_id = relationships.id
+          AND conversations.homeowner_id = relationships.homeowner_id
+          AND conversations.contractor_id = relationships.contractor_id
+          AND conversations.professional_user_id = relationships.professional_user_id
+        ORDER BY conversations.id DESC
+        LIMIT 1
+      ) AS conversation_id,
       participants.id AS actor_participant_id,
       participants.user_id AS actor_user_id,
       evaluation_subjects.evaluation_id AS canonical_evaluation_id,
@@ -534,6 +545,8 @@ async function projectVisitLifecycleAlertWithClient({
   const customerUserId = Number(context?.homeowner_user_id);
   const professionalUserId = Number(context?.selected_professional_user_id);
   const actorId = Number(actorUserId);
+  const conversationId = Number(context?.conversation_id);
+  const requestId = Number(context?.request_id);
   const counterpartUserId = actorId === customerUserId
     ? professionalUserId
     : actorId === professionalUserId
@@ -543,6 +556,8 @@ async function projectVisitLifecycleAlertWithClient({
     !Number.isSafeInteger(customerUserId) || customerUserId < 1 ||
     !Number.isSafeInteger(professionalUserId) || professionalUserId < 1 ||
     customerUserId === professionalUserId ||
+    !Number.isSafeInteger(conversationId) || conversationId < 1 ||
+    !Number.isSafeInteger(requestId) || requestId < 1 ||
     !counterpartUserId ||
     !eventRow?.id ||
     !eventRow?.event_type
@@ -617,7 +632,7 @@ async function projectVisitLifecycleAlertWithClient({
     safePayload: { shortPreview: policy.preview },
     destination: {
       type: "visit",
-      payload: { jobId, visitId },
+      payload: { conversationId, jobId, requestId, visitId },
     },
     availableAt: eventRow.created_at || null,
   });

@@ -1,6 +1,13 @@
 "use strict";
 
 const {
+  projectEmergencyRequestAlertsWithClient,
+} = require("../alerts/opportunityAlertService");
+const {
+  professionalCanSeeEmergencyOpportunity,
+} = require("./emergencyOpportunityService");
+
+const {
   getRequestServiceDomain,
   normalizeRequestServiceId,
 } = require("../requests/serviceCompatibility");
@@ -1144,6 +1151,15 @@ async function prepareEmergencyRequest({
       `,
       [current.row.id]
     );
+
+    await projectEmergencyRequestAlertsWithClient({
+      client,
+      emergencyRequest: {
+        ...result.rows[0],
+        disposition: current.assessment.disposition,
+      },
+      professionalCanSeeEmergencyOpportunity,
+    });
 
     await client.query("COMMIT");
 

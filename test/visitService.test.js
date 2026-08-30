@@ -53,6 +53,15 @@ test("Visit runtime vocabulary exactly preserves the approved authority contract
   assert.equal(VISIT_STATES.includes("RESCHEDULED"), false);
 });
 
+test("Visit Alerts preserve exact Job, Visit, Request, and Conversation destination identity", () => {
+  assert.match(serviceSource, /jobs\.job_request_id AS request_id/);
+  assert.match(serviceSource, /conversations\.relationship_id = relationships\.id/);
+  assert.match(
+    serviceSource,
+    /payload: \{ conversationId, jobId, requestId, visitId \}/
+  );
+});
+
 test("Visit scheduling requires offset instants, ordered bounds, and a canonical IANA zone", () => {
   assert.equal(
     visitServiceInternals.strictInstant("2026-08-20T13:00:00"),

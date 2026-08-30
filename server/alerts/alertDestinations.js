@@ -137,10 +137,43 @@ function normalizeDestination(input = {}) {
   }
 
   const jobResourceDestinations = {
-    visit: "visitId",
     quote: "quoteId",
     invoice: "invoiceId",
   };
+
+  if (type === "visit") {
+    const basic = exactDataObject(root.payload, ["jobId", "visitId"]);
+    const conversationContext = exactDataObject(root.payload, [
+      "conversationId",
+      "jobId",
+      "requestId",
+      "visitId",
+    ]);
+    if (!basic && !conversationContext) return { error: invalidDestination() };
+    const jobId = uuidIdentity(root.payload.jobId);
+    const visitId = uuidIdentity(root.payload.visitId);
+    if (!jobId || !visitId) return { error: invalidDestination() };
+    if (basic) {
+      return {
+        value: {
+          type,
+          payload: { jobId, visitId },
+          public: { type, jobId, visitId },
+        },
+      };
+    }
+    const conversationId = positiveIdentity(root.payload.conversationId);
+    const requestId = positiveIdentity(root.payload.requestId);
+    if (!conversationId || !requestId) return { error: invalidDestination() };
+    return {
+      value: {
+        type,
+        payload: { conversationId, jobId, requestId, visitId },
+        public: { type, conversationId, jobId, requestId, visitId },
+      },
+    };
+  }
+
   if (jobResourceDestinations[type]) {
     const resourceField = jobResourceDestinations[type];
     const payload = exactDataObject(root.payload, ["jobId", resourceField]);

@@ -142,6 +142,9 @@ function createPool({ failInsert = false } = {}) {
         row.completed_at = "2026-08-07T12:00:00.000Z";
         return { rows: [row] };
       }
+      if (sql.includes("opportunity_alert:eligible_professional_profiles")) {
+        return { rows: [] };
+      }
       if (sql.includes("job_request_create:insert_post") || sql.startsWith("INSERT INTO posts")) {
         if (failInsert) throw new Error("database unavailable test detail");
         return {

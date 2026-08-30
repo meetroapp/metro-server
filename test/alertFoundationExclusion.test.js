@@ -59,9 +59,7 @@ test("B1 permits only the bounded canonical Alert producer and resolver set", ()
   const producerCandidates = [
     "server/emergency/emergencyDispatchService.js",
     "server/emergency/emergencyOpportunityService.js",
-    "server/emergency/emergencyRequestService.js",
     "server/emergency/emergencySelectionService.js",
-    "server/relationships/requestRelationshipService.js",
     "server/authorization/evaluationService.js",
     "server/authorization/commercialAuthorityService.js",
   ];
@@ -102,6 +100,9 @@ test("B1 permits only the bounded canonical Alert producer and resolver set", ()
     "server/finance/preWorkDepositService.js",
     "server/relationships/professionalResponseService.js",
     "server/relationships/requestSelectionService.js",
+    "server/relationships/requestRelationshipService.js",
+    "server/requests/jobRequestCreateService.js",
+    "server/emergency/emergencyRequestService.js",
     "server/workflow/visitService.js",
   ]);
   for (const relativePath of listJsFilesRecursively("server")

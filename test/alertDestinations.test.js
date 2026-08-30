@@ -96,6 +96,25 @@ test("B1 destinations require exact protected Job resource identities", () => {
   assert.equal(invalid(destination("job", { jobId: "not-a-uuid" })), true);
 });
 
+test("Visit destinations preserve exact conversation and request return context", () => {
+  const jobId = "123e4567-e89b-42d3-a456-426614174000";
+  const visitId = "223e4567-e89b-42d3-a456-426614174000";
+  assert.deepEqual(
+    normalizeDestination(destination("visit", {
+      conversationId: 91,
+      jobId,
+      requestId: 42,
+      visitId,
+    })).value.public,
+    { type: "visit", conversationId: 91, jobId, requestId: 42, visitId }
+  );
+  assert.equal(invalid(destination("visit", {
+    conversationId: 91,
+    jobId,
+    visitId,
+  })), true);
+});
+
 test("alert destinations reject every extra top-level authority field", () => {
   for (const field of [
     "route",

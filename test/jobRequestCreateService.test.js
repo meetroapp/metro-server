@@ -170,6 +170,10 @@ function createPool({
         return { rows: user ? [user] : [] };
       }
 
+      if (sql.includes("opportunity_alert:eligible_professional_profiles")) {
+        return { rows: [] };
+      }
+
       if (sql.includes("job_request_create:idempotency_reserve")) {
         const [id, actorUserId, commandName, commandScope, key, fingerprint] = values;
         const existing = state.idempotency.find((row) =>
