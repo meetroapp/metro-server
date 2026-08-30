@@ -9,6 +9,10 @@ const {
   deriveQuoteDepositGate,
 } = require("../authorization/quoteDecisionHandoff");
 const {
+  createCanonicalLifecycleAlertWithClient,
+  resolveCanonicalLifecycleAlertsWithClient,
+} = require("../alerts/lifecycleAlertService");
+const {
   createPaymentLifecycleMessageWithClient,
 } = require("../conversations/conversationMessageService");
 
@@ -259,6 +263,8 @@ async function loadApprovedDecisionSource(client, {
       relationships.status AS relationship_status,
       professional.id AS professional_participant_id,
       customer.id AS customer_participant_id,
+      professional.user_id AS professional_user_id,
+      customer.user_id AS customer_user_id,
       decisions.id AS customer_decision_id,
       decisions.decision, decisions.issued_quote_version,
       decisions.issued_integrity_hash, decisions.decided_at,
@@ -539,6 +545,7 @@ async function completeCommand(client, commandId, result) {
 
 async function insertInitialObligation(client, source, requirement, commandId, actorParticipantId) {
   const obligationId = randomUUID();
+  const createdEventId = randomUUID();
   await client.query(
     `INSERT INTO canonical_pre_work_deposit_obligations (
       id, job_id, job_request_id, relationship_id,
@@ -605,9 +612,12 @@ async function insertInitialObligation(client, source, requirement, commandId, a
       recorded_by_participant_id, command_idempotency_id
      ) VALUES ($1, $2, 1, NULL, $3, 'DEPOSIT_OBLIGATION_CREATED',
        'DUE', $4, $5)`,
-    [randomUUID(), obligationId, source.job_id, actorParticipantId, commandId]
+    [createdEventId, obligationId, source.job_id, actorParticipantId, commandId]
   );
-  return loadObligation(client, source.customer_decision_id, { lock: true });
+  const obligation = await loadObligation(client, source.customer_decision_id, {
+    lock: true,
+  });
+  return obligation ? { ...obligation, created_event_id: createdEventId } : null;
 }
 
 async function materializeApprovedDecisionDepositWithClient({
@@ -675,6 +685,27 @@ async function materializeApprovedDecisionDepositWithClient({
       reserved.row.id,
       actorParticipantId
     );
+  }
+  if (materialized) {
+    await createCanonicalLifecycleAlertWithClient({
+      client,
+      recipientUserId: Number(source.customer_user_id),
+      sourceDomain: "commercial",
+      sourceEventType: "deposit.required",
+      sourceEntityType: "deposit_obligation",
+      sourceEntityId: obligation.id,
+      sourceEventId: obligation.created_event_id,
+      category: "payment",
+      priority: "high",
+      titleKey: "alerts.payment.depositRequired.title",
+      messageKey: "alerts.payment.depositRequired.message",
+      safePayload: { shortPreview: "Deposit required before scheduling" },
+      destination: {
+        type: "quote",
+        payload: { jobId: source.job_id, quoteId: source.quote_id },
+      },
+      availableAt: source.decided_at || null,
+    });
   }
   const result = {
     code: materialized
@@ -1032,6 +1063,7 @@ async function confirmDepositReceived(input = {}) {
     }
     const allocatedMinor = Math.min(amountMinor, remainingBefore);
     const receiptId = randomUUID();
+    const depositEventId = randomUUID();
     await client.query(
       `INSERT INTO canonical_pre_work_payment_receipts (
         id, job_id, relationship_id, gross_amount_minor, currency,
@@ -1122,7 +1154,7 @@ async function confirmDepositReceived(input = {}) {
        ) VALUES ($1, $2, $3, $4, $5, 'DEPOSIT_PAYMENT_ALLOCATED',
          $6, $7, $8, $9, $10)`,
       [
-        randomUUID(),
+        depositEventId,
         obligation.id,
         version,
         version - 1,
@@ -1134,6 +1166,34 @@ async function confirmDepositReceived(input = {}) {
         allocationCommand.row.id,
       ]
     );
+    if (state === "SATISFIED") {
+      await resolveCanonicalLifecycleAlertsWithClient({
+        client,
+        sourceDomain: "commercial",
+        sourceEntityType: "deposit_obligation",
+        sourceEntityId: obligation.id,
+        sourceEventTypes: ["deposit.required"],
+        recipientUserId: Number(source.customer_user_id),
+      });
+      await createCanonicalLifecycleAlertWithClient({
+        client,
+        recipientUserId: Number(source.customer_user_id),
+        sourceDomain: "commercial",
+        sourceEventType: "deposit.satisfied",
+        sourceEntityType: "deposit_obligation",
+        sourceEntityId: obligation.id,
+        sourceEventId: depositEventId,
+        category: "payment",
+        priority: "normal",
+        titleKey: "alerts.payment.depositSatisfied.title",
+        messageKey: "alerts.payment.depositSatisfied.message",
+        safePayload: { shortPreview: "Deposit requirement satisfied" },
+        destination: {
+          type: "quote",
+          payload: { jobId: source.job_id, quoteId: source.quote_id },
+        },
+      });
+    }
     const allocationResult = {
       code: "PRE_WORK_DEPOSIT_PAYMENT_ALLOCATED",
       receiptId,

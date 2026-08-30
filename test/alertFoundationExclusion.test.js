@@ -55,7 +55,7 @@ test("004C registers only the five approved recipient alert routes", () => {
   }
 });
 
-test("004D permits only the canonical communication producer and resolver", () => {
+test("B1 permits only the bounded canonical Alert producer and resolver set", () => {
   const producerCandidates = [
     "server/emergency/emergencyDispatchService.js",
     "server/emergency/emergencyOpportunityService.js",
@@ -99,6 +99,10 @@ test("004D permits only the canonical communication producer and resolver", () =
     "server/conversations/conversationParticipantStateService.js",
     "server/authorization/quoteDeliveryService.js",
     "server/finance/invoicePaymentService.js",
+    "server/finance/preWorkDepositService.js",
+    "server/relationships/professionalResponseService.js",
+    "server/relationships/requestSelectionService.js",
+    "server/workflow/visitService.js",
   ]);
   for (const relativePath of listJsFilesRecursively("server")
     .filter((item) => !item.startsWith("server/alerts/"))) {

@@ -3,6 +3,11 @@
 const { createHash, randomUUID } = require("node:crypto");
 
 const {
+  createCanonicalLifecycleAlertWithClient,
+  resolveCanonicalLifecycleAlertsWithClient,
+} = require("../alerts/lifecycleAlertService");
+
+const {
   parsePositiveOpaqueId,
   parsePositiveInteger,
 } = require("./requestRelationships");
@@ -1256,6 +1261,34 @@ async function selectProfessionalResponse({
       throw new Error("Selection idempotency completion failed.");
     }
     await invokeFailure(failureInjector, "idempotency_completion");
+
+    await resolveCanonicalLifecycleAlertsWithClient({
+      client,
+      sourceDomain: "workflow",
+      sourceEntityType: "request",
+      sourceEntityId: String(postId),
+      sourceEventTypes: ["request.professional_response_submitted"],
+      recipientUserId: actorUserId,
+    });
+    await createCanonicalLifecycleAlertWithClient({
+      client,
+      recipientUserId: Number(response.professional_user_id),
+      sourceDomain: "workflow",
+      sourceEventType: "request.professional_selected",
+      sourceEntityType: "request_selection",
+      sourceEntityId: String(identities.request_selection_id),
+      sourceEventId: String(identities.request_selection_id),
+      category: "request",
+      priority: "high",
+      titleKey: "alerts.request.professionalSelected.title",
+      messageKey: "alerts.request.professionalSelected.message",
+      safePayload: { shortPreview: "You were selected" },
+      destination: {
+        type: "conversation",
+        payload: { conversationId: Number(identities.conversation_id) },
+      },
+      availableAt: selectionInsert.rows[0].selected_at || null,
+    });
 
     await client.query("SET CONSTRAINTS ALL IMMEDIATE");
     await invokeFailure(failureInjector, "deferred_validation");

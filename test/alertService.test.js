@@ -219,6 +219,35 @@ test("alert service validates backend alert input before persistence", () => {
   assert.equal(Object.hasOwn(serverOwned.alert, "resolvedAt"), false);
 });
 
+test("permanent lifecycle identity is deterministic, required, and server derived", () => {
+  const event = alertInput({
+    sourceDomain: "workflow",
+    sourceEventType: "request.professional_selected",
+    sourceEntityType: "request_selection",
+    sourceEntityId: "55",
+    sourceEventId: "selection:55",
+    permanentEvent: true,
+  });
+  const first = validateAlertInput(event);
+  const replay = validateAlertInput({ ...event, dedupeKey: "replayed-command" });
+
+  assert.equal(first.ok, true);
+  assert.match(first.alert.canonicalEventKey, /^[0-9a-f]{64}$/);
+  assert.equal(replay.alert.canonicalEventKey, first.alert.canonicalEventKey);
+  assert.equal(
+    validateAlertInput({ ...event, sourceEventId: null }).code,
+    "INVALID_ALERT_SOURCE"
+  );
+  assert.equal(
+    validateAlertInput({ ...event, canonicalEventKey: "a".repeat(64) }).code,
+    "INVALID_ALERT_SOURCE"
+  );
+
+  const communication = validateAlertInput(alertInput());
+  assert.equal(communication.ok, true);
+  assert.equal(communication.alert.canonicalEventKey, null);
+});
+
 test("alert service creates and serializes a backend alert in a service-owned transaction", async () => {
   const context = createPool();
   const result = await createAlert({

@@ -13,6 +13,10 @@ const {
   schedulingGateFailure,
 } = require("../finance/preWorkDepositService");
 const {
+  createCanonicalLifecycleAlertWithClient,
+  resolveCanonicalLifecycleAlertsWithClient,
+} = require("../alerts/lifecycleAlertService");
+const {
   evaluateApprovedWorkStartReadinessWithClient,
   recordApprovedWorkStartWithClient,
 } = require("./approvedWorkExecutionService");
@@ -511,6 +515,112 @@ function actorRole(context) {
     return "PROFESSIONAL";
   }
   return null;
+}
+
+const ACTIONABLE_VISIT_ALERT_TYPES = Object.freeze([
+  "visit.proposed",
+  "visit.schedule_proposed",
+  "visit.change_requested",
+]);
+
+async function projectVisitLifecycleAlertWithClient({
+  client,
+  context,
+  actorUserId,
+  jobId,
+  visitId,
+  eventRow,
+}) {
+  const customerUserId = Number(context?.homeowner_user_id);
+  const professionalUserId = Number(context?.selected_professional_user_id);
+  const actorId = Number(actorUserId);
+  const counterpartUserId = actorId === customerUserId
+    ? professionalUserId
+    : actorId === professionalUserId
+      ? customerUserId
+      : null;
+  if (
+    !Number.isSafeInteger(customerUserId) || customerUserId < 1 ||
+    !Number.isSafeInteger(professionalUserId) || professionalUserId < 1 ||
+    customerUserId === professionalUserId ||
+    !counterpartUserId ||
+    !eventRow?.id ||
+    !eventRow?.event_type
+  ) {
+    throw new TypeError("Canonical Visit Alert participants are required.");
+  }
+
+  if (eventRow.event_type !== "VISIT_PROPOSED") {
+    for (const recipientUserId of [customerUserId, professionalUserId]) {
+      await resolveCanonicalLifecycleAlertsWithClient({
+        client,
+        sourceDomain: "workflow",
+        sourceEntityType: "visit",
+        sourceEntityId: visitId,
+        sourceEventTypes: ACTIONABLE_VISIT_ALERT_TYPES,
+        recipientUserId,
+      });
+    }
+  }
+
+  const policy = {
+    VISIT_PROPOSED: {
+      eventType: "visit.proposed",
+      titleKey: "alerts.schedule.visitProposed.title",
+      messageKey: "alerts.schedule.visitProposed.message",
+      preview: "Visit proposed",
+      priority: "high",
+    },
+    VISIT_SCHEDULE_PROPOSED: {
+      eventType: "visit.schedule_proposed",
+      titleKey: "alerts.schedule.visitScheduleProposed.title",
+      messageKey: "alerts.schedule.visitScheduleProposed.message",
+      preview: "Visit schedule proposed",
+      priority: "high",
+    },
+    VISIT_CHANGE_REQUESTED: {
+      eventType: "visit.change_requested",
+      titleKey: "alerts.schedule.visitChangeRequested.title",
+      messageKey: "alerts.schedule.visitChangeRequested.message",
+      preview: "Visit change requested",
+      priority: "high",
+    },
+    VISIT_CONFIRMED: {
+      eventType: "visit.confirmed",
+      titleKey: "alerts.schedule.visitConfirmed.title",
+      messageKey: "alerts.schedule.visitConfirmed.message",
+      preview: "Visit confirmed",
+      priority: "normal",
+    },
+    VISIT_CANCELLED: {
+      eventType: "visit.cancelled",
+      titleKey: "alerts.schedule.visitCancelled.title",
+      messageKey: "alerts.schedule.visitCancelled.message",
+      preview: "Visit cancelled",
+      priority: "high",
+    },
+  }[eventRow.event_type];
+  if (!policy) return { created: false };
+
+  return createCanonicalLifecycleAlertWithClient({
+    client,
+    recipientUserId: counterpartUserId,
+    sourceDomain: "workflow",
+    sourceEventType: policy.eventType,
+    sourceEntityType: "visit",
+    sourceEntityId: visitId,
+    sourceEventId: eventRow.id,
+    category: "schedule",
+    priority: policy.priority,
+    titleKey: policy.titleKey,
+    messageKey: policy.messageKey,
+    safePayload: { shortPreview: policy.preview },
+    destination: {
+      type: "visit",
+      payload: { jobId, visitId },
+    },
+    availableAt: eventRow.created_at || null,
+  });
 }
 
 async function requireActorRole({
@@ -1403,7 +1513,7 @@ async function proposeVisit(input = {}) {
       participantId,
       commandId: idempotency.reservation.id,
     });
-    await insertVisitEvent(client, {
+    const eventRow = await insertVisitEvent(client, {
       visitId,
       visitVersion: 1,
       previousVisitVersion: null,
@@ -1423,6 +1533,14 @@ async function proposeVisit(input = {}) {
         [visitId, workstreamId, jobId, participantId, idempotency.reservation.id]
       );
     }
+    await projectVisitLifecycleAlertWithClient({
+      client,
+      context: authorized.context,
+      actorUserId: validated.actorId,
+      jobId,
+      visitId,
+      eventRow,
+    });
     await invokeFailure(input.failureInjector, "after_write");
     const row = await loadVisit(client, jobId, visitId);
     const result = commandResult(
@@ -1949,7 +2067,7 @@ async function runVersionCommand({
       participantId,
       commandId: idempotency.reservation.id,
     });
-    await insertVisitEvent(client, {
+    const eventRow = await insertVisitEvent(client, {
       visitId,
       visitVersion: nextVersion,
       previousVisitVersion: expectedVersion,
@@ -1979,6 +2097,14 @@ async function runVersionCommand({
       if (recorded.error) return { abort: recorded.error };
       approvedWorkStartEvent = recorded.startEvent;
     }
+    await projectVisitLifecycleAlertWithClient({
+      client,
+      context: authorized.context,
+      actorUserId: validated.actorId,
+      jobId,
+      visitId,
+      eventRow,
+    });
     if (
       commandName === VISIT_COMMANDS.COMPLETE &&
       current.purpose === "EVALUATION"
@@ -2215,6 +2341,14 @@ async function requestVisitChange(input = {}) {
       reason,
       participantId,
       commandId: idempotency.reservation.id,
+    });
+    await projectVisitLifecycleAlertWithClient({
+      client,
+      context: authorized.context,
+      actorUserId: command.validated.actorId,
+      jobId: command.jobId,
+      visitId: command.visitId,
+      eventRow,
     });
     await invokeFailure(input.failureInjector, "after_write");
     const now = currentInstant(input.clock);

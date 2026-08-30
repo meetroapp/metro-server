@@ -256,10 +256,10 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 63);
+      assert.equal(migrations.length, 64);
       const migrated = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(migrated.success, true, JSON.stringify(migrated));
-      assert.equal(migrated.applied.length, 63);
+      assert.equal(migrated.applied.length, 64);
 
       const empty = await pool.query(
         `SELECT
@@ -278,7 +278,7 @@ test(
       assert.deepEqual(empty.rows[0], {
         plans: 0, versions: 0, items: 0, snapshots: 0, purchases: 0,
         corrections: 0, events: 0, evidence: 0, commands: 0,
-        obligations: 0, ledger: 63,
+        obligations: 0, ledger: 64,
       });
 
       const identities = await createVisitTestIdentities(pool, suffix);
@@ -632,7 +632,7 @@ test(
 
       const replay = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(replay.success, true, JSON.stringify(replay));
-      assert.equal(replay.skipped.length, 63);
+      assert.equal(replay.skipped.length, 64);
     } finally {
       await pool.end();
     }

@@ -8,6 +8,9 @@ const {
   validateProfessionalResponseIdempotencyKey,
   validateProfessionalResponsePayload,
 } = require("./requestRelationships");
+const {
+  createCanonicalLifecycleAlertWithClient,
+} = require("../alerts/lifecycleAlertService");
 
 const COMMAND_NAME = "professional_response.submit";
 const IMPLEMENTATION_MILESTONE_ID =
@@ -906,6 +909,25 @@ async function submitProfessionalResponse({
       reservationId: idempotency.reservation.id,
       row,
       classification: "created",
+    });
+    await createCanonicalLifecycleAlertWithClient({
+      client,
+      recipientUserId: Number(response.homeowner_id),
+      sourceDomain: "workflow",
+      sourceEventType: "request.professional_response_submitted",
+      sourceEntityType: "request",
+      sourceEntityId: String(postId),
+      sourceEventId: `${response.id}:version:1`,
+      category: "request",
+      priority: "normal",
+      titleKey: "alerts.request.professionalResponse.title",
+      messageKey: "alerts.request.professionalResponse.message",
+      safePayload: { shortPreview: "New professional response" },
+      destination: {
+        type: "request",
+        payload: { requestId: Number(postId) },
+      },
+      availableAt: response.submitted_at || null,
     });
     await client.query("SET CONSTRAINTS ALL IMMEDIATE");
     await client.query("COMMIT");

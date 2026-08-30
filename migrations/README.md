@@ -81,6 +81,7 @@ Current inventory:
 61. `202608280003_create_canonical_approved_work_execution_authority.sql`
 62. `202608290001_add_invoice_line_source_authority.sql`
 63. `202608290002_add_deposit_request_document_authority.sql`
+64. `202608290003_add_canonical_alert_event_identity.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
@@ -101,6 +102,12 @@ and migrate as `APPROVED_QUOTE_SCOPE`; Extra work must carry no Quote source.
 It also permits a draft Invoice to carry an already-received pre-work payment
 without creating a duplicate Invoice payment record. It creates no Invoice,
 payment, Quote, Job completion, or History row.
+
+`202608290003_add_canonical_alert_event_identity.sql` adds nullable,
+server-derived permanent event identity for lifecycle Alerts, unique per exact
+recipient, plus strict Job, Visit, Quote, and Invoice destination vocabulary.
+Existing Alert rows are not backfilled, and Communication attention-window
+aggregation retains its existing active dedupe behavior.
 
 `202608250001_correct_evaluation_visit_authority_and_negotiation.sql` adds the
 Job-scoped `evaluation_visit` authority shape, immutable

@@ -29,6 +29,7 @@ function alertInput(overrides = {}) {
     sourceEntityType: "conversation",
     sourceEntityId: "91",
     sourceEventId: "message:205",
+    canonicalEventKey: null,
     category: "communication",
     priority: "normal",
     titleKey: "alerts.communication.message.title",
@@ -92,11 +93,11 @@ test("alert repository inserts canonical recipient-scoped columns as JSONB", asy
   assert.equal(result.created, true);
   assert.equal(result.row.id, 100);
   assert.match(calls[0].sql, /INSERT INTO alerts/);
-  assert.match(calls[0].sql, /\$11::jsonb/);
-  assert.match(calls[0].sql, /\$13::jsonb/);
+  assert.match(calls[0].sql, /\$12::jsonb/);
+  assert.match(calls[0].sql, /\$14::jsonb/);
   assert.match(calls[0].sql, /ON CONFLICT DO NOTHING/);
   assert.equal(calls[0].params[0], 7);
-  assert.equal(calls[0].params[13], "communication:conversation:91:message:205");
+  assert.equal(calls[0].params[14], "communication:conversation:91:message:205");
 });
 
 test("alert repository returns existing active alert on dedupe conflict", async () => {
@@ -126,6 +127,80 @@ test("alert repository returns existing active alert on dedupe conflict", async 
     calls[1].sql,
     /lifecycle_state IN \('active', 'dismissed'\)/
   );
+});
+
+test("permanent event identity survives every lifecycle state and remains recipient scoped", async () => {
+  const calls = [];
+  const canonicalEventKey = "a".repeat(64);
+  const existing = row({
+    id: 109,
+    recipient_user_id: 7,
+    canonical_event_key: canonicalEventKey,
+    lifecycle_state: "archived",
+    read_at: "2026-08-03T12:01:00.000Z",
+    dismissed_at: "2026-08-03T12:02:00.000Z",
+    resolved_at: "2026-08-03T12:03:00.000Z",
+    archived_at: "2026-08-04T00:00:00.000Z",
+  });
+  const client = {
+    async query(text, params) {
+      const sql = normalizeSql(text);
+      calls.push({ sql, params });
+      if (sql.startsWith("INSERT INTO alerts")) return { rows: [] };
+      return { rows: [existing] };
+    },
+  };
+
+  const result = await insertAlertWithClient({
+    client,
+    alert: alertInput({ canonicalEventKey }),
+  });
+
+  assert.equal(result.created, false);
+  assert.equal(result.row.id, 109);
+  assert.deepEqual(calls[1].params, [7, canonicalEventKey]);
+  assert.match(calls[1].sql, /recipient_user_id = \$1/);
+  assert.match(calls[1].sql, /canonical_event_key = \$2/);
+  const whereClause = calls[1].sql.split(" FROM alerts ")[1];
+  assert.doesNotMatch(
+    whereClause,
+    /lifecycle_state|read_at|dismissed_at|resolved_at|archived_at/
+  );
+});
+
+test("the same permanent event may project once for each distinct recipient", async () => {
+  const canonicalEventKey = "b".repeat(64);
+  const lookups = [];
+  const client = {
+    async query(text, params) {
+      const sql = normalizeSql(text);
+      if (sql.startsWith("INSERT INTO alerts")) return { rows: [] };
+      lookups.push({ sql, params });
+      return {
+        rows: [row({
+          id: params[0] * 10,
+          recipient_user_id: params[0],
+          canonical_event_key: params[1],
+        })],
+      };
+    },
+  };
+
+  const first = await insertAlertWithClient({
+    client,
+    alert: alertInput({ recipientUserId: 7, canonicalEventKey }),
+  });
+  const second = await insertAlertWithClient({
+    client,
+    alert: alertInput({ recipientUserId: 8, canonicalEventKey }),
+  });
+
+  assert.equal(first.row.recipient_user_id, 7);
+  assert.equal(second.row.recipient_user_id, 8);
+  assert.deepEqual(lookups.map(({ params }) => params), [
+    [7, canonicalEventKey],
+    [8, canonicalEventKey],
+  ]);
 });
 
 test("alert repository keeps recipient lookup and mutations owner scoped", async () => {

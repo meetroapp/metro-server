@@ -123,6 +123,39 @@ function normalizeDestination(input = {}) {
     };
   }
 
+  if (type === "job") {
+    const payload = exactDataObject(root.payload, ["jobId"]);
+    const jobId = payload ? uuidIdentity(payload.jobId) : null;
+    if (!jobId) return { error: invalidDestination() };
+    return {
+      value: {
+        type,
+        payload: { jobId },
+        public: { type, jobId },
+      },
+    };
+  }
+
+  const jobResourceDestinations = {
+    visit: "visitId",
+    quote: "quoteId",
+    invoice: "invoiceId",
+  };
+  if (jobResourceDestinations[type]) {
+    const resourceField = jobResourceDestinations[type];
+    const payload = exactDataObject(root.payload, ["jobId", resourceField]);
+    const jobId = payload ? uuidIdentity(payload.jobId) : null;
+    const resourceId = payload ? uuidIdentity(payload[resourceField]) : null;
+    if (!jobId || !resourceId) return { error: invalidDestination() };
+    return {
+      value: {
+        type,
+        payload: { jobId, [resourceField]: resourceId },
+        public: { type, jobId, [resourceField]: resourceId },
+      },
+    };
+  }
+
   const numericDestinations = {
     emergency_request: "emergencyRequestId",
     request: "requestId",

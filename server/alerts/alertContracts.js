@@ -1,5 +1,6 @@
 "use strict";
 
+const { createHash } = require("node:crypto");
 const { types: { isProxy } } = require("node:util");
 
 const ALERT_SOURCE_DOMAINS = Object.freeze([
@@ -52,6 +53,10 @@ const ALERT_DESTINATION_TYPES = Object.freeze([
   "business_profile",
   "review",
   "notifications",
+  "job",
+  "visit",
+  "quote",
+  "invoice",
 ]);
 
 const ALERT_LIMITS = Object.freeze({
@@ -62,6 +67,7 @@ const ALERT_LIMITS = Object.freeze({
   titleKey: 160,
   messageKey: 160,
   dedupeKey: 240,
+  canonicalEventKey: 64,
   safePayloadBytes: 4096,
   safePayloadDepth: 2,
   safePayloadKeys: 20,
@@ -168,6 +174,49 @@ function assertAllowed(value, allowed) {
   return allowed.includes(value) ? value : null;
 }
 
+function deriveCanonicalEventKey({
+  sourceDomain,
+  sourceEventType,
+  sourceEntityType,
+  sourceEntityId,
+  sourceEventId,
+}) {
+  const normalizedEventType = normalizeBoundedToken(
+    sourceEventType,
+    ALERT_LIMITS.sourceEventType
+  );
+  const normalizedEntityType = normalizeBoundedToken(
+    sourceEntityType,
+    ALERT_LIMITS.sourceEntityType
+  );
+  const normalizedEntityId = normalizeBoundedToken(
+    sourceEntityId,
+    ALERT_LIMITS.sourceEntityId
+  );
+  const normalizedEventId = normalizeBoundedToken(
+    sourceEventId,
+    ALERT_LIMITS.sourceEventId
+  );
+  if (
+    !ALERT_SOURCE_DOMAINS.includes(sourceDomain) ||
+    !normalizedEventType ||
+    !normalizedEntityType ||
+    !normalizedEntityId ||
+    !normalizedEventId
+  ) {
+    return null;
+  }
+  return createHash("sha256")
+    .update(JSON.stringify({
+      sourceDomain,
+      sourceEventType: normalizedEventType,
+      sourceEntityType: normalizedEntityType,
+      sourceEntityId: normalizedEntityId,
+      sourceEventId: normalizedEventId,
+    }))
+    .digest("hex");
+}
+
 module.exports = {
   ALERT_CATEGORIES,
   ALERT_DESTINATION_TYPES,
@@ -180,6 +229,7 @@ module.exports = {
   SAFE_SOURCE_PATTERN,
   alertFailure,
   assertAllowed,
+  deriveCanonicalEventKey,
   isPlainObject,
   normalizeBoundedToken,
   normalizeLocalizationKey,

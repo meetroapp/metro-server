@@ -14,6 +14,9 @@ const {
 } = require("../alerts/communicationAlertService");
 const { createAlert } = require("../alerts/alertService");
 const {
+  resolveCanonicalLifecycleAlertsWithClient,
+} = require("../alerts/lifecycleAlertService");
+const {
   deriveQuoteDepositGate,
 } = require("../authorization/quoteDecisionHandoff");
 
@@ -47,10 +50,21 @@ async function createProfessionalQuoteDecisionAlertWithClient({
     !Number.isSafeInteger(Number(quote.currentVersion)) ||
     Number(quote.currentVersion) !== Number(decisionRow.issued_quote_version) ||
     !Number.isSafeInteger(Number(context?.professional_user_id)) ||
+    !Number.isSafeInteger(Number(context?.customer_user_id)) ||
     !Number.isSafeInteger(Number(delivery?.conversation_id))
   ) {
     throw new TypeError("Canonical Quote decision attention identity is required.");
   }
+
+  await resolveCanonicalLifecycleAlertsWithClient({
+    client,
+    sourceDomain: "commercial",
+    sourceEntityType: "quote",
+    sourceEntityId: quote.id,
+    sourceEventTypes: ["quote.delivered"],
+    recipientUserId: Number(context.customer_user_id),
+    resolvedAt: decisionRow.decided_at || null,
+  });
 
   const deposit = approved
     ? deriveQuoteDepositGate({
@@ -86,6 +100,7 @@ async function createProfessionalQuoteDecisionAlertWithClient({
       sourceEntityType: "quote",
       sourceEntityId: quote.id,
       sourceEventId: decisionRow.id,
+      permanentEvent: true,
       category: "proposal",
       priority: "high",
       titleKey: approved

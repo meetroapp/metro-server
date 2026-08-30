@@ -21,6 +21,9 @@ const {
   resolveCommunicationRecipient,
 } = require("../alerts/communicationAlertService");
 const {
+  createCanonicalLifecycleAlertWithClient,
+} = require("../alerts/lifecycleAlertService");
+const {
   COMMAND_NAME,
   COPY_COMMAND_NAME,
   DELIVERY_INTENT,
@@ -589,6 +592,31 @@ async function sendQuoteInMeetro(input = {}) {
       recipientUserId: receiverId,
       recipientLastReadMessageId: recipientAttentionWindow.lastReadMessageId,
       message,
+    });
+    await createCanonicalLifecycleAlertWithClient({
+      client,
+      recipientUserId: receiverId,
+      sourceDomain: "commercial",
+      sourceEventType: "quote.delivered",
+      sourceEntityType: "quote",
+      sourceEntityId: loaded.quote.id,
+      sourceEventId: `${loaded.quote.id}:version:${loaded.quote.currentVersion}`,
+      category: "proposal",
+      priority: "high",
+      titleKey: "alerts.commercial.quoteDelivered.title",
+      messageKey: "alerts.commercial.quoteDelivered.message",
+      safePayload: {
+        shortPreview: "Quote ready for review",
+        issuedQuoteVersion: Number(loaded.quote.currentVersion),
+      },
+      destination: {
+        type: "quote",
+        payload: {
+          jobId: loaded.quote.jobId,
+          quoteId: loaded.quote.id,
+        },
+      },
+      availableAt: message.created_at || null,
     });
     logger.info(
       deliveryIntent === DELIVERY_INTENT.COPY

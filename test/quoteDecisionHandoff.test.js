@@ -40,6 +40,7 @@ test("approved decision creates one bounded professional alert with resource-onl
   const client = {
     async query(sql, values) {
       calls.push({ sql, values });
+      if (/UPDATE alerts/.test(sql)) return { rows: [] };
       assert.match(sql, /INSERT INTO alerts/);
       return { rows: [{
         id: 91,
@@ -53,10 +54,10 @@ test("approved decision creates one bounded professional alert with resource-onl
         priority: "high",
         title_key: "alerts.commercial.quoteApproved.title",
         message_key: "alerts.commercial.quoteApproved.message",
-        safe_payload: JSON.parse(values[10]),
+        safe_payload: JSON.parse(values[11]),
         destination_type: "conversation",
-        destination_payload: JSON.parse(values[12]),
-        dedupe_key: values[13],
+        destination_payload: JSON.parse(values[13]),
+        dedupe_key: values[14],
         lifecycle_state: "active",
         available_at: "2026-08-28T14:00:00.000Z",
         expires_at: null,
@@ -73,6 +74,7 @@ test("approved decision creates one bounded professional alert with resource-onl
     client,
     context: {
       professional_user_id: 24,
+      customer_user_id: 17,
       customer_display_name: "Antony Guzman",
       job_title: "Inspect damaged cabinet door and trim",
     },
@@ -94,9 +96,10 @@ test("approved decision creates one bounded professional alert with resource-onl
     delivery: { conversation_id: 342 },
   });
   assert.deepEqual(result, { alertId: "91", created: true });
-  assert.equal(calls.length, 1);
-  const inserted = calls[0].values;
-  assert.deepEqual(JSON.parse(inserted[10]), {
+  assert.equal(calls.length, 2);
+  assert.match(calls[0].sql, /UPDATE alerts/);
+  const inserted = calls[1].values;
+  assert.deepEqual(JSON.parse(inserted[11]), {
     shortPreview: "Inspect damaged cabinet door and trim",
     projectTitle: "Inspect damaged cabinet door and trim",
     customerLabel: "Antony Guzman",
@@ -110,12 +113,88 @@ test("approved decision creates one bounded professional alert with resource-onl
     depositDueMinor: 51000,
     remainingMinor: 17000,
   });
-  assert.deepEqual(JSON.parse(inserted[12]), {
+  assert.deepEqual(JSON.parse(inserted[13]), {
     conversationId: 342,
     jobId: JOB_ID,
     quoteId: QUOTE_ID,
   });
-  assert.match(inserted[13], /version:2:decision:APPROVED:professional:24$/);
+  assert.match(inserted[14], /version:2:decision:APPROVED:professional:24$/);
+});
+
+test("declined decision preserves one durable professional Alert and resolves exact customer delivery", async () => {
+  const calls = [];
+  const client = {
+    async query(sql, values) {
+      calls.push({ sql, values });
+      if (/UPDATE alerts/.test(sql)) return { rows: [] };
+      return { rows: [{
+        id: 92,
+        recipient_user_id: 24,
+        source_domain: "commercial",
+        source_event_type: "quote.customer_declined",
+        source_entity_type: "quote",
+        source_entity_id: QUOTE_ID,
+        source_event_id: DECISION_ID,
+        canonical_event_key: values[6],
+        category: "proposal",
+        priority: "high",
+        title_key: values[9],
+        message_key: values[10],
+        safe_payload: JSON.parse(values[11]),
+        destination_type: values[12],
+        destination_payload: JSON.parse(values[13]),
+        dedupe_key: values[14],
+        lifecycle_state: "active",
+        available_at: "2026-08-28T14:00:00.000Z",
+        expires_at: null,
+        read_at: null,
+        dismissed_at: null,
+        resolved_at: null,
+        archived_at: null,
+        created_at: "2026-08-28T14:00:00.000Z",
+        updated_at: "2026-08-28T14:00:00.000Z",
+      }] };
+    },
+  };
+
+  const result = await createProfessionalQuoteDecisionAlertWithClient({
+    client,
+    context: {
+      professional_user_id: 24,
+      customer_user_id: 17,
+      customer_display_name: "Customer",
+      job_title: "Customer project",
+    },
+    quote: {
+      id: QUOTE_ID,
+      jobId: JOB_ID,
+      currentVersion: 2,
+      documentNumber: "Q-0000001",
+      totalMinor: 68000,
+      currency: "USD",
+      customerTermsSnapshot: {},
+    },
+    decisionRow: {
+      id: DECISION_ID,
+      decision: "DECLINED",
+      issued_quote_version: 2,
+      decided_at: "2026-08-28T14:00:00.000Z",
+    },
+    delivery: { conversation_id: 342 },
+  });
+
+  assert.deepEqual(result, { alertId: "92", created: true });
+  assert.match(calls[0].sql, /UPDATE alerts/);
+  assert.deepEqual(calls[0].values.slice(0, 5), [
+    "commercial",
+    "quote",
+    QUOTE_ID,
+    "quote.delivered",
+    17,
+  ]);
+  assert.equal(calls[1].values[2], "quote.customer_declined");
+  assert.match(calls[1].values[6], /^[0-9a-f]{64}$/);
+  assert.equal(calls[1].values[12], "conversation");
 });
 
 test("mismatched decision identity fails before creating professional attention", async () => {

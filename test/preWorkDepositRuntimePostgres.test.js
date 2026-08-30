@@ -265,10 +265,10 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 63);
+      assert.equal(migrations.length, 64);
       const migrated = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(migrated.success, true, JSON.stringify(migrated));
-      assert.equal(migrated.applied.length, 63);
+      assert.equal(migrated.applied.length, 64);
 
       const identities = await createVisitTestIdentities(pool, suffix);
       const fixture = await createVisitLifecycleFixture(pool, identities, `${suffix}-deposit`);
@@ -291,6 +291,15 @@ test(
         logger: quiet,
       });
       assert.equal(issuedOnly.code, "PRE_WORK_DEPOSIT_APPROVED_AGREEMENT_REQUIRED");
+      assert.equal(
+        (await pool.query(
+          `SELECT count(*)::integer AS count FROM alerts
+           WHERE source_event_type = 'deposit.required'
+             AND destination_payload->>'jobId' = $1`,
+          [issuedFixture.jobId]
+        )).rows[0].count,
+        0
+      );
 
       const declinedFixture = await createVisitLifecycleFixture(
         pool,
@@ -321,6 +330,15 @@ test(
       assert.equal(
         declinedStatus.code,
         "PRE_WORK_DEPOSIT_APPROVED_AGREEMENT_REQUIRED"
+      );
+      assert.equal(
+        (await pool.query(
+          `SELECT count(*)::integer AS count FROM alerts
+           WHERE source_event_type = 'deposit.required'
+             AND destination_payload->>'jobId' = $1`,
+          [declinedFixture.jobId]
+        )).rows[0].count,
+        0
       );
 
       const legacyFixture = await createVisitLifecycleFixture(
@@ -403,6 +421,21 @@ test(
         versions: 1,
         events: 1,
       });
+      const requiredAlert = await pool.query(
+        `SELECT alerts.recipient_user_id, alerts.source_entity_id,
+          alerts.canonical_event_key, alerts.lifecycle_state,
+          alerts.destination_type, alerts.destination_payload
+         FROM alerts
+         WHERE alerts.source_event_type = 'deposit.required'
+           AND alerts.destination_payload->>'jobId' = $1
+           AND alerts.destination_payload->>'quoteId' = $2`,
+        [fixture.jobId, quote.quoteId]
+      );
+      assert.equal(requiredAlert.rowCount, 1);
+      assert.equal(Number(requiredAlert.rows[0].recipient_user_id), identities.homeownerId);
+      assert.match(requiredAlert.rows[0].canonical_event_key, /^[0-9a-f]{64}$/);
+      assert.equal(requiredAlert.rows[0].lifecycle_state, "active");
+      assert.equal(requiredAlert.rows[0].destination_type, "quote");
 
       const due = await getProfessionalDepositStatus({
         pool,
@@ -482,6 +515,24 @@ test(
       assert.equal(first.deposit.appliedMinor, 20000);
       assert.equal(first.deposit.remainingMinor, 31000);
       assert.equal(first.payment.unappliedMinor, 0);
+      assert.equal(
+        (await pool.query(
+          `SELECT lifecycle_state FROM alerts
+           WHERE source_event_type = 'deposit.required'
+             AND source_entity_id = $1`,
+          [requiredAlert.rows[0].source_entity_id]
+        )).rows[0].lifecycle_state,
+        "active"
+      );
+      assert.equal(
+        (await pool.query(
+          `SELECT count(*)::integer AS count FROM alerts
+           WHERE source_event_type = 'deposit.satisfied'
+             AND source_entity_id = $1`,
+          [requiredAlert.rows[0].source_entity_id]
+        )).rows[0].count,
+        0
+      );
       const firstReplay = await payment(
         pool,
         identities.professionalId,
@@ -514,6 +565,28 @@ test(
       });
       assert.equal(second.deposit.state, "SATISFIED");
       assert.equal(second.deposit.remainingMinor, 0);
+      const satisfiedAlerts = await pool.query(
+        `SELECT source_event_type, lifecycle_state, canonical_event_key,
+          recipient_user_id, destination_type, destination_payload
+         FROM alerts
+         WHERE source_entity_id = $1
+           AND source_event_type IN ('deposit.required', 'deposit.satisfied')
+         ORDER BY id`,
+        [requiredAlert.rows[0].source_entity_id]
+      );
+      assert.deepEqual(satisfiedAlerts.rows.map((row) => ({
+        event: row.source_event_type,
+        state: row.lifecycle_state,
+        recipient: Number(row.recipient_user_id),
+        destination: row.destination_type,
+      })), [
+        { event: "deposit.required", state: "resolved", recipient: identities.homeownerId, destination: "quote" },
+        { event: "deposit.satisfied", state: "active", recipient: identities.homeownerId, destination: "quote" },
+      ]);
+      assert.equal(
+        satisfiedAlerts.rows.every((row) => /^[0-9a-f]{64}$/.test(row.canonical_event_key)),
+        true
+      );
 
       const activated = await activateApprovedWorkVisitAuthority({
         pool,
@@ -657,7 +730,7 @@ test(
       );
       const replayMigrations = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(replayMigrations.success, true, JSON.stringify(replayMigrations));
-      assert.equal(replayMigrations.skipped.length, 63);
+      assert.equal(replayMigrations.skipped.length, 64);
     } finally {
       await pool.end();
     }

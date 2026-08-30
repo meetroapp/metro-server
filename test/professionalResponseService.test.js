@@ -42,6 +42,11 @@ test("canonical submission atomically creates the exact response aggregate", asy
   assert.equal(fake.state.evidence.length, 1);
   assert.equal(fake.state.idempotency.length, 1);
   assert.equal(fake.state.idempotency[0].completed_at !== null, true);
+  assert.equal(fake.state.alerts.length, 1);
+  assert.equal(fake.state.alerts[0].recipient_user_id, 7);
+  assert.equal(fake.state.alerts[0].source_event_type, "request.professional_response_submitted");
+  assert.deepEqual(fake.state.alerts[0].destination_payload, { requestId: 41 });
+  assert.match(fake.state.alerts[0].canonical_event_key, /^[0-9a-f]{64}$/);
   assert.equal(
     String(fake.state.responses[0].request_relationship_id),
     String(fake.state.relationships[0].id)
@@ -108,6 +113,7 @@ test("same key retry replays the original pair without duplicate evidence", asyn
   assert.equal(fake.state.versions.length, 1);
   assert.equal(fake.state.evidence.length, 1);
   assert.equal(fake.state.idempotency.length, 1);
+  assert.equal(fake.state.alerts.length, 1);
 });
 
 test("same key with different canonical content conflicts without writes", async () => {
@@ -122,6 +128,7 @@ test("same key with different canonical content conflicts without writes", async
   assert.equal(conflict.code, "PROFESSIONAL_RESPONSE_IDEMPOTENCY_CONFLICT");
   assert.equal(fake.state.responses.length, 1);
   assert.equal(fake.state.evidence.length, 1);
+  assert.equal(fake.state.alerts.length, 1);
 });
 
 test("different key returns existing canonical participation unchanged", async () => {

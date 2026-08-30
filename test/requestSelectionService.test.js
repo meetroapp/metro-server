@@ -52,6 +52,13 @@ test("selection atomically creates one canonical selection and exact conversatio
   assert.equal(fake.state.selectionEvidence.length, 1);
   assert.equal(fake.state.idempotency.length, 1);
   assert.ok(fake.state.idempotency[0].completed_at);
+  assert.equal(fake.state.alerts.length, 1);
+  assert.equal(fake.state.alerts[0].recipient_user_id, 9);
+  assert.equal(fake.state.alerts[0].source_event_type, "request.professional_selected");
+  assert.deepEqual(fake.state.alerts[0].destination_payload, {
+    conversationId: 801,
+  });
+  assert.match(fake.state.alerts[0].canonical_event_key, /^[0-9a-f]{64}$/);
   assert.equal(
     fake.state.selectionEvidence[0].implementation_milestone_id,
     IMPLEMENTATION_MILESTONE_ID

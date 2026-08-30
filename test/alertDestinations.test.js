@@ -63,6 +63,39 @@ test("alert destinations accept each proven Phase A canonical identity", () => {
   assert.deepEqual(normalizeDestination(destination("notifications", {})).value.payload, {});
 });
 
+test("B1 destinations require exact protected Job resource identities", () => {
+  const jobId = "123e4567-e89b-42d3-a456-426614174000";
+  const resourceId = "223e4567-e89b-42d3-a456-426614174000";
+  assert.deepEqual(
+    normalizeDestination(destination("job", { jobId })).value.public,
+    { type: "job", jobId }
+  );
+  for (const [type, field] of [
+    ["visit", "visitId"],
+    ["quote", "quoteId"],
+    ["invoice", "invoiceId"],
+  ]) {
+    assert.deepEqual(
+      normalizeDestination(destination(type, {
+        jobId,
+        [field]: resourceId,
+      })).value.public,
+      { type, jobId, [field]: resourceId }
+    );
+    assert.equal(invalid(destination(type, { [field]: resourceId })), true);
+    assert.equal(invalid(destination(type, {
+      jobId,
+      [field]: "not-a-uuid",
+    })), true);
+    assert.equal(invalid(destination(type, {
+      jobId,
+      [field]: resourceId,
+      address: "unsafe",
+    })), true);
+  }
+  assert.equal(invalid(destination("job", { jobId: "not-a-uuid" })), true);
+});
+
 test("alert destinations reject every extra top-level authority field", () => {
   for (const field of [
     "route",

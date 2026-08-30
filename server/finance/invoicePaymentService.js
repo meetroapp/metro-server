@@ -14,6 +14,10 @@ const {
   resolveCommunicationRecipient,
 } = require("../alerts/communicationAlertService");
 const {
+  createCanonicalLifecycleAlertWithClient,
+  resolveCanonicalLifecycleAlertsWithClient,
+} = require("../alerts/lifecycleAlertService");
+const {
   customerPartyInternals: {
     customerPartyProjection,
     insertCanonicalInvoiceCustomerParty,
@@ -1002,6 +1006,28 @@ async function issueInvoice(input = {}) {
       recipientLastReadMessageId: attention.lastReadMessageId,
       message,
     });
+    await createCanonicalLifecycleAlertWithClient({
+      client,
+      recipientUserId: receiverId,
+      sourceDomain: "commercial",
+      sourceEventType: "invoice.delivered",
+      sourceEntityType: "invoice",
+      sourceEntityId: context.invoice_id,
+      sourceEventId: `${context.invoice_id}:version:${nextVersion}`,
+      category: "invoice",
+      priority: "high",
+      titleKey: "alerts.invoice.delivered.title",
+      messageKey: "alerts.invoice.delivered.message",
+      safePayload: {
+        shortPreview: "Invoice ready for review",
+        invoiceVersion: nextVersion,
+      },
+      destination: {
+        type: "invoice",
+        payload: { jobId: context.job_id, invoiceId: context.invoice_id },
+      },
+      availableAt: issuedAt,
+    });
     const refreshed = await loadInvoiceContext(client, validated.invoiceId, validated.actorId);
     const issuedInvoice = await loadInvoiceProjection(client, refreshed, "professional");
     const result = {
@@ -1112,6 +1138,47 @@ async function recordPayment(input = {}) {
         customerReference, context.professional_participant_id,
         evidenceHash, recordedAt]
     );
+    if (status === "PAID") {
+      await resolveCanonicalLifecycleAlertsWithClient({
+        client,
+        sourceDomain: "commercial",
+        sourceEntityType: "invoice",
+        sourceEntityId: context.invoice_id,
+        sourceEventTypes: ["invoice.delivered"],
+        recipientUserId: Number(context.homeowner_id),
+        resolvedAt: recordedAt,
+      });
+    }
+    await createCanonicalLifecycleAlertWithClient({
+      client,
+      recipientUserId: Number(context.homeowner_id),
+      sourceDomain: "commercial",
+      sourceEventType: status === "PAID"
+        ? "invoice.paid"
+        : "invoice.payment_recorded",
+      sourceEntityType: "invoice",
+      sourceEntityId: context.invoice_id,
+      sourceEventId: paymentId,
+      category: "payment",
+      priority: status === "PAID" ? "normal" : "informational",
+      titleKey: status === "PAID"
+        ? "alerts.invoice.paid.title"
+        : "alerts.invoice.paymentRecorded.title",
+      messageKey: status === "PAID"
+        ? "alerts.invoice.paid.message"
+        : "alerts.invoice.paymentRecorded.message",
+      safePayload: {
+        shortPreview: status === "PAID"
+          ? "Invoice paid"
+          : "Invoice payment recorded",
+        invoiceVersion: nextVersion,
+      },
+      destination: {
+        type: "invoice",
+        payload: { jobId: context.job_id, invoiceId: context.invoice_id },
+      },
+      availableAt: recordedAt,
+    });
     const refreshed = await loadInvoiceContext(client, validated.invoiceId, validated.actorId);
     const invoice = await loadInvoiceProjection(client, refreshed, "professional");
     const payment = invoice.payments.find((item) => item.paymentId === paymentId);

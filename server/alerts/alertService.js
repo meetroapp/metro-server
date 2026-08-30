@@ -9,6 +9,7 @@ const {
   ALERT_SOURCE_DOMAINS,
   alertFailure,
   assertAllowed,
+  deriveCanonicalEventKey,
   isPlainObject,
   normalizeBoundedToken,
   normalizeLocalizationKey,
@@ -366,6 +367,14 @@ function validateAlertInput(input = {}) {
         ALERT_LIMITS.sourceEventId
       );
 
+  if (Object.hasOwn(input, "canonicalEventKey")) {
+    return alertFailure(
+      ALERT_ERROR_CODES.INVALID_SOURCE,
+      "Alert event identity is server-derived."
+    );
+  }
+  const permanentEvent = input.permanentEvent === true;
+
   if (
     !sourceDomain ||
     !sourceEventType ||
@@ -373,7 +382,8 @@ function validateAlertInput(input = {}) {
     !sourceEntityId ||
     (sourceEventIdSupplied &&
       input.sourceEventId !== null &&
-      sourceEventId === null)
+      sourceEventId === null) ||
+    (permanentEvent && !sourceEventId)
   ) {
     return alertFailure(
       ALERT_ERROR_CODES.INVALID_SOURCE,
@@ -454,6 +464,15 @@ function validateAlertInput(input = {}) {
       sourceEntityType,
       sourceEntityId,
       sourceEventId,
+      canonicalEventKey: permanentEvent
+        ? deriveCanonicalEventKey({
+            sourceDomain,
+            sourceEventType,
+            sourceEntityType,
+            sourceEntityId,
+            sourceEventId,
+          })
+        : null,
       category,
       priority,
       titleKey,

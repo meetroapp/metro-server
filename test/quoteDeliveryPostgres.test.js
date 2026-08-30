@@ -354,6 +354,25 @@ test("disposable PostgreSQL certifies canonical Quote delivery and ordinary mess
     assert.equal(rows.rows[0].workflow_type, "QUOTE_SHARED");
     assert.equal(rows.rows[0].workflow_status, "SENT");
 
+    const deliveryAlert = await pool.query(
+      `SELECT recipient_user_id, source_event_type, source_entity_id,
+        canonical_event_key, destination_type, destination_payload
+       FROM alerts
+       WHERE recipient_user_id = $1
+         AND source_domain = 'commercial'
+         AND source_event_type = 'quote.delivered'
+         AND source_entity_type = 'quote'
+         AND source_entity_id = $2`,
+      [ids.homeownerId, quote.id]
+    );
+    assert.equal(deliveryAlert.rowCount, 1);
+    assert.match(deliveryAlert.rows[0].canonical_event_key, /^[0-9a-f]{64}$/);
+    assert.equal(deliveryAlert.rows[0].destination_type, "quote");
+    assert.deepEqual(deliveryAlert.rows[0].destination_payload, {
+      jobId: fixture.jobId,
+      quoteId: quote.id,
+    });
+
     const messages = await listConversationMessages({
       pool,
       conversationId: fixture.conversationId,

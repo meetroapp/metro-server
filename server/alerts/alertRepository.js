@@ -12,6 +12,7 @@ const ALERT_COLUMNS = `
   source_entity_type,
   source_entity_id,
   source_event_id,
+  canonical_event_key,
   category,
   priority,
   title_key,
@@ -44,6 +45,7 @@ async function insertAlertWithClient({ client, alert }) {
       source_entity_type,
       source_entity_id,
       source_event_id,
+      canonical_event_key,
       category,
       priority,
       title_key,
@@ -66,12 +68,13 @@ async function insertAlertWithClient({ client, alert }) {
       $8,
       $9,
       $10,
-      $11::jsonb,
-      $12,
-      $13::jsonb,
-      $14,
-      COALESCE($15::timestamp, CURRENT_TIMESTAMP),
-      $16::timestamp
+      $11,
+      $12::jsonb,
+      $13,
+      $14::jsonb,
+      $15,
+      COALESCE($16::timestamp, CURRENT_TIMESTAMP),
+      $17::timestamp
     )
     ON CONFLICT DO NOTHING
     RETURNING ${ALERT_COLUMNS}
@@ -83,6 +86,7 @@ async function insertAlertWithClient({ client, alert }) {
       alert.sourceEntityType,
       alert.sourceEntityId,
       alert.sourceEventId,
+      alert.canonicalEventKey,
       alert.category,
       alert.priority,
       alert.titleKey,
@@ -100,6 +104,15 @@ async function insertAlertWithClient({ client, alert }) {
     return { row: result.rows[0], created: true };
   }
 
+  if (alert.canonicalEventKey) {
+    const existingEvent = await findAlertByCanonicalEventWithClient({
+      client,
+      recipientUserId: alert.recipientUserId,
+      canonicalEventKey: alert.canonicalEventKey,
+    });
+    return { row: existingEvent, created: false };
+  }
+
   const existing = await findActiveAlertByDedupeWithClient({
     client,
     recipientUserId: alert.recipientUserId,
@@ -107,6 +120,26 @@ async function insertAlertWithClient({ client, alert }) {
   });
 
   return { row: existing, created: false };
+}
+
+async function findAlertByCanonicalEventWithClient({
+  client,
+  recipientUserId,
+  canonicalEventKey,
+}) {
+  requireDatabasePool(client);
+  const result = await client.query(
+    `
+    SELECT ${ALERT_COLUMNS}
+    FROM alerts
+    WHERE recipient_user_id = $1
+      AND canonical_event_key = $2
+    ORDER BY id ASC
+    LIMIT 1
+    `,
+    [recipientUserId, canonicalEventKey]
+  );
+  return result.rows[0] || null;
 }
 
 async function findActiveAlertByDedupeWithClient({
@@ -445,6 +478,7 @@ module.exports = {
   dismissAlertWithClient,
   expireAlertWithClient,
   findActiveAlertByDedupeWithClient,
+  findAlertByCanonicalEventWithClient,
   findAnyAlertByRecipientWithClient,
   findAlertByRecipientWithClient,
   insertAlertWithClient,

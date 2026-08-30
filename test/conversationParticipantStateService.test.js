@@ -494,7 +494,7 @@ function createStatefulConversationPool({
       if (sql.includes("INSERT INTO alerts")) {
         const existing = state.alerts.find((alert) =>
           alert.recipient_user_id === Number(params[0]) &&
-          alert.dedupe_key === params[13] &&
+          alert.dedupe_key === params[14] &&
           ["active", "dismissed"].includes(alert.lifecycle_state) &&
           alert.archived_at === null &&
           alert.resolved_at === null
@@ -504,13 +504,13 @@ function createStatefulConversationPool({
         const alert = statefulAlert({
           id: nextId,
           sourceEventId: Number(params[5]),
-          dedupeKey: params[13],
-          safePayload: JSON.parse(params[10]),
+          dedupeKey: params[14],
+          safePayload: JSON.parse(params[11]),
         });
         alert.recipient_user_id = Number(params[0]);
-        alert.available_at = params[14];
-        alert.created_at = params[14];
-        alert.updated_at = params[14];
+        alert.available_at = params[15];
+        alert.created_at = params[15];
+        alert.updated_at = params[15];
         state.alerts.push(alert);
         state.alertMutations += 1;
         return { rows: [clone(alert)], rowCount: 1 };

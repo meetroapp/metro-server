@@ -19,8 +19,12 @@ const {
   createDraftQuote,
   issueQuote,
 } = require("../server/authorization/quoteDraftService");
-const { sendQuoteInMeetro } = require("../server/authorization/quoteDeliveryService");
-const { completeEvaluation } = require("../server/authorization/evaluationService");
+const {
+  completeEvaluation,
+} = require("../server/authorization/evaluationService");
+const {
+  sendQuoteInMeetro,
+} = require("../server/authorization/quoteDeliveryService");
 const {
   completeWorkstream,
   createWorkActivity,
@@ -269,12 +273,12 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 63);
+      assert.equal(migrations.length, 64);
       const migrated = await runMigrationCollection(pool, migrations, targetMetadata());
-      assert.equal(migrated.applied.length, 63);
+      assert.equal(migrated.applied.length, 64);
       const replay = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(replay.applied.length, 0);
-      assert.equal(replay.skipped.length, 63);
+      assert.equal(replay.skipped.length, 64);
 
       const { identities, fixture, quote, originalQuote, completion } =
         await prepareCompletedJob(pool, suffix);
@@ -418,6 +422,23 @@ test(
       }, issueKey);
       assert.equal(issueReplay.replayed, true);
       assert.equal(issueReplay.delivery.messageId, issued.delivery.messageId);
+      const deliveredAlert = await pool.query(
+        `SELECT recipient_user_id, source_event_type, lifecycle_state,
+          canonical_event_key, destination_type, destination_payload
+         FROM alerts
+         WHERE source_event_type = 'invoice.delivered'
+           AND source_entity_id = $1`,
+        [created.invoice.invoiceId]
+      );
+      assert.equal(deliveredAlert.rowCount, 1);
+      assert.equal(Number(deliveredAlert.rows[0].recipient_user_id), identities.homeownerId);
+      assert.equal(deliveredAlert.rows[0].lifecycle_state, "active");
+      assert.match(deliveredAlert.rows[0].canonical_event_key, /^[0-9a-f]{64}$/);
+      assert.equal(deliveredAlert.rows[0].destination_type, "invoice");
+      assert.deepEqual(deliveredAlert.rows[0].destination_payload, {
+        jobId: fixture.jobId,
+        invoiceId: created.invoice.invoiceId,
+      });
 
       const messageCount = await pool.query(
         `SELECT count(*)::integer AS count FROM messages
@@ -473,6 +494,17 @@ test(
       assert.equal(partial.invoice.status, "PARTIALLY_PAID");
       assert.equal(partial.invoice.paidMinor, 63000);
       assert.equal(partial.invoice.balanceMinor, 12500);
+      const partialAlerts = await pool.query(
+        `SELECT source_event_type, lifecycle_state
+         FROM alerts
+         WHERE source_entity_type = 'invoice' AND source_entity_id = $1
+         ORDER BY id`,
+        [created.invoice.invoiceId]
+      );
+      assert.deepEqual(partialAlerts.rows, [
+        { source_event_type: "invoice.delivered", lifecycle_state: "active" },
+        { source_event_type: "invoice.payment_recorded", lifecycle_state: "active" },
+      ]);
       const partialReplay = await command(recordPayment, pool, identities.professionalId, {
         invoiceId: created.invoice.invoiceId,
         expectedVersion: issued.invoice.currentVersion,
@@ -503,6 +535,35 @@ test(
       assert.equal(paid.invoice.status, "PAID");
       assert.equal(paid.invoice.balanceMinor, 0);
       assert.equal(paid.invoice.payments.length, 2);
+      const paidAlerts = await pool.query(
+        `SELECT recipient_user_id, source_event_type, lifecycle_state,
+          canonical_event_key, destination_type, destination_payload
+         FROM alerts
+         WHERE source_entity_type = 'invoice' AND source_entity_id = $1
+         ORDER BY id`,
+        [created.invoice.invoiceId]
+      );
+      assert.deepEqual(paidAlerts.rows.map((row) => ({
+        recipient: Number(row.recipient_user_id),
+        event: row.source_event_type,
+        state: row.lifecycle_state,
+        destination: row.destination_type,
+      })), [
+        { recipient: identities.homeownerId, event: "invoice.delivered", state: "resolved", destination: "invoice" },
+        { recipient: identities.homeownerId, event: "invoice.payment_recorded", state: "active", destination: "invoice" },
+        { recipient: identities.homeownerId, event: "invoice.paid", state: "active", destination: "invoice" },
+      ]);
+      assert.equal(
+        paidAlerts.rows.every((row) => /^[0-9a-f]{64}$/.test(row.canonical_event_key)),
+        true
+      );
+      assert.equal(
+        paidAlerts.rows.every((row) =>
+          row.destination_payload.jobId === fixture.jobId &&
+          row.destination_payload.invoiceId === created.invoice.invoiceId
+        ),
+        true
+      );
 
       const professional = await getProfessionalInvoice({
         pool,

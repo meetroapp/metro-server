@@ -115,6 +115,7 @@ function createRequestSelectionFake({
     participants: [],
     messages: [],
     workflowEvents: [],
+    alerts: [],
   };
   const calls = [];
   let selectionSequence = 700;
@@ -510,6 +511,57 @@ function createRequestSelectionFake({
           row.result_classification = "created";
           row.result_reference = JSON.parse(values[4]);
           row.completed_at = "2026-08-06T13:00:00.000Z";
+          return { rows: [clone(row)] };
+        }
+
+        if (
+          sql.startsWith("UPDATE alerts") &&
+          sql.includes("lifecycle_state = 'resolved'")
+        ) {
+          const resolved = current.alerts.filter((row) =>
+            row.source_domain === values[0] &&
+            row.source_entity_type === values[1] &&
+            row.source_entity_id === values[2] &&
+            (values[3] == null || row.source_event_type === values[3]) &&
+            (values[4] == null || Number(row.recipient_user_id) === Number(values[4])) &&
+            ["active", "dismissed"].includes(row.lifecycle_state)
+          );
+          for (const row of resolved) {
+            row.lifecycle_state = "resolved";
+            row.resolved_at = values[5] || "2026-08-06T13:00:00.000Z";
+          }
+          return { rows: resolved.map(clone) };
+        }
+
+        if (sql.startsWith("INSERT INTO alerts")) {
+          const row = {
+            id: current.alerts.length + 1,
+            recipient_user_id: values[0],
+            source_domain: values[1],
+            source_event_type: values[2],
+            source_entity_type: values[3],
+            source_entity_id: values[4],
+            source_event_id: values[5],
+            canonical_event_key: values[6],
+            category: values[7],
+            priority: values[8],
+            title_key: values[9],
+            message_key: values[10],
+            safe_payload: JSON.parse(values[11]),
+            destination_type: values[12],
+            destination_payload: JSON.parse(values[13]),
+            dedupe_key: values[14],
+            lifecycle_state: "active",
+            available_at: values[15] || "2026-08-06T13:00:00.000Z",
+            expires_at: values[16],
+            read_at: null,
+            dismissed_at: null,
+            resolved_at: null,
+            archived_at: null,
+            created_at: "2026-08-06T13:00:00.000Z",
+            updated_at: "2026-08-06T13:00:00.000Z",
+          };
+          current.alerts.push(row);
           return { rows: [clone(row)] };
         }
 

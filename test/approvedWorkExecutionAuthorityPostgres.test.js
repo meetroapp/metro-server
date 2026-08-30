@@ -572,10 +572,10 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 63);
+      assert.equal(migrations.length, 64);
       const migrated = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(migrated.success, true, JSON.stringify(migrated));
-      assert.equal(migrated.applied.length, 63);
+      assert.equal(migrated.applied.length, 64);
 
       const empty = await pool.query(
         `SELECT
@@ -591,7 +591,7 @@ test(
       );
       assert.deepEqual(empty.rows[0], {
         executions: 0, versions: 0, bindings: 0, classifications: 0,
-        starts: 0, commands: 0, grants: 0, ledger: 63,
+        starts: 0, commands: 0, grants: 0, ledger: 64,
       });
       const capabilities = await pool.query(
         `SELECT capability FROM lifecycle_capabilities
@@ -1011,7 +1011,7 @@ test(
       const replay = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(replay.success, true, JSON.stringify(replay));
       assert.equal(replay.applied.length, 0);
-      assert.equal(replay.skipped.length, 63);
+      assert.equal(replay.skipped.length, 64);
     } finally {
       await pool.end();
     }
