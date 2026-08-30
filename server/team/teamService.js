@@ -134,6 +134,7 @@ function serializeInvitation(row = {}, token = null) {
   return {
     id: row.id,
     businessId: Number(row.contractor_profile_id),
+    businessName: row.business_name || "",
     email: row.email_normalized,
     displayName: row.display_name || "",
     role: row.role,
@@ -555,10 +556,14 @@ async function getMyTeamAuthority({ pool, authenticatedActor }) {
       [Number(authenticatedActor.id)]
     ),
     pool.query(
-      `SELECT * FROM business_team_invitations
-        WHERE email_normalized = $1 AND status = 'PENDING'
-          AND expires_at > CURRENT_TIMESTAMP
-        ORDER BY created_at DESC`,
+      `SELECT invitations.*, profiles.business_name
+         FROM business_team_invitations invitations
+         JOIN contractor_profiles profiles
+           ON profiles.id = invitations.contractor_profile_id
+        WHERE invitations.email_normalized = $1
+          AND invitations.status = 'PENDING'
+          AND invitations.expires_at > CURRENT_TIMESTAMP
+        ORDER BY invitations.created_at DESC`,
       [normalizeEmail(identity.rows[0].email)]
     ),
   ]);

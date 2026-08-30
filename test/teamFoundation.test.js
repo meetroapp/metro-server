@@ -12,6 +12,7 @@ const {
   TRIAL_SEAT_LIMIT,
   deactivateTeamMember,
   digestInvitationToken,
+  getMyTeamAuthority,
   inviteTeamMember,
   normalizeEmail,
   normalizeRole,
@@ -102,6 +103,37 @@ test("membership serialization preserves durable membership identity over user i
   assert.equal(result.userId, 42);
   assert.equal(result.displayName, "Field Employee");
   assert.equal(result.email, "employee@example.test");
+});
+
+test("pending Team invitation projection names the exact Business before acceptance", async () => {
+  const pool = {
+    async query(text) {
+      if (/SELECT id, email FROM users/.test(text)) {
+        return { rows: [{ id: 42, email: "employee@example.test" }] };
+      }
+      if (/FROM business_team_memberships memberships/.test(text)) {
+        return { rows: [] };
+      }
+      if (/FROM business_team_invitations invitations/.test(text)) {
+        return { rows: [{
+          id: "d5d34bb1-2c69-4dc8-af8d-31cf2d4f669b",
+          contractor_profile_id: 17,
+          business_name: "Example Electric",
+          email_normalized: "employee@example.test",
+          display_name: "Field Employee",
+          role: "FIELD_EMPLOYEE",
+          status: "PENDING",
+          expires_at: new Date(Date.now() + 60_000),
+          created_at: new Date(),
+          version: 1,
+        }] };
+      }
+      throw new Error(`Unexpected query: ${text}`);
+    },
+  };
+  const result = await getMyTeamAuthority({ pool, authenticatedActor: { id: 42 } });
+  assert.equal(result.pendingInvitations[0].businessName, "Example Electric");
+  assert.equal(result.pendingInvitations[0].businessId, 17);
 });
 
 test("malformed business and member authority fails before transactions", async () => {
