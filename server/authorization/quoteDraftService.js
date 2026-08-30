@@ -1745,6 +1745,15 @@ async function loadQuoteProjection(client, quoteId) {
       business_sources.document_number AS business_document_number,
       business_sources.source_document_id AS business_source_document_id,
       business_sources.source_document_version AS business_source_document_version,
+      business_sources.source_snapshot_integrity_hash AS business_source_snapshot_integrity_hash,
+      source_drafts.version AS business_source_current_document_version,
+      source_drafts.job_id AS business_source_current_job_id,
+      source_drafts.document_type AS business_source_current_document_type,
+      source_drafts.draft_status AS business_source_current_draft_status,
+      source_drafts.document_number AS business_source_current_document_number,
+      source_drafts.content AS business_source_current_content,
+      source_drafts.business_contact_id AS business_source_current_contact_id,
+      source_drafts.business_customer_relationship_id AS business_source_current_relationship_id,
       customer_parties.contractor_profile_id AS customer_party_contractor_profile_id,
       customer_parties.business_contact_id,
       customer_parties.business_customer_relationship_id
@@ -1760,6 +1769,9 @@ async function loadQuoteProjection(client, quoteId) {
       ON decisions.quote_id = quotes.id
     LEFT JOIN canonical_quote_business_document_sources business_sources
       ON business_sources.quote_id = quotes.id
+    LEFT JOIN business_document_working_drafts source_drafts
+      ON source_drafts.id = business_sources.source_document_id
+      AND source_drafts.contractor_profile_id = business_sources.contractor_profile_id
     LEFT JOIN canonical_quote_customer_parties customer_parties
       ON customer_parties.quote_id = quotes.id
       AND customer_parties.job_id = quotes.job_id
@@ -1770,6 +1782,42 @@ async function loadQuoteProjection(client, quoteId) {
   );
   const identity = identityResult.rows[0];
   if (!identity) return null;
+  const sourceCurrentDocumentVersion = Number(
+    identity.business_source_current_document_version
+  );
+  const hasCurrentSourceDocumentVersion =
+    Number.isInteger(sourceCurrentDocumentVersion) && sourceCurrentDocumentVersion > 0;
+  let currentSourceSnapshotMatches = null;
+  if (identity.business_source_document_id && hasCurrentSourceDocumentVersion) {
+    currentSourceSnapshotMatches = false;
+    const conversion = workingQuoteConversion(identity.business_source_current_content);
+    const hasContact = Boolean(identity.business_source_current_contact_id);
+    const hasRelationship = Boolean(identity.business_source_current_relationship_id);
+    if (
+      !conversion.error &&
+      identity.business_source_current_document_type === "QUOTE" &&
+      identity.business_source_current_draft_status === "WORKING_DRAFT" &&
+      normalizedUuid(identity.business_source_current_job_id) === normalizedUuid(identity.job_id) &&
+      identity.business_source_current_document_number === identity.business_document_number &&
+      hasContact === hasRelationship
+    ) {
+      const currentFingerprint = businessDocumentSourceFingerprint({
+        draftId: identity.business_source_document_id,
+        documentVersion: Number(identity.business_source_document_version),
+        jobId: identity.job_id,
+        documentNumber: identity.business_document_number,
+        conversion,
+        customerParty: hasContact
+          ? {
+              businessContactId: identity.business_source_current_contact_id,
+              customerRelationshipId: identity.business_source_current_relationship_id,
+            }
+          : null,
+      });
+      currentSourceSnapshotMatches =
+        currentFingerprint === identity.business_source_snapshot_integrity_hash;
+    }
+  }
   const scopes = await loadCurrentSnapshots(client, quoteId, Number(identity.current_version));
   const historyResult = await client.query(
     `
@@ -1833,6 +1881,13 @@ async function loadQuoteProjection(client, quoteId) {
       ? {
           documentId: identity.business_source_document_id,
           documentVersion: Number(identity.business_source_document_version),
+          ...(hasCurrentSourceDocumentVersion &&
+          sourceCurrentDocumentVersion !== Number(identity.business_source_document_version)
+            ? {
+                currentDocumentVersion: sourceCurrentDocumentVersion,
+                currentSnapshotMatchesSource: currentSourceSnapshotMatches,
+              }
+            : {}),
         }
       : null,
     customerParty: identity.business_contact_id
@@ -3403,15 +3458,16 @@ async function decideIssuedQuote(input = {}, decision) {
       ]
     );
     await invokeFailure(input.failureInjector, "after_write");
+    let approvedDeposit = null;
     if (decision === "APPROVED") {
-      const deposit = await materializeApprovedDecisionDepositWithClient({
+      approvedDeposit = await materializeApprovedDecisionDepositWithClient({
         client,
         jobId: context.job_id,
         decisionId: decisionResult.rows[0].id,
         actorParticipantId: context.actor_participant_id,
         idempotencyKey: `approval:${decisionResult.rows[0].id}`,
       });
-      if (deposit.error) return { abort: deposit.error };
+      if (approvedDeposit.error) return { abort: approvedDeposit.error };
     }
     const quote = await loadQuoteProjection(client, quoteId);
     await createProfessionalQuoteDecisionAlertWithClient({

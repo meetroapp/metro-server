@@ -9,6 +9,7 @@ const {
   businessDocumentDeliveryInternals: {
     deliveryProjection,
     listSql,
+    sqlStore,
   },
 } = require("../server/documents/businessDocumentDeliveryService");
 const {
@@ -164,6 +165,54 @@ test("new numbered Invoice delivery freezes its business-facing number", async (
   assert.equal(result.delivery.documentNumber, "INV-0000457");
   assert.equal(store.events[0].delivery.documentReference, "INV-0000457");
   assert.equal(store.events[0].snapshot.document.reference, "INV-0000457");
+});
+
+test("external Deposit Request delivery reuses governed Email history without Invoice numbering or payment", async () => {
+  const store = memoryStore();
+  store.source.document.documentType = "DEPOSIT_REQUEST";
+  store.source.document.reference = "WDR-ABCDEF12";
+  store.source.document.documentNumber = null;
+  store.source.document.paymentRequirementId = "77777777-7777-4777-8777-777777777777";
+  store.source.document.depositRequestAuthority = {
+    paymentRequirementId: store.source.document.paymentRequirementId,
+    jobId: store.source.document.jobId,
+    relationshipId: 341,
+    quoteId: "44444444-4444-4444-8444-444444444444",
+    issuedQuoteVersion: 13,
+    customerDecisionId: "55555555-5555-4555-8555-555555555555",
+    state: "DUE",
+    currency: "USD",
+    quoteTotalMinor: 68000,
+    requiredMinor: 51000,
+    appliedMinor: 0,
+    remainingMinor: 51000,
+    latestVersion: 1,
+    quoteReference: "Q-0000001",
+    depositRule: { type: "PERCENT", percentBasisPoints: 7500, fixedMinor: null },
+  };
+  store.source.document.content = {
+    customerName: "Jack Smith",
+    customerEmail: "jack@example.test",
+    projectTitle: "Fan replacement",
+    paymentInstructions: "Pay by check.",
+  };
+  store.source.document.photos = [];
+  const result = await deliverBusinessDocument({
+    ...deliveryInput({ subject: "Deposit Request" }),
+    store,
+    emailDelivery: {
+      providerName: "resend",
+      async sendBusinessDocumentEmail() {
+        return { accepted: true, status: "accepted", providerReference: "deposit-request-1" };
+      },
+    },
+  });
+  assert.equal(result.status, 202);
+  assert.equal(result.delivery.documentReference, "WDR-ABCDEF12");
+  assert.equal(store.events[0].snapshot.document.type, "DEPOSIT_REQUEST");
+  assert.equal(store.events[0].snapshot.depositRequest.requestedMinor, 51000);
+  assert.equal(store.events[0].snapshot.depositRequest.paymentsReceivedMinor, 0);
+  assert.doesNotMatch(JSON.stringify(store.events[0].snapshot), /invoiceId|receiptId|allocationId/i);
 });
 
 test("PDF rendering failure is governed before provider invocation and cannot create false delivery-requested state", async () => {
@@ -379,4 +428,63 @@ test("owner-scoped customer PDF retrieval enforces exact version for Quote and I
   store.source.document.reference = before.document.reference;
   store.source.document.documentNumber = before.document.documentNumber;
   assert.deepEqual(store.source, before);
+});
+
+test("customer PDF hydrates blank Quote customer and project fields from exact durable links", async () => {
+  let renderedPackage = null;
+  const calls = [];
+  const pool = {
+    async query(sql, values) {
+      calls.push({ sql, values });
+      if (sql.includes("business_document_delivery:load_photos")) return { rows: [] };
+      return {
+        rows: [{
+          id: DRAFT_ID,
+          contractor_profile_id: 10,
+          document_type: "QUOTE",
+          draft_reference: "WQ-LINKED",
+          document_number: "Q-0000001",
+          job_id: "22222222-2222-4222-8222-222222222222",
+          version: 4,
+          content: { totalOverride: "680", depositMode: "PERCENT", depositPercent: "75" },
+          business_contact_id: "33333333-3333-4333-8333-333333333333",
+          business_customer_relationship_id: "44444444-4444-4444-8444-444444444444",
+          business_name: "Handyman LLC",
+          business_email: "pro@example.test",
+          linked_customer_name: "Antony Guzman",
+          linked_customer_email: "antony@example.test",
+          linked_customer_phone: null,
+          linked_customer_address: null,
+          linked_customer_service_area: "Cape Coral, FL",
+          linked_job_title: "Inspect damaged cabinet door and trim",
+          linked_job_concern: "Inspect the damaged cabinet door and surrounding trim.",
+        }],
+      };
+    },
+  };
+  const result = await getBusinessDocumentCustomerPdf({
+    pool,
+    authenticatedActor: { id: 1 },
+    draftId: DRAFT_ID,
+    expectedVersion: 4,
+    store: sqlStore,
+    pdfRenderer: async (customerPackage) => {
+      renderedPackage = customerPackage;
+      return {
+        buffer: Buffer.from("%PDF-linked"),
+        filename: "quote-Q-0000001-v4.pdf",
+        contentType: "application/pdf",
+      };
+    },
+  });
+  assert.equal(result.status, 200);
+  assert.equal(renderedPackage.customer.name, "Antony Guzman");
+  assert.equal(renderedPackage.project.title, "Inspect damaged cabinet door and trim");
+  assert.equal(
+    renderedPackage.project.scope,
+    "Inspect the damaged cabinet door and surrounding trim."
+  );
+  assert.equal(renderedPackage.totalMinor, 68000);
+  assert.match(calls[0].sql, /LEFT JOIN business_contacts contacts/);
+  assert.match(calls[0].sql, /LEFT JOIN LATERAL/);
 });

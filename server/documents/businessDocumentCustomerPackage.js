@@ -212,8 +212,86 @@ function businessLogo(business = {}) {
 }
 
 function buildBusinessDocumentCustomerPackage(document, business = {}) {
-  if (!document || !["QUOTE", "INVOICE"].includes(document.documentType)) return null;
+  if (!document || !["QUOTE", "INVOICE", "DEPOSIT_REQUEST"].includes(document.documentType)) return null;
   const content = document.content || {};
+  if (document.documentType === "DEPOSIT_REQUEST") {
+    const authority = document.depositRequestAuthority;
+    if (!authority || authority.paymentRequirementId !== document.paymentRequirementId ||
+        authority.jobId !== document.jobId ||
+        !["DUE", "PARTIALLY_SATISFIED"].includes(authority.state) ||
+        ![authority.quoteTotalMinor, authority.requiredMinor, authority.appliedMinor, authority.remainingMinor]
+          .every(Number.isSafeInteger) || authority.requiredMinor <= 0 ||
+        authority.requiredMinor > authority.quoteTotalMinor || authority.remainingMinor <= 0) {
+      return null;
+    }
+    return Object.freeze({
+      schemaVersion: 1,
+      source: "BUSINESS_DOCUMENT_WORKING_DRAFT_DELIVERY",
+      document: Object.freeze({
+        id: String(document.id),
+        type: "DEPOSIT_REQUEST",
+        reference: cleanText(document.reference, 240),
+        version: Number(document.version),
+        status: "SAVED_DRAFT_NOT_ISSUED",
+        date: null,
+        dueDate: cleanText(content.dueDate, 80) || null,
+      }),
+      business: Object.freeze({
+        displayName: cleanText(business.business_name || business.displayName, 240) || "Meetro Professional",
+        email: safeEmail(business.business_email || business.email) || null,
+        phone: cleanText(business.phone, 80) || null,
+        website: cleanText(business.website || business.business_website, 240) || null,
+        location: cleanText(business.location, 500) || null,
+        logoUrl: businessLogo(business),
+      }),
+      customer: Object.freeze({
+        name: cleanText(content.customerName, 240) || null,
+        email: safeEmail(content.customerEmail) || null,
+        phone: cleanText(content.customerPhone, 80) || null,
+        address: cleanText(content.customerAddress, 600) || null,
+        location: cleanText(content.customerLocation || content.serviceLocation, 600) || null,
+      }),
+      project: Object.freeze({
+        title: cleanText(content.projectTitle, 500) || null,
+        scope: null,
+        observation: null,
+      }),
+      lineItems: Object.freeze([]),
+      subtotalMinor: authority.quoteTotalMinor,
+      discountMinor: 0,
+      taxMinor: 0,
+      feesMinor: 0,
+      totalMinor: authority.quoteTotalMinor,
+      paidMinor: authority.appliedMinor,
+      balanceMinor: authority.remainingMinor,
+      currency: authority.currency,
+      paymentTerms: cleanText(
+        content.paymentInstructions || content.paymentTerms || content.terms,
+        8000
+      ) || null,
+      estimatedDuration: null,
+      conditions: Object.freeze([]),
+      exclusions: Object.freeze([]),
+      agreement: safeAgreement({}),
+      notes: cleanText(content.notes, 8000) || null,
+      warrantyNotes: null,
+      customerMessage: cleanText(content.customerMessage, 4000) || null,
+      photos: Object.freeze([]),
+      depositRequest: Object.freeze({
+        paymentRequirementId: authority.paymentRequirementId,
+        jobId: authority.jobId,
+        quoteId: authority.quoteId,
+        approvedQuoteReference: authority.quoteReference || cleanText(content.quoteReference, 240) || null,
+        issuedQuoteVersion: authority.issuedQuoteVersion,
+        customerDecisionId: authority.customerDecisionId,
+        projectTotalMinor: authority.quoteTotalMinor,
+        requestedMinor: authority.requiredMinor,
+        remainingAfterDepositMinor: authority.quoteTotalMinor - authority.requiredMinor,
+        paymentsReceivedMinor: authority.appliedMinor,
+        amountStillNeededMinor: authority.remainingMinor,
+      }),
+    });
+  }
   const isQuote = document.documentType === "QUOTE";
   const projectObservation = isQuote ? cleanText(content.projectDescription, 12000) : "";
   const projectScope = cleanText(
@@ -324,6 +402,28 @@ function formatMoney(minor, currency = "USD") {
 }
 
 function customerPackageLines(customerPackage, customerMessage = "") {
+  if (customerPackage.document.type === "DEPOSIT_REQUEST") {
+    const request = customerPackage.depositRequest;
+    return [
+      customerPackage.business.displayName,
+      `DEPOSIT REQUEST ${customerPackage.document.reference}`,
+      `Ready for customer review · Version ${customerPackage.document.version}`,
+      customerPackage.customer.name ? `Customer: ${customerPackage.customer.name}` : null,
+      customerPackage.project.title ? `Project: ${customerPackage.project.title}` : null,
+      request.approvedQuoteReference ? `Approved Quote: ${request.approvedQuoteReference}` : null,
+      `Project total: ${formatMoney(request.projectTotalMinor, customerPackage.currency)}`,
+      `Deposit requested: ${formatMoney(request.requestedMinor, customerPackage.currency)}`,
+      `Amount remaining after deposit: ${formatMoney(request.remainingAfterDepositMinor, customerPackage.currency)}`,
+      request.paymentsReceivedMinor > 0
+        ? `Payments received: ${formatMoney(request.paymentsReceivedMinor, customerPackage.currency)}`
+        : null,
+      `Amount still needed: ${formatMoney(request.amountStillNeededMinor, customerPackage.currency)}`,
+      customerPackage.document.dueDate ? `Due date: ${customerPackage.document.dueDate}` : null,
+      customerPackage.paymentTerms ? `Payment Instructions\n${customerPackage.paymentTerms}` : null,
+      customerPackage.notes ? `Note\n${customerPackage.notes}` : null,
+      cleanText(customerMessage, 4000) ? `Message\n${cleanText(customerMessage, 4000)}` : null,
+    ].filter(Boolean);
+  }
   const agreement = customerPackage.agreement || {};
   const sections = [
     customerPackage.business.displayName,
@@ -383,7 +483,7 @@ function buildCustomerPackageEmail(customerPackage, { subject, customerMessage, 
       `<figure><img src="${escapeHtml(photo.imageUrl)}" alt="${escapeHtml(photo.role.replaceAll("_", " "))} project evidence" style="max-width:240px;height:auto"><figcaption>${escapeHtml(photo.role.replaceAll("_", " "))}</figcaption></figure>`
     ).join("");
   return Object.freeze({
-    subject: cleanText(subject, 240) || `${customerPackage.document.type === "QUOTE" ? "Quote" : "Invoice"} ${customerPackage.document.reference}`,
+    subject: cleanText(subject, 240) || `${customerPackage.document.type === "QUOTE" ? "Quote" : customerPackage.document.type === "DEPOSIT_REQUEST" ? "Deposit Request" : "Invoice"} ${customerPackage.document.reference}`,
     text: lines.join("\n\n"),
     html: `<main>${lines.map((line) => `<p style="white-space:pre-line">${escapeHtml(line)}</p>`).join("")}${imageHtml}</main>`,
     attachment: Object.freeze({

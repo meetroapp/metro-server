@@ -68,6 +68,114 @@ test("server arithmetic proves 24000 materials plus 68000 labor equals 92000", (
   });
 });
 
+test("saved Quote authority attests a newer draft version only when its canonical source snapshot is unchanged", async () => {
+  const internals = service.quoteDraftServiceInternals;
+  const documentId = "11111111-1111-4111-8111-111111111111";
+  const jobId = "22222222-2222-4222-8222-222222222222";
+  const quoteId = "33333333-3333-4333-8333-333333333333";
+  const content = {
+    projectTitle: "Inspect damaged cabinet door and trim",
+    totalOverride: "680",
+    currency: "USD",
+  };
+  const conversion = internals.workingQuoteConversion(content);
+  const sourceHash = internals.businessDocumentSourceFingerprint({
+    draftId: documentId,
+    documentVersion: 1,
+    jobId,
+    documentNumber: "Q-0000001",
+    conversion,
+  });
+
+  function client(currentContent) {
+    return {
+      async query(sql) {
+        if (sql.includes("FROM canonical_quote_scope_item_snapshots")) {
+          return { rows: [] };
+        }
+        if (sql.includes("FROM canonical_quote_versions\n")) {
+          return {
+            rows: [{
+              version: 1,
+              status: "DRAFT",
+              currency: "USD",
+              materials_subtotal_minor: 0,
+              labor_service_subtotal_minor: 68000,
+              total_minor: 68000,
+              scope_item_count: 0,
+              conditions_snapshot: [],
+              exclusions_snapshot: [],
+              customer_terms_snapshot: null,
+              issued_at: null,
+              integrity_hash: "a".repeat(64),
+              integrity_version: 2,
+              created_at: "2026-08-29T18:00:00.000Z",
+            }],
+          };
+        }
+        return {
+          rows: [{
+            id: quoteId,
+            job_id: jobId,
+            job_request_id: 23,
+            relationship_id: 345,
+            issuer_participant_id: "44444444-4444-4444-8444-444444444444",
+            parent_quote_id: null,
+            lineage_type: null,
+            lineage_reason_category: null,
+            status: "DRAFT",
+            issued_at: null,
+            currency: "USD",
+            current_version: 1,
+            materials_subtotal_minor: 0,
+            labor_service_subtotal_minor: 68000,
+            total_minor: 68000,
+            scope_item_count: 0,
+            conditions_snapshot: [],
+            exclusions_snapshot: [],
+            customer_terms_snapshot: null,
+            integrity_hash: "a".repeat(64),
+            integrity_version: 2,
+            version_created_at: "2026-08-29T18:00:00.000Z",
+            created_at: "2026-08-29T18:00:00.000Z",
+            updated_at: "2026-08-29T18:00:00.000Z",
+            customer_decision: null,
+            customer_decision_quote_version: null,
+            customer_decided_at: null,
+            business_document_number: "Q-0000001",
+            business_source_document_id: documentId,
+            business_source_document_version: 1,
+            business_source_snapshot_integrity_hash: sourceHash,
+            business_source_current_document_version: 2,
+            business_source_current_job_id: jobId,
+            business_source_current_document_type: "QUOTE",
+            business_source_current_draft_status: "WORKING_DRAFT",
+            business_source_current_document_number: "Q-0000001",
+            business_source_current_content: currentContent,
+            business_source_current_contact_id: null,
+            business_source_current_relationship_id: null,
+            business_contact_id: null,
+          }],
+        };
+      },
+    };
+  }
+
+  const matching = await internals.loadQuoteProjection(client(content), quoteId);
+  assert.deepEqual(matching.sourceBusinessDocument, {
+    documentId,
+    documentVersion: 1,
+    currentDocumentVersion: 2,
+    currentSnapshotMatchesSource: true,
+  });
+
+  const drifted = await internals.loadQuoteProjection(
+    client({ ...content, totalOverride: "700" }),
+    quoteId
+  );
+  assert.equal(drifted.sourceBusinessDocument.currentSnapshotMatchesSource, false);
+});
+
 test("Recommendation text is descriptive input and never parsed for pricing", () => {
   const source = readFileSync(join(__dirname, "..", "server", "authorization", "quoteDraftService.js"), "utf8");
   assert.doesNotMatch(source, /parseFloat|parseInt|currency.*statement|statement.*(?:amount|price|minor)/i);

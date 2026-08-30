@@ -75,6 +75,7 @@ function createInvoicePaymentHandlers({
         authenticatedActor: req.user,
         invoiceId: req.params.invoiceId,
         expectedVersion: req.body?.expectedVersion,
+        messageText: req.body?.messageText,
         idempotencyKey: req.headers?.["idempotency-key"],
       })),
     recordPayment: handle("record_invoice_payment", ["invoice", "payment"], (req) =>

@@ -80,12 +80,19 @@ Current inventory:
 60. `202608280002_create_canonical_materials_work_preparation_authority.sql`
 61. `202608280003_create_canonical_approved_work_execution_authority.sql`
 62. `202608290001_add_invoice_line_source_authority.sql`
+63. `202608290002_add_deposit_request_document_authority.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
 
 This inventory records migration source files, not applied database state.
 Migration creation and governed migration execution remain separate operations.
+
+`202608290002_add_deposit_request_document_authority.sql` adds the distinct
+`DEPOSIT_REQUEST` private working-document purpose, binds it to one exact
+pre-work deposit obligation and Job, prevents Invoice-number consumption, and
+allows the existing governed delivery ledger to record its deliberate sends.
+It creates no request, delivery, message, payment, Invoice, or lifecycle row.
 
 `202608290001_add_invoice_line_source_authority.sql` adds database-enforced
 Invoice line source truth for exact approved Quote scope and professionally

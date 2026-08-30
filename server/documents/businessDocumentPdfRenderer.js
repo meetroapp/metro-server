@@ -206,7 +206,11 @@ function addText(doc, value, x, y, { size = 10, color = COLOR.text, style = "nor
 }
 
 function safeFilename(customerPackage) {
-  const kind = customerPackage.document.type === "QUOTE" ? "quote" : "invoice";
+  const kind = customerPackage.document.type === "QUOTE"
+    ? "quote"
+    : customerPackage.document.type === "DEPOSIT_REQUEST"
+      ? "deposit-request"
+      : "invoice";
   const reference = String(customerPackage.document.reference || "document")
     .replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "document";
   return `${kind}-${reference}-v${customerPackage.document.version}.pdf`;
@@ -221,6 +225,10 @@ function renderPreparedCustomerPdf(customerPackage, photos, logo = null, options
   const usablePageHeight = contentBottom - 60;
   const layout = [];
   let y = PAGE.margin;
+  const isDepositRequest = customerPackage.document.type === "DEPOSIT_REQUEST";
+  const displayDocumentType = isDepositRequest
+    ? "DEPOSIT REQUEST"
+    : customerPackage.document.type;
 
   function pageNumber() {
     return doc.getCurrentPageInfo().pageNumber;
@@ -232,7 +240,7 @@ function renderPreparedCustomerPdf(customerPackage, photos, logo = null, options
     doc.addPage();
     y = 34;
     addText(doc, customerPackage.business.displayName, PAGE.margin, y, { size: 9, color: COLOR.muted, style: "bold" });
-    addText(doc, customerPackage.document.type, PAGE.width - PAGE.margin, y, { size: 9, color: COLOR.muted, style: "bold", align: "right" });
+    addText(doc, displayDocumentType, PAGE.width - PAGE.margin, y, { size: 9, color: COLOR.muted, style: "bold", align: "right" });
     doc.setDrawColor(...COLOR.line);
     doc.line(PAGE.margin, 42, PAGE.width - PAGE.margin, 42);
     y = 60;
@@ -338,7 +346,7 @@ function renderPreparedCustomerPdf(customerPackage, photos, logo = null, options
 
   if (logo?.dataUrl) doc.addImage(logo.dataUrl, logo.format, PAGE.margin, y - 10, 34, 34, undefined, "FAST");
   addText(doc, customerPackage.business.displayName, PAGE.margin + (logo ? 44 : 0), y + 4, { size: 17, color: COLOR.ink, style: "bold", maxWidth: logo ? 286 : 330 });
-  addText(doc, customerPackage.document.type, PAGE.width - PAGE.margin, y + 5, { size: 23, color: COLOR.ink, style: "bold", align: "right" });
+  addText(doc, displayDocumentType, PAGE.width - PAGE.margin, y + 5, { size: 23, color: COLOR.ink, style: "bold", align: "right" });
   y += 30;
   const contact = [customerPackage.business.phone, customerPackage.business.email, customerPackage.business.website, customerPackage.business.location].filter(Boolean).join("  |  ");
   if (contact) y = addText(doc, contact, PAGE.margin, y, { size: 8.5, color: COLOR.muted, maxWidth: contentWidth });
@@ -352,7 +360,7 @@ function renderPreparedCustomerPdf(customerPackage, photos, logo = null, options
   const meta = [
     ["CUSTOMER", [customerPackage.customer.name, customerPackage.customer.address || customerPackage.customer.location, customerPackage.customer.phone, customerPackage.customer.email].filter(Boolean).join("\n") || "-"],
     ["PROJECT", customerPackage.project.title || "-"],
-    [customerPackage.document.type, customerPackage.document.reference || "-"],
+    [displayDocumentType, customerPackage.document.reference || "-"],
     [customerPackage.document.dueDate ? "DATE / DUE DATE" : "DATE", customerPackage.document.dueDate ? `${customerPackage.document.date || "-"} / ${customerPackage.document.dueDate}` : customerPackage.document.date || "-"],
   ];
   const metaWidth = contentWidth / meta.length;
@@ -369,12 +377,18 @@ function renderPreparedCustomerPdf(customerPackage, photos, logo = null, options
   y += metaHeight + 14;
 
   section("Observation", customerPackage.project.observation);
-  section(customerPackage.document.type === "QUOTE" ? "Scope of Work" : "Work Performed", customerPackage.project.scope);
+  section(customerPackage.document.type === "QUOTE" ? "Scope of Work" : isDepositRequest ? "Project" : "Work Performed", customerPackage.project.scope);
   photoSection("Project Photos / Evidence", "GENERAL_EVIDENCE");
   photoSection("Before Photos", "BEFORE");
   photoSection("After Photos", "AFTER");
 
-  const financialRows = [
+  const financialRows = isDepositRequest ? [
+    ["Project total", customerPackage.depositRequest.projectTotalMinor],
+    ["Amount remaining after deposit", customerPackage.depositRequest.remainingAfterDepositMinor],
+    customerPackage.depositRequest.paymentsReceivedMinor > 0
+      ? ["Payments received", customerPackage.depositRequest.paymentsReceivedMinor]
+      : null,
+  ].filter(Boolean) : [
     ["Subtotal", customerPackage.subtotalMinor],
     customerPackage.discountMinor ? ["Discount", -customerPackage.discountMinor] : null,
     customerPackage.taxMinor ? ["Tax", customerPackage.taxMinor] : null,
@@ -382,7 +396,15 @@ function renderPreparedCustomerPdf(customerPackage, photos, logo = null, options
     customerPackage.document.type === "INVOICE" && customerPackage.paidMinor != null ? ["Amount paid", customerPackage.paidMinor] : null,
   ].filter(Boolean);
   const savedStatus = "Ready for Customer Review";
-  const summaryEntries = customerPackage.document.type === "QUOTE"
+  const summaryEntries = isDepositRequest
+    ? [
+        ["Approved Quote", customerPackage.depositRequest.approvedQuoteReference || "Verified approved Quote"],
+        ["Payment Instructions", customerPackage.paymentTerms || "Contact the professional for payment instructions."],
+        ["Due Date", customerPackage.document.dueDate || "Not confirmed."],
+        ["Amount Still Needed", money(customerPackage.depositRequest.amountStillNeededMinor, customerPackage.currency)],
+        ["Status", savedStatus],
+      ]
+    : customerPackage.document.type === "QUOTE"
     ? [
         customerPackage.paymentTerms
           ? ["Payment Terms", customerPackage.paymentTerms]
@@ -455,8 +477,8 @@ function renderPreparedCustomerPdf(customerPackage, photos, logo = null, options
   doc.setDrawColor(...COLOR.ink);
   doc.setFillColor(...COLOR.fill);
   doc.rect(PAGE.margin, y, contentWidth, 48, "FD");
-  addText(doc, customerPackage.document.type === "QUOTE" ? "PROJECT PRICE" : "TOTAL DUE", PAGE.margin + 28, y + 29, { size: 12, color: COLOR.ink, style: "bold" });
-  addText(doc, money(customerPackage.document.type === "INVOICE" ? customerPackage.balanceMinor : customerPackage.totalMinor, customerPackage.currency), PAGE.width - PAGE.margin - 28, y + 31, { size: 22, color: COLOR.ink, style: "bold", align: "right" });
+  addText(doc, customerPackage.document.type === "QUOTE" ? "PROJECT PRICE" : isDepositRequest ? "DEPOSIT REQUESTED" : "TOTAL DUE", PAGE.margin + 28, y + 29, { size: 12, color: COLOR.ink, style: "bold" });
+  addText(doc, money(isDepositRequest ? customerPackage.depositRequest.requestedMinor : customerPackage.document.type === "INVOICE" ? customerPackage.balanceMinor : customerPackage.totalMinor, customerPackage.currency), PAGE.width - PAGE.margin - 28, y + 31, { size: 22, color: COLOR.ink, style: "bold", align: "right" });
   y += 62;
   for (const [label, amount] of financialRows) {
     addText(doc, label, PAGE.margin + 300, y, { size: 9.5, color: COLOR.muted });

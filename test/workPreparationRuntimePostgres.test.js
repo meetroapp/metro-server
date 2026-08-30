@@ -254,10 +254,10 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 62);
+      assert.equal(migrations.length, 63);
       const migrated = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(migrated.success, true, JSON.stringify(migrated));
-      assert.equal(migrated.applied.length, 62);
+      assert.equal(migrated.applied.length, 63);
 
       const identities = await createVisitTestIdentities(pool, suffix);
 

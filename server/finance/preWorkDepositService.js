@@ -8,6 +8,9 @@ const {
 const {
   deriveQuoteDepositGate,
 } = require("../authorization/quoteDecisionHandoff");
+const {
+  createPaymentLifecycleMessageWithClient,
+} = require("../conversations/conversationMessageService");
 
 const {
   databaseClient,
@@ -194,6 +197,7 @@ async function loadProfessionalJobContext(client, jobId, actorId, { lock = false
       jobs.source_request_relationship_id AS relationship_id,
       relationships.status AS relationship_status,
       relationships.homeowner_id, relationships.professional_user_id,
+      conversations.id AS conversation_id,
       professional.id AS professional_participant_id,
       customer.id AS customer_participant_id,
       EXISTS (
@@ -226,6 +230,9 @@ async function loadProfessionalJobContext(client, jobId, actorId, { lock = false
        ON customer.job_id = jobs.id
        AND customer.request_relationship_id = relationships.id
        AND customer.user_id = relationships.homeowner_id
+     LEFT JOIN conversations
+       ON conversations.relationship_id = relationships.id
+       AND conversations.status = 'active'
      WHERE jobs.id = $1 AND jobs.lifecycle_contract_version = 2
      LIMIT 1
      ${lock ? "FOR UPDATE OF jobs, relationships" : ""}`,
@@ -1161,6 +1168,55 @@ async function confirmDepositReceived(input = {}) {
       },
       deposit: depositProjection(source, ensured.requirement, obligation, history),
     };
+    if (!positiveInteger(context.conversation_id)) {
+      return {
+        abort: failure(
+          409,
+          "PRE_WORK_DEPOSIT_CONVERSATION_UNAVAILABLE",
+          "The received Payment cannot be represented in the customer relationship."
+        ),
+      };
+    }
+    await createPaymentLifecycleMessageWithClient({
+      client,
+      conversation: {
+        id: Number(context.conversation_id),
+        homeowner_id: Number(context.homeowner_id),
+        professional_user_id: Number(context.professional_user_id),
+        status: "active",
+      },
+      senderUserId: Number(context.professional_user_id),
+      recipientUserId: Number(context.homeowner_id),
+      messageText: state === "SATISFIED"
+        ? "Payment received. The deposit requirement is satisfied."
+        : "Payment received. A remaining deposit is still due.",
+      messageType: "payment_received",
+      workflowType: "PAYMENT_RECEIVED",
+      quoteId: source.quote_id,
+      jobId: source.job_id,
+      workflowPayload: {
+        schemaVersion: 1,
+        quoteId: source.quote_id,
+        jobId: source.job_id,
+        issuedQuoteVersion: Number(source.issued_quote_version),
+        state: state === "SATISFIED" ? "DEPOSIT_RECEIVED" : "PARTIALLY_RECEIVED",
+        currency,
+        quoteTotalMinor: Number(source.total_minor),
+        requiredMinor: Number(obligation.required_minor),
+        receivedMinor: appliedMinor,
+        remainingMinor,
+        balanceRemainingMinor: Number(source.total_minor) - appliedMinor,
+        paymentTerms: ensured.requirement.paymentTerms || null,
+        payment: {
+          receiptId,
+          grossAmountMinor: amountMinor,
+          allocatedMinor,
+          displayMethod: displayMethod || normalizedMethod,
+          receivedAt,
+          externalReference,
+        },
+      },
+    });
     await completeCommand(client, reserved.row.id, result);
     return { result };
   });

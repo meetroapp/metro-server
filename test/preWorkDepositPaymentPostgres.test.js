@@ -367,10 +367,10 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 62);
+      assert.equal(migrations.length, 63);
       const migrated = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(migrated.success, true, JSON.stringify(migrated));
-      assert.equal(migrated.applied.length, 62);
+      assert.equal(migrated.applied.length, 63);
 
       const empty = await pool.query(
         `SELECT
@@ -391,7 +391,7 @@ test(
         reversals: 0,
         events: 0,
         commands: 0,
-        ledger: 59,
+        ledger: 63,
       });
 
       const identities = await createVisitTestIdentities(pool, suffix);
@@ -764,7 +764,7 @@ test(
 
       const replay = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(replay.success, true, JSON.stringify(replay));
-      assert.equal(replay.skipped.length, 62);
+      assert.equal(replay.skipped.length, 63);
     } finally {
       await pool.end();
     }

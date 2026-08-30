@@ -17,9 +17,9 @@ const sql = readFileSync(join(migrationsDirectory, migration61Name), "utf8");
 
 test("migration 61 follows frozen Migration 60 and advances inventory only once", () => {
   const migrations = getMigrationFiles();
-  assert.equal(migrations.length, 62);
+  assert.equal(migrations.length, 63);
   assert.deepEqual(
-    migrations.slice(-3, -1).map(({ filename }) => filename),
+    migrations.slice(-4, -2).map(({ filename }) => filename),
     [migration60Name, migration61Name]
   );
   assert.doesNotMatch(sql, /^\s*(?:BEGIN|COMMIT|ROLLBACK)\s*;/im);

@@ -284,6 +284,80 @@ async function createBusinessDocumentDeliveryMessageWithClient({
   return message;
 }
 
+async function createPaymentLifecycleMessageWithClient({
+  client,
+  conversation,
+  senderUserId,
+  recipientUserId,
+  messageText,
+  messageType,
+  workflowType,
+  workflowPayload,
+  quoteId,
+  jobId,
+}) {
+  requireDatabasePool(client);
+  const supported = (
+    messageType === "payment_request" && workflowType === "PAYMENT_REQUEST"
+  ) || (
+    messageType === "payment_received" && workflowType === "PAYMENT_RECEIVED"
+  );
+  if (!supported || !conversation?.id || conversation.status !== "active" ||
+      !parsePositiveInteger(senderUserId) || !parsePositiveInteger(recipientUserId) ||
+      senderUserId === recipientUserId || !textForBusinessDelivery(messageText) ||
+      !workflowPayload || typeof workflowPayload !== "object" || Array.isArray(workflowPayload) ||
+      typeof quoteId !== "string" || !quoteId || typeof jobId !== "string" || !jobId ||
+      workflowPayload.quoteId !== quoteId || workflowPayload.jobId !== jobId) {
+    throw new TypeError("A governed Payment lifecycle Conversation message is required.");
+  }
+  await ensureConversationParticipantStatesWithClient({ client, conversationId: conversation.id });
+  const attention = await getCommunicationAttentionWindowWithClient({
+    client,
+    conversationId: conversation.id,
+    recipientUserId,
+  });
+  const inserted = await client.query(
+    `/* conversation_message:payment_lifecycle */
+     INSERT INTO messages (
+       quote_request_id, conversation_id, sender_id, receiver_id, message_text,
+       image_url, message_type, workflow_type, workflow_status, workflow_payload
+     ) VALUES (NULL, $1, $2, $3, $4, NULL, $5, $6, 'SENT', $7::jsonb)
+     RETURNING *`,
+    [
+      conversation.id,
+      senderUserId,
+      recipientUserId,
+      textForBusinessDelivery(messageText),
+      messageType,
+      workflowType,
+      JSON.stringify(workflowPayload),
+    ]
+  );
+  const message = inserted.rows[0];
+  if (!message) throw new Error("The Payment lifecycle Conversation message was not returned.");
+  await advanceConversationParticipantReadStateWithClient({
+    client,
+    conversation,
+    participantUserId: senderUserId,
+    lastReadMessageId: message.id,
+    lastReadAt: message.created_at || null,
+  });
+  const activity = await client.query(
+    "UPDATE conversations SET updated_at = COALESCE($2, CURRENT_TIMESTAMP) WHERE id = $1",
+    [conversation.id, message.created_at || null]
+  );
+  if (activity.rowCount === 0) throw new Error("Conversation activity could not be updated.");
+  await createOrRefreshCommunicationMessageAlert({
+    client,
+    conversation,
+    senderUserId,
+    recipientUserId,
+    recipientLastReadMessageId: attention.lastReadMessageId,
+    message,
+  });
+  return message;
+}
+
 function textForBusinessDelivery(value) {
   const normalized = typeof value === "string" ? value.trim() : "";
   return normalized && normalized.length <= MAX_MESSAGE_TEXT_LENGTH ? normalized : null;
@@ -766,6 +840,7 @@ module.exports = {
   createProfessionalQuoteDecisionAlertWithClient,
   createConversationMessage,
   createBusinessDocumentDeliveryMessageWithClient,
+  createPaymentLifecycleMessageWithClient,
   decodeMessageCursor,
   encodeMessageCursor,
   listConversationMessages,

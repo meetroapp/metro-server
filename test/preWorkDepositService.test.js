@@ -95,10 +95,10 @@ test("manual methods are extensible but bounded and no instruction creates recei
   assert.match(source, /NORMALIZED_METHOD_PATTERN = \/\^\[A-Z\]/);
   assert.doesNotMatch(source, /new Set\(\["CASH", "CHECK", "VENMO"/);
   assert.match(source, /customer_terms_snapshot/i);
-  assert.doesNotMatch(
-    source,
-    /INSERT INTO canonical_pre_work_payment_receipts[\s\S]*paymentTerms/
-  );
+  const receiptInsert = source.match(
+    /INSERT INTO canonical_pre_work_payment_receipts[\s\S]*?\) VALUES[\s\S]*?\);/i
+  )?.[0] || "";
+  assert.doesNotMatch(receiptInsert, /paymentTerms/);
 });
 
 test("monetary commands use serializable transactions and append-only evidence", () => {

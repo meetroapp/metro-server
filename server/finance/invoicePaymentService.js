@@ -272,6 +272,7 @@ async function loadEffectiveApprovedBillingLines(client, jobId) {
     `SELECT quotes.id AS quote_id,
       decisions.issued_quote_version AS quote_version,
       versions.currency,
+      versions.customer_terms_snapshot,
       customer_parties.contractor_profile_id AS customer_party_contractor_profile_id,
       customer_parties.business_contact_id,
       customer_parties.business_customer_relationship_id,
@@ -317,6 +318,16 @@ async function loadEffectiveApprovedBillingLines(client, jobId) {
     [jobId]
   );
   return result.rows;
+}
+
+function effectiveApprovedPaymentTerms(lines = []) {
+  const terms = new Set();
+  for (const line of lines) {
+    const value = optionalText(line?.customer_terms_snapshot?.paymentTerms, 2000);
+    if (value) terms.add(value);
+  }
+  if (terms.size > 1) return { error: true, terms: null };
+  return { error: false, terms: [...terms][0] || null };
 }
 
 async function loadApplicablePaymentsReceived(client, jobId, effectiveLines) {
@@ -702,6 +713,11 @@ async function createInvoice(input = {}) {
       return { abort: failure(409, "INVOICE_ALREADY_EXISTS", "This Job already has an Invoice.") };
     }
     const billingLines = await loadEffectiveApprovedBillingLines(client, validated.jobId);
+    const approvedTerms = effectiveApprovedPaymentTerms(billingLines);
+    if (approvedTerms.error) {
+      return { abort: failure(409, "INVOICE_PAYMENT_TERMS_CONFLICT", "Approved Payment terms do not agree.") };
+    }
+    const effectiveTerms = approvedTerms.terms || terms;
     const currencies = new Set(billingLines.map((line) => line.currency));
     const approvedMinor = billingLines.reduce(
       (sum, line) => sum + Number(line.line_total_minor), 0
@@ -757,7 +773,8 @@ async function createInvoice(input = {}) {
     const versionHash = invoiceVersionHash({
       invoiceId, version: 1, jobId: validated.jobId, status: "DRAFT", currency,
       subtotalMinor: totalMinor, totalMinor, paidMinor, balanceMinor,
-      invoiceDate, due: { mode: dueMode, date: dueDate }, customerNotes, terms,
+      invoiceDate, due: { mode: dueMode, date: dueDate }, customerNotes,
+      terms: effectiveTerms,
     });
     await client.query(
       `INSERT INTO canonical_invoices (
@@ -782,7 +799,7 @@ async function createInvoice(input = {}) {
       ) VALUES ($1, 1, $2, 'DRAFT', $3, $4, $4, $5, $6,
         $7, $8, $9, $10, $11, $12, $13)`,
       [invoiceId, validated.jobId, currency, totalMinor, paidMinor, balanceMinor, invoiceDate,
-        dueMode, dueDate, customerNotes, terms,
+        dueMode, dueDate, customerNotes, effectiveTerms,
         context.professional_participant_id, versionHash]
     );
     for (const [index, line] of billingLines.entries()) {
@@ -833,25 +850,30 @@ function invoiceMessageSnapshot(invoice) {
     invoiceId: invoice.invoiceId,
     invoiceNumber: invoice.invoiceNumber,
     jobId: invoice.jobId,
-    status: "SENT",
+    status: invoice.status,
     totalMinor: invoice.totalMinor,
+    paidMinor: invoice.paidMinor,
     balanceMinor: invoice.balanceMinor,
     currency: invoice.currency,
     due: invoice.due,
     business: invoice.business,
     job: invoice.job,
+    terms: invoice.terms,
     issuedAt: invoice.issuedAt,
   };
 }
 
 async function issueInvoice(input = {}) {
   const validated = validateInput(
-    input, ["invoiceId", "expectedVersion", "idempotencyKey"], { invoice: true }
+    input, ["invoiceId", "expectedVersion", "messageText", "idempotencyKey"], { invoice: true }
   );
   if (validated.error) return validated.error;
   const expectedVersion = positiveInteger(input.expectedVersion);
+  const messageText = input.messageText == null
+    ? null
+    : optionalText(input.messageText, 5000);
   const idempotency = validateIdempotencyKey(input.idempotencyKey);
-  if (!expectedVersion || idempotency.error) {
+  if (!expectedVersion || idempotency.error || (input.messageText != null && !messageText)) {
     return idempotency.error || failure(400, "INVALID_INVOICE_ISSUE_COMMAND", "The Invoice issue command is invalid.");
   }
   return runTransaction(input.pool, "SERIALIZABLE", async (client) => {
@@ -864,6 +886,7 @@ async function issueInvoice(input = {}) {
     const fingerprint = hash({
       command: "invoice.issue", actorId: validated.actorId,
       invoiceId: validated.invoiceId, jobId: context.job_id, expectedVersion,
+      messageText,
     });
     const reserved = await reserveCommand(client, {
       actorId: validated.actorId, commandName: "invoice.issue",
@@ -936,7 +959,7 @@ async function issueInvoice(input = {}) {
     const snapshot = invoiceMessageSnapshot(invoice);
     const deliveryFingerprint = hash({
       command: "invoice.issue", actorId: validated.actorId,
-      invoiceId: validated.invoiceId, expectedVersion,
+      invoiceId: validated.invoiceId, expectedVersion, messageText,
     });
     const inserted = await client.query(
       `INSERT INTO messages (
@@ -951,7 +974,7 @@ async function issueInvoice(input = {}) {
         message_type, workflow_type, workflow_status, workflow_payload,
         invoice_id, job_id, invoice_delivery_request_fingerprint, created_at`,
       [conversation.id, validated.actorId, receiverId,
-        `${context.business_name || "Professional"} shared an Invoice.`,
+        messageText || `${context.business_name || "Professional"} shared an Invoice.`,
         JSON.stringify(snapshot), context.invoice_id, context.job_id,
         idempotency.idempotencyKey, deliveryFingerprint]
     );
@@ -1257,6 +1280,7 @@ async function getProfessionalInvoiceWorkspace(input = {}) {
     const readyJobs = [];
     for (const row of ready.rows) {
       const approvedLines = await loadEffectiveApprovedBillingLines(client, row.job_id);
+      const approvedTerms = effectiveApprovedPaymentTerms(approvedLines);
       const currencies = new Set(approvedLines.map((line) => line.currency));
       const approvedMinor = approvedLines.reduce(
         (sum, line) => sum + Number(line.line_total_minor), 0
@@ -1280,6 +1304,7 @@ async function getProfessionalInvoiceWorkspace(input = {}) {
         amountStillDueMinor: Number.isSafeInteger(approvedMinor)
           ? Math.max(0, approvedMinor - paymentsReceivedMinor)
           : null,
+        paymentTerms: approvedTerms.error ? null : approvedTerms.terms,
         approvedWork: approvedLines.map((line) => ({
           description: line.description,
           quantity: Number(line.quantity),
@@ -1375,6 +1400,7 @@ module.exports = {
     createCommandFingerprint,
     dateOnly,
     dueProjection,
+    effectiveApprovedPaymentTerms,
     hash,
     invoiceMessageSnapshot,
     invoiceProjection,

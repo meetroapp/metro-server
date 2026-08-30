@@ -18,7 +18,7 @@ const {
   },
 } = require("../relationships/customerPartyService");
 
-const DOCUMENT_TYPES = Object.freeze(["QUOTE", "INVOICE"]);
+const DOCUMENT_TYPES = Object.freeze(["QUOTE", "INVOICE", "DEPOSIT_REQUEST"]);
 const PHOTO_ROLES = Object.freeze(["UNCLASSIFIED", "GENERAL_EVIDENCE", "BEFORE", "AFTER"]);
 const PHOTO_VISIBILITIES = Object.freeze(["PRIVATE_INTERNAL", "CUSTOMER_VISIBLE"]);
 const DRAFT_STATUS = "WORKING_DRAFT";
@@ -129,6 +129,7 @@ const CONTENT_TEXT_LIMITS = Object.freeze({
   notes: 8000,
   warrantyNotes: 8000,
   customerMessage: 4000,
+  paymentInstructions: 8000,
   quoteReference: 240,
   quoteNumber: 240,
   invoiceNumber: 240,
@@ -138,6 +139,12 @@ const CONTENT_TEXT_LIMITS = Object.freeze({
 });
 const CONTENT_KEYS = new Set([
   ...Object.keys(CONTENT_TEXT_LIMITS), "lineItems", "materialItems", "laborItems", "conditions", "exclusions", "agreement",
+]);
+const DEPOSIT_REQUEST_CONTENT_KEYS = new Set([
+  "customerName", "customerEmail", "customerPhone", "customerAddress",
+  "customerLocation", "serviceLocation", "projectTitle", "notes", "dueDate",
+  "terms", "paymentTerms", "paymentInstructions", "customerMessage",
+  "quoteReference",
 ]);
 
 const AGREEMENT_TEXT_LIMITS = Object.freeze({
@@ -168,8 +175,11 @@ function normalizeAgreement(value) {
   return agreement;
 }
 
-function normalizeContent(value, { partial = false } = {}) {
+function normalizeContent(value, { partial = false, documentType = null } = {}) {
   if (!onlyKeys(value, CONTENT_KEYS)) return null;
+  if (documentType === "DEPOSIT_REQUEST" && !onlyKeys(value, DEPOSIT_REQUEST_CONTENT_KEYS)) {
+    return null;
+  }
   const result = {};
   for (const [key, maximum] of Object.entries(CONTENT_TEXT_LIMITS)) {
     if (!Object.hasOwn(value, key)) continue;
@@ -344,15 +354,23 @@ function validateCreateInput(input) {
   const key = uuid(input.idempotencyKey);
   if (!key) return { error: failure(400, "BUSINESS_DOCUMENT_IDEMPOTENCY_REQUIRED", "A valid save identity is required.") };
   const allowedPayload = new Set([
-    "documentType", "jobId", "content", "workspace", "photos", "customerParty",
+    "documentType", "jobId", "paymentRequirementId", "content", "workspace", "photos", "customerParty",
   ]);
   if (!onlyKeys(input.payload, allowedPayload)) return { error: failure(400, "BUSINESS_DOCUMENT_FIELD_REJECTED", "Server-owned document fields cannot be supplied.") };
   const documentType = String(input.payload.documentType || "").trim().toUpperCase();
   const jobId = input.payload.jobId == null || input.payload.jobId === "" ? null : uuid(input.payload.jobId);
-  const content = normalizeContent(input.payload.content);
+  const paymentRequirementId = input.payload.paymentRequirementId == null || input.payload.paymentRequirementId === ""
+    ? null
+    : uuid(input.payload.paymentRequirementId);
+  const content = normalizeContent(input.payload.content, { documentType });
   const workspace = normalizeWorkspace(input.payload.workspace, documentType);
   const customerParty = normalizeCustomerParty(input.payload.customerParty);
-  if (!DOCUMENT_TYPES.includes(documentType) || (input.payload.jobId && !jobId) || !content || !workspace || !Array.isArray(input.payload.photos) || !customerParty) {
+  const depositRequestShape = documentType === "DEPOSIT_REQUEST"
+    ? Boolean(jobId && paymentRequirementId)
+    : paymentRequirementId === null;
+  if (!DOCUMENT_TYPES.includes(documentType) || (input.payload.jobId && !jobId) ||
+      (input.payload.paymentRequirementId && !paymentRequirementId) || !depositRequestShape ||
+      !content || !workspace || !Array.isArray(input.payload.photos) || !customerParty) {
     return { error: failure(400, "BUSINESS_DOCUMENT_INVALID", "The working document is invalid.") };
   }
   return {
@@ -360,6 +378,7 @@ function validateCreateInput(input) {
     idempotencyKey: key,
     documentType,
     jobId,
+    paymentRequirementId,
     content,
     workspace,
     rawPhotos: input.payload.photos,
@@ -380,6 +399,7 @@ function validateUpdateInput(input) {
     payload: {
       documentType: input.payload?.documentType,
       jobId: input.payload?.jobId,
+      paymentRequirementId: input.payload?.paymentRequirementId,
       content: input.payload?.content,
       workspace: input.payload?.workspace,
       photos: input.payload?.photos,
@@ -394,7 +414,7 @@ function validateUpdateInput(input) {
   const draftId = uuid(input.draftId);
   const expectedVersion = Number(input.payload?.expectedVersion);
   const allowedPayload = new Set([
-    "expectedVersion", "documentType", "jobId", "content", "workspace", "photos", "customerParty",
+    "expectedVersion", "documentType", "jobId", "paymentRequirementId", "content", "workspace", "photos", "customerParty",
   ]);
   if (!draftId || !onlyKeys(input.payload, allowedPayload) || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
     return { error: failure(400, "BUSINESS_DOCUMENT_VERSION_REQUIRED", "The current saved version is required.") };
@@ -431,6 +451,7 @@ function validateDeleteInput(input) {
 }
 
 function publicProjection(row, photos = []) {
+  const depositRequestAuthority = depositAuthorityProjection(row);
   return Object.freeze({
     id: String(row.id),
     documentType: row.document_type,
@@ -438,7 +459,13 @@ function publicProjection(row, photos = []) {
     reference: row.draft_reference,
     documentNumber: row.document_number || null,
     jobId: row.job_id || null,
+    paymentRequirementId: row.payment_requirement_id || null,
+    depositRequestAuthority,
     customerParty: customerPartyProjection(row),
+    customerDisplayName:
+      row.linked_customer_display_name ||
+      (exactObject(row.content) ? row.content.customerName : null) ||
+      null,
     version: Number(row.version),
     createdAt: new Date(row.created_at).toISOString(),
     updatedAt: new Date(row.updated_at).toISOString(),
@@ -516,13 +543,109 @@ async function loadPhotos(client, documentId) {
   return result.rows;
 }
 
+const DEPOSIT_AUTHORITY_SELECT = `
+  obligations.job_id AS deposit_job_id,
+  obligations.relationship_id AS deposit_relationship_id,
+  obligations.quote_id AS deposit_quote_id,
+  obligations.issued_quote_version AS deposit_issued_quote_version,
+  obligations.customer_decision_id AS deposit_customer_decision_id,
+  obligations.currency AS deposit_currency,
+  obligations.quote_total_minor AS deposit_quote_total_minor,
+  obligations.deposit_rule_type AS deposit_rule_type,
+  obligations.deposit_percent_basis_points AS deposit_percent_basis_points,
+  obligations.deposit_fixed_minor AS deposit_fixed_minor,
+  deposit_versions.state AS deposit_state,
+  deposit_versions.required_minor AS deposit_required_minor,
+  deposit_versions.applied_minor AS deposit_applied_minor,
+  deposit_versions.remaining_minor AS deposit_remaining_minor,
+  deposit_versions.version AS deposit_latest_version,
+  quote_sources.document_number AS deposit_quote_reference`;
+
+const DEPOSIT_AUTHORITY_JOINS = `
+  LEFT JOIN canonical_pre_work_deposit_obligations obligations
+    ON obligations.id = drafts.payment_requirement_id
+   AND obligations.job_id = drafts.job_id
+  LEFT JOIN LATERAL (
+    SELECT versions.*
+    FROM canonical_pre_work_deposit_versions versions
+    WHERE versions.obligation_id = obligations.id
+    ORDER BY versions.version DESC
+    LIMIT 1
+  ) deposit_versions ON TRUE
+  LEFT JOIN canonical_quote_business_document_sources quote_sources
+    ON quote_sources.quote_id = obligations.quote_id`;
+
+function depositAuthorityProjection(row) {
+  if (!row?.payment_requirement_id || !row.deposit_latest_version) return null;
+  return Object.freeze({
+    paymentRequirementId: String(row.payment_requirement_id),
+    jobId: String(row.deposit_job_id),
+    relationshipId: Number(row.deposit_relationship_id),
+    quoteId: String(row.deposit_quote_id),
+    issuedQuoteVersion: Number(row.deposit_issued_quote_version),
+    customerDecisionId: String(row.deposit_customer_decision_id),
+    state: row.deposit_state,
+    currency: row.deposit_currency,
+    quoteTotalMinor: Number(row.deposit_quote_total_minor),
+    requiredMinor: Number(row.deposit_required_minor),
+    appliedMinor: Number(row.deposit_applied_minor),
+    remainingMinor: Number(row.deposit_remaining_minor),
+    latestVersion: Number(row.deposit_latest_version),
+    quoteReference: row.deposit_quote_reference || null,
+    depositRule: Object.freeze({
+      type: row.deposit_rule_type,
+      percentBasisPoints: row.deposit_percent_basis_points == null ? null : Number(row.deposit_percent_basis_points),
+      fixedMinor: row.deposit_fixed_minor == null ? null : Number(row.deposit_fixed_minor),
+    }),
+  });
+}
+
+async function loadDepositRequestAuthority(
+  client,
+  actorUserId,
+  paymentRequirementId,
+  jobId,
+  { lock = false } = {}
+) {
+  const result = await client.query(
+    `/* business_document:load_deposit_request_authority */
+     SELECT obligations.id AS payment_requirement_id,
+            ${DEPOSIT_AUTHORITY_SELECT}
+     FROM canonical_pre_work_deposit_obligations obligations
+     INNER JOIN jobs ON jobs.id = obligations.job_id
+     INNER JOIN request_relationships relationships
+       ON relationships.id = jobs.source_request_relationship_id
+      AND relationships.professional_user_id = $1
+      AND relationships.status = 'active'
+      AND relationships.emergency_request_id IS NULL
+     LEFT JOIN LATERAL (
+       SELECT versions.*
+       FROM canonical_pre_work_deposit_versions versions
+       WHERE versions.obligation_id = obligations.id
+       ORDER BY versions.version DESC
+       LIMIT 1
+     ) deposit_versions ON TRUE
+     LEFT JOIN canonical_quote_business_document_sources quote_sources
+       ON quote_sources.quote_id = obligations.quote_id
+     WHERE obligations.id = $2 AND obligations.job_id = $3
+     LIMIT 1 ${lock ? "FOR SHARE OF obligations" : ""}`,
+    [actorUserId, paymentRequirementId, jobId]
+  );
+  return depositAuthorityProjection(result.rows[0]);
+}
+
 async function loadOwned(client, actorUserId, draftId, { lock = false } = {}) {
   const result = await client.query(
     `/* business_document:load_owned */
-     SELECT drafts.*
+     SELECT drafts.*, contacts.display_name AS linked_customer_display_name,
+            ${DEPOSIT_AUTHORITY_SELECT}
      FROM business_document_working_drafts drafts
      INNER JOIN contractor_profiles profiles
        ON profiles.id = drafts.contractor_profile_id
+     LEFT JOIN business_contacts contacts
+       ON contacts.id = drafts.business_contact_id
+       AND contacts.contractor_profile_id = drafts.contractor_profile_id
+     ${DEPOSIT_AUTHORITY_JOINS}
      WHERE drafts.id = $1 AND profiles.user_id = $2
        AND drafts.draft_status = 'WORKING_DRAFT'
      LIMIT 1 ${lock ? "FOR UPDATE OF drafts" : ""}`,
@@ -542,6 +665,7 @@ async function loadOwnedBusinessContext(
     `/* business_document:load_owned_business_context */
      SELECT drafts.contractor_profile_id, drafts.document_type,
             drafts.document_number, drafts.version,
+            drafts.job_id, drafts.payment_requirement_id,
             drafts.business_contact_id,
             drafts.business_customer_relationship_id
      FROM business_document_working_drafts drafts
@@ -652,6 +776,14 @@ const sqlStore = Object.freeze({
   getOwnedBusinessContext(pool, actorUserId, draftId) {
     return loadOwnedBusinessContext(pool, actorUserId, draftId);
   },
+  loadDepositRequestAuthority({ pool, actorUserId, paymentRequirementId, jobId }) {
+    return loadDepositRequestAuthority(
+      pool,
+      actorUserId,
+      paymentRequirementId,
+      jobId
+    );
+  },
   create({ pool, actorUserId, contractorProfileId, command, draft }) {
     return withTransaction(pool, async (client) => {
       const reserved = await reserveCommand(client, command);
@@ -680,6 +812,38 @@ const sqlStore = Object.freeze({
         await cancelCommand(client, reserved.id);
         return { kind: "analysis_unavailable" };
       }
+      let depositRequestAuthority = null;
+      if (draft.documentType === "DEPOSIT_REQUEST") {
+        depositRequestAuthority = await loadDepositRequestAuthority(
+          client,
+          actorUserId,
+          draft.paymentRequirementId,
+          draft.jobId,
+          { lock: true }
+        );
+        if (!depositRequestAuthority ||
+            !["DUE", "PARTIALLY_SATISFIED"].includes(depositRequestAuthority.state) ||
+            depositRequestAuthority.remainingMinor <= 0) {
+          await cancelCommand(client, reserved.id);
+          return { kind: "deposit_requirement_unavailable" };
+        }
+        const existing = await client.query(
+          `/* business_document:find_existing_deposit_request */
+           SELECT id
+           FROM business_document_working_drafts
+           WHERE contractor_profile_id = $1
+             AND payment_requirement_id = $2
+             AND document_type = 'DEPOSIT_REQUEST'
+             AND draft_status = 'WORKING_DRAFT'
+           LIMIT 1 FOR UPDATE`,
+          [contractorProfileId, draft.paymentRequirementId]
+        );
+        if (existing.rows[0]) {
+          const document = await loadOwned(client, actorUserId, existing.rows[0].id);
+          await finishCommand(client, reserved.id, document);
+          return { kind: "existing", document };
+        }
+      }
       let customerParty = null;
       if (draft.customerParty) {
         customerParty = await loadOwnedCustomerParty(client, {
@@ -693,12 +857,14 @@ const sqlStore = Object.freeze({
           return { kind: "customer_party_unavailable" };
         }
       }
-      const allocation = await allocateDocumentNumber(
-        client,
-        contractorProfileId,
-        draft.documentType
-      );
-      if (allocation.kind !== "allocated") {
+      const allocation = draft.documentType === "DEPOSIT_REQUEST"
+        ? { kind: "not_required", documentNumber: null }
+        : await allocateDocumentNumber(
+            client,
+            contractorProfileId,
+            draft.documentType
+          );
+      if (!["allocated", "not_required"].includes(allocation.kind)) {
         await cancelCommand(client, reserved.id);
         return {
           kind: allocation.kind === "setup_required"
@@ -711,8 +877,9 @@ const sqlStore = Object.freeze({
          INSERT INTO business_document_working_drafts (
            id, contractor_profile_id, created_by_user_id, job_id, document_type,
            draft_reference, document_number, content, workspace_context,
-           business_contact_id, business_customer_relationship_id
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11)`,
+           business_contact_id, business_customer_relationship_id,
+           payment_requirement_id
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12)`,
         [
           draft.id,
           contractorProfileId,
@@ -725,6 +892,7 @@ const sqlStore = Object.freeze({
           JSON.stringify(draft.workspace),
           customerParty?.businessContactId || null,
           customerParty?.customerRelationshipId || null,
+          draft.paymentRequirementId,
         ]
       );
       await syncPhotos(client, { draftId: draft.id, contractorProfileId, actorUserId, photos: draft.photos });
@@ -758,6 +926,10 @@ const sqlStore = Object.freeze({
         await cancelCommand(client, reserved.id);
         return { kind: "type_conflict" };
       }
+      if ((current.payment_requirement_id || null) !== (draft.paymentRequirementId || null)) {
+        await cancelCommand(client, reserved.id);
+        return { kind: "deposit_requirement_conflict" };
+      }
       if (!(await jobAssociationAllowed(
         client,
         actorUserId,
@@ -775,6 +947,20 @@ const sqlStore = Object.freeze({
         await cancelCommand(client, reserved.id);
         return { kind: "analysis_unavailable" };
       }
+      if (draft.documentType === "DEPOSIT_REQUEST") {
+        const authority = await loadDepositRequestAuthority(
+          client,
+          actorUserId,
+          draft.paymentRequirementId,
+          draft.jobId,
+          { lock: true }
+        );
+        if (!authority || !["DUE", "PARTIALLY_SATISFIED"].includes(authority.state) ||
+            authority.remainingMinor <= 0) {
+          await cancelCommand(client, reserved.id);
+          return { kind: "deposit_requirement_unavailable" };
+        }
+      }
       let customerParty = draft.customerPartyMode === "PRESERVE"
         ? customerPartyProjection(current)
         : draft.customerParty;
@@ -791,7 +977,7 @@ const sqlStore = Object.freeze({
         }
       }
       let documentNumber = current.document_number || null;
-      if (!documentNumber) {
+      if (!documentNumber && draft.documentType !== "DEPOSIT_REQUEST") {
         const allocation = await allocateDocumentNumber(
           client,
           contractorProfileId,
@@ -872,15 +1058,21 @@ const sqlStore = Object.freeze({
     const since = query.time === "30D" ? "30 days" : query.time === "90D" ? "90 days" : null;
     const result = await pool.query(
       `/* business_document:list */
-       SELECT drafts.*
+      SELECT drafts.*, contacts.display_name AS linked_customer_display_name
+              , ${DEPOSIT_AUTHORITY_SELECT}
        FROM business_document_working_drafts drafts
        INNER JOIN contractor_profiles profiles ON profiles.id = drafts.contractor_profile_id
+       LEFT JOIN business_contacts contacts
+         ON contacts.id = drafts.business_contact_id
+         AND contacts.contractor_profile_id = drafts.contractor_profile_id
+       ${DEPOSIT_AUTHORITY_JOINS}
        WHERE profiles.user_id = $1
          AND ($2::text IS NULL OR drafts.document_type = $2)
          AND ($3::text IS NULL OR drafts.updated_at >= CURRENT_TIMESTAMP - $3::interval)
          AND ($4::text IS NULL OR
            drafts.draft_reference ILIKE $4 OR
            drafts.document_number ILIKE $4 OR
+           COALESCE(contacts.display_name, '') ILIKE $4 OR
            COALESCE(drafts.content->>'customerName', '') ILIKE $4 OR
            COALESCE(drafts.content->>'projectTitle', '') ILIKE $4 OR
            COALESCE(drafts.content->>'customerLocation', '') ILIKE $4 OR
@@ -900,6 +1092,8 @@ function outcome(result, successCode, successStatus) {
   if (result.kind === "in_progress") return failure(409, "BUSINESS_DOCUMENT_SAVE_IN_PROGRESS", "This working document save is already in progress.");
   if (result.kind === "version_conflict") return failure(409, "BUSINESS_DOCUMENT_VERSION_CONFLICT", "A newer saved version exists.", { currentVersion: result.currentVersion });
   if (result.kind === "type_conflict") return failure(409, "BUSINESS_DOCUMENT_TYPE_CONFLICT", "The saved document type cannot be changed.");
+  if (result.kind === "deposit_requirement_conflict") return failure(409, "DEPOSIT_REQUEST_REQUIREMENT_CONFLICT", "A Deposit Request cannot be moved to a different payment requirement.");
+  if (result.kind === "deposit_requirement_unavailable") return failure(409, "DEPOSIT_REQUEST_REQUIREMENT_UNAVAILABLE", "This exact deposit requirement is no longer available for a new or revised request.");
   if (result.kind === "job_unavailable") return failure(409, "BUSINESS_DOCUMENT_JOB_CONFLICT", "The selected Job is no longer available for this document.");
   if (result.kind === "analysis_unavailable") return failure(409, "BUSINESS_DOCUMENT_JOB_ANALYSIS_CONFLICT", "The selected private Job Analysis session is unavailable.");
   if (result.kind === "customer_party_unavailable") return failure(404, "BUSINESS_DOCUMENT_CUSTOMER_PARTY_UNAVAILABLE", "The selected Contact and Customer Relationship are unavailable.");
@@ -910,10 +1104,14 @@ function outcome(result, successCode, successStatus) {
   if (result.kind === "not_found") return failure(404, "BUSINESS_DOCUMENT_NOT_FOUND", "The working document was not found.");
   return {
     ok: true,
-    status: result.kind === "replay" ? 200 : successStatus,
-    code: result.kind === "replay" ? "BUSINESS_DOCUMENT_SAVE_REPLAYED" : successCode,
+    status: ["replay", "existing"].includes(result.kind) ? 200 : successStatus,
+    code: result.kind === "replay"
+      ? "BUSINESS_DOCUMENT_SAVE_REPLAYED"
+      : result.kind === "existing"
+        ? "DEPOSIT_REQUEST_DRAFT_REUSED"
+        : successCode,
     document: result.document,
-    replayed: result.kind === "replay",
+    replayed: ["replay", "existing"].includes(result.kind),
   };
 }
 
@@ -929,6 +1127,21 @@ async function createBusinessDocumentDraft(input = {}) {
   if (owner.kind === "profile_required") return failure(403, "BUSINESS_DOCUMENT_AUTHORITY_REQUIRED", "A professional business profile is required.");
   if (owner.kind === "profile_ambiguous") return failure(409, "BUSINESS_DOCUMENT_PROFILE_AMBIGUOUS", "Select a Job to identify which business owns this document.");
   if (owner.kind !== "resolved") return failure(409, "BUSINESS_DOCUMENT_JOB_CONFLICT", "The selected Job is not available to this professional.");
+  if (validated.documentType === "DEPOSIT_REQUEST") {
+    if (typeof store.loadDepositRequestAuthority !== "function") {
+      return failure(409, "DEPOSIT_REQUEST_REQUIREMENT_UNAVAILABLE", "The exact deposit requirement could not be verified.");
+    }
+    const authority = await store.loadDepositRequestAuthority({
+      pool: input.pool,
+      actorUserId: validated.actorId,
+      paymentRequirementId: validated.paymentRequirementId,
+      jobId: validated.jobId,
+    });
+    if (!authority || !["DUE", "PARTIALLY_SATISFIED"].includes(authority.state) ||
+        authority.remainingMinor <= 0) {
+      return failure(409, "DEPOSIT_REQUEST_REQUIREMENT_UNAVAILABLE", "This exact deposit requirement is no longer available for preparation.");
+    }
+  }
   if (
     validated.workspace.jobAnalysisSessionId &&
     (
@@ -949,11 +1162,17 @@ async function createBusinessDocumentDraft(input = {}) {
   });
   if (!photos) return failure(400, "BUSINESS_DOCUMENT_PHOTOS_INVALID", "One or more document photos are invalid.");
   const id = randomUUID();
+  const referencePrefix = validated.documentType === "QUOTE"
+    ? "WQ"
+    : validated.documentType === "INVOICE"
+      ? "WI"
+      : "WDR";
   const draft = {
     id,
-    reference: `${validated.documentType === "QUOTE" ? "WQ" : "WI"}-${id.slice(0, 8).toUpperCase()}`,
+    reference: `${referencePrefix}-${id.slice(0, 8).toUpperCase()}`,
     documentType: validated.documentType,
     jobId: validated.jobId,
+    paymentRequirementId: validated.paymentRequirementId,
     content: validated.content,
     workspace: validated.workspace,
     photos,
@@ -963,6 +1182,7 @@ async function createBusinessDocumentDraft(input = {}) {
   const hash = requestHash({
     documentType: draft.documentType,
     jobId: draft.jobId,
+    paymentRequirementId: draft.paymentRequirementId,
     content: draft.content,
     workspace: draft.workspace,
     photos: draft.photos,
@@ -988,6 +1208,25 @@ async function updateBusinessDocumentDraft(input = {}) {
     validated.draftId
   );
   if (!context?.contractor_profile_id) return failure(404, "BUSINESS_DOCUMENT_NOT_FOUND", "The working document was not found.");
+  if (context.document_type !== validated.documentType ||
+      (context.payment_requirement_id || null) !== (validated.paymentRequirementId || null)) {
+    return failure(409, "DEPOSIT_REQUEST_REQUIREMENT_CONFLICT", "The saved document purpose or payment requirement cannot be changed.");
+  }
+  if (validated.documentType === "DEPOSIT_REQUEST") {
+    if (typeof store.loadDepositRequestAuthority !== "function") {
+      return failure(409, "DEPOSIT_REQUEST_REQUIREMENT_UNAVAILABLE", "The exact deposit requirement could not be verified.");
+    }
+    const authority = await store.loadDepositRequestAuthority({
+      pool: input.pool,
+      actorUserId: validated.actorId,
+      paymentRequirementId: validated.paymentRequirementId,
+      jobId: validated.jobId,
+    });
+    if (!authority || !["DUE", "PARTIALLY_SATISFIED"].includes(authority.state) ||
+        authority.remainingMinor <= 0) {
+      return failure(409, "DEPOSIT_REQUEST_REQUIREMENT_UNAVAILABLE", "This exact deposit requirement is no longer available for revision.");
+    }
+  }
   if (!(await store.validateJobAssociation(
     input.pool,
     validated.actorId,
@@ -1018,6 +1257,7 @@ async function updateBusinessDocumentDraft(input = {}) {
   const draft = {
     documentType: validated.documentType,
     jobId: validated.jobId,
+    paymentRequirementId: validated.paymentRequirementId,
     content: validated.content,
     workspace: validated.workspace,
     photos,
@@ -1027,6 +1267,7 @@ async function updateBusinessDocumentDraft(input = {}) {
   const hashDraft = {
     documentType: draft.documentType,
     jobId: draft.jobId,
+    paymentRequirementId: draft.paymentRequirementId,
     content: draft.content,
     workspace: draft.workspace,
     photos: draft.photos,

@@ -3,6 +3,7 @@
 const { createHash } = require("node:crypto");
 const {
   createBusinessDocumentDeliveryMessageWithClient,
+  createPaymentLifecycleMessageWithClient,
 } = require("../conversations/conversationMessageService");
 const {
   buildBusinessDocumentCustomerPackage,
@@ -161,10 +162,59 @@ async function loadOwnedContext(client, actorUserId, draftId, { lock = false } =
     `/* business_document_delivery:load_owned */
      SELECT drafts.*, profiles.business_name, profiles.phone, profiles.location,
             profiles.image_url, profiles.profile_details,
-            users.email AS business_email
+            users.email AS business_email,
+            contacts.display_name AS linked_customer_name,
+            contacts.email AS linked_customer_email,
+            contacts.phone AS linked_customer_phone,
+            contacts.address_text AS linked_customer_address,
+            contacts.service_area_text AS linked_customer_service_area,
+            posts.title AS linked_job_title,
+            concerns.original_text AS linked_job_concern,
+            obligations.job_id AS deposit_job_id,
+            obligations.relationship_id AS deposit_relationship_id,
+            obligations.quote_id AS deposit_quote_id,
+            obligations.issued_quote_version AS deposit_issued_quote_version,
+            obligations.customer_decision_id AS deposit_customer_decision_id,
+            obligations.currency AS deposit_currency,
+            obligations.quote_total_minor AS deposit_quote_total_minor,
+            obligations.deposit_rule_type AS deposit_rule_type,
+            obligations.deposit_percent_basis_points AS deposit_percent_basis_points,
+            obligations.deposit_fixed_minor AS deposit_fixed_minor,
+            deposit_versions.state AS deposit_state,
+            deposit_versions.required_minor AS deposit_required_minor,
+            deposit_versions.applied_minor AS deposit_applied_minor,
+            deposit_versions.remaining_minor AS deposit_remaining_minor,
+            deposit_versions.version AS deposit_latest_version,
+            quote_sources.document_number AS deposit_quote_reference
      FROM business_document_working_drafts drafts
      INNER JOIN contractor_profiles profiles ON profiles.id = drafts.contractor_profile_id
      INNER JOIN users ON users.id = profiles.user_id
+     LEFT JOIN business_contacts contacts
+       ON contacts.id = drafts.business_contact_id
+       AND contacts.contractor_profile_id = drafts.contractor_profile_id
+     LEFT JOIN jobs ON jobs.id = drafts.job_id
+     LEFT JOIN posts ON posts.id = jobs.job_request_id
+     LEFT JOIN LATERAL (
+       SELECT reported_concerns.original_text
+       FROM reported_concerns
+       WHERE reported_concerns.job_request_id = jobs.job_request_id
+       ORDER BY reported_concerns.sequence ASC,
+         reported_concerns.reported_at ASC,
+         reported_concerns.id ASC
+       LIMIT 1
+     ) concerns ON TRUE
+     LEFT JOIN canonical_pre_work_deposit_obligations obligations
+       ON obligations.id = drafts.payment_requirement_id
+      AND obligations.job_id = drafts.job_id
+     LEFT JOIN LATERAL (
+       SELECT versions.*
+       FROM canonical_pre_work_deposit_versions versions
+       WHERE versions.obligation_id = obligations.id
+       ORDER BY versions.version DESC
+       LIMIT 1
+     ) deposit_versions ON TRUE
+     LEFT JOIN canonical_quote_business_document_sources quote_sources
+       ON quote_sources.quote_id = obligations.quote_id
      WHERE drafts.id = $1 AND profiles.user_id = $2
        AND drafts.draft_status = 'WORKING_DRAFT'
      LIMIT 1 ${lock ? "FOR SHARE OF drafts" : ""}`,
@@ -172,6 +222,56 @@ async function loadOwnedContext(client, actorUserId, draftId, { lock = false } =
   );
   const row = result.rows[0];
   if (!row) return null;
+  const sourceContent = exactObject(row.content) ? row.content : {};
+  const authoritativeContent = {
+    ...sourceContent,
+    ...(row.business_contact_id && row.linked_customer_name
+      ? {
+          customerName: row.linked_customer_name,
+          customerEmail: row.linked_customer_email || sourceContent.customerEmail || "",
+          customerPhone: row.linked_customer_phone || sourceContent.customerPhone || "",
+          customerAddress: row.linked_customer_address || sourceContent.customerAddress || "",
+          customerLocation:
+            row.linked_customer_address ||
+            row.linked_customer_service_area ||
+            sourceContent.customerLocation ||
+            sourceContent.serviceLocation ||
+            "",
+        }
+      : {}),
+    ...(row.document_type === "QUOTE" && row.job_id
+      ? {
+          projectTitle: sourceContent.projectTitle || row.linked_job_title || "",
+          projectDescription:
+            sourceContent.projectDescription || row.linked_job_concern || "",
+          recommendedSolution:
+            sourceContent.recommendedSolution || row.linked_job_concern || "",
+        }
+      : {}),
+  };
+  const depositRequestAuthority = row.payment_requirement_id && row.deposit_latest_version
+    ? Object.freeze({
+        paymentRequirementId: String(row.payment_requirement_id),
+        jobId: String(row.deposit_job_id),
+        relationshipId: Number(row.deposit_relationship_id),
+        quoteId: String(row.deposit_quote_id),
+        issuedQuoteVersion: Number(row.deposit_issued_quote_version),
+        customerDecisionId: String(row.deposit_customer_decision_id),
+        state: row.deposit_state,
+        currency: row.deposit_currency,
+        quoteTotalMinor: Number(row.deposit_quote_total_minor),
+        requiredMinor: Number(row.deposit_required_minor),
+        appliedMinor: Number(row.deposit_applied_minor),
+        remainingMinor: Number(row.deposit_remaining_minor),
+        latestVersion: Number(row.deposit_latest_version),
+        quoteReference: row.deposit_quote_reference || null,
+        depositRule: Object.freeze({
+          type: row.deposit_rule_type,
+          percentBasisPoints: row.deposit_percent_basis_points == null ? null : Number(row.deposit_percent_basis_points),
+          fixedMinor: row.deposit_fixed_minor == null ? null : Number(row.deposit_fixed_minor),
+        }),
+      })
+    : null;
   return {
     contractorProfileId: Number(row.contractor_profile_id),
     business: row,
@@ -181,8 +281,10 @@ async function loadOwnedContext(client, actorUserId, draftId, { lock = false } =
       reference: row.draft_reference,
       documentNumber: row.document_number || null,
       jobId: row.job_id || null,
+      paymentRequirementId: row.payment_requirement_id || null,
+      depositRequestAuthority,
       version: Number(row.version),
-      content: exactObject(row.content) ? row.content : {},
+      content: authoritativeContent,
       photos: await loadPhotos(client, row.id),
     },
   };
@@ -312,20 +414,57 @@ async function deliverMessageSql(values) {
       recipientUserId: Number(context.recipient_user_id),
       conversationId: conversation.id,
     });
-    const label = values.documentType === "QUOTE" ? "Quote" : "Invoice";
+    const label = values.documentType === "QUOTE"
+      ? "Quote"
+      : values.documentType === "DEPOSIT_REQUEST"
+        ? "Deposit Request"
+        : "Invoice";
+    const displayedAmountMinor = values.documentType === "DEPOSIT_REQUEST"
+      ? values.customerPackage.depositRequest.requestedMinor
+      : values.customerPackage.totalMinor;
     const messageText = [
       values.customerMessage,
       `${current.business.business_name || "Your professional"} shared ${label} ${values.documentReference} (version ${values.documentVersion}).`,
-      `Amount: ${(values.customerPackage.totalMinor / 100).toFixed(2)} ${values.customerPackage.currency}.`,
+      `${values.documentType === "DEPOSIT_REQUEST" ? "Deposit requested" : "Amount"}: ${(displayedAmountMinor / 100).toFixed(2)} ${values.customerPackage.currency}.`,
     ].filter(Boolean).join("\n\n");
-    const message = await createBusinessDocumentDeliveryMessageWithClient({
-      client,
-      conversation,
-      senderUserId: values.actorUserId,
-      recipientUserId: Number(context.recipient_user_id),
-      messageText,
-      workflowPayload: values.customerPackage,
-    });
+    const message = values.documentType === "DEPOSIT_REQUEST"
+      ? await createPaymentLifecycleMessageWithClient({
+          client,
+          conversation,
+          senderUserId: values.actorUserId,
+          recipientUserId: Number(context.recipient_user_id),
+          messageText,
+          messageType: "payment_request",
+          workflowType: "PAYMENT_REQUEST",
+          quoteId: values.customerPackage.depositRequest.quoteId,
+          jobId: values.customerPackage.depositRequest.jobId,
+          workflowPayload: {
+            schemaVersion: 1,
+            depositRequestDocumentId: values.customerPackage.document.id,
+            depositRequestReference: values.customerPackage.document.reference,
+            paymentRequirementId: values.customerPackage.depositRequest.paymentRequirementId,
+            quoteId: values.customerPackage.depositRequest.quoteId,
+            jobId: values.customerPackage.depositRequest.jobId,
+            issuedQuoteVersion: values.customerPackage.depositRequest.issuedQuoteVersion,
+            state: "PAYMENT_REQUIRED",
+            currency: values.customerPackage.currency,
+            quoteTotalMinor: values.customerPackage.depositRequest.projectTotalMinor,
+            requiredMinor: values.customerPackage.depositRequest.requestedMinor,
+            receivedMinor: values.customerPackage.depositRequest.paymentsReceivedMinor,
+            remainingMinor: values.customerPackage.depositRequest.amountStillNeededMinor,
+            balanceRemainingMinor: values.customerPackage.depositRequest.remainingAfterDepositMinor,
+            paymentTerms: values.customerPackage.paymentTerms,
+            payment: null,
+          },
+        })
+      : await createBusinessDocumentDeliveryMessageWithClient({
+          client,
+          conversation,
+          senderUserId: values.actorUserId,
+          recipientUserId: Number(context.recipient_user_id),
+          messageText,
+          workflowPayload: values.customerPackage,
+        });
     const completed = await client.query(
       `/* business_document_delivery:complete_message */
        UPDATE business_document_delivery_events

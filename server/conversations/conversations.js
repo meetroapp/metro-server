@@ -462,6 +462,9 @@ function normalizeInvoiceSharedPayload(row = {}) {
     : null;
   const totalMinor = integer(payload.totalMinor);
   const balanceMinor = integer(payload.balanceMinor);
+  const paidMinor = payload.paidMinor == null && totalMinor !== null && balanceMinor !== null
+    ? totalMinor - balanceMinor
+    : integer(payload.paidMinor);
   const currency = typeof payload.currency === "string" && /^[A-Z]{3}$/.test(payload.currency)
     ? payload.currency
     : null;
@@ -473,8 +476,9 @@ function normalizeInvoiceSharedPayload(row = {}) {
     payload.invoiceId !== row.invoice_id ||
     payload.jobId !== row.job_id ||
     !text(payload.invoiceNumber, 40) ||
-    payload.status !== "SENT" ||
-    totalMinor === null || balanceMinor === null || balanceMinor > totalMinor ||
+    !["SENT", "PARTIALLY_PAID", "PAID"].includes(payload.status) ||
+    totalMinor === null || paidMinor === null || paidMinor < 0 || balanceMinor === null ||
+    totalMinor !== paidMinor + balanceMinor ||
     !currency || !dueMode
   ) return {};
 
@@ -483,8 +487,9 @@ function normalizeInvoiceSharedPayload(row = {}) {
     invoiceId: row.invoice_id,
     invoiceNumber: text(payload.invoiceNumber, 40),
     jobId: row.job_id,
-    status: "SENT",
+    status: payload.status,
     totalMinor,
+    paidMinor,
     balanceMinor,
     currency,
     due: {
@@ -499,12 +504,91 @@ function normalizeInvoiceSharedPayload(row = {}) {
       service: text(payload.job?.service, 120),
     },
     issuedAt: text(payload.issuedAt, 80),
+    terms: text(payload.terms, 2000),
+  };
+}
+
+function normalizePaymentLifecyclePayload(row = {}) {
+  const payload = normalizeMessageWorkflowPayload(row.workflow_payload);
+  const expected = row.message_type === "payment_request"
+    ? { workflowType: "PAYMENT_REQUEST", states: ["PAYMENT_REQUIRED"] }
+    : row.message_type === "payment_received"
+      ? { workflowType: "PAYMENT_RECEIVED", states: ["PARTIALLY_RECEIVED", "DEPOSIT_RECEIVED"] }
+      : null;
+  const integer = (value) => Number.isSafeInteger(value) && value >= 0 ? value : null;
+  const text = (value, max = 2000) => typeof value === "string" && value.trim()
+    ? value.trim().slice(0, max)
+    : null;
+  const payment = payload.payment == null ? null : {
+    receiptId: text(payload.payment?.receiptId, 80),
+    grossAmountMinor: integer(payload.payment?.grossAmountMinor),
+    allocatedMinor: integer(payload.payment?.allocatedMinor),
+    displayMethod: text(payload.payment?.displayMethod, 160),
+    receivedAt: text(payload.payment?.receivedAt, 80),
+    externalReference: text(payload.payment?.externalReference, 300),
+  };
+  const quoteTotalMinor = integer(payload.quoteTotalMinor);
+  const requiredMinor = integer(payload.requiredMinor);
+  const receivedMinor = integer(payload.receivedMinor);
+  const remainingMinor = integer(payload.remainingMinor);
+  const balanceRemainingMinor = integer(payload.balanceRemainingMinor);
+  const uuid = (value) => typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+    ? value.toLowerCase()
+    : null;
+  const quoteId = uuid(payload.quoteId);
+  const jobId = uuid(payload.jobId);
+  const depositRequestDocumentId = uuid(payload.depositRequestDocumentId);
+  const paymentRequirementId = uuid(payload.paymentRequirementId);
+  const depositRequestReference = text(payload.depositRequestReference, 40);
+  const depositRequestBindingPresent = [
+    payload.depositRequestDocumentId,
+    payload.paymentRequirementId,
+    payload.depositRequestReference,
+  ].some((value) => value != null);
+  const validDepositRequestBinding = !depositRequestBindingPresent || (
+    row.message_type === "payment_request" && depositRequestDocumentId &&
+    paymentRequirementId && /^WDR-[A-Z0-9]{8}$/.test(depositRequestReference || "")
+  );
+  if (!expected || row.workflow_type !== expected.workflowType || row.workflow_status !== "SENT" ||
+      payload.schemaVersion !== 1 || !quoteId || !jobId ||
+      !Number.isSafeInteger(payload.issuedQuoteVersion) || payload.issuedQuoteVersion < 1 ||
+      !expected.states.includes(payload.state) || !/^[A-Z]{3}$/.test(payload.currency || "") ||
+      [quoteTotalMinor, requiredMinor, receivedMinor, remainingMinor, balanceRemainingMinor].includes(null) ||
+      receivedMinor + remainingMinor !== requiredMinor ||
+      (row.message_type === "payment_request" && balanceRemainingMinor !== quoteTotalMinor - requiredMinor) ||
+      (row.message_type === "payment_received" && balanceRemainingMinor !== quoteTotalMinor - receivedMinor) ||
+      (row.message_type === "payment_request" && payment !== null) ||
+      !validDepositRequestBinding ||
+      (row.message_type === "payment_received" && (!payment?.receiptId || !payment.displayMethod || !payment.receivedAt))) {
+    return {};
+  }
+  return {
+    schemaVersion: 1,
+    quoteId,
+    jobId,
+    issuedQuoteVersion: payload.issuedQuoteVersion,
+    state: payload.state,
+    currency: payload.currency,
+    quoteTotalMinor,
+    requiredMinor,
+    receivedMinor,
+    remainingMinor,
+    balanceRemainingMinor,
+    paymentTerms: text(payload.paymentTerms),
+    payment,
+    ...(depositRequestBindingPresent ? {
+      depositRequestDocumentId,
+      depositRequestReference,
+      paymentRequirementId,
+    } : {}),
   };
 }
 
 function serializeConversationMessage(row = {}, viewerUserId) {
   const quoteShared = row.message_type === "quote_shared";
   const invoiceShared = row.message_type === "invoice_shared";
+  const paymentLifecycle = ["payment_request", "payment_received"].includes(row.message_type);
   const value = {
     id: row.id,
     sender: {
@@ -527,6 +611,8 @@ function serializeConversationMessage(row = {}, viewerUserId) {
         ? normalizeQuoteSharedPayload(row)
         : invoiceShared
           ? normalizeInvoiceSharedPayload(row)
+          : paymentLifecycle
+            ? normalizePaymentLifecyclePayload(row)
           : normalizeMessageWorkflowPayload(row.workflow_payload),
     },
     createdAt: row.created_at || null,
@@ -543,6 +629,13 @@ function serializeConversationMessage(row = {}, viewerUserId) {
       type: "invoice",
       invoiceId: row.invoice_id || null,
       jobId: row.job_id || null,
+    };
+  }
+  if (paymentLifecycle) {
+    value.reference = {
+      type: "payment",
+      quoteId: value.workflow.payload.quoteId || null,
+      jobId: value.workflow.payload.jobId || null,
     };
   }
   return value;
@@ -661,6 +754,7 @@ module.exports = {
   parsePositiveInteger,
   participantArchiveField,
   normalizeInvoiceSharedPayload,
+  normalizePaymentLifecyclePayload,
   normalizeQuoteSharedPayload,
   serializeConversationForHomeowner,
   serializeConversationForProfessional,
