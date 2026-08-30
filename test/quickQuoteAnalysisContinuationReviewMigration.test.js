@@ -81,45 +81,45 @@ test(
 
     assert.equal(
       migrations.length,
-      72
+      73
     );
     assert.equal(
       migrations.at(-1)?.filename,
-      "202608300008_create_business_time_evidence_authority.sql"
-    );
-
-    assert.equal(
-      migrations.at(-26)?.filename,
-      migrationName
-    );
-
-    assert.equal(
-      migrations.at(-25)?.filename,
-      "202608210001_create_business_document_working_drafts.sql"
+      "202608300009_add_business_time_settings_authority.sql"
     );
 
     assert.equal(
       migrations.at(-27)?.filename,
+      migrationName
+    );
+
+    assert.equal(
+      migrations.at(-26)?.filename,
+      "202608210001_create_business_document_working_drafts.sql"
+    );
+
+    assert.equal(
+      migrations.at(-28)?.filename,
       "202608190001_create_quick_quote_analysis_session_foundation.sql"
     );
 
     assert.equal(
-      migrations.at(-24)?.filename,
+      migrations.at(-25)?.filename,
       "202608210002_create_business_document_delivery_foundation.sql"
     );
 
     assert.equal(
-      migrations.at(-23)?.filename,
+      migrations.at(-24)?.filename,
       "202608230001_add_business_document_numbers.sql"
     );
 
     assert.equal(
-      migrations.at(-22)?.filename,
+      migrations.at(-23)?.filename,
       "202608230002_add_canonical_quote_customer_terms_snapshot.sql"
     );
 
     assert.equal(
-      migrations.at(-21)?.filename,
+      migrations.at(-22)?.filename,
       "202608230003_create_canonical_quote_business_document_sources.sql"
     );
 

@@ -27,6 +27,8 @@ const ROLE_PERMISSIONS = Object.freeze({
     "TIME_SELF_VIEW",
     "TIME_SELF_ACTION",
     "TIME_TEAM_VIEW",
+    "TIME_SETTINGS_MANAGE",
+    "TEAM_TODAY_VIEW",
   ]),
   MANAGER: Object.freeze([
     "TEAM_VIEW",
@@ -42,6 +44,7 @@ const ROLE_PERMISSIONS = Object.freeze({
     "TIME_SELF_VIEW",
     "TIME_SELF_ACTION",
     "TIME_TEAM_VIEW",
+    "TEAM_TODAY_VIEW",
   ]),
   BOOKKEEPER_FINANCE: Object.freeze([
     "TEAM_SELF",

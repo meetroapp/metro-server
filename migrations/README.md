@@ -90,12 +90,20 @@ Current inventory:
 70. `202608300006_create_business_job_assignment_authority.sql`
 71. `202608300007_create_business_job_field_operations_authority.sql`
 72. `202608300008_create_business_time_evidence_authority.sql`
+73. `202608300009_add_business_time_settings_authority.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
 
 This inventory records migration source files, not applied database state.
 Migration creation and governed migration execution remain separate operations.
+
+`202608300009_add_business_time_settings_authority.sql` adds nullable,
+Business-owned IANA timezone and week-start presentation authority to the
+existing contractor profile, with exact active-membership update evidence. It
+does not guess or backfill historical Business settings and does not mutate
+canonical time sessions, Team membership, Jobs, Billing, subscription, trial,
+provider, field-status, customer communication, payroll, or Alert authority.
 
 `202608300008_create_business_time_evidence_authority.sql` adds replay-safe
 Clock In / Clock Out commands, one-active-timer enforcement, server-timestamped

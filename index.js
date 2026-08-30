@@ -143,6 +143,12 @@ const {
   registerTimeEvidenceRoutes,
 } = require("./server/team/timeEvidence");
 const {
+  registerBusinessTimeSettingsRoutes,
+} = require("./server/team/businessTimeSettings");
+const {
+  registerTimeOperationsRoutes,
+} = require("./server/team/timeOperations");
+const {
   activateReservedMeetroBusinessTrial,
 } = require("./server/subscriptions/subscriptionService");
 
@@ -928,6 +934,20 @@ registerFieldOperationsRoutes({
 });
 
 registerTimeEvidenceRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerBusinessTimeSettingsRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerTimeOperationsRoutes({
   app,
   authMiddleware,
   getPool,

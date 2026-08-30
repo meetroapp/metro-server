@@ -14,7 +14,7 @@ test("Slice 004 is one additive migration after Workstream foundation", () => {
   const migrations = readdirSync(join(root, "migrations"))
     .filter((name) => /^\d+.*\.sql$/.test(name))
     .sort();
-  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300008_create_business_time_evidence_authority.sql");
+  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300009_add_business_time_settings_authority.sql");
   const index = migrations.indexOf(migrationName);
   assert.equal(migrations[index - 1], "202608100001_create_workstream_activity_foundation.sql");
   assert.equal(migrations[index + 1], "202608100003_create_canonical_quote_scope_foundation.sql");
