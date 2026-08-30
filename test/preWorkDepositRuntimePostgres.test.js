@@ -265,10 +265,10 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 64);
+      assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300001_create_professional_subscription_foundation.sql");
       const migrated = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(migrated.success, true, JSON.stringify(migrated));
-      assert.equal(migrated.applied.length, 64);
+      assert.equal(migrated.applied.length, migrations.length);
 
       const identities = await createVisitTestIdentities(pool, suffix);
       const fixture = await createVisitLifecycleFixture(pool, identities, `${suffix}-deposit`);
@@ -730,7 +730,7 @@ test(
       );
       const replayMigrations = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(replayMigrations.success, true, JSON.stringify(replayMigrations));
-      assert.equal(replayMigrations.skipped.length, 64);
+      assert.equal(replayMigrations.skipped.length, migrations.length);
     } finally {
       await pool.end();
     }

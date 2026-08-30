@@ -148,6 +148,7 @@ async function verifyAppleEvidence({
   authenticatedActor,
   signedTransactionInfo,
   signedRenewalInfo,
+  providerSignedAt,
   eventType = "CLIENT_VERIFICATION",
   verifier = createAppleSubscriptionVerifier(),
   environment = process.env,
@@ -172,10 +173,17 @@ async function verifyAppleEvidence({
   }
   const plan = planForProductId(transaction.productId, environment);
   const providerState = deriveProviderState(transaction, renewalInfo);
+  const providerVerifiedAt = normalizeInstant(
+    providerSignedAt ||
+    renewalInfo?.signedDate ||
+    transaction.signedDate ||
+    transaction.purchaseDate ||
+    transaction.originalPurchaseDate
+  );
   const originalId = String(transaction.originalTransactionId || "").trim();
   const transactionId = String(transaction.transactionId || "").trim();
   const appAccountToken = String(transaction.appAccountToken || "").toLowerCase();
-  if (!plan || !providerState || !originalId || !transactionId || !appAccountToken) {
+  if (!plan || !providerState || !providerVerifiedAt || !originalId || !transactionId || !appAccountToken) {
     return failure(422, "APPLE_EVIDENCE_MISMATCH", "Apple purchase evidence does not match a configured Meetro plan.");
   }
 
@@ -217,8 +225,8 @@ async function verifyAppleEvidence({
         (contractor_profile_id, provider, provider_environment, provider_product_id,
          provider_original_transaction_id, latest_provider_transaction_id, effective_plan,
          status, seat_limit, access_started_at, access_ends_at, trial_eligible, trial_ends_at,
-         will_auto_renew, grace_period_ends_at, canceled_at, revoked_at)
-       VALUES ($1, 'APPLE_APP_STORE', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+         will_auto_renew, grace_period_ends_at, canceled_at, revoked_at, last_verified_at)
+       VALUES ($1, 'APPLE_APP_STORE', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
        ON CONFLICT (contractor_profile_id) DO UPDATE SET
          provider_environment = EXCLUDED.provider_environment,
          provider_product_id = EXCLUDED.provider_product_id,
@@ -234,7 +242,8 @@ async function verifyAppleEvidence({
          grace_period_ends_at = EXCLUDED.grace_period_ends_at,
          canceled_at = EXCLUDED.canceled_at,
          revoked_at = EXCLUDED.revoked_at,
-         last_verified_at = CURRENT_TIMESTAMP
+         last_verified_at = EXCLUDED.last_verified_at
+       WHERE EXCLUDED.last_verified_at > professional_subscriptions.last_verified_at
        RETURNING *`,
       [
         context.contractor_profile_id,
@@ -253,16 +262,26 @@ async function verifyAppleEvidence({
         providerState.graceEndsAt,
         providerState.canceledAt,
         providerState.revokedAt,
+        providerVerifiedAt,
       ]
     );
+    let subscription = result.rows[0];
+    if (!subscription) {
+      const current = await client.query(
+        `SELECT * FROM professional_subscriptions WHERE contractor_profile_id = $1`,
+        [context.contractor_profile_id]
+      );
+      subscription = current.rows[0];
+    }
     await client.query("COMMIT");
     return {
       ok: true,
       status: 200,
-      code: event.rowCount ? "SUBSCRIPTION_VERIFIED" : "SUBSCRIPTION_VERIFICATION_REPLAYED",
+      code: event.rowCount === 0 ? "SUBSCRIPTION_VERIFICATION_REPLAYED" :
+        result.rowCount === 0 ? "SUBSCRIPTION_VERIFIED_NO_CHANGE" : "SUBSCRIPTION_VERIFIED",
       replayed: event.rowCount === 0,
-      entitled: entitledStatus(result.rows[0].status, result.rows[0].access_ends_at),
-      subscription: serializeSubscription(result.rows[0]),
+      entitled: entitledStatus(subscription.status, subscription.access_ends_at),
+      subscription: serializeSubscription(subscription),
     };
   } catch (error) {
     try { await client.query("ROLLBACK"); } catch {}

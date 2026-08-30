@@ -116,14 +116,23 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 64);
+      assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300001_create_professional_subscription_foundation.sql");
+      const visitStartIndex = migrations.findIndex(
+        ({ filename }) => filename ===
+          "202608270001_add_canonical_visit_start_authority.sql"
+      );
+      assert.equal(visitStartIndex, 57);
       assert.equal(
-        migrations.at(-2).filename,
-        "202608270001_add_canonical_visit_start_authority.sql"
+        migrations[visitStartIndex - 1].filename,
+        "202608260001_create_evaluation_remote_provenance.sql"
+      );
+      assert.equal(
+        migrations[visitStartIndex + 1].filename,
+        "202608280001_create_pre_work_deposit_payment_authority.sql"
       );
       const migrated = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(migrated.success, true, migrated.errorCode);
-      assert.equal(migrated.applied.length, 64);
+      assert.equal(migrated.applied.length, migrations.length);
 
       const identities = await createVisitTestIdentities(pool, suffix);
       const directFixture = await createVisitLifecycleFixture(

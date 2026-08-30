@@ -60,7 +60,7 @@ test(
       const migrations = getMigrationFiles();
       const migrated = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(migrated.success, true, migrated.errorCode);
-      assert.equal(migrated.applied.length, 64);
+      assert.equal(migrated.applied.length, migrations.length);
       const identities = await createVisitTestIdentities(pool, randomUUID());
 
       const first = await createCanonicalLifecycleAlertWithClient({

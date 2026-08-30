@@ -14,7 +14,7 @@ test("migration 33 is additive, append-only, and advisory-only", () => {
   const migrations = readdirSync(join(root, "migrations"))
     .filter((name) => /^\d+.*\.sql$/.test(name))
     .sort();
-  assert.equal(migrations.length, 64);
+  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300001_create_professional_subscription_foundation.sql");
   const index = migrations.indexOf(migrationName);
   assert.equal(migrations[index - 1], "202608100003_create_canonical_quote_scope_foundation.sql");
   assert.match(sql, /CREATE TABLE IF NOT EXISTS intelligence_quote_composition_feedback/i);

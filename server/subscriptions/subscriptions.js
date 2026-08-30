@@ -87,6 +87,7 @@ function createSubscriptionHandlers({
       authenticatedActor: { id: Number(owner.rows[0].user_id) },
       signedTransactionInfo: notification.data.signedTransactionInfo,
       signedRenewalInfo: notification.data.signedRenewalInfo,
+      providerSignedAt: notification.signedDate,
       eventType: `SERVER_NOTIFICATION_${String(notification.notificationType || "UNKNOWN")}_${String(notification.subtype || "NONE")}_${String(notification.notificationUUID || "NO_UUID")}`,
       verifier,
       environment,

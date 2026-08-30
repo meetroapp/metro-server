@@ -273,12 +273,12 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 64);
+      assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300001_create_professional_subscription_foundation.sql");
       const migrated = await runMigrationCollection(pool, migrations, targetMetadata());
-      assert.equal(migrated.applied.length, 64);
+      assert.equal(migrated.applied.length, migrations.length);
       const replay = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(replay.applied.length, 0);
-      assert.equal(replay.skipped.length, 64);
+      assert.equal(replay.skipped.length, migrations.length);
 
       const { identities, fixture, quote, originalQuote, completion } =
         await prepareCompletedJob(pool, suffix);

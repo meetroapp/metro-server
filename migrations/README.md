@@ -82,12 +82,19 @@ Current inventory:
 62. `202608290001_add_invoice_line_source_authority.sql`
 63. `202608290002_add_deposit_request_document_authority.sql`
 64. `202608290003_add_canonical_alert_event_identity.sql`
+65. `202608300001_create_professional_subscription_foundation.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
 
 This inventory records migration source files, not applied database state.
 Migration creation and governed migration execution remain separate operations.
+
+`202608300001_create_professional_subscription_foundation.sql` adds the
+business-owned professional subscription account, one effective verified Apple
+subscription authority, and replay-safe provider-event identity. It creates no
+subscription, transaction, entitlement, Job billing, or Alert rows and performs
+no backfill.
 
 `202608290002_add_deposit_request_document_authority.sql` adds the distinct
 `DEPOSIT_REQUEST` private working-document purpose, binds it to one exact
