@@ -3,6 +3,8 @@
 const PLAN_DEFINITIONS = Object.freeze({
   COMMUNITY_2_USER_MONTHLY: Object.freeze({
     code: "COMMUNITY_2_USER_MONTHLY",
+    name: "Starter",
+    positioning: "For small businesses",
     amountMinor: 3499,
     currency: "USD",
     billingPeriod: "MONTH",
@@ -13,6 +15,8 @@ const PLAN_DEFINITIONS = Object.freeze({
   }),
   COMMUNITY_5_USER_MONTHLY: Object.freeze({
     code: "COMMUNITY_5_USER_MONTHLY",
+    name: "Growth",
+    positioning: "For growing teams",
     amountMinor: 6999,
     currency: "USD",
     billingPeriod: "MONTH",
@@ -20,6 +24,18 @@ const PLAN_DEFINITIONS = Object.freeze({
     trialDays: 14,
     productEnvironmentKey: "APPLE_COMMUNITY_5_USER_MONTHLY_PRODUCT_ID",
     stripePriceEnvironmentKey: "STRIPE_COMMUNITY_5_USER_MONTHLY_PRICE_ID",
+  }),
+  COMMUNITY_10_USER_MONTHLY: Object.freeze({
+    code: "COMMUNITY_10_USER_MONTHLY",
+    name: "Professional",
+    positioning: "For established teams",
+    amountMinor: 12999,
+    currency: "USD",
+    billingPeriod: "MONTH",
+    seatLimit: 10,
+    trialDays: 14,
+    productEnvironmentKey: "APPLE_COMMUNITY_10_USER_MONTHLY_PRODUCT_ID",
+    stripePriceEnvironmentKey: "STRIPE_COMMUNITY_10_USER_MONTHLY_PRICE_ID",
   }),
 });
 
@@ -34,6 +50,8 @@ function getSubscriptionCatalog(environment = process.env) {
     const stripePriceId = configuredProductId(environment[plan.stripePriceEnvironmentKey]);
     return ({
     code: plan.code,
+    name: plan.name,
+    positioning: plan.positioning,
     amountMinor: plan.amountMinor,
     currency: plan.currency,
     billingPeriod: plan.billingPeriod,

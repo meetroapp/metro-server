@@ -23,13 +23,15 @@ const {
 const productEnvironment = {
   APPLE_COMMUNITY_2_USER_MONTHLY_PRODUCT_ID: "com.meetro.community.professional.2.monthly",
   APPLE_COMMUNITY_5_USER_MONTHLY_PRODUCT_ID: "com.meetro.community.professional.5.monthly",
+  APPLE_COMMUNITY_10_USER_MONTHLY_PRODUCT_ID: "com.meetro.community.professional.10.monthly",
 };
 
-test("server-owned catalog exposes only the two approved monthly plans", () => {
+test("server-owned catalog exposes only the three approved monthly plans", () => {
   const plans = getSubscriptionCatalog(productEnvironment);
-  assert.deepEqual(plans.map(({ code, amountMinor, seatLimit, trialDays }) => ({ code, amountMinor, seatLimit, trialDays })), [
-    { code: "COMMUNITY_2_USER_MONTHLY", amountMinor: 3499, seatLimit: 2, trialDays: 14 },
-    { code: "COMMUNITY_5_USER_MONTHLY", amountMinor: 6999, seatLimit: 5, trialDays: 14 },
+  assert.deepEqual(plans.map(({ code, name, amountMinor, seatLimit, trialDays }) => ({ code, name, amountMinor, seatLimit, trialDays })), [
+    { code: "COMMUNITY_2_USER_MONTHLY", name: "Starter", amountMinor: 3499, seatLimit: 2, trialDays: 14 },
+    { code: "COMMUNITY_5_USER_MONTHLY", name: "Growth", amountMinor: 6999, seatLimit: 5, trialDays: 14 },
+    { code: "COMMUNITY_10_USER_MONTHLY", name: "Professional", amountMinor: 12999, seatLimit: 10, trialDays: 14 },
   ]);
   assert.equal(planForProductId("client.forged.product", productEnvironment), null);
 });
@@ -81,6 +83,13 @@ test("seat enforcement counts owner and rejects Plan A third seat", () => {
 test("Plan B permits five total seats but rejects a sixth", () => {
   assert.equal(assertSeatAvailable({ entitlement: { entitled: true, seatLimit: 5 }, activeProfessionalSeats: 4 }).ok, true);
   assert.equal(assertSeatAvailable({ entitlement: { entitled: true, seatLimit: 5 }, activeProfessionalSeats: 5 }).ok, false);
+});
+
+test("Professional permits the owner plus nine employees but rejects an eleventh seat", () => {
+  assert.equal(assertSeatAvailable({ entitlement: { entitled: true, seatLimit: 10 }, activeProfessionalSeats: 9 }).ok, true);
+  const rejected = assertSeatAvailable({ entitlement: { entitled: true, seatLimit: 10 }, activeProfessionalSeats: 10 });
+  assert.equal(rejected.code, "SUBSCRIPTION_SEAT_LIMIT_REACHED");
+  assert.match(rejected.message, /up to 10 users/);
 });
 
 test("staging QA compatibility cannot activate in production", () => {

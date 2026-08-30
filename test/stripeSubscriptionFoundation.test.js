@@ -19,6 +19,7 @@ const environment = {
   NODE_ENV: "test",
   STRIPE_COMMUNITY_2_USER_MONTHLY_PRICE_ID: "price_meetro_plan_a",
   STRIPE_COMMUNITY_5_USER_MONTHLY_PRICE_ID: "price_meetro_plan_b",
+  STRIPE_COMMUNITY_10_USER_MONTHLY_PRICE_ID: "price_meetro_plan_professional",
   STRIPE_SUBSCRIPTION_RETURN_URL: "https://staging.meetro.example/#professionalSubscription",
 };
 const token = "123e4567-e89b-12d3-a456-426614174000";
@@ -62,6 +63,28 @@ test("Stripe checkout uses the exact server plan, provider trial, and business b
   assert.equal(checkout.subscription_data.trial_period_days, 14);
   assert.equal(checkout.subscription_data.metadata.meetro_app_account_token, token);
   assert.equal(calls.some(({ sql }) => /canonical_invoices|invoice_payments|deposit_requests|\bjobs\b/i.test(sql)), false);
+});
+
+test("Professional checkout uses the exact 10-seat monthly server authority", async () => {
+  const { pool } = checkoutPool();
+  let checkout;
+  const provider = {
+    checkoutConfigured: true,
+    retrievePrice: async () => ({ active: true, unit_amount: 12999, currency: "usd", recurring: { interval: "month", interval_count: 1 } }),
+    createCustomer: async () => ({ id: "cus_verified" }),
+    createCheckoutSession: async (params) => { checkout = params; return { url: "https://checkout.stripe.test/professional" }; },
+  };
+  const result = await createStripeCheckout({
+    pool,
+    authenticatedActor: { id: 8 },
+    planCode: "COMMUNITY_10_USER_MONTHLY",
+    stripeProvider: provider,
+    environment,
+  });
+  assert.equal(result.code, "STRIPE_CHECKOUT_CREATED");
+  assert.deepEqual(checkout.line_items, [{ price: "price_meetro_plan_professional", quantity: 1 }]);
+  assert.equal(checkout.subscription_data.trial_period_days, 14);
+  assert.equal(checkout.subscription_data.metadata.meetro_plan, "COMMUNITY_10_USER_MONTHLY");
 });
 
 test("an active Apple entitlement prevents accidental Stripe checkout", async () => {
@@ -262,4 +285,11 @@ test("Migration 66 adds only Stripe subscription authority and remains isolated 
   assert.match(sql, /'APPLE_APP_STORE', 'STRIPE'/);
   assert.match(sql, /stripe_customer_id/);
   assert.doesNotMatch(sql, /canonical_invoices|invoice_payments|deposit_requests|\bjobs\b|canonical_quotes|alerts/i);
+});
+
+test("Migration 67 adds only the Professional plan and 10-seat authority", () => {
+  const sql = fs.readFileSync(path.join(__dirname, "../migrations/202608300003_add_professional_subscription_plan.sql"), "utf8");
+  assert.match(sql, /COMMUNITY_10_USER_MONTHLY/);
+  assert.match(sql, /seat_limit IN \(2, 5, 10\)/);
+  assert.doesNotMatch(sql, /INSERT INTO|UPDATE\s+|DELETE FROM|canonical_invoices|invoice_payments|deposit_requests|\bjobs\b|canonical_quotes|alerts/i);
 });

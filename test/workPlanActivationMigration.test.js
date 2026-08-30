@@ -12,7 +12,7 @@ const sql = readFileSync(join(__dirname, "..", "migrations", migrationName), "ut
 
 test("Work Plan execution is additive governed migration 41", () => {
   const migrations = getMigrationFiles();
-  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300002_add_stripe_subscription_authority.sql");
+  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300003_add_professional_subscription_plan.sql");
   const migrationIndex = migrations.findIndex(({ filename }) => filename === migrationName);
   assert.equal(migrationIndex, 40);
   assert.equal(
