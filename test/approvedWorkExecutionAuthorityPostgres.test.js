@@ -572,7 +572,7 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300003_add_professional_subscription_plan.sql");
+  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300004_create_meetro_business_trial_authority.sql");
       const migrated = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(migrated.success, true, JSON.stringify(migrated));
       assert.equal(migrated.applied.length, migrations.length);

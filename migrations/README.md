@@ -85,12 +85,20 @@ Current inventory:
 65. `202608300001_create_professional_subscription_foundation.sql`
 66. `202608300002_add_stripe_subscription_authority.sql`
 67. `202608300003_add_professional_subscription_plan.sql`
+68. `202608300004_create_meetro_business_trial_authority.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
 
 This inventory records migration source files, not applied database state.
 Migration creation and governed migration execution remain separate operations.
+
+`202608300004_create_meetro_business_trial_authority.sql` adds the one-time,
+server-governed 14-day Meetro Business Trial reservation, activation, expiry,
+and paid-conversion evidence. Trial identity is account-owned and independent
+of Apple and Stripe provider subscriptions; the migration creates no provider
+transaction, paid subscription, Job billing, Alert, or Employee/Team row and
+performs no backfill.
 
 `202608300001_create_professional_subscription_foundation.sql` adds the
 business-owned professional subscription account, one effective verified Apple

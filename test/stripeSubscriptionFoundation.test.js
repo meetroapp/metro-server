@@ -45,7 +45,7 @@ function checkoutPool(existing = null) {
   return { calls, pool: { connect: async () => client } };
 }
 
-test("Stripe checkout uses the exact server plan, provider trial, and business binding", async () => {
+test("Stripe checkout uses the exact paid server plan without starting the Meetro trial", async () => {
   const { calls, pool } = checkoutPool();
   let checkout;
   const provider = {
@@ -60,7 +60,8 @@ test("Stripe checkout uses the exact server plan, provider trial, and business b
   const result = await createStripeCheckout({ pool, authenticatedActor: { id: 8 }, planCode: "COMMUNITY_2_USER_MONTHLY", stripeProvider: provider, environment });
   assert.equal(result.code, "STRIPE_CHECKOUT_CREATED");
   assert.deepEqual(checkout.line_items, [{ price: "price_meetro_plan_a", quantity: 1 }]);
-  assert.equal(checkout.subscription_data.trial_period_days, 14);
+  assert.equal(Object.hasOwn(checkout.subscription_data, "trial_period_days"), false);
+  assert.equal(Object.hasOwn(checkout.subscription_data, "trial_settings"), false);
   assert.equal(checkout.subscription_data.metadata.meetro_app_account_token, token);
   assert.equal(calls.some(({ sql }) => /canonical_invoices|invoice_payments|deposit_requests|\bjobs\b/i.test(sql)), false);
 });
@@ -83,7 +84,7 @@ test("Professional checkout uses the exact 10-seat monthly server authority", as
   });
   assert.equal(result.code, "STRIPE_CHECKOUT_CREATED");
   assert.deepEqual(checkout.line_items, [{ price: "price_meetro_plan_professional", quantity: 1 }]);
-  assert.equal(checkout.subscription_data.trial_period_days, 14);
+  assert.equal(Object.hasOwn(checkout.subscription_data, "trial_period_days"), false);
   assert.equal(checkout.subscription_data.metadata.meetro_plan, "COMMUNITY_10_USER_MONTHLY");
 });
 
@@ -137,7 +138,7 @@ test("an existing Stripe entitlement prevents an unnecessary Apple subscription"
   assert.equal(result.code, "SUBSCRIPTION_PROVIDER_CHANGE_REQUIRES_REVIEW");
 });
 
-test("Stripe trial dates and status come from provider subscription truth", () => {
+test("Stripe trialing evidence is classified for fail-closed rejection", () => {
   const start = 1_800_000_000;
   const state = deriveStripeProviderState({ status: "trialing", trial_start: start, trial_end: start + 14 * 86400, current_period_start: start, current_period_end: start + 14 * 86400 });
   assert.equal(state.status, "TRIAL");
@@ -168,6 +169,7 @@ test("Stripe renewal, payment failure, cancellation, and expiration remain provi
 
 function stripeAuthorityPool({ ownerMatches = true } = {}) {
   const events = new Set();
+  const trialConversions = [];
   let subscriptionRow = null;
   const client = {
     async query(sql, params) {
@@ -186,12 +188,16 @@ function stripeAuthorityPool({ ownerMatches = true } = {}) {
         };
         return { rowCount: 1, rows: [subscriptionRow] };
       }
+      if (sql.includes("UPDATE meetro_business_trials")) {
+        trialConversions.push(params[0]);
+        return { rows: [] };
+      }
       if (sql.includes("SELECT * FROM professional_subscriptions")) return { rows: subscriptionRow ? [subscriptionRow] : [] };
       throw new Error(`Unexpected query: ${sql}`);
     },
     release() {},
   };
-  return { events, pool: { connect: async () => client } };
+  return { events, trialConversions, pool: { connect: async () => client } };
 }
 
 function stripeEvidence() {
@@ -199,16 +205,31 @@ function stripeEvidence() {
   return {
     event: { id: "evt_verified_1", type: "customer.subscription.created", created: start, livemode: false },
     subscription: {
-      id: "sub_verified_1", customer: "cus_verified", status: "trialing", trial_start: start,
-      trial_end: start + 14 * 86400, current_period_start: start, current_period_end: start + 14 * 86400,
+      id: "sub_verified_1", customer: "cus_verified", status: "active",
+      current_period_start: start, current_period_end: start + 30 * 86400,
       metadata: { meetro_business_id: "12", meetro_app_account_token: token, meetro_plan: "COMMUNITY_2_USER_MONTHLY" },
       items: { data: [{ price: { id: "price_meetro_plan_a" } }] },
     },
   };
 }
 
+test("verified Stripe trialing state is rejected because the initial trial is Meetro-owned", async () => {
+  const start = Math.floor(Date.now() / 1000);
+  const evidence = stripeEvidence();
+  evidence.subscription.status = "trialing";
+  evidence.subscription.trial_start = start;
+  evidence.subscription.trial_end = start + 14 * 86400;
+  const result = await processStripeSubscriptionEvent({
+    pool: { connect() { throw new Error("must not connect"); } },
+    ...evidence,
+    providerRetrieved: true,
+    environment,
+  });
+  assert.equal(result.code, "STRIPE_PROVIDER_TRIAL_NOT_SUPPORTED");
+});
+
 test("verified Stripe webhook replay is idempotent and grants the shared business entitlement once", async () => {
-  const { events, pool } = stripeAuthorityPool();
+  const { events, trialConversions, pool } = stripeAuthorityPool();
   const evidence = stripeEvidence();
   const first = await processStripeSubscriptionEvent({ pool, ...evidence, providerRetrieved: true, environment });
   const replay = await processStripeSubscriptionEvent({ pool, ...evidence, providerRetrieved: true, environment });
@@ -217,6 +238,7 @@ test("verified Stripe webhook replay is idempotent and grants the shared busines
   assert.equal(first.subscription.plan, "COMMUNITY_2_USER_MONTHLY");
   assert.equal(replay.code, "SUBSCRIPTION_VERIFICATION_REPLAYED");
   assert.equal(events.size, 1);
+  assert.deepEqual(trialConversions, [12]);
 });
 
 test("wrong business cannot claim a Stripe subscription", async () => {

@@ -4,6 +4,9 @@ const { createHash } = require("node:crypto");
 const { getSubscriptionCatalog, planForCode, planForProductId, planForStripePriceId } = require("./subscriptionCatalog");
 const { createAppleSubscriptionVerifier } = require("./appleSubscriptionVerifier");
 
+const MEETRO_BUSINESS_TRIAL_DAYS = 14;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 function failure(status, code, message) {
   return { ok: false, status, code, message };
 }
@@ -34,6 +37,61 @@ function serializeSubscription(row, { qaAccess = false } = {}) {
     entitled: qaAccess || entitledStatus(row.status, row.access_ends_at),
     qaAccess,
   };
+}
+
+function serializeBusinessTrial(row, { providerConverted = false, now = Date.now() } = {}) {
+  if (!row) return null;
+  const startsAt = row.starts_at || null;
+  const endsAt = row.ends_at || null;
+  const convertedAt = row.converted_at || null;
+  const endTime = endsAt ? new Date(endsAt).getTime() : Number.NaN;
+  const converted = Boolean(convertedAt || providerConverted);
+  const active = Boolean(startsAt && Number.isFinite(endTime) && endTime > now && !converted);
+  const status = converted ? "CONVERTED" : !startsAt ? "PENDING" : active ? "ACTIVE" : "EXPIRED";
+  return {
+    source: "MEETRO_SERVER",
+    status,
+    startsAt,
+    endsAt,
+    convertedAt,
+    trialDays: MEETRO_BUSINESS_TRIAL_DAYS,
+    daysRemaining: active ? Math.max(1, Math.ceil((endTime - now) / DAY_MS)) : 0,
+    entitled: active,
+  };
+}
+
+async function activateReservedMeetroBusinessTrial({ pool, userId }) {
+  if (!pool || !Number.isSafeInteger(Number(userId))) return null;
+  const activated = await pool.query(
+    `UPDATE meetro_business_trials trials
+        SET starts_at = CURRENT_TIMESTAMP,
+            ends_at = CURRENT_TIMESTAMP + INTERVAL '14 days'
+      WHERE trials.user_id = $1
+        AND trials.starts_at IS NULL
+        AND EXISTS (
+          SELECT 1 FROM users
+          WHERE users.id = trials.user_id
+            AND users.account_type = 'professional'
+        )
+      RETURNING trials.*`,
+    [Number(userId)]
+  );
+  if (activated.rows[0]) return serializeBusinessTrial(activated.rows[0]);
+  const current = await pool.query(
+    `SELECT * FROM meetro_business_trials WHERE user_id = $1`,
+    [Number(userId)]
+  );
+  return serializeBusinessTrial(current.rows[0] || null);
+}
+
+async function markBusinessTrialConverted(client, contractorProfileId) {
+  await client.query(
+    `UPDATE meetro_business_trials
+        SET converted_at = COALESCE(converted_at, CURRENT_TIMESTAMP)
+      WHERE contractor_profile_id = $1
+        AND starts_at IS NOT NULL`,
+    [Number(contractorProfileId)]
+  );
 }
 
 async function loadBusinessContext(client, userId) {
@@ -88,20 +146,28 @@ async function getSubscriptionState({ pool, authenticatedActor, environment = pr
     [context.contractor_profile_id]
   );
   const subscription = result.rows[0] || null;
-  const qaAccess = !subscription && stagingQaAccess(environment, context.contractor_profile_id);
+  const trialResult = await pool.query(
+    `SELECT * FROM meetro_business_trials WHERE user_id = $1`,
+    [context.id]
+  );
+  const trialRow = trialResult.rows[0] || null;
+  const businessTrial = serializeBusinessTrial(trialRow, { providerConverted: Boolean(subscription) });
+  const providerEntitled = Boolean(subscription && entitledStatus(subscription.status, subscription.access_ends_at));
+  const trialEntitled = !subscription && businessTrial?.entitled === true;
+  const qaAccess = !subscription && !trialEntitled && stagingQaAccess(environment, context.contractor_profile_id);
   return {
     ok: true,
     status: 200,
     code: "SUBSCRIPTION_STATE_LOADED",
     applicable: true,
-    entitled: qaAccess || Boolean(subscription && entitledStatus(subscription.status, subscription.access_ends_at)),
+    entitled: qaAccess || trialEntitled || providerEntitled,
     businessId: Number(context.contractor_profile_id),
     appAccountToken: account.app_account_token,
     catalog,
     productConfigurationRequired: catalog.some((plan) =>
       !plan.providers.APPLE_APP_STORE.configured && !plan.providers.STRIPE.configured),
-    trialEligibility: subscription?.trial_eligible === true ? "ELIGIBLE" :
-      subscription?.trial_eligible === false ? "INELIGIBLE" : "PROVIDER_REQUIRED",
+    trialEligibility: businessTrial?.status || "NOT_RESERVED",
+    businessTrial,
     subscription: serializeSubscription(subscription, { qaAccess }),
     qaAccess: qaAccess ? {
       source: "STAGING_EXISTING_PROFESSIONAL_COMPATIBILITY",
@@ -189,6 +255,9 @@ async function verifyAppleEvidence({
   const appAccountToken = String(transaction.appAccountToken || "").toLowerCase();
   if (!plan || !providerState || !providerVerifiedAt || !originalId || !transactionId || !appAccountToken) {
     return failure(422, "APPLE_EVIDENCE_MISMATCH", "Apple purchase evidence does not match a configured Meetro plan.");
+  }
+  if (providerState.status === "TRIAL") {
+    return failure(422, "APPLE_PROVIDER_TRIAL_NOT_SUPPORTED", "Apple must confirm a paid Meetro subscription. The initial Meetro Business Trial is server-governed.");
   }
 
   const client = await pool.connect();
@@ -285,6 +354,9 @@ async function verifyAppleEvidence({
         [context.contractor_profile_id]
       );
       subscription = current.rows[0];
+    }
+    if (subscription && entitledStatus(subscription.status, subscription.access_ends_at)) {
+      await markBusinessTrialConverted(client, context.contractor_profile_id);
     }
     await client.query("COMMIT");
     return {
@@ -405,7 +477,7 @@ async function createStripeCheckout({ pool, authenticatedActor, planCode, stripe
       mode: "subscription",
       customer: customerId,
       line_items: [{ price: priceId, quantity: 1 }],
-      subscription_data: { trial_period_days: plan.trialDays, trial_settings: { end_behavior: { missing_payment_method: "cancel" } }, metadata },
+      subscription_data: { metadata },
       metadata,
       success_url: returnUrl,
       cancel_url: returnUrl,
@@ -449,6 +521,9 @@ async function processStripeSubscriptionEvent({ pool, event, subscription, provi
   const verifiedAt = normalizeInstant(Number(event?.created) * 1000);
   if (!Number.isSafeInteger(businessId) || !accountToken || !customerId || !plan || !providerState || !verifiedAt || !event?.id || !subscription?.id) {
     return failure(422, "STRIPE_EVIDENCE_MISMATCH", "Stripe subscription evidence does not match a configured Meetro business and plan.");
+  }
+  if (providerState.status === "TRIAL") {
+    return failure(422, "STRIPE_PROVIDER_TRIAL_NOT_SUPPORTED", "Stripe must confirm a paid Meetro subscription. The initial Meetro Business Trial is server-governed.");
   }
   const client = await pool.connect();
   try {
@@ -502,6 +577,9 @@ async function processStripeSubscriptionEvent({ pool, event, subscription, provi
     );
     let row = result.rows[0];
     if (!row) row = (await client.query(`SELECT * FROM professional_subscriptions WHERE contractor_profile_id = $1`, [businessId])).rows[0];
+    if (row && entitledStatus(row.status, row.access_ends_at)) {
+      await markBusinessTrialConverted(client, businessId);
+    }
     await client.query("COMMIT");
     return { ok: true, status: 200, code: result.rowCount ? "SUBSCRIPTION_VERIFIED" : "SUBSCRIPTION_VERIFIED_NO_CHANGE", replayed: false, entitled: entitledStatus(row.status, row.access_ends_at), subscription: serializeSubscription(row) };
   } catch (error) {
@@ -525,6 +603,7 @@ function assertSeatAvailable({ entitlement, activeProfessionalSeats, additionalS
 }
 
 module.exports = {
+  activateReservedMeetroBusinessTrial,
   assertSeatAvailable,
   createStripeCheckout,
   createSubscriptionManagement,
@@ -532,6 +611,7 @@ module.exports = {
   deriveStripeProviderState,
   entitledStatus,
   getSubscriptionState,
+  serializeBusinessTrial,
   serializeSubscription,
   stagingQaAccess,
   processStripeSubscriptionEvent,

@@ -130,6 +130,9 @@ const {
 const {
   registerSubscriptionRoutes,
 } = require("./server/subscriptions/subscriptions");
+const {
+  activateReservedMeetroBusinessTrial,
+} = require("./server/subscriptions/subscriptionService");
 
 const {
   registerIntelligenceRoutes,
@@ -1183,12 +1186,21 @@ app.post("/auth/signup", async (req, res) => {
         SELECT id, business_name, business_category, '', '', '', '', '{}'::jsonb
         FROM created_user
         WHERE account_type = 'professional'
+        RETURNING id, user_id
+      ), reserved_business_trial AS (
+        INSERT INTO meetro_business_trials
+          (user_id, contractor_profile_id, created_reason)
+        SELECT user_id, id, 'PROFESSIONAL_SIGNUP'
+        FROM created_professional_profile
+        ON CONFLICT (user_id) DO NOTHING
         RETURNING user_id
       )
       SELECT created_user.*
       FROM created_user
       LEFT JOIN created_professional_profile
         ON created_professional_profile.user_id = created_user.id
+      LEFT JOIN reserved_business_trial
+        ON reserved_business_trial.user_id = created_user.id
       `,
       [
         finalUsername,
@@ -1485,7 +1497,9 @@ async function completeAuthenticationVerification(req, res) {
                COALESCE(profile.category, users.business_category) AS business_category,
                users.profile_photo_url, users.token_version,
                profile.id AS contractor_profile_id,
-               (profile.id IS NOT NULL) AS has_business_profile
+               (profile.id IS NOT NULL) AS has_business_profile,
+               (business_trial.user_id IS NOT NULL AND business_trial.starts_at IS NULL)
+                 AS business_trial_activation_pending
         FROM users
         LEFT JOIN LATERAL (
           SELECT contractor_profiles.id,
@@ -1496,6 +1510,8 @@ async function completeAuthenticationVerification(req, res) {
           ORDER BY contractor_profiles.created_at ASC, contractor_profiles.id ASC
           LIMIT 1
         ) profile ON TRUE
+        LEFT JOIN meetro_business_trials business_trial
+          ON business_trial.user_id = users.id
         WHERE users.id = $1 AND users.email = $2
         `,
         [temporarySession.accountId, temporarySession.email]
@@ -1512,6 +1528,20 @@ async function completeAuthenticationVerification(req, res) {
           code: "SESSION_INVALID",
           message: "Verification challenge is no longer valid.",
         });
+      }
+
+      if (account.business_trial_activation_pending === true) {
+        const activatedTrial = await activateReservedMeetroBusinessTrial({
+          pool: getPool(req),
+          userId: account.id,
+        });
+        if (!activatedTrial || activatedTrial.status !== "ACTIVE") {
+          return res.status(503).json({
+            success: false,
+            code: "BUSINESS_TRIAL_ACTIVATION_FAILED",
+            message: "Your Meetro Business Trial could not be started. Please try again.",
+          });
+        }
       }
 
       const token = createToken(account);
