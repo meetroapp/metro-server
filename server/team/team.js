@@ -133,6 +133,12 @@ function createTeamHandlers({
       businessId: req.query?.businessId,
       environment,
     })),
+    inspect: handle("inspect_business_team_invitation", (req) =>
+      service.inspectTeamInvitation({
+        pool: getPool(req),
+        token: req.body?.token,
+      })
+    ),
     invite: handle("invite_business_team_member", async (req) =>
       attachTeamInvitationDelivery({
         result: await service.inviteTeamMember({
@@ -193,6 +199,11 @@ function registerTeamRoutes(options) {
     throw new TypeError("Business Team route dependencies are required.");
   }
   const handlers = createTeamHandlers(options);
+
+  // Invitation inspection is intentionally unauthenticated and read-only.
+  // The high-entropy invitation token is required; no Team authority is mutated.
+  app.post("/team/invitations/inspect", handlers.inspect);
+
   app.get("/team/me", authMiddleware, handlers.getMine);
   app.get("/team", authMiddleware, handlers.list);
   app.post("/team/invitations", authMiddleware, handlers.invite);

@@ -302,6 +302,64 @@ async function listTeam({ pool, authenticatedActor, businessId, environment = pr
   };
 }
 
+async function inspectTeamInvitation({ pool, token }) {
+  const tokenDigest = digestInvitationToken(token);
+
+  if (!pool) {
+    return failure(
+      500,
+      "TEAM_INVITATION_INSPECTION_UNAVAILABLE",
+      "Team invitation information is unavailable."
+    );
+  }
+
+  if (!tokenDigest) {
+    return failure(
+      400,
+      "TEAM_INVITATION_INVALID",
+      "Invitation token is invalid."
+    );
+  }
+
+  const result = await pool.query(
+    `SELECT invitations.*, profiles.business_name
+       FROM business_team_invitations invitations
+       JOIN contractor_profiles profiles
+         ON profiles.id = invitations.contractor_profile_id
+      WHERE invitations.token_digest = $1
+      LIMIT 1`,
+    [tokenDigest]
+  );
+
+  const row = result.rows[0];
+
+  if (!row) {
+    return failure(
+      404,
+      "TEAM_INVITATION_NOT_FOUND",
+      "Team invitation not found."
+    );
+  }
+
+  const invitation = serializeInvitation(row);
+
+  return {
+    ok: true,
+    status: 200,
+    code: "BUSINESS_TEAM_INVITATION_INSPECTED",
+    invitation: {
+      id: invitation.id,
+      businessId: invitation.businessId,
+      businessName: invitation.businessName,
+      email: invitation.email,
+      displayName: invitation.displayName,
+      role: invitation.role,
+      status: invitation.status,
+      expiresAt: invitation.expiresAt,
+    },
+  };
+}
+
 async function inviteTeamMember({ pool, authenticatedActor, businessId, email, displayName, role, environment = process.env }) {
   const actorId = positiveInteger(authenticatedActor?.id);
   const normalizedBusinessId = positiveInteger(businessId);
@@ -700,6 +758,7 @@ module.exports = {
   deactivateTeamMember,
   digestInvitationToken,
   getMyTeamAuthority,
+  inspectTeamInvitation,
   inviteTeamMember,
   listTeam,
   normalizeEmail,

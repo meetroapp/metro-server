@@ -13,6 +13,7 @@ const {
   deactivateTeamMember,
   digestInvitationToken,
   getMyTeamAuthority,
+  inspectTeamInvitation,
   inviteTeamMember,
   normalizeEmail,
   normalizeRole,
@@ -135,6 +136,74 @@ test("pending Team invitation projection names the exact Business before accepta
   const result = await getMyTeamAuthority({ pool, authenticatedActor: { id: 42 } });
   assert.equal(result.pendingInvitations[0].businessName, "Example Electric");
   assert.equal(result.pendingInvitations[0].businessId, 17);
+});
+
+test("Team invitation inspection exposes bounded join context without mutation or secret token output", async () => {
+  const invitationId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+
+  const queries = [];
+  const pool = {
+    async query(text, params) {
+      queries.push({ text, params });
+
+      if (/FROM business_team_invitations invitations/.test(text)) {
+        return {
+          rows: [{
+            id: invitationId,
+            contractor_profile_id: 17,
+            business_name: "All Handyman Services",
+            email_normalized: "employee@example.test",
+            display_name: "Field Employee",
+            role: "FIELD_EMPLOYEE",
+            status: "PENDING",
+            expires_at: new Date(Date.now() + 60_000),
+            created_at: new Date(),
+            version: 1,
+            token_digest: "server-secret-digest",
+            invited_by_user_id: 7,
+          }],
+        };
+      }
+
+      throw new Error(`Unexpected query: ${text}`);
+    },
+  };
+
+  const result = await inspectTeamInvitation({
+    pool,
+    token: "a".repeat(32),
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.code, "BUSINESS_TEAM_INVITATION_INSPECTED");
+  assert.equal(result.invitation.id, invitationId);
+  assert.equal(result.invitation.businessName, "All Handyman Services");
+  assert.equal(result.invitation.email, "employee@example.test");
+  assert.equal(result.invitation.role, "FIELD_EMPLOYEE");
+  assert.equal(result.invitation.status, "PENDING");
+
+  assert.equal(Object.hasOwn(result.invitation, "token"), false);
+  assert.equal(Object.hasOwn(result.invitation, "tokenDigest"), false);
+  assert.equal(Object.hasOwn(result.invitation, "invitedByUserId"), false);
+
+  const sql = queries.map((entry) => entry.text).join("\n");
+  assert.doesNotMatch(sql, /INSERT|UPDATE|DELETE/i);
+});
+
+test("invalid invitation inspection token fails before database access", async () => {
+  const pool = {
+    async query() {
+      throw new Error("database must not be queried");
+    },
+  };
+
+  const result = await inspectTeamInvitation({
+    pool,
+    token: "short",
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "TEAM_INVITATION_INVALID");
 });
 
 test("malformed business and member authority fails before transactions", async () => {
@@ -364,6 +433,7 @@ test("Team routes are authenticated and expose only governed commands", () => {
   });
   assert.ok(handlers);
   assert.deepEqual(routes.map(({ method, path: value }) => `${method.toUpperCase()} ${value}`), [
+    "POST /team/invitations/inspect",
     "GET /team/me",
     "GET /team",
     "POST /team/invitations",
@@ -373,6 +443,15 @@ test("Team routes are authenticated and expose only governed commands", () => {
     "PATCH /team/members/:membershipId/role",
     "POST /team/members/:membershipId/deactivate",
   ]);
-  routes.forEach((route) => assert.equal(route.handlers[0], authMiddleware));
+  const inspectionRoute = routes.find(
+    (route) => route.path === "/team/invitations/inspect"
+  );
+  assert.ok(inspectionRoute);
+  assert.notEqual(inspectionRoute.handlers[0], authMiddleware);
+
+  routes
+    .filter((route) => route.path !== "/team/invitations/inspect")
+    .forEach((route) => assert.equal(route.handlers[0], authMiddleware));
+
   assert.equal(typeof createTeamHandlers, "function");
 });
