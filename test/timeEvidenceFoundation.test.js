@@ -86,6 +86,8 @@ test("time routes extend the existing authenticated Team surface", () => {
 
 test("server timestamps remain canonical and time does not touch frozen domains", () => {
   assert.match(service, /clocked_out_at = CURRENT_TIMESTAMP/);
+  assert.match(service, /event_type, command_id\)\s*VALUES \(\$1,\$2,\$3,\$4,'CLOCKED_IN',\$5\)/);
+  assert.doesNotMatch(service, /event_type, command_id, occurred_at/);
   assert.doesNotMatch(service, /durationSeconds\s*[,}].*req\.|durationSeconds: req\./s);
   assert.doesNotMatch(service, /UPDATE\s+(?:jobs|canonical_|deposit_|invoice_|professional_subscriptions|meetro_business_trials)/i);
   assert.doesNotMatch(service, /createCanonicalLifecycleAlert|canonical_alerts|\bconversations\b/i);

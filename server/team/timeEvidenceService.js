@@ -306,10 +306,10 @@ async function clockIn({ pool, authenticatedActor, businessId, category, jobId, 
     );
     await client.query(
       `INSERT INTO business_time_events
-         (session_id, contractor_profile_id, membership_id, actor_user_id, event_type, command_id, occurred_at)
-       VALUES ($1,$2,$3,$4,'CLOCKED_IN',$5,$6)`,
+         (session_id, contractor_profile_id, membership_id, actor_user_id, event_type, command_id)
+       VALUES ($1,$2,$3,$4,'CLOCKED_IN',$5)`,
       [sessionResult.rows[0].id, normalizedBusinessId, actor.id, actorId,
-        commandResult.rows[0].id, sessionResult.rows[0].clocked_in_at]
+        commandResult.rows[0].id]
     );
     const resultReference = { session: serializeSession({
       ...sessionResult.rows[0], employee_name: actor.username,
@@ -376,9 +376,9 @@ async function clockOut({ pool, authenticatedActor, businessId, sessionId, locat
     const closed = { ...closedResult.rows[0], employee_name: actor.username, job_title: active.job_title };
     await client.query(
       `INSERT INTO business_time_events
-         (session_id, contractor_profile_id, membership_id, actor_user_id, event_type, command_id, occurred_at)
-       VALUES ($1,$2,$3,$4,'CLOCKED_OUT',$5,$6)`,
-      [closed.id, normalizedBusinessId, actor.id, actorId, commandResult.rows[0].id, closed.clocked_out_at]
+         (session_id, contractor_profile_id, membership_id, actor_user_id, event_type, command_id)
+       VALUES ($1,$2,$3,$4,'CLOCKED_OUT',$5)`,
+      [closed.id, normalizedBusinessId, actor.id, actorId, commandResult.rows[0].id]
     );
     const resultReference = { session: serializeSession(closed) };
     await client.query(
