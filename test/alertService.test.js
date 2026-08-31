@@ -989,10 +989,18 @@ test("alert list rejects malformed and authority-bearing queries before SQL", as
 });
 
 test("alert count service normalizes one recipient-scoped aggregate", async () => {
-  let params;
+  const params = [];
   const pool = {
-    async query(_text, values) {
-      params = values;
+    async query(text, values) {
+      params.push(values);
+      if (text.includes("alerts:communication_attention_counts")) {
+        return {
+          rows: [
+            { audience: "team", business_id: "7", job_id: "072c8736-5d97-4253-ba3e-dd1bce281a20", conversation_id: null, unread_count: "1" },
+            { audience: "customer", business_id: 7, job_id: "072c8736-5d97-4253-ba3e-dd1bce281a20", conversation_id: "342", unread_count: "2" },
+          ],
+        };
+      }
       return {
         rows: [
           { category: "communication", active_count: "2", unread_count: "1" },
@@ -1010,13 +1018,25 @@ test("alert count service normalizes one recipient-scoped aggregate", async () =
     logger: () => {},
   });
 
-  assert.deepEqual(params, [7]);
+  assert.deepEqual(params, [[7], [7]]);
   assert.deepEqual(result.counts, {
     active: 5,
     unread: 3,
     byCategory: {
       communication: { active: 2, unread: 1 },
       emergency: { active: 3, unread: 2 },
+    },
+    communication: {
+      unread: 3,
+      customerUnread: 2,
+      teamUnread: 1,
+      byJob: [{
+        businessId: 7,
+        jobId: "072c8736-5d97-4253-ba3e-dd1bce281a20",
+        customerUnread: 2,
+        teamUnread: 1,
+      }],
+      byConversation: [{ conversationId: 342, customerUnread: 2 }],
     },
   });
 });

@@ -406,6 +406,105 @@ async function resolveFieldTeamAlertDestination({
   }, { readOnly: true });
 }
 
+async function acknowledgeFieldMessageAttention({
+  pool,
+  authenticatedActor,
+  businessId,
+  jobId,
+  assignmentId,
+}) {
+  const actorId = positiveInteger(authenticatedActor?.id);
+  const normalizedBusinessId = positiveInteger(businessId);
+  const normalizedJobId = uuid(jobId);
+  const normalizedAssignmentId = uuid(assignmentId);
+  if (!pool || !actorId) {
+    return failure(401, "AUTHENTICATION_REQUIRED", "Authentication required.");
+  }
+  if (!normalizedBusinessId || !normalizedJobId || !normalizedAssignmentId) {
+    return failure(400, "FIELD_ATTENTION_IDENTITY_INVALID", "Exact business, Job, and assignment identity are required.");
+  }
+
+  return withTransaction(pool, async (client) => {
+    const actor = await loadActor(client, actorId, normalizedBusinessId);
+    if (!actor || !permissionForRole(actor.role, "FIELD_COMMUNICATION")) {
+      return failure(403, "FIELD_COMMUNICATION_PERMISSION_REQUIRED", "This Team role cannot acknowledge private Team communication.");
+    }
+    const assignment = await loadAssignment(
+      client,
+      normalizedBusinessId,
+      normalizedJobId,
+      normalizedAssignmentId,
+      { lock: true }
+    );
+    const authorityFailure = assignmentAuthorityFailure(actor, assignment);
+    if (authorityFailure) return authorityFailure;
+    const activationVersion = await loadActivationVersion(client, assignment.id);
+    if (!activationVersion) {
+      return failure(409, "FIELD_ASSIGNMENT_EVIDENCE_REQUIRED", "The assignment activation evidence is unavailable.");
+    }
+
+    const result = await client.query(
+      `/* field_operations:acknowledge_message_attention */
+       UPDATE alerts
+          SET read_at = COALESCE(read_at, CURRENT_TIMESTAMP),
+              updated_at = CASE
+                WHEN read_at IS NULL THEN CURRENT_TIMESTAMP
+                ELSE updated_at
+              END
+        WHERE id IN (
+          SELECT alerts.id
+            FROM alerts
+            JOIN business_job_field_messages messages
+              ON messages.id::text = alerts.source_entity_id
+             AND messages.id::text = alerts.source_event_id
+            JOIN business_team_memberships senders
+              ON senders.id = messages.sender_membership_id
+             AND senders.contractor_profile_id = messages.contractor_profile_id
+             AND senders.user_id = messages.sender_user_id
+             AND senders.status = 'ACTIVE'
+           WHERE alerts.recipient_user_id = $1
+             AND messages.contractor_profile_id = $2
+             AND messages.job_id = $3
+             AND messages.assignment_id = $4
+             AND messages.membership_id = $5
+             AND messages.sender_user_id <> $1
+             AND alerts.source_domain = 'business'
+             AND alerts.source_event_type = 'job.field_message.received'
+             AND alerts.source_entity_type = 'business_job_field_message'
+             AND alerts.category = 'work'
+             AND alerts.destination_type = 'job'
+             AND alerts.destination_payload = jsonb_build_object('jobId', messages.job_id)
+             AND alerts.lifecycle_state = 'active'
+             AND alerts.archived_at IS NULL
+             AND alerts.read_at IS NULL
+             AND (
+               ($6 = 'FIELD_EMPLOYEE' AND senders.role IN ('OWNER', 'MANAGER'))
+               OR
+               ($6 IN ('OWNER', 'MANAGER') AND senders.role = 'FIELD_EMPLOYEE'
+                 AND senders.id = messages.membership_id)
+             )
+        )
+          AND recipient_user_id = $1
+          AND read_at IS NULL
+        RETURNING id`,
+      [
+        actorId,
+        normalizedBusinessId,
+        normalizedJobId,
+        assignment.id,
+        assignment.membership_id,
+        actor.role,
+      ]
+    );
+    return {
+      ok: true,
+      status: 200,
+      code: "FIELD_MESSAGE_ATTENTION_ACKNOWLEDGED",
+      acknowledgedCount: result.rows.length,
+    };
+  });
+}
+
 async function listFieldOperations({ pool, authenticatedActor, businessId, jobId, assignmentId }) {
   const actorId = positiveInteger(authenticatedActor?.id);
   const normalizedBusinessId = positiveInteger(businessId);
@@ -606,6 +705,7 @@ async function sendFieldMessage({ pool, authenticatedActor, businessId, jobId, a
 module.exports = {
   FIELD_STATUSES,
   NEXT_FIELD_STATUS,
+  acknowledgeFieldMessageAttention,
   fingerprint,
   listManagedFieldCommunications,
   listFieldOperations,

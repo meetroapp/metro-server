@@ -6,6 +6,7 @@ const path = require("node:path");
 const test = require("node:test");
 
 const {
+  acknowledgeFieldCustomerAttention,
   getFieldCustomerConversation,
   resolveFieldCustomerAlertDestination,
   sendFieldCustomerMessage,
@@ -150,6 +151,7 @@ function createPool({
   existingCommand = null,
   insertCommand = null,
   failOn = null,
+  acknowledgedRows = [{ id: 301 }],
 } = {}) {
   const calls = [];
   let released = 0;
@@ -199,6 +201,9 @@ function createPool({
       }
       if (sql.includes("field_customer_communication:safe_text_projection")) {
         return { rows: safeRows };
+      }
+      if (sql.includes("field_customer_communication:acknowledge_attention")) {
+        return { rows: acknowledgedRows };
       }
       if (sql.startsWith("SELECT * FROM business_job_customer_message_commands")) {
         commandSelects += 1;
@@ -260,6 +265,34 @@ function createPool({
     get released() { return released; },
   };
 }
+
+test("exact authorized Customer projection acknowledges only canonical customer replies", async () => {
+  const fixture = createPool();
+  const response = await acknowledgeFieldCustomerAttention({
+    pool: fixture.pool,
+    authenticatedActor: { id: 14 },
+    jobId: JOB_ID,
+    payload: { businessId: 80, assignmentId: ASSIGNMENT_ID },
+  });
+  assert.equal(response.code, "FIELD_CUSTOMER_ATTENTION_ACKNOWLEDGED");
+  assert.equal(response.acknowledgedCount, 1);
+  const update = fixture.calls.find(({ sql }) =>
+    sql.includes("field_customer_communication:acknowledge_attention")
+  );
+  assert.deepEqual(update.params, [14, 91, 7, 9]);
+  assert.match(update.sql, /alerts\.recipient_user_id = \$1/);
+  assert.match(update.sql, /messages\.conversation_id = \$2/);
+
+  const stale = createPool({ authorityRows: [] });
+  const denied = await acknowledgeFieldCustomerAttention({
+    pool: stale.pool,
+    authenticatedActor: { id: 14 },
+    jobId: JOB_ID,
+    payload: { businessId: 80, assignmentId: ASSIGNMENT_ID },
+  });
+  assert.equal(denied.ok, false);
+  assert.equal(stale.calls.some(({ sql }) => sql.includes("acknowledge_attention")), false);
+});
 
 function readRequest(overrides = {}) {
   return {
@@ -666,6 +699,7 @@ test("new routes are separate and private Team messaging remains isolated", () =
   assert.deepEqual(routes.map(([method, pathname]) => [method, pathname]), [
     ["GET", "/employee/alerts/:alertId/customer-conversation-destination"],
     ["GET", "/employee/jobs/:jobId/customer-conversation"],
+    ["POST", "/employee/jobs/:jobId/customer-conversation/read"],
     ["POST", "/employee/jobs/:jobId/customer-conversation/messages"],
   ]);
   assert.doesNotMatch(fieldOperationsSource, /\bconversations\b|conversation_participants|quote_request_id/i);

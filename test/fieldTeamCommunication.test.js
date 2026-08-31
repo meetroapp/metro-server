@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const {
+  acknowledgeFieldMessageAttention,
   fingerprint,
   listManagedFieldCommunications,
   resolveFieldTeamAlertDestination,
@@ -100,6 +101,7 @@ function createPool({
   assignmentRow = assignment(),
   ownerRecipients = [{ user_id: 9 }, { user_id: 10 }],
   existingMessageRow = null,
+  acknowledgedRows = [{ id: 801 }],
 } = {}) {
   const calls = [];
   let insertedMessage = null;
@@ -119,6 +121,9 @@ function createPool({
       }
       if (sql.includes("FROM business_job_assignment_events")) {
         return { rows: [{ assignment_version: 4 }] };
+      }
+      if (sql.includes("field_operations:acknowledge_message_attention")) {
+        return { rows: acknowledgedRows };
       }
       if (sql.includes("FROM business_job_field_status_events")) {
         return { rows: [] };
@@ -157,6 +162,36 @@ function createPool({
     pool: { async connect() { return client; } },
   };
 }
+
+test("exact authorized Team load can acknowledge only its assignment attention", async () => {
+  const fixture = createPool();
+  const response = await acknowledgeFieldMessageAttention({
+    pool: fixture.pool,
+    authenticatedActor: { id: 9 },
+    businessId: 7,
+    jobId: JOB_ID,
+    assignmentId: ASSIGNMENT_ID,
+  });
+  assert.equal(response.code, "FIELD_MESSAGE_ATTENTION_ACKNOWLEDGED");
+  assert.equal(response.acknowledgedCount, 1);
+  const update = fixture.calls.find(({ sql }) =>
+    sql.includes("field_operations:acknowledge_message_attention")
+  );
+  assert.deepEqual(update.params.slice(0, 5), [9, 7, JOB_ID, ASSIGNMENT_ID, MEMBERSHIP_ID]);
+  assert.match(update.sql, /alerts\.recipient_user_id = \$1/);
+  assert.match(update.sql, /messages\.assignment_id = \$4/);
+
+  const stale = createPool({ assignmentRow: null });
+  const denied = await acknowledgeFieldMessageAttention({
+    pool: stale.pool,
+    authenticatedActor: { id: 9 },
+    businessId: 7,
+    jobId: JOB_ID,
+    assignmentId: ASSIGNMENT_ID,
+  });
+  assert.equal(denied.code, "FIELD_ASSIGNMENT_NOT_FOUND");
+  assert.equal(stale.calls.some(({ sql }) => sql.includes("acknowledge_message_attention")), false);
+});
 
 test("Owner and Manager load only current exact-assignment private Team history", async () => {
   for (const role of ["OWNER", "MANAGER"]) {

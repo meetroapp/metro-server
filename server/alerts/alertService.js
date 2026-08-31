@@ -26,6 +26,7 @@ const {
 const { normalizeSafePayload } = require("./alertPayload");
 const {
   archiveAlertWithClient,
+  countCommunicationAttentionForRecipientWithClient,
   countAlertsForRecipientWithClient,
   dismissAlertWithClient,
   expireAlertWithClient,
@@ -658,11 +659,17 @@ async function getAlertCountsForRecipient({
   const database = client || pool;
   try {
     requireDatabasePool(database);
-    const rows = await countAlertsForRecipientWithClient({
-      client: database,
-      recipientUserId: parsedRecipientId,
-    });
-    if (!Array.isArray(rows)) {
+    const [rows, communicationRows] = await Promise.all([
+      countAlertsForRecipientWithClient({
+        client: database,
+        recipientUserId: parsedRecipientId,
+      }),
+      countCommunicationAttentionForRecipientWithClient({
+        client: database,
+        recipientUserId: parsedRecipientId,
+      }),
+    ]);
+    if (!Array.isArray(rows) || !Array.isArray(communicationRows)) {
       throw new TypeError("Alert count rows are invalid.");
     }
 
@@ -681,11 +688,53 @@ async function getAlertCountsForRecipient({
       unread += categoryUnread;
     }
 
+    const communication = {
+      unread: 0,
+      customerUnread: 0,
+      teamUnread: 0,
+      byJob: [],
+      byConversation: [],
+    };
+    const jobScopes = new Map();
+    const conversationScopes = new Map();
+    for (const row of communicationRows) {
+      const count = normalizeAlertCount(row?.unread_count);
+      const audience = row?.audience;
+      const businessId = parsePositiveSafeInteger(row?.business_id);
+      const jobId = typeof row?.job_id === "string" ? row.job_id : null;
+      const conversationId = parsePositiveSafeInteger(row?.conversation_id);
+      if (!businessId || !["customer", "team"].includes(audience)) continue;
+      communication.unread += count;
+      if (audience === "team") communication.teamUnread += count;
+      else communication.customerUnread += count;
+      if (jobId) {
+        const key = `${businessId}:${jobId}`;
+        const scope = jobScopes.get(key) || {
+          businessId,
+          jobId,
+          customerUnread: 0,
+          teamUnread: 0,
+        };
+        scope[`${audience}Unread`] += count;
+        jobScopes.set(key, scope);
+      }
+      if (audience === "customer" && conversationId) {
+        const scope = conversationScopes.get(conversationId) || {
+          conversationId,
+          customerUnread: 0,
+        };
+        scope.customerUnread += count;
+        conversationScopes.set(conversationId, scope);
+      }
+    }
+    communication.byJob = [...jobScopes.values()];
+    communication.byConversation = [...conversationScopes.values()];
+
     return {
       ok: true,
       status: 200,
       code: "ALERT_COUNTS_RETRIEVED",
-      counts: { active, unread, byCategory },
+      counts: { active, unread, byCategory, communication },
     };
   } catch (error) {
     logSafeServerError(logger, {

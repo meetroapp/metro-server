@@ -24,6 +24,15 @@ function createFieldCustomerCommunicationHandlers({
   };
 
   return {
+    acknowledgeAttention: handle(
+      "acknowledge_employee_job_customer_communication_attention",
+      (req) => service.acknowledgeFieldCustomerAttention({
+        pool: getPool(req),
+        authenticatedActor: req.user,
+        jobId: req.params?.jobId,
+        payload: req.body,
+      })
+    ),
     resolveAlertDestination: handle(
       "resolve_employee_alert_customer_conversation_destination",
       (req) => service.resolveFieldCustomerAlertDestination({
@@ -69,6 +78,11 @@ function registerFieldCustomerCommunicationRoutes(options) {
     "/employee/jobs/:jobId/customer-conversation",
     authMiddleware,
     handlers.getConversation
+  );
+  app.post(
+    "/employee/jobs/:jobId/customer-conversation/read",
+    authMiddleware,
+    handlers.acknowledgeAttention
   );
   app.post(
     "/employee/jobs/:jobId/customer-conversation/messages",

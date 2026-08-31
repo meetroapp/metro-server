@@ -6,6 +6,7 @@ const test = require("node:test");
 const {
   archiveAlertWithClient,
   countAlertsForRecipientWithClient,
+  countCommunicationAttentionForRecipientWithClient,
   dismissAlertWithClient,
   expireAlertWithClient,
   findAnyAlertByRecipientWithClient,
@@ -464,6 +465,29 @@ test("alert repository counts active and unread alerts in one recipient-scoped a
   assert.match(captured.sql, /archived_at IS NULL/);
   assert.match(captured.sql, /COUNT\(\*\) FILTER \(WHERE read_at IS NULL\)/);
   assert.match(captured.sql, /GROUP BY category/);
+});
+
+test("communication attention counts distinct recipient-owned Alerts under current authority", async () => {
+  let captured;
+  const client = {
+    async query(text, params) {
+      captured = { sql: normalizeSql(text), params };
+      return { rows: [{ audience: "team", business_id: 7, job_id: "job", unread_count: 1 }] };
+    },
+  };
+  const rows = await countCommunicationAttentionForRecipientWithClient({
+    client,
+    recipientUserId: 7,
+  });
+  assert.equal(rows.length, 1);
+  assert.deepEqual(captured.params, [7]);
+  assert.match(captured.sql, /alerts:communication_attention_counts/);
+  assert.match(captured.sql, /COUNT\(DISTINCT alert_id\)/);
+  assert.match(captured.sql, /WHERE recipient_user_id = \$1/);
+  assert.match(captured.sql, /assignments\.state = 'ACTIVE'/);
+  assert.match(captured.sql, /jobs\.lifecycle_contract_version = 2/);
+  assert.match(captured.sql, /candidate_count = 1/);
+  assert.doesNotMatch(captured.sql, /INSERT INTO|DELETE FROM/);
 });
 
 test("alert repository read-all uses one race-safe cutoff update for active unread rows", async () => {

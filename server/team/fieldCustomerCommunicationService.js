@@ -650,6 +650,78 @@ async function getFieldCustomerConversation({
   }, { readOnly: true });
 }
 
+async function acknowledgeFieldCustomerAttention({
+  pool,
+  authenticatedActor,
+  jobId,
+  payload,
+}) {
+  const actorUserId = positiveInteger(authenticatedActor?.id);
+  const normalizedJobId = uuid(jobId);
+  if (!pool || !actorUserId) return failure(401, "AUTHENTICATION_REQUIRED", "Authentication required.");
+  const validation = validateReadPayload(payload);
+  if (!validation.ok) return validation;
+  if (!normalizedJobId) return failure(400, "FIELD_CUSTOMER_JOB_INVALID", "Exact Job identity is required.");
+
+  return withTransaction(pool, async (client) => {
+    const context = await resolveAuthorizedContext({
+      database: client,
+      actorUserId,
+      businessId: validation.businessId,
+      jobId: normalizedJobId,
+      assignmentId: validation.assignmentId,
+      lock: true,
+    });
+    if (context.error) return context.error;
+    const result = await client.query(
+      `/* field_customer_communication:acknowledge_attention */
+       UPDATE alerts
+          SET read_at = COALESCE(read_at, CURRENT_TIMESTAMP),
+              updated_at = CASE
+                WHEN read_at IS NULL THEN CURRENT_TIMESTAMP
+                ELSE updated_at
+              END
+        WHERE id IN (
+          SELECT alerts.id
+            FROM alerts
+            JOIN messages
+              ON messages.id::text = alerts.source_event_id
+             AND messages.conversation_id::text = alerts.source_entity_id
+           WHERE alerts.recipient_user_id = $1
+             AND alerts.source_domain = 'communication'
+             AND alerts.source_event_type = 'conversation.message_created'
+             AND alerts.source_entity_type = 'conversation'
+             AND alerts.category = 'communication'
+             AND alerts.destination_type = 'conversation'
+             AND alerts.destination_payload = jsonb_build_object(
+               'conversationId', messages.conversation_id
+             )
+             AND messages.conversation_id = $2
+             AND messages.sender_id = $3
+             AND messages.receiver_id = $4
+             AND alerts.lifecycle_state = 'active'
+             AND alerts.archived_at IS NULL
+             AND alerts.read_at IS NULL
+        )
+          AND recipient_user_id = $1
+          AND read_at IS NULL
+        RETURNING id`,
+      [
+        actorUserId,
+        context.authority.conversation_id,
+        context.authority.homeowner_id,
+        context.authority.professional_user_id,
+      ]
+    );
+    return {
+      ok: true,
+      status: 200,
+      code: "FIELD_CUSTOMER_ATTENTION_ACKNOWLEDGED",
+      acknowledgedCount: result.rows.length,
+    };
+  });
+}
+
 async function resolveFieldCustomerAlertDestination({
   pool,
   authenticatedActor,
@@ -917,6 +989,7 @@ async function sendFieldCustomerMessage({
 module.exports = {
   MAX_CUSTOMER_MESSAGE_HISTORY,
   MAX_CUSTOMER_MESSAGE_LENGTH,
+  acknowledgeFieldCustomerAttention,
   createFieldCustomerReplyAlertsWithClient,
   fingerprint,
   getFieldCustomerConversation,

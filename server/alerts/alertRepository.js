@@ -283,6 +283,203 @@ async function countAlertsForRecipientWithClient({
   return result.rows;
 }
 
+async function countCommunicationAttentionForRecipientWithClient({
+  client,
+  recipientUserId,
+}) {
+  requireDatabasePool(client);
+  const result = await client.query(
+    `/* alerts:communication_attention_counts */
+    WITH unread_alerts AS (
+      SELECT *
+        FROM alerts
+       WHERE recipient_user_id = $1
+         AND lifecycle_state = 'active'
+         AND archived_at IS NULL
+         AND read_at IS NULL
+         AND available_at <= CURRENT_TIMESTAMP
+    ),
+    team_attention AS (
+      SELECT DISTINCT
+        alerts.id AS alert_id,
+        messages.contractor_profile_id AS business_id,
+        messages.job_id,
+        NULL::integer AS conversation_id,
+        'team'::text AS audience
+      FROM unread_alerts alerts
+      JOIN business_job_field_messages messages
+        ON messages.id::text = alerts.source_entity_id
+       AND messages.id::text = alerts.source_event_id
+      JOIN business_job_assignments assignments
+        ON assignments.id = messages.assignment_id
+       AND assignments.contractor_profile_id = messages.contractor_profile_id
+       AND assignments.job_id = messages.job_id
+       AND assignments.membership_id = messages.membership_id
+       AND assignments.state = 'ACTIVE'
+      JOIN business_team_memberships assigned_memberships
+        ON assigned_memberships.id = assignments.membership_id
+       AND assigned_memberships.contractor_profile_id = assignments.contractor_profile_id
+       AND assigned_memberships.status = 'ACTIVE'
+       AND assigned_memberships.role = 'FIELD_EMPLOYEE'
+      JOIN business_team_memberships senders
+        ON senders.id = messages.sender_membership_id
+       AND senders.contractor_profile_id = messages.contractor_profile_id
+       AND senders.user_id = messages.sender_user_id
+       AND senders.status = 'ACTIVE'
+      JOIN jobs
+        ON jobs.id = assignments.job_id
+       AND jobs.lifecycle_contract_version = 2
+      WHERE alerts.source_domain = 'business'
+        AND alerts.source_event_type = 'job.field_message.received'
+        AND alerts.source_entity_type = 'business_job_field_message'
+        AND alerts.category = 'work'
+        AND alerts.destination_type = 'job'
+        AND alerts.destination_payload = jsonb_build_object('jobId', messages.job_id)
+        AND EXISTS (
+          SELECT 1
+            FROM business_job_assignment_events activation_events
+           WHERE activation_events.assignment_id = assignments.id
+             AND activation_events.contractor_profile_id = assignments.contractor_profile_id
+             AND activation_events.job_id = assignments.job_id
+             AND activation_events.membership_id = assignments.membership_id
+             AND activation_events.event_type IN ('ASSIGNED', 'REASSIGNED')
+        )
+        AND (
+          (
+            senders.role IN ('OWNER', 'MANAGER')
+            AND assigned_memberships.user_id = $1
+          )
+          OR (
+            senders.role = 'FIELD_EMPLOYEE'
+            AND senders.id = assigned_memberships.id
+            AND EXISTS (
+              SELECT 1
+                FROM business_team_memberships recipients
+               WHERE recipients.user_id = $1
+                 AND recipients.contractor_profile_id = messages.contractor_profile_id
+                 AND recipients.status = 'ACTIVE'
+                 AND recipients.role IN ('OWNER', 'MANAGER')
+            )
+          )
+        )
+    ),
+    customer_participant_attention AS (
+      SELECT DISTINCT
+        alerts.id AS alert_id,
+        conversations.contractor_id AS business_id,
+        NULL::uuid AS job_id,
+        conversations.id AS conversation_id,
+        'customer'::text AS audience
+      FROM unread_alerts alerts
+      JOIN messages
+        ON messages.id::text = alerts.source_event_id
+       AND messages.conversation_id::text = alerts.source_entity_id
+      JOIN conversations
+        ON conversations.id = messages.conversation_id
+      WHERE alerts.source_domain = 'communication'
+        AND alerts.source_event_type = 'conversation.message_created'
+        AND alerts.source_entity_type = 'conversation'
+        AND alerts.category = 'communication'
+        AND alerts.destination_type = 'conversation'
+        AND alerts.destination_payload = jsonb_build_object('conversationId', conversations.id)
+        AND alerts.recipient_user_id IN (
+          conversations.homeowner_id,
+          conversations.professional_user_id
+        )
+    ),
+    field_customer_candidates AS (
+      SELECT DISTINCT
+        alerts.id AS alert_id,
+        profiles.id AS business_id,
+        jobs.id AS job_id,
+        conversations.id AS conversation_id,
+        assignments.id AS assignment_id,
+        'customer'::text AS audience
+      FROM unread_alerts alerts
+      JOIN messages
+        ON messages.id::text = alerts.source_event_id
+       AND messages.conversation_id::text = alerts.source_entity_id
+      JOIN conversations
+        ON conversations.id = messages.conversation_id
+       AND messages.sender_id = conversations.homeowner_id
+       AND messages.receiver_id = conversations.professional_user_id
+      JOIN request_selections selections
+        ON selections.id = conversations.request_selection_id
+       AND selections.conversation_id = conversations.id
+       AND selections.ended_at IS NULL
+      JOIN request_relationships relationships
+        ON relationships.id = conversations.relationship_id
+       AND relationships.id = selections.request_relationship_id
+       AND relationships.status = 'active'
+       AND relationships.emergency_request_id IS NULL
+      JOIN contractor_profiles profiles
+        ON profiles.id = conversations.contractor_id
+       AND profiles.id = selections.contractor_id
+       AND profiles.user_id = conversations.professional_user_id
+      JOIN jobs
+        ON jobs.source_request_selection_id = selections.id
+       AND jobs.source_request_relationship_id = relationships.id
+       AND jobs.lifecycle_contract_version = 2
+      JOIN business_job_assignments assignments
+        ON assignments.job_id = jobs.id
+       AND assignments.contractor_profile_id = profiles.id
+       AND assignments.state = 'ACTIVE'
+      JOIN business_team_memberships memberships
+        ON memberships.id = assignments.membership_id
+       AND memberships.contractor_profile_id = assignments.contractor_profile_id
+       AND memberships.user_id = $1
+       AND memberships.status = 'ACTIVE'
+       AND memberships.role = 'FIELD_EMPLOYEE'
+      WHERE alerts.source_domain = 'communication'
+        AND alerts.source_event_type = 'conversation.message_created'
+        AND alerts.source_entity_type = 'conversation'
+        AND alerts.category = 'communication'
+        AND alerts.destination_type = 'conversation'
+        AND alerts.destination_payload = jsonb_build_object('conversationId', conversations.id)
+        AND alerts.recipient_user_id NOT IN (
+          conversations.homeowner_id,
+          conversations.professional_user_id
+        )
+        AND EXISTS (
+          SELECT 1
+            FROM business_job_assignment_events activation_events
+           WHERE activation_events.assignment_id = assignments.id
+             AND activation_events.contractor_profile_id = assignments.contractor_profile_id
+             AND activation_events.job_id = assignments.job_id
+             AND activation_events.membership_id = assignments.membership_id
+             AND activation_events.event_type IN ('ASSIGNED', 'REASSIGNED')
+        )
+    ),
+    field_customer_attention AS (
+      SELECT alert_id, business_id, job_id, conversation_id, audience
+        FROM (
+          SELECT candidates.*,
+                 COUNT(*) OVER (PARTITION BY alert_id) AS candidate_count
+            FROM field_customer_candidates candidates
+        ) scoped
+       WHERE candidate_count = 1
+    ),
+    communication_attention AS (
+      SELECT * FROM team_attention
+      UNION ALL
+      SELECT * FROM customer_participant_attention
+      UNION ALL
+      SELECT * FROM field_customer_attention
+    )
+    SELECT
+      audience,
+      business_id,
+      job_id,
+      conversation_id,
+      COUNT(DISTINCT alert_id)::integer AS unread_count
+    FROM communication_attention
+    GROUP BY audience, business_id, job_id, conversation_id
+    ORDER BY audience, business_id, job_id, conversation_id`,
+    [recipientUserId]
+  );
+  return result.rows;
+}
+
 async function markAlertsReadThroughCutoffWithClient({
   client,
   recipientUserId,
@@ -484,6 +681,7 @@ module.exports = {
   insertAlertWithClient,
   listAlertsForRecipientWithClient,
   countAlertsForRecipientWithClient,
+  countCommunicationAttentionForRecipientWithClient,
   markAlertsReadThroughCutoffWithClient,
   markAlertReadWithClient,
   resolveAlertsBySourceWithClient,
