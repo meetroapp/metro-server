@@ -212,7 +212,12 @@ test("Bookkeeper/Finance and field roles fail closed at the server authority bou
 test("employee Schedule is derived only from active assignments and canonical Visit versions", async () => {
   const pool = readPool((sql) => {
     if (/FROM business_team_memberships memberships/.test(sql)) {
-      return result([{ id: FIELD_MEMBERSHIP_ID, role: "FIELD_EMPLOYEE", business_name: "Meetro Test" }]);
+      return result([{
+        id: FIELD_MEMBERSHIP_ID,
+        role: "FIELD_EMPLOYEE",
+        business_name: "Meetro Test",
+        time_zone: "America/New_York",
+      }]);
     }
     if (/FROM business_job_assignments assignments/.test(sql) && /canonical_visits visits/.test(sql)) {
       assert.match(sql, /assignments\.membership_id = \$2/);
@@ -239,6 +244,7 @@ test("employee Schedule is derived only from active assignments and canonical Vi
     businessId: BUSINESS_ID,
   });
   assert.equal(response.code, "EMPLOYEE_ASSIGNED_SCHEDULE_LOADED");
+  assert.equal(response.timeZone, "America/New_York");
   assert.equal(response.schedule.length, 1);
   assert.equal(response.schedule[0].jobId, JOB_ID);
   assert.equal(response.schedule[0].location.remote, true);

@@ -764,6 +764,78 @@ async function listConversationMessages({
       decision_customers.user_id AS canonical_quote_customer_user_id,
       quote_aggregates.current_version AS canonical_quote_current_version,
       quote_sources.document_number AS canonical_quote_number,
+      CASE
+        WHEN delegated_commands.id IS NOT NULL
+          AND delegated_assignments.id IS NOT NULL
+          AND delegated_memberships.id IS NOT NULL
+          AND delegated_users.id IS NOT NULL
+          AND delegated_jobs.id IS NOT NULL
+          AND messages.sender_id = message_conversations.professional_user_id
+          AND messages.receiver_id = message_conversations.homeowner_id
+          AND messages.message_type = 'text'
+          AND NULLIF(btrim(messages.message_text), '') IS NOT NULL
+          AND messages.image_url IS NULL
+          AND messages.workflow_type IS NULL
+          AND messages.workflow_status IS NULL
+          AND COALESCE(messages.workflow_payload, '{}'::jsonb) = '{}'::jsonb
+          AND messages.quote_id IS NULL
+          AND messages.invoice_id IS NULL
+          AND messages.job_id IS NULL
+          AND messages.delivery_idempotency_key IS NULL
+          AND messages.delivery_request_fingerprint IS NULL
+          AND messages.invoice_delivery_idempotency_key IS NULL
+          AND messages.invoice_delivery_request_fingerprint IS NULL
+        THEN 'FIELD_EMPLOYEE'
+        ELSE NULL
+      END AS delegated_author_type,
+      CASE
+        WHEN delegated_commands.id IS NOT NULL
+          AND delegated_assignments.id IS NOT NULL
+          AND delegated_memberships.id IS NOT NULL
+          AND delegated_users.id IS NOT NULL
+          AND delegated_jobs.id IS NOT NULL
+          AND messages.sender_id = message_conversations.professional_user_id
+          AND messages.receiver_id = message_conversations.homeowner_id
+          AND messages.message_type = 'text'
+          AND NULLIF(btrim(messages.message_text), '') IS NOT NULL
+          AND messages.image_url IS NULL
+          AND messages.workflow_type IS NULL
+          AND messages.workflow_status IS NULL
+          AND COALESCE(messages.workflow_payload, '{}'::jsonb) = '{}'::jsonb
+          AND messages.quote_id IS NULL
+          AND messages.invoice_id IS NULL
+          AND messages.job_id IS NULL
+          AND messages.delivery_idempotency_key IS NULL
+          AND messages.delivery_request_fingerprint IS NULL
+          AND messages.invoice_delivery_idempotency_key IS NULL
+          AND messages.invoice_delivery_request_fingerprint IS NULL
+        THEN delegated_users.username
+        ELSE NULL
+      END AS delegated_author_display_name,
+      CASE
+        WHEN delegated_commands.id IS NOT NULL
+          AND delegated_assignments.id IS NOT NULL
+          AND delegated_memberships.id IS NOT NULL
+          AND delegated_users.id IS NOT NULL
+          AND delegated_jobs.id IS NOT NULL
+          AND messages.sender_id = message_conversations.professional_user_id
+          AND messages.receiver_id = message_conversations.homeowner_id
+          AND messages.message_type = 'text'
+          AND NULLIF(btrim(messages.message_text), '') IS NOT NULL
+          AND messages.image_url IS NULL
+          AND messages.workflow_type IS NULL
+          AND messages.workflow_status IS NULL
+          AND COALESCE(messages.workflow_payload, '{}'::jsonb) = '{}'::jsonb
+          AND messages.quote_id IS NULL
+          AND messages.invoice_id IS NULL
+          AND messages.job_id IS NULL
+          AND messages.delivery_idempotency_key IS NULL
+          AND messages.delivery_request_fingerprint IS NULL
+          AND messages.invoice_delivery_idempotency_key IS NULL
+          AND messages.invoice_delivery_request_fingerprint IS NULL
+        THEN 'FIELD_EMPLOYEE'
+        ELSE NULL
+      END AS delegated_author_role,
       messages.created_at
     FROM messages
     INNER JOIN conversations message_conversations
@@ -782,6 +854,26 @@ async function listConversationMessages({
     LEFT JOIN canonical_quote_business_document_sources quote_sources
       ON quote_sources.quote_id = messages.quote_id
       AND quote_sources.job_id = messages.job_id
+    LEFT JOIN business_job_customer_message_commands delegated_commands
+      ON delegated_commands.result_message_id = messages.id
+      AND delegated_commands.completed_at IS NOT NULL
+    LEFT JOIN business_job_assignments delegated_assignments
+      ON delegated_assignments.id = delegated_commands.assignment_id
+      AND delegated_assignments.contractor_profile_id = delegated_commands.contractor_profile_id
+      AND delegated_assignments.job_id = delegated_commands.job_id
+      AND delegated_assignments.membership_id = delegated_commands.membership_id
+    LEFT JOIN business_team_memberships delegated_memberships
+      ON delegated_memberships.id = delegated_commands.membership_id
+      AND delegated_memberships.contractor_profile_id = delegated_commands.contractor_profile_id
+      AND delegated_memberships.user_id = delegated_commands.actor_user_id
+    LEFT JOIN users delegated_users
+      ON delegated_users.id = delegated_commands.actor_user_id
+      AND delegated_users.id = delegated_memberships.user_id
+    LEFT JOIN jobs delegated_jobs
+      ON delegated_jobs.id = delegated_commands.job_id
+      AND delegated_jobs.source_request_selection_id = message_conversations.request_selection_id
+      AND delegated_jobs.source_request_relationship_id = message_conversations.relationship_id
+      AND delegated_jobs.lifecycle_contract_version = 2
     WHERE messages.conversation_id = $1
       AND (
         $2::boolean = FALSE

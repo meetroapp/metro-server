@@ -166,7 +166,7 @@ async function withReadTransaction(pool, action) {
 
 async function loadActorMembership(database, actorUserId, businessId) {
   const result = await database.query(
-    `SELECT memberships.*, profiles.business_name
+    `SELECT memberships.*, profiles.business_name, profiles.time_zone
        FROM business_team_memberships memberships
        JOIN contractor_profiles profiles
          ON profiles.id = memberships.contractor_profile_id
@@ -435,6 +435,7 @@ async function listEmployeeSchedule({ pool, authenticatedActor, businessId }) {
       code: "EMPLOYEE_ASSIGNED_SCHEDULE_LOADED",
       business: { id: normalizedBusinessId, name: actor.business_name || "" },
       membershipId: actor.id,
+      timeZone: actor.time_zone || null,
       schedule: result.rows.map((row) => ({
         visitId: row.visit_id,
         jobId: row.job_id,

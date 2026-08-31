@@ -617,6 +617,21 @@ function serializeConversationMessage(row = {}, viewerUserId) {
     },
     createdAt: row.created_at || null,
   };
+  const delegatedDisplayName =
+    typeof row.delegated_author_display_name === "string"
+      ? row.delegated_author_display_name.trim()
+      : "";
+  if (
+    row.delegated_author_type === "FIELD_EMPLOYEE" &&
+    row.delegated_author_role === "FIELD_EMPLOYEE" &&
+    delegatedDisplayName
+  ) {
+    value.delegatedAuthor = {
+      type: "FIELD_EMPLOYEE",
+      displayName: delegatedDisplayName,
+      role: "FIELD_EMPLOYEE",
+    };
+  }
   if (quoteShared) {
     value.reference = {
       type: "quote",
