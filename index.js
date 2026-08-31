@@ -243,6 +243,10 @@ const LOCAL_DEV_ORIGINS = Object.freeze([
   "http://127.0.0.1:3000",
 ]);
 
+const NATIVE_APP_ORIGINS = Object.freeze([
+  "capacitor://localhost",
+]);
+
 function parseOriginList(value) {
   if (!value) return [];
 
@@ -254,6 +258,7 @@ function parseOriginList(value) {
 
 function getApprovedCorsOrigins(env = process.env) {
   const configuredOrigins = [
+    ...NATIVE_APP_ORIGINS,
     ...parseOriginList(env.ALLOWED_ORIGINS),
     ...parseOriginList(env.FRONTEND_ORIGINS),
     ...parseOriginList(env.FRONTEND_URL),
