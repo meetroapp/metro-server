@@ -7,7 +7,9 @@ const test = require("node:test");
 
 const {
   getFieldCustomerConversation,
+  resolveFieldCustomerAlertDestination,
   sendFieldCustomerMessage,
+  validateAlertDestinationPayload,
   validateReadPayload,
   validateSendPayload,
 } = require("../server/team/fieldCustomerCommunicationService");
@@ -140,6 +142,8 @@ function projectedRows() {
 
 function createPool({
   actorRows = [actor()],
+  alertRows = [communicationAlertRow(14)],
+  candidateRows = [{ assignment_id: ASSIGNMENT_ID, job_id: JOB_ID }],
   authorityRows = [authority()],
   activationRows = [{ assignment_version: 3 }],
   safeRows = projectedRows(),
@@ -180,6 +184,12 @@ function createPool({
 
       if (sql.includes("FROM business_team_memberships memberships") && sql.includes("memberships.user_id = $1")) {
         return { rows: actorRows };
+      }
+      if (sql.includes("field_customer_communication:owned_alert")) {
+        return { rows: alertRows };
+      }
+      if (sql.includes("field_customer_communication:alert_assignment_candidates")) {
+        return { rows: candidateRows };
       }
       if (sql.includes("field_customer_communication:exact_authority")) {
         return { rows: authorityRows };
@@ -276,6 +286,16 @@ function sendRequest(overrides = {}) {
   };
 }
 
+function alertDestinationRequest(overrides = {}) {
+  return {
+    pool: overrides.pool,
+    authenticatedActor: { id: 14 },
+    alertId: 301,
+    payload: { businessId: 80 },
+    ...overrides,
+  };
+}
+
 test("migration creates immutable delegated authorship evidence with no backfill", () => {
   assert.match(migration, /CREATE TABLE IF NOT EXISTS business_job_customer_message_commands/);
   assert.match(migration, /UNIQUE \(membership_id, assignment_id, idempotency_key\)/);
@@ -319,6 +339,130 @@ test("employee payloads reject every caller-controlled canonical and commercial 
     message: "Hello\u0000customer",
     idempotencyKey: "key-1",
   }).code, "FIELD_CUSTOMER_MESSAGE_REQUEST_INVALID");
+  for (const field of ["conversationId", "jobId", "assignmentId", "customerId"]) {
+    assert.equal(
+      validateAlertDestinationPayload({ businessId: 80, [field]: "caller-value" }).code,
+      "FIELD_CUSTOMER_ALERT_DESTINATION_FIELDS_UNSUPPORTED"
+    );
+  }
+});
+
+test("owned communication Alert resolves the exact current Field customer destination", async () => {
+  const fake = createPool();
+  const result = await resolveFieldCustomerAlertDestination(
+    alertDestinationRequest({ pool: fake.pool })
+  );
+  assert.deepEqual(result, {
+    ok: true,
+    status: 200,
+    code: "FIELD_CUSTOMER_ALERT_DESTINATION_RESOLVED",
+    destination: {
+      businessId: 80,
+      jobId: JOB_ID,
+      audience: "customer",
+    },
+  });
+  assert.equal("assignmentId" in result.destination, false);
+  const alertLoad = fake.calls.find((call) =>
+    call.sql.includes("field_customer_communication:owned_alert")
+  );
+  assert.deepEqual(alertLoad.params, [301, 14]);
+  const candidateLookup = fake.calls.find((call) =>
+    call.sql.includes("field_customer_communication:alert_assignment_candidates")
+  );
+  assert.deepEqual(candidateLookup.params, [80, MEMBERSHIP_ID, 91]);
+  assert.match(candidateLookup.sql, /assignments\.state = 'ACTIVE'/);
+  assert.match(candidateLookup.sql, /memberships\.role = 'FIELD_EMPLOYEE'/);
+  assert.match(candidateLookup.sql, /jobs\.lifecycle_contract_version = 2/);
+  assert.match(candidateLookup.sql, /relationships\.status = 'active'/);
+  assert.match(candidateLookup.sql, /selections\.ended_at IS NULL/);
+  assert.match(candidateLookup.sql, /business_job_assignment_events/);
+  assert.match(candidateLookup.sql, /LIMIT 2/);
+  assert.equal(fake.calls.at(-1).sql, "COMMIT");
+});
+
+test("revoked or inactive assignment makes historical Alert routing unavailable", async () => {
+  const fake = createPool({ candidateRows: [] });
+  const result = await resolveFieldCustomerAlertDestination(
+    alertDestinationRequest({ pool: fake.pool })
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "FIELD_CUSTOMER_ALERT_DESTINATION_UNAVAILABLE");
+  assert.equal(fake.calls.some((call) => call.sql.includes("exact_authority")), false);
+  assert.equal(fake.calls.at(-1).sql, "ROLLBACK");
+});
+
+test("wrong or inactive Field membership cannot resolve an Alert destination", async () => {
+  for (const actorRows of [[], [actor({ role: "MANAGER" })], [actor({ status: "INACTIVE" })]]) {
+    const fake = createPool({ actorRows });
+    const result = await resolveFieldCustomerAlertDestination(
+      alertDestinationRequest({ pool: fake.pool })
+    );
+    assert.equal(result.ok, false);
+    assert.equal(result.code, "FIELD_CUSTOMER_COMMUNICATION_PERMISSION_REQUIRED");
+    assert.equal(fake.calls.some((call) => call.sql.includes("owned_alert")), false);
+  }
+});
+
+test("Alert owned by another user cannot resolve a Field destination", async () => {
+  const fake = createPool({ alertRows: [] });
+  const result = await resolveFieldCustomerAlertDestination(
+    alertDestinationRequest({ pool: fake.pool })
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "FIELD_CUSTOMER_ALERT_DESTINATION_UNAVAILABLE");
+  const alertLoad = fake.calls.find((call) => call.sql.includes("owned_alert"));
+  assert.match(alertLoad.sql, /id = \$1/);
+  assert.match(alertLoad.sql, /recipient_user_id = \$2/);
+  assert.deepEqual(alertLoad.params, [301, 14]);
+});
+
+test("Alert Conversation must exactly match the currently authorized Conversation", async () => {
+  const alert = communicationAlertRow(14);
+  alert.source_entity_id = "92";
+  alert.destination_payload = { conversationId: 92 };
+  const fake = createPool({ alertRows: [alert] });
+  const result = await resolveFieldCustomerAlertDestination(
+    alertDestinationRequest({ pool: fake.pool })
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "FIELD_CUSTOMER_ALERT_DESTINATION_UNAVAILABLE");
+  assert.equal(fake.calls.at(-1).sql, "ROLLBACK");
+});
+
+test("malformed or non-communication Alert cannot resolve a Field destination", async () => {
+  const malformedAlerts = [
+    communicationAlertRow(14),
+    communicationAlertRow(14),
+    communicationAlertRow(14),
+  ];
+  malformedAlerts[0].source_domain = "workflow";
+  malformedAlerts[1].destination_type = "request";
+  malformedAlerts[2].destination_payload = { conversationId: 999 };
+  for (const malformed of malformedAlerts) {
+    const fake = createPool({ alertRows: [malformed] });
+    const result = await resolveFieldCustomerAlertDestination(
+      alertDestinationRequest({ pool: fake.pool })
+    );
+    assert.equal(result.ok, false);
+    assert.equal(result.code, "FIELD_CUSTOMER_ALERT_DESTINATION_UNAVAILABLE");
+    assert.equal(fake.calls.some((call) => call.sql.includes("alert_assignment_candidates")), false);
+  }
+});
+
+test("two current assignments for one Alert Conversation fail closed as ambiguous", async () => {
+  const fake = createPool({
+    candidateRows: [
+      { assignment_id: ASSIGNMENT_ID, job_id: JOB_ID },
+      { assignment_id: "e7c9a660-c087-4af1-b139-8d77f8d69b33", job_id: OTHER_JOB_ID },
+    ],
+  });
+  const result = await resolveFieldCustomerAlertDestination(
+    alertDestinationRequest({ pool: fake.pool })
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "FIELD_CUSTOMER_ALERT_DESTINATION_AMBIGUOUS");
+  assert.equal(fake.calls.some((call) => call.sql.includes("exact_authority")), false);
 });
 
 test("exact active assigned employee loads bounded customer-safe ordinary text projection", async () => {
@@ -512,6 +656,7 @@ test("new routes are separate and private Team messaging remains isolated", () =
     sendPublicDatabaseError() {},
   });
   assert.deepEqual(routes.map(([method, pathname]) => [method, pathname]), [
+    ["GET", "/employee/alerts/:alertId/customer-conversation-destination"],
     ["GET", "/employee/jobs/:jobId/customer-conversation"],
     ["POST", "/employee/jobs/:jobId/customer-conversation/messages"],
   ]);

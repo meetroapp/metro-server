@@ -16,6 +16,7 @@ const MAX_CUSTOMER_MESSAGE_HISTORY = 500;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const READ_FIELDS = new Set(["businessId", "assignmentId"]);
+const ALERT_DESTINATION_FIELDS = new Set(["businessId"]);
 const SEND_FIELDS = new Set([
   "businessId",
   "assignmentId",
@@ -102,6 +103,21 @@ function validateSendPayload(payload) {
     return failure(400, "FIELD_CUSTOMER_MESSAGE_REQUEST_INVALID", "Exact delegated customer message identity is required.");
   }
   return { ok: true, businessId, assignmentId, message, idempotencyKey };
+}
+
+function validateAlertDestinationPayload(payload) {
+  if (!plainObject(payload)) {
+    return failure(400, "FIELD_CUSTOMER_ALERT_DESTINATION_REQUEST_INVALID", "Exact business identity is required.");
+  }
+  const unsupported = unsupportedFields(payload, ALERT_DESTINATION_FIELDS);
+  if (unsupported.length > 0) {
+    return failure(400, "FIELD_CUSTOMER_ALERT_DESTINATION_FIELDS_UNSUPPORTED", "Alert and customer Conversation authority are resolved by Meetro.");
+  }
+  const businessId = positiveInteger(payload.businessId);
+  if (!businessId) {
+    return failure(400, "FIELD_CUSTOMER_ALERT_DESTINATION_REQUEST_INVALID", "Exact business identity is required.");
+  }
+  return { ok: true, businessId };
 }
 
 async function databaseClient(pool) {
@@ -229,6 +245,100 @@ async function loadActivationVersion(database, assignmentId) {
   );
   if (result.rows.length === 0) return null;
   return positiveInteger(result.rows[0].assignment_version);
+}
+
+async function loadOwnedCommunicationAlert(database, alertId, actorUserId) {
+  const result = await database.query(
+    `/* field_customer_communication:owned_alert */
+     SELECT id, recipient_user_id, source_domain, source_event_type,
+            source_entity_type, source_entity_id, category,
+            destination_type, destination_payload
+       FROM alerts
+      WHERE id = $1
+        AND recipient_user_id = $2
+      LIMIT 2`,
+    [alertId, actorUserId]
+  );
+  return result.rows.length === 1 ? result.rows[0] : null;
+}
+
+function communicationAlertConversationId(alert) {
+  if (
+    !alert ||
+    alert.source_domain !== "communication" ||
+    alert.source_event_type !== "conversation.message_created" ||
+    alert.source_entity_type !== "conversation" ||
+    alert.category !== "communication" ||
+    alert.destination_type !== "conversation" ||
+    !plainObject(alert.destination_payload)
+  ) return null;
+  const sourceConversationId = positiveInteger(alert.source_entity_id);
+  const { conversationId: destinationConversationValue } =
+    alert.destination_payload;
+  const destinationConversationId = positiveInteger(
+    destinationConversationValue
+  );
+  return sourceConversationId && sourceConversationId === destinationConversationId
+    ? sourceConversationId
+    : null;
+}
+
+async function loadAlertAssignmentCandidates(database, {
+  businessId,
+  membershipId,
+  conversationId,
+}) {
+  const result = await database.query(
+    `/* field_customer_communication:alert_assignment_candidates */
+     SELECT assignments.id AS assignment_id, assignments.job_id
+       FROM business_job_assignments assignments
+       JOIN business_team_memberships memberships
+         ON memberships.id = assignments.membership_id
+        AND memberships.contractor_profile_id = assignments.contractor_profile_id
+        AND memberships.status = 'ACTIVE'
+        AND memberships.role = 'FIELD_EMPLOYEE'
+       JOIN jobs
+         ON jobs.id = assignments.job_id
+        AND jobs.lifecycle_contract_version = 2
+       JOIN contractor_profiles profiles
+         ON profiles.id = assignments.contractor_profile_id
+       JOIN request_relationships relationships
+         ON relationships.id = jobs.source_request_relationship_id
+        AND relationships.post_id = jobs.job_request_id
+        AND relationships.emergency_request_id IS NULL
+        AND relationships.status = 'active'
+        AND relationships.contractor_id = profiles.id
+        AND relationships.professional_user_id = profiles.user_id
+       JOIN request_selections selections
+         ON selections.id = jobs.source_request_selection_id
+        AND selections.request_relationship_id = relationships.id
+        AND selections.post_id = jobs.job_request_id
+        AND selections.selected_by_user_id = relationships.homeowner_id
+        AND selections.contractor_id = profiles.id
+        AND selections.professional_user_id = profiles.user_id
+        AND selections.ended_at IS NULL
+       JOIN conversations
+         ON conversations.id = selections.conversation_id
+        AND conversations.request_selection_id = selections.id
+        AND conversations.relationship_id = relationships.id
+        AND conversations.homeowner_id = relationships.homeowner_id
+        AND conversations.contractor_id = profiles.id
+        AND conversations.professional_user_id = profiles.user_id
+      WHERE assignments.contractor_profile_id = $1
+        AND assignments.membership_id = $2
+        AND assignments.state = 'ACTIVE'
+        AND conversations.id = $3
+        AND EXISTS (
+          SELECT 1
+            FROM business_job_assignment_events activation_events
+           WHERE activation_events.assignment_id = assignments.id
+             AND activation_events.event_type IN ('ASSIGNED', 'REASSIGNED')
+        )
+      ORDER BY assignments.id ASC
+      LIMIT 2`,
+    [businessId, membershipId, conversationId]
+  );
+  return result.rows;
 }
 
 function authorityFailure(actor, authority) {
@@ -381,6 +491,82 @@ async function getFieldCustomerConversation({
       status: 200,
       code: "FIELD_CUSTOMER_CONVERSATION_LOADED",
       conversation: await loadSafeProjection(client, context.authority),
+    };
+  }, { readOnly: true });
+}
+
+async function resolveFieldCustomerAlertDestination({
+  pool,
+  authenticatedActor,
+  alertId,
+  payload,
+}) {
+  const actorUserId = positiveInteger(authenticatedActor?.id);
+  const normalizedAlertId = positiveInteger(alertId);
+  if (!pool || !actorUserId) return failure(401, "AUTHENTICATION_REQUIRED", "Authentication required.");
+  const validation = validateAlertDestinationPayload(payload);
+  if (!validation.ok) return validation;
+  if (!normalizedAlertId) {
+    return failure(400, "FIELD_CUSTOMER_ALERT_INVALID", "Exact Alert identity is required.");
+  }
+
+  return withTransaction(pool, async (client) => {
+    const actor = await loadActor(client, actorUserId, validation.businessId);
+    if (
+      !actor ||
+      actor.status !== "ACTIVE" ||
+      actor.role !== "FIELD_EMPLOYEE" ||
+      !permissionForRole(actor.role, "FIELD_CUSTOMER_COMMUNICATION")
+    ) {
+      return authorityFailure(actor, null);
+    }
+
+    const alert = await loadOwnedCommunicationAlert(
+      client,
+      normalizedAlertId,
+      actorUserId
+    );
+    const conversationId = communicationAlertConversationId(alert);
+    if (!conversationId) {
+      return failure(404, "FIELD_CUSTOMER_ALERT_DESTINATION_UNAVAILABLE", "This customer Conversation destination is unavailable.");
+    }
+
+    const candidates = await loadAlertAssignmentCandidates(client, {
+      businessId: validation.businessId,
+      membershipId: actor.id,
+      conversationId,
+    });
+    if (candidates.length === 0) {
+      return failure(404, "FIELD_CUSTOMER_ALERT_DESTINATION_UNAVAILABLE", "No current authorized assignment matches this Alert.");
+    }
+    if (candidates.length !== 1) {
+      return failure(409, "FIELD_CUSTOMER_ALERT_DESTINATION_AMBIGUOUS", "The current authorized assignment is ambiguous.");
+    }
+
+    const candidate = candidates[0];
+    const context = await resolveAuthorizedContext({
+      database: client,
+      actorUserId,
+      businessId: validation.businessId,
+      jobId: candidate.job_id,
+      assignmentId: candidate.assignment_id,
+    });
+    if (
+      context.error ||
+      Number(context.authority?.conversation_id) !== conversationId
+    ) {
+      return failure(404, "FIELD_CUSTOMER_ALERT_DESTINATION_UNAVAILABLE", "No current authorized assignment matches this Alert.");
+    }
+
+    return {
+      ok: true,
+      status: 200,
+      code: "FIELD_CUSTOMER_ALERT_DESTINATION_RESOLVED",
+      destination: {
+        businessId: validation.businessId,
+        jobId: context.authority.job_id,
+        audience: "customer",
+      },
     };
   }, { readOnly: true });
 }
@@ -579,8 +765,10 @@ module.exports = {
   fingerprint,
   getFieldCustomerConversation,
   normalizeIdempotencyKey,
+  resolveFieldCustomerAlertDestination,
   sendFieldCustomerMessage,
   serializeCustomerMessage,
   validateReadPayload,
+  validateAlertDestinationPayload,
   validateSendPayload,
 };

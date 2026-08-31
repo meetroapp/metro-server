@@ -24,6 +24,15 @@ function createFieldCustomerCommunicationHandlers({
   };
 
   return {
+    resolveAlertDestination: handle(
+      "resolve_employee_alert_customer_conversation_destination",
+      (req) => service.resolveFieldCustomerAlertDestination({
+        pool: getPool(req),
+        authenticatedActor: req.user,
+        alertId: req.params?.alertId,
+        payload: req.query,
+      })
+    ),
     getConversation: handle(
       "get_employee_job_customer_conversation",
       (req) => service.getFieldCustomerConversation({
@@ -51,6 +60,11 @@ function registerFieldCustomerCommunicationRoutes(options) {
     throw new TypeError("Field customer communication route dependencies are required.");
   }
   const handlers = createFieldCustomerCommunicationHandlers(options);
+  app.get(
+    "/employee/alerts/:alertId/customer-conversation-destination",
+    authMiddleware,
+    handlers.resolveAlertDestination
+  );
   app.get(
     "/employee/jobs/:jobId/customer-conversation",
     authMiddleware,
