@@ -140,6 +140,9 @@ const {
   registerFieldOperationsRoutes,
 } = require("./server/team/fieldOperations");
 const {
+  registerFieldCustomerCommunicationRoutes,
+} = require("./server/team/fieldCustomerCommunication");
+const {
   registerTimeEvidenceRoutes,
 } = require("./server/team/timeEvidence");
 const {
@@ -928,6 +931,13 @@ registerJobAssignmentRoutes({
 });
 
 registerFieldOperationsRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerFieldCustomerCommunicationRoutes({
   app,
   authMiddleware,
   getPool,

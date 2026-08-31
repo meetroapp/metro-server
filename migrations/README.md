@@ -91,12 +91,21 @@ Current inventory:
 71. `202608300007_create_business_job_field_operations_authority.sql`
 72. `202608300008_create_business_time_evidence_authority.sql`
 73. `202608300009_add_business_time_settings_authority.sql`
+74. `202608300010_allow_pending_team_invitation_token_rotation.sql`
+75. `202608310001_create_business_job_customer_message_authority.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
 
 This inventory records migration source files, not applied database state.
 Migration creation and governed migration execution remain separate operations.
+
+`202608310001_create_business_job_customer_message_authority.sql` adds
+assignment-scoped delegated Field Employee customer-message commands and
+immutable authorship provenance for ordinary canonical business-to-customer
+messages. It does not add Field Employees as canonical Conversation
+participants, create messages by migration or backfill, or grant Quote,
+Invoice, payment, billing, scheduling, or canonical lifecycle authority.
 
 `202608300009_add_business_time_settings_authority.sql` adds nullable,
 Business-owned IANA timezone and week-start presentation authority to the
