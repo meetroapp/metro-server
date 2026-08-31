@@ -184,6 +184,14 @@ function createPool({
         }
 
         if (
+          sql.includes(
+            "field_customer_communication:customer_reply_alert_recipients"
+          )
+        ) {
+          return { rows: [] };
+        }
+
+        if (
           sql.includes("FROM conversations") &&
           sql.includes(
             "WHERE conversations.id = $1"

@@ -114,10 +114,12 @@ test("field operation routes extend existing Team and My Jobs surfaces", () => {
     sendPublicDatabaseError() {},
   });
   assert.deepEqual(routes.map(([method, pathname]) => [method, pathname]), [
+    ["GET", "/team/jobs/:jobId/field-communications"],
     ["GET", "/team/jobs/:jobId/field-operations"],
     ["POST", "/team/jobs/:jobId/field-messages"],
     ["GET", "/employee/jobs/:jobId/field-operations"],
     ["POST", "/employee/jobs/:jobId/field-status"],
     ["POST", "/employee/jobs/:jobId/field-messages"],
+    ["GET", "/employee/alerts/:alertId/team-message-destination"],
   ]);
 });

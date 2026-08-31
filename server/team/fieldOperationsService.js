@@ -211,6 +211,201 @@ async function loadOperations(database, assignment, activationVersion) {
   };
 }
 
+async function loadManagedCommunicationAssignments(
+  database,
+  businessId,
+  jobId
+) {
+  const result = await database.query(
+    `/* field_operations:managed_communication_assignments */
+     SELECT assignments.*, memberships.user_id AS member_user_id,
+            memberships.role AS member_role,
+            memberships.status AS member_status,
+            users.username AS member_name, posts.title AS job_title
+       FROM business_job_assignments assignments
+       JOIN business_team_memberships memberships
+         ON memberships.id = assignments.membership_id
+        AND memberships.contractor_profile_id = assignments.contractor_profile_id
+        AND memberships.status = 'ACTIVE'
+        AND memberships.role = 'FIELD_EMPLOYEE'
+       JOIN users ON users.id = memberships.user_id
+       JOIN jobs
+         ON jobs.id = assignments.job_id
+        AND jobs.lifecycle_contract_version = 2
+       JOIN posts ON posts.id = jobs.job_request_id
+      WHERE assignments.contractor_profile_id = $1
+        AND assignments.job_id = $2
+        AND assignments.state = 'ACTIVE'
+        AND EXISTS (
+          SELECT 1
+            FROM business_job_assignment_events activation_events
+           WHERE activation_events.assignment_id = assignments.id
+             AND activation_events.contractor_profile_id = assignments.contractor_profile_id
+             AND activation_events.job_id = assignments.job_id
+             AND activation_events.membership_id = assignments.membership_id
+             AND activation_events.event_type IN ('ASSIGNED', 'REASSIGNED')
+        )
+      ORDER BY users.username ASC, assignments.id ASC
+      LIMIT 50`,
+    [businessId, jobId]
+  );
+  return result.rows;
+}
+
+async function listManagedFieldCommunications({
+  pool,
+  authenticatedActor,
+  businessId,
+  jobId,
+}) {
+  const actorId = positiveInteger(authenticatedActor?.id);
+  const normalizedBusinessId = positiveInteger(businessId);
+  const normalizedJobId = uuid(jobId);
+  if (!pool || !actorId) {
+    return failure(401, "AUTHENTICATION_REQUIRED", "Authentication required.");
+  }
+  if (!normalizedBusinessId || !normalizedJobId) {
+    return failure(400, "FIELD_COMMUNICATION_IDENTITY_INVALID", "Exact business and Job identity are required.");
+  }
+
+  return withTransaction(pool, async (client) => {
+    const actor = await loadActor(client, actorId, normalizedBusinessId);
+    if (
+      !actor ||
+      !["OWNER", "MANAGER"].includes(actor.role) ||
+      !permissionForRole(actor.role, "FIELD_COMMUNICATION")
+    ) {
+      return failure(403, "FIELD_COMMUNICATION_PERMISSION_REQUIRED", "Only an authorized business operator may access private Team communication.");
+    }
+
+    const assignments = await loadManagedCommunicationAssignments(
+      client,
+      normalizedBusinessId,
+      normalizedJobId
+    );
+    const communications = [];
+    for (const assignment of assignments) {
+      const activationVersion = await loadActivationVersion(
+        client,
+        assignment.id
+      );
+      if (!activationVersion) {
+        throw new Error(
+          "Current Field assignment activation evidence is unavailable."
+        );
+      }
+      communications.push(
+        await loadOperations(client, assignment, activationVersion)
+      );
+    }
+
+    return {
+      ok: true,
+      status: 200,
+      code: "MANAGED_FIELD_COMMUNICATIONS_LOADED",
+      businessId: normalizedBusinessId,
+      jobId: normalizedJobId,
+      communications,
+    };
+  }, { readOnly: true });
+}
+
+async function resolveFieldTeamAlertDestination({
+  pool,
+  authenticatedActor,
+  businessId,
+  alertId,
+}) {
+  const actorId = positiveInteger(authenticatedActor?.id);
+  const normalizedBusinessId = positiveInteger(businessId);
+  const normalizedAlertId = positiveInteger(alertId);
+  if (!pool || !actorId) {
+    return failure(401, "AUTHENTICATION_REQUIRED", "Authentication required.");
+  }
+  if (!normalizedBusinessId || !normalizedAlertId) {
+    return failure(400, "FIELD_TEAM_ALERT_IDENTITY_INVALID", "Exact Alert and business identity are required.");
+  }
+
+  return withTransaction(pool, async (client) => {
+    const actor = await loadActor(client, actorId, normalizedBusinessId);
+    if (
+      !actor ||
+      actor.role !== "FIELD_EMPLOYEE" ||
+      !permissionForRole(actor.role, "FIELD_COMMUNICATION")
+    ) {
+      return failure(403, "FIELD_COMMUNICATION_PERMISSION_REQUIRED", "Only an active Field Employee may resolve private Team communication.");
+    }
+
+    const result = await client.query(
+      `/* field_operations:team_alert_destination */
+       SELECT messages.job_id
+         FROM alerts
+         JOIN business_job_field_messages messages
+           ON messages.id::text = alerts.source_entity_id
+          AND messages.id::text = alerts.source_event_id
+         JOIN business_job_assignments assignments
+           ON assignments.id = messages.assignment_id
+          AND assignments.contractor_profile_id = messages.contractor_profile_id
+          AND assignments.job_id = messages.job_id
+          AND assignments.membership_id = messages.membership_id
+          AND assignments.state = 'ACTIVE'
+         JOIN business_team_memberships recipients
+           ON recipients.id = assignments.membership_id
+          AND recipients.contractor_profile_id = assignments.contractor_profile_id
+          AND recipients.user_id = alerts.recipient_user_id
+          AND recipients.status = 'ACTIVE'
+          AND recipients.role = 'FIELD_EMPLOYEE'
+         JOIN business_team_memberships senders
+           ON senders.id = messages.sender_membership_id
+          AND senders.contractor_profile_id = messages.contractor_profile_id
+          AND senders.user_id = messages.sender_user_id
+          AND senders.status = 'ACTIVE'
+          AND senders.role IN ('OWNER', 'MANAGER')
+         JOIN jobs
+           ON jobs.id = assignments.job_id
+          AND jobs.lifecycle_contract_version = 2
+        WHERE alerts.id = $1
+          AND alerts.recipient_user_id = $2
+          AND messages.contractor_profile_id = $3
+          AND assignments.membership_id = $4
+          AND alerts.source_domain = 'business'
+          AND alerts.source_event_type = 'job.field_message.received'
+          AND alerts.source_entity_type = 'business_job_field_message'
+          AND alerts.category = 'work'
+          AND alerts.destination_type = 'job'
+          AND alerts.destination_payload = jsonb_build_object(
+            'jobId', messages.job_id
+          )
+          AND EXISTS (
+            SELECT 1
+              FROM business_job_assignment_events activation_events
+             WHERE activation_events.assignment_id = assignments.id
+               AND activation_events.contractor_profile_id = assignments.contractor_profile_id
+               AND activation_events.job_id = assignments.job_id
+               AND activation_events.membership_id = assignments.membership_id
+               AND activation_events.event_type IN ('ASSIGNED', 'REASSIGNED')
+          )
+        ORDER BY messages.id ASC
+        LIMIT 2`,
+      [normalizedAlertId, actorId, normalizedBusinessId, actor.id]
+    );
+    if (result.rows.length !== 1 || !uuid(result.rows[0].job_id)) {
+      return failure(404, "FIELD_TEAM_ALERT_DESTINATION_UNAVAILABLE", "This private Team message destination is no longer available.");
+    }
+
+    return {
+      ok: true,
+      status: 200,
+      code: "FIELD_TEAM_ALERT_DESTINATION_RESOLVED",
+      destination: {
+        businessId: normalizedBusinessId,
+        jobId: result.rows[0].job_id,
+        audience: "team",
+      },
+    };
+  }, { readOnly: true });
+}
+
 async function listFieldOperations({ pool, authenticatedActor, businessId, jobId, assignmentId }) {
   const actorId = positiveInteger(authenticatedActor?.id);
   const normalizedBusinessId = positiveInteger(businessId);
@@ -412,8 +607,10 @@ module.exports = {
   FIELD_STATUSES,
   NEXT_FIELD_STATUS,
   fingerprint,
+  listManagedFieldCommunications,
   listFieldOperations,
   normalizeIdempotencyKey,
+  resolveFieldTeamAlertDestination,
   sendFieldMessage,
   serializeMessage,
   serializeStatusEvent,
