@@ -583,6 +583,14 @@ test("successful delegated send writes canonical business identity and durable e
   assert.deepEqual(commandCompletion.params, [COMMAND_ID, 201]);
   const alertInsert = fake.calls.find((call) => call.sql.includes("INSERT INTO alerts"));
   assert.equal(alertInsert.params[0], 7);
+  assert.equal(
+    fake.calls.some((call) =>
+      call.sql.includes(
+        "field_customer_communication:customer_reply_alert_recipients"
+      )
+    ),
+    false
+  );
   assert.equal(fake.calls.at(-1).sql, "COMMIT");
   assert.equal(fake.released, 1);
 });
@@ -662,4 +670,5 @@ test("new routes are separate and private Team messaging remains isolated", () =
   ]);
   assert.doesNotMatch(fieldOperationsSource, /\bconversations\b|conversation_participants|quote_request_id/i);
   assert.match(fieldOperationsSource, /business_job_field_messages/);
+  assert.doesNotMatch(serviceSource, /business_job_field_messages/);
 });

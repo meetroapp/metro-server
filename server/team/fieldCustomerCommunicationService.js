@@ -6,9 +6,12 @@ const {
   ensureConversationParticipantStatesWithClient,
 } = require("../conversations/conversationParticipantStateService");
 const {
+  COMMUNICATION_ALERT_POLICY,
+  buildCommunicationSafePreview,
   createOrRefreshCommunicationMessageAlert,
   getCommunicationAttentionWindowWithClient,
 } = require("../alerts/communicationAlertService");
+const { createAlert } = require("../alerts/alertService");
 const { permissionForRole } = require("./teamService");
 
 const MAX_CUSTOMER_MESSAGE_LENGTH = 5000;
@@ -339,6 +342,158 @@ async function loadAlertAssignmentCandidates(database, {
     [businessId, membershipId, conversationId]
   );
   return result.rows;
+}
+
+async function loadCustomerReplyAlertRecipients(database, {
+  conversationId,
+}) {
+  const result = await database.query(
+    `/* field_customer_communication:customer_reply_alert_recipients */
+     SELECT DISTINCT memberships.user_id, memberships.role
+       FROM conversations
+       JOIN request_selections selections
+         ON selections.id = conversations.request_selection_id
+        AND selections.conversation_id = conversations.id
+        AND selections.selected_by_user_id = conversations.homeowner_id
+        AND selections.professional_user_id = conversations.professional_user_id
+        AND selections.ended_at IS NULL
+       JOIN request_relationships relationships
+         ON relationships.id = conversations.relationship_id
+        AND relationships.id = selections.request_relationship_id
+        AND relationships.post_id = selections.post_id
+        AND relationships.emergency_request_id IS NULL
+        AND relationships.status = 'active'
+        AND relationships.homeowner_id = conversations.homeowner_id
+        AND relationships.contractor_id = conversations.contractor_id
+        AND relationships.professional_user_id = conversations.professional_user_id
+       JOIN contractor_profiles profiles
+         ON profiles.id = conversations.contractor_id
+        AND profiles.id = selections.contractor_id
+        AND profiles.id = relationships.contractor_id
+        AND profiles.user_id = conversations.professional_user_id
+       JOIN jobs
+         ON jobs.source_request_selection_id = selections.id
+        AND jobs.source_request_relationship_id = relationships.id
+        AND jobs.job_request_id = relationships.post_id
+        AND jobs.lifecycle_contract_version = 2
+       JOIN business_job_assignments assignments
+         ON assignments.job_id = jobs.id
+        AND assignments.contractor_profile_id = profiles.id
+        AND assignments.state = 'ACTIVE'
+       JOIN business_team_memberships memberships
+         ON memberships.id = assignments.membership_id
+        AND memberships.contractor_profile_id = assignments.contractor_profile_id
+        AND memberships.status = 'ACTIVE'
+        AND memberships.role = 'FIELD_EMPLOYEE'
+      WHERE conversations.id = $1
+        AND EXISTS (
+          SELECT 1
+            FROM business_job_assignment_events activation_events
+           WHERE activation_events.assignment_id = assignments.id
+             AND activation_events.contractor_profile_id = assignments.contractor_profile_id
+             AND activation_events.job_id = assignments.job_id
+             AND activation_events.membership_id = assignments.membership_id
+             AND activation_events.event_type IN ('ASSIGNED', 'REASSIGNED')
+        )
+      ORDER BY memberships.user_id ASC`,
+    [conversationId]
+  );
+  return result.rows;
+}
+
+async function createFieldCustomerReplyAlertsWithClient({
+  client,
+  conversation,
+  message,
+}) {
+  const conversationId = positiveInteger(conversation?.id);
+  const homeownerId = positiveInteger(conversation?.homeowner_id);
+  const professionalUserId = positiveInteger(
+    conversation?.professional_user_id
+  );
+  const messageId = positiveInteger(message?.id);
+  if (
+    !client ||
+    typeof client.query !== "function" ||
+    !conversationId ||
+    !homeownerId ||
+    !professionalUserId ||
+    homeownerId === professionalUserId ||
+    !messageId ||
+    positiveInteger(message?.sender_id) !== homeownerId ||
+    positiveInteger(message?.receiver_id) !== professionalUserId
+  ) {
+    throw new TypeError(
+      "A canonical customer reply is required for Field alert fanout."
+    );
+  }
+
+  const recipients = await loadCustomerReplyAlertRecipients(client, {
+    conversationId,
+  });
+  let createdCount = 0;
+  for (const recipient of recipients) {
+    const recipientUserId = positiveInteger(recipient.user_id);
+    if (
+      !recipientUserId ||
+      recipientUserId === homeownerId ||
+      recipientUserId === professionalUserId ||
+      !permissionForRole(
+        recipient.role,
+        "FIELD_CUSTOMER_COMMUNICATION"
+      )
+    ) {
+      throw new Error(
+        "Field customer reply alert authority is invalid."
+      );
+    }
+
+    const created = await createAlert({
+      client,
+      input: {
+        recipientUserId,
+        sourceDomain: COMMUNICATION_ALERT_POLICY.sourceDomain,
+        sourceEventType: COMMUNICATION_ALERT_POLICY.sourceEventType,
+        sourceEntityType: COMMUNICATION_ALERT_POLICY.sourceEntityType,
+        sourceEntityId: String(conversationId),
+        sourceEventId: String(messageId),
+        permanentEvent: true,
+        category: COMMUNICATION_ALERT_POLICY.category,
+        priority: COMMUNICATION_ALERT_POLICY.priority,
+        titleKey: COMMUNICATION_ALERT_POLICY.titleKey,
+        messageKey: COMMUNICATION_ALERT_POLICY.messageKey,
+        safePayload: {
+          shortPreview: buildCommunicationSafePreview(message),
+        },
+        destination: {
+          type: "conversation",
+          payload: { conversationId },
+        },
+        dedupeKey: [
+          "communication",
+          "conversation",
+          conversationId,
+          "recipient",
+          recipientUserId,
+          "message",
+          messageId,
+        ].join(":"),
+        availableAt: message.created_at || null,
+        expiresAt: null,
+      },
+    });
+    if (!created.ok || !created.alert?.id) {
+      throw new Error(
+        "Field customer reply alert could not be created."
+      );
+    }
+    if (created.created) createdCount += 1;
+  }
+
+  return {
+    eligibleRecipientCount: recipients.length,
+    createdCount,
+  };
 }
 
 function authorityFailure(actor, authority) {
@@ -762,6 +917,7 @@ async function sendFieldCustomerMessage({
 module.exports = {
   MAX_CUSTOMER_MESSAGE_HISTORY,
   MAX_CUSTOMER_MESSAGE_LENGTH,
+  createFieldCustomerReplyAlertsWithClient,
   fingerprint,
   getFieldCustomerConversation,
   normalizeIdempotencyKey,

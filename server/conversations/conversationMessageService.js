@@ -19,6 +19,9 @@ const {
 const {
   deriveQuoteDepositGate,
 } = require("../authorization/quoteDecisionHandoff");
+const {
+  createFieldCustomerReplyAlertsWithClient,
+} = require("../team/fieldCustomerCommunicationService");
 
 const DEFAULT_MESSAGE_PAGE_SIZE = 50;
 const MAX_MESSAGE_PAGE_SIZE = 100;
@@ -583,6 +586,14 @@ async function createConversationMessage({
         recipientAttentionWindow.lastReadMessageId,
       message,
     });
+
+    if (senderUserId === Number(conversation.homeowner_id)) {
+      await createFieldCustomerReplyAlertsWithClient({
+        client,
+        conversation,
+        message,
+      });
+    }
 
     await client.query("COMMIT");
 

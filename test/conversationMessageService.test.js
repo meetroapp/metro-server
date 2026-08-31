@@ -70,6 +70,8 @@ function createPool(rows = []) {
 
 function createWritePool({
   conversationRows,
+  fieldRecipientRows = [],
+  messageId = 201,
   failOn,
   activityRowCount = 1,
   direct = false,
@@ -122,7 +124,7 @@ function createWritePool({
       if (sql.includes("INSERT INTO messages")) {
         return {
           rows: [{
-            id: 201,
+            id: messageId,
             sender_id: params[1],
             receiver_id: params[2],
             message_text: params[3],
@@ -159,6 +161,14 @@ function createWritePool({
 
       if (sql.includes("COUNT(*)::bigint AS unread_count")) {
         return { rows: [{ unread_count: "1" }] };
+      }
+
+      if (
+        sql.includes(
+          "field_customer_communication:customer_reply_alert_recipients"
+        )
+      ) {
+        return { rows: fieldRecipientRows };
       }
 
       if (sql.includes("INSERT INTO alerts")) {
@@ -332,6 +342,116 @@ test("homeowner canonical send locks, inserts fixed identity, updates activity, 
     fake.calls.indexOf(alertInsert) <
       fake.calls.findIndex(({ sql }) => sql === "COMMIT")
   );
+
+  const fieldRecipientLookup = fake.calls.find(({ sql }) =>
+    sql.includes(
+      "field_customer_communication:customer_reply_alert_recipients"
+    )
+  );
+  assert.deepEqual(fieldRecipientLookup.params, [91]);
+  assert.ok(
+    fake.calls.indexOf(alertInsert) <
+      fake.calls.indexOf(fieldRecipientLookup)
+  );
+});
+
+test("customer reply preserves the Business alert and fans out canonical message alerts to every eligible Field user", async () => {
+  const fake = createWritePool({
+    fieldRecipientRows: [
+      { user_id: 14, role: "FIELD_EMPLOYEE" },
+      { user_id: 15, role: "FIELD_EMPLOYEE" },
+    ],
+  });
+
+  await createConversationMessage({
+    pool: fake.pool,
+    conversationId: 91,
+    senderUserId: 7,
+    payload: { message_text: "Gate code is 1234." },
+  });
+
+  const alertInserts = fake.calls.filter(({ sql }) =>
+    sql.includes("INSERT INTO alerts")
+  );
+  assert.equal(alertInserts.length, 3);
+  assert.deepEqual(
+    alertInserts.map(({ params }) => params[0]),
+    [9, 14, 15]
+  );
+
+  for (const fieldAlert of alertInserts.slice(1)) {
+    const recipientUserId = fieldAlert.params[0];
+    assert.equal(fieldAlert.params[1], "communication");
+    assert.equal(
+      fieldAlert.params[2],
+      "conversation.message_created"
+    );
+    assert.equal(fieldAlert.params[3], "conversation");
+    assert.equal(fieldAlert.params[4], "91");
+    assert.equal(fieldAlert.params[5], "201");
+    assert.equal(fieldAlert.params[7], "communication");
+    assert.equal(fieldAlert.params[12], "conversation");
+    assert.equal(fieldAlert.params[13], '{"conversationId":91}');
+    assert.equal(
+      fieldAlert.params[14],
+      `communication:conversation:91:recipient:${recipientUserId}:message:201`
+    );
+    assert.match(String(fieldAlert.params[6]), /^[0-9a-f]{64}$/);
+    assert.doesNotMatch(fieldAlert.params[13], /jobId|assignmentId/);
+  }
+
+  const recipientLookup = fake.calls.find(({ sql }) =>
+    sql.includes(
+      "field_customer_communication:customer_reply_alert_recipients"
+    )
+  );
+  assert.match(recipientLookup.sql, /assignments\.state = 'ACTIVE'/);
+  assert.match(recipientLookup.sql, /memberships\.status = 'ACTIVE'/);
+  assert.match(recipientLookup.sql, /memberships\.role = 'FIELD_EMPLOYEE'/);
+  assert.match(recipientLookup.sql, /jobs\.lifecycle_contract_version = 2/);
+  assert.match(recipientLookup.sql, /relationships\.status = 'active'/);
+  assert.match(
+    recipientLookup.sql,
+    /selections\.selected_by_user_id = conversations\.homeowner_id/
+  );
+  assert.match(
+    recipientLookup.sql,
+    /selections\.professional_user_id = conversations\.professional_user_id/
+  );
+  assert.match(recipientLookup.sql, /selections\.ended_at IS NULL/);
+  assert.match(recipientLookup.sql, /business_job_assignment_events/);
+  assert.match(recipientLookup.sql, /'ASSIGNED', 'REASSIGNED'/);
+  assert.match(recipientLookup.sql, /SELECT DISTINCT memberships\.user_id/);
+});
+
+test("Field customer reply alert dedupe is stable for one canonical message and distinct for a later message", async () => {
+  const run = async (messageId) => {
+    const fake = createWritePool({
+      fieldRecipientRows: [
+        { user_id: 14, role: "FIELD_EMPLOYEE" },
+      ],
+      messageId,
+    });
+    await createConversationMessage({
+      pool: fake.pool,
+      conversationId: 91,
+      senderUserId: 7,
+      payload: { message_text: "Customer reply" },
+    });
+    return fake.calls.filter(({ sql }) =>
+      sql.includes("INSERT INTO alerts")
+    ).at(-1).params;
+  };
+
+  const firstAttempt = await run(201);
+  const sameMessageRetry = await run(201);
+  const laterMessage = await run(202);
+
+  assert.equal(firstAttempt[6], sameMessageRetry[6]);
+  assert.equal(firstAttempt[14], sameMessageRetry[14]);
+  assert.notEqual(firstAttempt[6], laterMessage[6]);
+  assert.notEqual(firstAttempt[14], laterMessage[14]);
+  assert.match(laterMessage[14], /:message:202$/);
 });
 
 test("professional canonical send resolves the homeowner server-side", async () => {
@@ -359,6 +479,14 @@ test("professional canonical send resolves the homeowner server-side", async () 
     201,
   ]);
   assert.notEqual(senderAdvance.params[1], 7);
+  assert.equal(
+    fake.calls.some(({ sql }) =>
+      sql.includes(
+        "field_customer_communication:customer_reply_alert_recipients"
+      )
+    ),
+    false
+  );
 });
 
 test("validation and invalid identity failures occur before database access", async () => {
