@@ -163,12 +163,16 @@ function inspectAuthorization(env, { execute = false } = {}) {
     RAILWAY_SERVICE_NAME: EXPECTED_PRODUCTION_TARGET.databaseServiceName,
     EXPECTED_PRESTATE_SERVER_SHA: PRODUCTION_PRESTATE.serverSha,
     EXPECTED_PRESTATE_IMAGE_DIGEST: PRODUCTION_PRESTATE.imageDigest,
-    EXPECTED_PRODUCTION_DEPLOYMENT_ID: PRODUCTION_PRESTATE.deploymentId,
+    CERTIFIED_HISTORICAL_PRODUCTION_DEPLOYMENT_ID:
+      PRODUCTION_PRESTATE.historicalCertifiedDeploymentId,
     CONFIRM_PRODUCTION_TARGET: `${EXPECTED_PRODUCTION_TARGET.projectName}/production/Postgres/railway`,
     PRODUCTION_CONVERGENCE_ID: CONVERGENCE_ID,
   };
   for (const [key, value] of Object.entries(required)) {
     if (env[key] !== value) reasons.push(`${key}_MISMATCH`);
+  }
+  if (!UUID_PATTERN.test(env.ACTUAL_PRE_MAINTENANCE_DEPLOYMENT_ID || "")) {
+    reasons.push("ACTUAL_PRE_MAINTENANCE_DEPLOYMENT_ID_INVALID");
   }
   if (execute) {
     if (!env.CERTIFIED_BACKUP_REFERENCE) reasons.push("BACKUP_REFERENCE_MISSING");
@@ -189,6 +193,9 @@ function inspectAuthorization(env, { execute = false } = {}) {
     }
     if (env.CURRENT_MAINTENANCE_BRIDGE_IMAGE_DIGEST !== env.EXPECTED_MAINTENANCE_BRIDGE_IMAGE_DIGEST) {
       reasons.push("CURRENT_MAINTENANCE_BRIDGE_IMAGE_MISMATCH");
+    }
+    if (env.CURRENT_MAINTENANCE_BRIDGE_CURRENT !== "true") {
+      reasons.push("CURRENT_MAINTENANCE_BRIDGE_NOT_CURRENT");
     }
     if (env.CONFIRM_PRODUCTION_CONVERGENCE !== "EXECUTE_MC_PRODUCTION_CONVERGENCE_004_R1") {
       reasons.push("EXECUTION_ACKNOWLEDGEMENT_MISMATCH");

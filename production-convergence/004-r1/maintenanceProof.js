@@ -4,6 +4,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const {
+  EXPECTED_PRODUCTION_RUNTIME,
   EXPECTED_PRODUCTION_TARGET,
   OWNER_BACKFILL_ELIGIBILITY,
   PRODUCTION_PRESTATE,
@@ -11,7 +12,7 @@ const {
 
 const BRIDGE_VERSION = "maintenance-bridge-v1";
 const MAINTENANCE_MECHANISM = "railway-immutable-maintenance-bridge-v1";
-const PROOF_VERSION = 1;
+const PROOF_VERSION = 2;
 const PROOF_FRESHNESS_MS = 5 * 60 * 1000;
 const CLOCK_SKEW_MS = 30 * 1000;
 const MAX_PROOF_BYTES = 32 * 1024;
@@ -28,12 +29,28 @@ const REQUIRED_KEYS = Object.freeze([
   "projectId",
   "environmentId",
   "serviceId",
+  "historicalCertifiedDeploymentId",
   "preMaintenanceDeploymentId",
   "preMaintenanceServerSha",
   "preMaintenanceImageDigest",
+  "preMaintenanceDeploymentStatus",
+  "preMaintenanceDeploymentCurrent",
+  "preMaintenanceDeploymentInactiveAfterBridge",
+  "preMaintenanceDeploymentVerifiedAtUtc",
+  "preMaintenanceHealthVerified",
+  "preMaintenanceHealthStatus",
+  "preMaintenanceGitSource",
+  "preMaintenanceRegion",
+  "preMaintenanceReplicaCount",
+  "preMaintenanceDomain",
+  "preMaintenancePort",
+  "preMaintenanceDatabaseAttachment",
+  "preMaintenanceHealthcheckPath",
+  "preMaintenanceHealthcheckTimeoutSeconds",
   "bridgeDeploymentId",
   "bridgeImageDigest",
   "bridgeVersion",
+  "bridgeCurrent",
   "bridgeBecameCurrentAtUtc",
   "oldDeploymentInactiveAtUtc",
   "maintenanceVerifiedAtUtc",
@@ -88,8 +105,14 @@ function parseUtc(value, field, reasons) {
 function validateMaintenanceProof(proof, {
   expectedProofSha256,
   expectedBridgeImageDigest,
+  actualPreMaintenanceDeploymentId,
   currentBridgeDeploymentId,
   currentBridgeImageDigest,
+  currentBridgeCurrent = false,
+  expectedProductionTarget = EXPECTED_PRODUCTION_TARGET,
+  expectedProductionRuntime = EXPECTED_PRODUCTION_RUNTIME,
+  expectedProductionPrestate = PRODUCTION_PRESTATE,
+  expectedOwnerEligibility = OWNER_BACKFILL_ELIGIBILITY,
   now = new Date(),
 } = {}) {
   const reasons = [];
@@ -102,28 +125,52 @@ function validateMaintenanceProof(proof, {
   if (!HEX_SHA256_PATTERN.test(expectedProofSha256 || "")) reasons.push("PROOF_SHA256_INVALID");
   else if (proofSha256(proof) !== expectedProofSha256) reasons.push("PROOF_SHA256_MISMATCH");
   if (!SHA256_PATTERN.test(expectedBridgeImageDigest || "")) reasons.push("EXPECTED_BRIDGE_DIGEST_INVALID");
+  if (!UUID_PATTERN.test(actualPreMaintenanceDeploymentId || "")) {
+    reasons.push("ACTUAL_PRE_MAINTENANCE_DEPLOYMENT_INVALID");
+  }
   if (!UUID_PATTERN.test(currentBridgeDeploymentId || "")) reasons.push("CURRENT_BRIDGE_DEPLOYMENT_INVALID");
   if (!SHA256_PATTERN.test(currentBridgeImageDigest || "")) reasons.push("CURRENT_BRIDGE_DIGEST_INVALID");
   if (currentBridgeImageDigest !== expectedBridgeImageDigest) reasons.push("CURRENT_BRIDGE_DIGEST_MISMATCH");
+  if (actualPreMaintenanceDeploymentId === currentBridgeDeploymentId) {
+    reasons.push("PRE_MAINTENANCE_AND_BRIDGE_DEPLOYMENT_REUSED");
+  }
+
+  if (currentBridgeCurrent !== true) reasons.push("CURRENT_BRIDGE_NOT_CURRENT");
 
   const expected = {
     proofVersion: PROOF_VERSION,
     maintenanceMechanism: MAINTENANCE_MECHANISM,
-    projectId: EXPECTED_PRODUCTION_TARGET.projectId,
-    environmentId: EXPECTED_PRODUCTION_TARGET.environmentId,
-    serviceId: EXPECTED_PRODUCTION_TARGET.backendServiceId,
-    preMaintenanceDeploymentId: PRODUCTION_PRESTATE.deploymentId,
-    preMaintenanceServerSha: PRODUCTION_PRESTATE.serverSha,
-    preMaintenanceImageDigest: PRODUCTION_PRESTATE.imageDigest,
+    projectId: expectedProductionTarget.projectId,
+    environmentId: expectedProductionTarget.environmentId,
+    serviceId: expectedProductionTarget.backendServiceId,
+    historicalCertifiedDeploymentId: expectedProductionPrestate.historicalCertifiedDeploymentId,
+    preMaintenanceDeploymentId: actualPreMaintenanceDeploymentId,
+    preMaintenanceServerSha: expectedProductionPrestate.serverSha,
+    preMaintenanceImageDigest: expectedProductionPrestate.imageDigest,
+    preMaintenanceDeploymentStatus: "SUCCESS",
+    preMaintenanceDeploymentCurrent: true,
+    preMaintenanceDeploymentInactiveAfterBridge: true,
+    preMaintenanceHealthVerified: true,
+    preMaintenanceHealthStatus: 200,
+    preMaintenanceGitSource: null,
+    preMaintenanceRegion: expectedProductionRuntime.region,
+    preMaintenanceReplicaCount: expectedProductionRuntime.replicaCount,
+    preMaintenanceDomain: expectedProductionRuntime.domain,
+    preMaintenancePort: expectedProductionRuntime.port,
+    preMaintenanceDatabaseAttachment: expectedProductionRuntime.databaseAttachment,
+    preMaintenanceHealthcheckPath: expectedProductionRuntime.healthcheckPath,
+    preMaintenanceHealthcheckTimeoutSeconds:
+      expectedProductionRuntime.healthcheckTimeoutSeconds,
     bridgeDeploymentId: currentBridgeDeploymentId,
     bridgeImageDigest: expectedBridgeImageDigest,
     bridgeVersion: BRIDGE_VERSION,
+    bridgeCurrent: true,
     healthMarkerVerified: true,
     trafficProbeStatus: 503,
     oldApplicationInactive: true,
     databaseReachabilityVerified: true,
-    ownerEligibilityFingerprint: OWNER_BACKFILL_ELIGIBILITY.eligibilityFingerprint,
-    databasePrestateFingerprint: PRODUCTION_PRESTATE.auditSchemaFingerprint,
+    ownerEligibilityFingerprint: expectedOwnerEligibility.eligibilityFingerprint,
+    databasePrestateFingerprint: expectedProductionPrestate.auditSchemaFingerprint,
   };
   for (const [field, value] of Object.entries(expected)) {
     if (proof[field] !== value) reasons.push(`${field}_MISMATCH`);
@@ -145,14 +192,22 @@ function validateMaintenanceProof(proof, {
   }
 
   const currentTime = now instanceof Date ? now.getTime() : new Date(now).getTime();
+  const preMaintenanceVerified = parseUtc(
+    proof.preMaintenanceDeploymentVerifiedAtUtc,
+    "preMaintenanceDeploymentVerifiedAtUtc",
+    reasons
+  );
   const bridgeCurrent = parseUtc(proof.bridgeBecameCurrentAtUtc, "bridgeBecameCurrentAtUtc", reasons);
   const oldInactive = parseUtc(proof.oldDeploymentInactiveAtUtc, "oldDeploymentInactiveAtUtc", reasons);
   const verified = parseUtc(proof.maintenanceVerifiedAtUtc, "maintenanceVerifiedAtUtc", reasons);
   const expires = parseUtc(proof.proofFreshnessExpiresAtUtc, "proofFreshnessExpiresAtUtc", reasons);
-  if (![currentTime, bridgeCurrent, oldInactive, verified, expires].every(Number.isFinite)) {
+  if (![currentTime, preMaintenanceVerified, bridgeCurrent, oldInactive, verified, expires]
+    .every(Number.isFinite)) {
     reasons.push("PROOF_TIME_INVALID");
   } else {
-    if (!(bridgeCurrent <= oldInactive && oldInactive <= verified)) reasons.push("PROOF_TIME_ORDER_INVALID");
+    if (!(preMaintenanceVerified <= bridgeCurrent && bridgeCurrent <= oldInactive && oldInactive <= verified)) {
+      reasons.push("PROOF_TIME_ORDER_INVALID");
+    }
     if (verified > currentTime + CLOCK_SKEW_MS) reasons.push("PROOF_FROM_FUTURE");
     if (expires <= verified || expires - verified > PROOF_FRESHNESS_MS) reasons.push("PROOF_EXPIRY_INVALID");
     if (currentTime > expires) reasons.push("PROOF_EXPIRED");
@@ -162,6 +217,8 @@ function validateMaintenanceProof(proof, {
   return Object.freeze({
     status: "MAINTENANCE_PROOF_VERIFIED",
     proofSha256: expectedProofSha256,
+    historicalCertifiedDeploymentId: proof.historicalCertifiedDeploymentId,
+    preMaintenanceDeploymentId: proof.preMaintenanceDeploymentId,
     bridgeDeploymentId: proof.bridgeDeploymentId,
     bridgeImageDigest: proof.bridgeImageDigest,
     expiresAtUtc: proof.proofFreshnessExpiresAtUtc,
@@ -189,8 +246,10 @@ function loadMaintenanceProof(env, { now = new Date() } = {}) {
   return validateMaintenanceProof(proof, {
     expectedProofSha256: env.MAINTENANCE_BRIDGE_PROOF_SHA256,
     expectedBridgeImageDigest: env.EXPECTED_MAINTENANCE_BRIDGE_IMAGE_DIGEST,
+    actualPreMaintenanceDeploymentId: env.ACTUAL_PRE_MAINTENANCE_DEPLOYMENT_ID,
     currentBridgeDeploymentId: env.CURRENT_MAINTENANCE_BRIDGE_DEPLOYMENT_ID,
     currentBridgeImageDigest: env.CURRENT_MAINTENANCE_BRIDGE_IMAGE_DIGEST,
+    currentBridgeCurrent: env.CURRENT_MAINTENANCE_BRIDGE_CURRENT === "true",
     now,
   });
 }

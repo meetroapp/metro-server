@@ -156,6 +156,8 @@ async function run({ argv = process.argv.slice(2), env = process.env, output = c
       variantFilename: VARIANT_FILENAME,
       prestateServerSha: PRODUCTION_PRESTATE.serverSha,
       prestateImageDigest: PRODUCTION_PRESTATE.imageDigest,
+      historicalCertifiedDeploymentId: PRODUCTION_PRESTATE.historicalCertifiedDeploymentId,
+      actualPreMaintenanceDeploymentIdEnvironment: "ACTUAL_PRE_MAINTENANCE_DEPLOYMENT_ID",
       ownerBackfillEligibility: PRODUCTION_PRESTATE.ownerBackfillEligibility,
       expectedPostLedgerRows: 75,
       maintenanceMechanism: MAINTENANCE_MECHANISM,

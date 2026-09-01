@@ -17,9 +17,19 @@ const EXPECTED_PRODUCTION_TARGET = Object.freeze({
   databaseName: "railway",
 });
 
+const EXPECTED_PRODUCTION_RUNTIME = Object.freeze({
+  region: "us-west2",
+  replicaCount: 1,
+  domain: "athletic-rebirth-production-0a28.up.railway.app",
+  port: 8080,
+  databaseAttachment: "${{Postgres.DATABASE_URL}}",
+  healthcheckPath: "/health",
+  healthcheckTimeoutSeconds: 60,
+});
+
 const PRODUCTION_PRESTATE = Object.freeze({
   serverSha: "6e4d78ed0e3cfe0541ff686198299ec1d850cdf6",
-  deploymentId: "3914f61b-831a-4a7a-9372-d388a52dbb0c",
+  historicalCertifiedDeploymentId: "3914f61b-831a-4a7a-9372-d388a52dbb0c",
   imageDigest: "sha256:9ccd24c79227dd0ec4a09ca9253e0cf097ddb9a9c95c84eb2a21b4a2eee3ba2d",
   postgresVersion: "18.6",
   auditSchemaFingerprint: "8d238df84a2cc3328e85227b65595efcd07a0788fc3010ee952272440658fd7b",
@@ -587,6 +597,7 @@ module.exports = Object.freeze({
   CURRENT_PRODUCTION_LEDGER,
   EXECUTION_TARGET,
   EXPECTED_PRODUCTION_TARGET,
+  EXPECTED_PRODUCTION_RUNTIME,
   PRODUCTION_PRESTATE,
   TARGET_MIGRATIONS,
 });
