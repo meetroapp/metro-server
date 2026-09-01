@@ -17,9 +17,9 @@ const sql = readFileSync(join(migrationsDirectory, migration61Name), "utf8");
 
 test("migration 61 follows frozen Migration 60 and advances inventory only once", () => {
   const migrations = getMigrationFiles();
-  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300009_add_business_time_settings_authority.sql");
+  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608310001_create_business_job_customer_message_authority.sql");
   assert.deepEqual(
-    migrations.slice(-14, -12).map(({ filename }) => filename),
+    migrations.slice(-16, -14).map(({ filename }) => filename),
     [migration60Name, migration61Name]
   );
   assert.doesNotMatch(sql, /^\s*(?:BEGIN|COMMIT|ROLLBACK)\s*;/im);

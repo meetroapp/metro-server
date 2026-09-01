@@ -11,7 +11,7 @@ const sql = readFileSync(join(__dirname, "..", "migrations", migrationName), "ut
 
 test("migration 42 is the additive Job completion and history foundation", () => {
   const migrations = getMigrationFiles();
-  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300009_add_business_time_settings_authority.sql");
+  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608310001_create_business_job_customer_message_authority.sql");
   assert.equal(migrations[41].filename, migrationName);
   assert.match(sql, /CREATE TABLE IF NOT EXISTS canonical_job_completion_records/i);
   assert.match(sql, /CREATE TABLE IF NOT EXISTS canonical_job_completion_command_idempotency/i);

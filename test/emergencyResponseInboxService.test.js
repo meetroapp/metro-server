@@ -280,8 +280,13 @@ test("database failures propagate unchanged for route normalization", async () =
 
 test(
   "production Emergency homeowner-response SQL executes against local PostgreSQL",
-  async () => {
+  async (context) => {
     const databaseUrl = process.env.DATABASE_URL;
+
+    if (!databaseUrl) {
+      context.skip("A disposable local PostgreSQL test database is required.");
+      return;
+    }
 
     assertSafeTestDatabaseUrl(databaseUrl, {
       nodeEnv: process.env.NODE_ENV,

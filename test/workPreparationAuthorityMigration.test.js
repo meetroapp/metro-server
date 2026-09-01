@@ -18,9 +18,9 @@ const sql = readFileSync(join(migrationsDirectory, migration60Name), "utf8");
 
 test("migration 60 follows frozen Migration 59 and is locally inventoried", () => {
   const migrations = getMigrationFiles();
-  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608300009_add_business_time_settings_authority.sql");
+  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608310001_create_business_job_customer_message_authority.sql");
   assert.deepEqual(
-    migrations.slice(-15, -12).map(({ filename }) => filename),
+    migrations.slice(-17, -14).map(({ filename }) => filename),
     [migration59Name, migration60Name, migration61Name]
   );
   assert.doesNotMatch(sql, /^\s*(?:BEGIN|COMMIT|ROLLBACK)\s*;/im);
