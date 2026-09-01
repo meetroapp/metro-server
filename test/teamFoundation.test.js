@@ -6,6 +6,7 @@ const path = require("node:path");
 const test = require("node:test");
 
 const {
+  ACCEPTANCE_SEAT_LIMIT,
   INVITABLE_TEAM_ROLES,
   ROLE_PERMISSIONS,
   TEAM_ROLES,
@@ -123,8 +124,9 @@ test("preset roles expose bounded server permissions and never custom permission
   assert.equal(Object.hasOwn(ROLE_PERMISSIONS, "CUSTOM"), false);
 });
 
-test("trial authority reserves exactly two total professional seats", () => {
+test("trial and acceptance policies keep their explicit governed seat limits", () => {
   assert.equal(TRIAL_SEAT_LIMIT, 2);
+  assert.equal(ACCEPTANCE_SEAT_LIMIT, 10);
 });
 
 test("invitation identities and role input normalize fail closed", () => {

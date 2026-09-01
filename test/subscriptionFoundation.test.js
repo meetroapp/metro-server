@@ -15,9 +15,13 @@ const {
   entitledStatus,
   getSubscriptionState,
   serializeBusinessTrial,
-  stagingQaAccess,
   verifyAppleEvidence,
 } = require("../server/subscriptions/subscriptionService");
+const {
+  SUBSCRIPTION_ENFORCEMENT_MODE_ENV,
+  SUBSCRIPTION_ENFORCEMENT_MODES,
+  resolveSubscriptionEnforcementMode,
+} = require("../server/subscriptions/subscriptionEnforcementMode");
 const {
   decodeRootCertificates,
 } = require("../server/subscriptions/appleSubscriptionVerifier");
@@ -95,13 +99,14 @@ test("Professional permits the owner plus nine employees but rejects an eleventh
   assert.match(rejected.message, /up to 10 users/);
 });
 
-test("staging QA compatibility cannot activate in production", () => {
-  assert.equal(stagingQaAccess({ NODE_ENV: "staging" }), true);
-  assert.equal(stagingQaAccess({ NODE_ENV: "staging", SUBSCRIPTION_STAGING_QA_ACCESS: "enabled" }), true);
-  assert.equal(stagingQaAccess({ NODE_ENV: "staging", SUBSCRIPTION_STAGING_QA_ACCESS: "disabled" }), false);
-  assert.equal(stagingQaAccess({ NODE_ENV: "production", SUBSCRIPTION_STAGING_QA_ACCESS: "enabled" }), false);
-  assert.equal(stagingQaAccess({ NODE_ENV: "development", SUBSCRIPTION_STAGING_QA_ACCESS: "enabled" }), false);
-  assert.equal(stagingQaAccess({ NODE_ENV: "test", SUBSCRIPTION_STAGING_QA_ACCESS: "enabled" }), false);
+test("subscription enforcement mode defaults unknown and missing values to ENFORCED", () => {
+  assert.equal(resolveSubscriptionEnforcementMode({}), SUBSCRIPTION_ENFORCEMENT_MODES.ENFORCED);
+  assert.equal(resolveSubscriptionEnforcementMode({ [SUBSCRIPTION_ENFORCEMENT_MODE_ENV]: "TYPO" }), SUBSCRIPTION_ENFORCEMENT_MODES.ENFORCED);
+  assert.equal(resolveSubscriptionEnforcementMode({ [SUBSCRIPTION_ENFORCEMENT_MODE_ENV]: "non_blocking_acceptance" }), SUBSCRIPTION_ENFORCEMENT_MODES.ENFORCED);
+  assert.equal(
+    resolveSubscriptionEnforcementMode({ [SUBSCRIPTION_ENFORCEMENT_MODE_ENV]: "NON_BLOCKING_ACCEPTANCE" }),
+    SUBSCRIPTION_ENFORCEMENT_MODES.NON_BLOCKING_ACCEPTANCE
+  );
 });
 
 test("homeowners are not subject to professional subscription", async () => {
@@ -112,51 +117,92 @@ test("homeowners are not subject to professional subscription", async () => {
   } };
   const result = await getSubscriptionState({ pool, authenticatedActor: { id: 7 } });
   assert.equal(result.applicable, false);
+  assert.equal(result.businessAccessActive, true);
+  assert.equal(result.subscriptionEnforcementMode, "ENFORCED");
   assert.equal(result.entitled, true);
   assert.deepEqual(result.catalog, []);
   assert.equal(calls.length, 1);
   assert.doesNotMatch(calls[0], /professional_subscription|invoice|quote|job|alerts/i);
 });
 
-function stagingProfessionalPool() {
+function professionalPool({
+  membershipActive = true,
+  principalPresent = true,
+  subscription = null,
+  trial = null,
+} = {}) {
   const calls = [];
   const pool = { query: async (sql) => {
     calls.push(sql);
-    if (sql.includes("FROM users")) return { rows: [{ id: 8, account_type: "professional", contractor_profile_id: 12 }] };
+    if (sql.includes("FROM users")) return { rows: principalPresent ? [{ id: 8, account_type: "professional", contractor_profile_id: 12 }] : [] };
+    if (sql.includes("FROM business_team_memberships")) return { rows: membershipActive ? [{ present: 1 }] : [] };
     if (sql.includes("INSERT INTO professional_subscription_accounts")) return { rows: [{ contractor_profile_id: 12, app_account_token: "123e4567-e89b-12d3-a456-426614174000" }] };
-    if (sql.includes("FROM professional_subscriptions")) return { rows: [] };
-    if (sql.includes("FROM meetro_business_trials")) return { rows: [] };
+    if (sql.includes("FROM professional_subscriptions")) return { rows: subscription ? [subscription] : [] };
+    if (sql.includes("FROM meetro_business_trials")) return { rows: trial ? [trial] : [] };
     throw new Error("Unexpected SQL");
   } };
   return { calls, pool };
 }
 
-test("staging QA professional receives full server-owned access without purchase authority", async () => {
-  const { calls, pool } = stagingProfessionalPool();
-  const result = await getSubscriptionState({ pool, authenticatedActor: { id: 8 }, environment: { NODE_ENV: "staging" } });
-  assert.equal(result.entitled, true);
-  assert.equal(result.subscription, null);
-  assert.deepEqual(result.qaAccess, {
-    source: "STAGING_EXISTING_PROFESSIONAL_COMPATIBILITY",
-    environment: "staging",
-    productionAllowed: false,
+test("NON_BLOCKING_ACCEPTANCE grants canonical access to an active Business member without fabricating billing state", async () => {
+  const { calls, pool } = professionalPool();
+  const result = await getSubscriptionState({
+    pool,
+    authenticatedActor: { id: 8 },
+    environment: { [SUBSCRIPTION_ENFORCEMENT_MODE_ENV]: "NON_BLOCKING_ACCEPTANCE" },
   });
+  assert.equal(result.subscriptionEnforcementMode, "NON_BLOCKING_ACCEPTANCE");
+  assert.equal(result.businessAccessActive, true);
+  assert.equal(result.entitled, true);
+  assert.equal(result.paidEntitlementActive, false);
+  assert.equal(result.purchaseAvailable, false);
+  assert.equal(result.subscription, null);
+  assert.equal(result.businessTrial, null);
+  assert.equal(Object.hasOwn(result, "qaAccess"), false);
   assert.equal(calls.filter((sql) => /INSERT INTO professional_subscription_accounts/i.test(sql)).length, 1);
   assert.equal(calls.some((sql) => /INSERT INTO professional_subscriptions|professional_subscription_provider_events/i.test(sql)), false);
   assert.equal(calls.some((sql) => /canonical_invoices|invoice_payments|deposit|canonical_quotes|\bjobs\b|\balerts\b/i.test(sql)), false);
 });
 
-test("production ignores the staging QA setting and creates no fallback entitlement", async () => {
-  const { calls, pool } = stagingProfessionalPool();
+test("ENFORCED is the missing-mode default and creates no fallback entitlement", async () => {
+  const { calls, pool } = professionalPool();
   const result = await getSubscriptionState({
     pool,
     authenticatedActor: { id: 8 },
-    environment: { NODE_ENV: "production", SUBSCRIPTION_STAGING_QA_ACCESS: "enabled" },
+    environment: {},
   });
+  assert.equal(result.subscriptionEnforcementMode, "ENFORCED");
+  assert.equal(result.businessAccessActive, false);
   assert.equal(result.entitled, false);
   assert.equal(result.subscription, null);
-  assert.equal(result.qaAccess, null);
+  assert.equal(result.paidEntitlementActive, false);
+  assert.equal(Object.hasOwn(result, "qaAccess"), false);
   assert.equal(calls.some((sql) => /INSERT INTO professional_subscriptions|professional_subscription_provider_events/i.test(sql)), false);
+});
+
+test("NON_BLOCKING_ACCEPTANCE denies an invalid or revoked Business membership", async () => {
+  const { calls, pool } = professionalPool({ membershipActive: false });
+  const result = await getSubscriptionState({
+    pool,
+    authenticatedActor: { id: 8 },
+    environment: { [SUBSCRIPTION_ENFORCEMENT_MODE_ENV]: "NON_BLOCKING_ACCEPTANCE" },
+  });
+  assert.equal(result.code, "BUSINESS_AUTHORITY_REQUIRED");
+  assert.equal(result.status, 403);
+  assert.equal(calls.some((sql) => /INSERT INTO professional_subscription_accounts/i.test(sql)), false);
+});
+
+test("NON_BLOCKING_ACCEPTANCE cannot turn a preserved orphan profile into access authority", async () => {
+  const { calls, pool } = professionalPool({ principalPresent: false });
+  const result = await getSubscriptionState({
+    pool,
+    authenticatedActor: { id: 999 },
+    environment: { [SUBSCRIPTION_ENFORCEMENT_MODE_ENV]: "NON_BLOCKING_ACCEPTANCE" },
+  });
+  assert.equal(result.code, "AUTHENTICATION_REQUIRED");
+  assert.equal(result.status, 401);
+  assert.equal(calls.length, 1);
+  assert.equal(calls.some((sql) => /INSERT|UPDATE|DELETE/i.test(sql)), false);
 });
 
 test("an active Meetro Business Trial grants professional access without a plan or provider row", async () => {
@@ -177,12 +223,56 @@ test("an active Meetro Business Trial grants professional access without a plan 
     environment: { NODE_ENV: "production" },
   });
   assert.equal(result.entitled, true);
+  assert.equal(result.businessAccessActive, true);
+  assert.equal(result.subscriptionEnforcementMode, "ENFORCED");
+  assert.equal(result.paidEntitlementActive, false);
   assert.equal(result.subscription, null);
   assert.equal(result.businessTrial.source, "MEETRO_SERVER");
   assert.equal(result.businessTrial.status, "ACTIVE");
   assert.equal(result.businessTrial.trialDays, 14);
-  assert.equal(result.qaAccess, null);
+  assert.equal(Object.hasOwn(result, "qaAccess"), false);
   assert.equal(calls.some((sql) => /INSERT INTO professional_subscriptions|provider_events|canonical_invoices|invoice_payments|deposit_requests|alerts/i.test(sql)), false);
+});
+
+test("ENFORCED denies an expired trial without verified paid entitlement", async () => {
+  const { pool } = professionalPool({
+    trial: {
+      starts_at: new Date(Date.now() - 15 * 86400000).toISOString(),
+      ends_at: new Date(Date.now() - 86400000).toISOString(),
+      converted_at: null,
+    },
+  });
+  const result = await getSubscriptionState({ pool, authenticatedActor: { id: 8 }, environment: {} });
+  assert.equal(result.subscriptionEnforcementMode, "ENFORCED");
+  assert.equal(result.businessTrial.status, "EXPIRED");
+  assert.equal(result.businessAccessActive, false);
+  assert.equal(result.entitled, false);
+});
+
+test("ENFORCED accepts a verified canonical paid entitlement independently of provider identity", async () => {
+  const { pool } = professionalPool({
+    subscription: {
+      provider: "STRIPE",
+      provider_product_id: "price_server_verified",
+      effective_plan: "COMMUNITY_2_USER_MONTHLY",
+      status: "ACTIVE",
+      seat_limit: 2,
+      access_started_at: new Date(Date.now() - 86400000).toISOString(),
+      access_ends_at: new Date(Date.now() + 30 * 86400000).toISOString(),
+      version: 1,
+    },
+    trial: {
+      starts_at: new Date(Date.now() - 20 * 86400000).toISOString(),
+      ends_at: new Date(Date.now() - 6 * 86400000).toISOString(),
+      converted_at: new Date(Date.now() - 5 * 86400000).toISOString(),
+    },
+  });
+  const result = await getSubscriptionState({ pool, authenticatedActor: { id: 8 }, environment: {} });
+  assert.equal(result.subscriptionEnforcementMode, "ENFORCED");
+  assert.equal(result.businessAccessActive, true);
+  assert.equal(result.paidEntitlementActive, true);
+  assert.equal(result.entitled, true);
+  assert.equal(result.subscription.entitled, true);
 });
 
 test("unconfigured Apple verification fails closed", async () => {

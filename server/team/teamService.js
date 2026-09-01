@@ -3,8 +3,10 @@
 const { createHash, randomBytes } = require("node:crypto");
 const {
   entitledStatus,
-  stagingQaAccess,
 } = require("../subscriptions/subscriptionService");
+const {
+  isNonBlockingAcceptance,
+} = require("../subscriptions/subscriptionEnforcementMode");
 
 const TEAM_ROLES = Object.freeze([
   "OWNER",
@@ -64,6 +66,7 @@ const ROLE_PERMISSIONS = Object.freeze({
   ]),
 });
 const TRIAL_SEAT_LIMIT = 2;
+const ACCEPTANCE_SEAT_LIMIT = 10;
 const INVITATION_LIFETIME_DAYS = 7;
 
 function failure(status, code, message) {
@@ -214,8 +217,8 @@ async function loadSeatAuthority(database, contractorProfileId, environment = pr
   const trialActive = row.trial_starts_at && row.trial_ends_at && !row.trial_converted_at &&
     new Date(row.trial_starts_at).getTime() <= now && new Date(row.trial_ends_at).getTime() > now;
   if (trialActive) return { ok: true, source: "MEETRO_BUSINESS_TRIAL", seatLimit: TRIAL_SEAT_LIMIT };
-  if (stagingQaAccess(environment, contractorProfileId)) {
-    return { ok: true, source: "STAGING_QA", seatLimit: TRIAL_SEAT_LIMIT };
+  if (isNonBlockingAcceptance(environment)) {
+    return { ok: true, source: "NON_BLOCKING_ACCEPTANCE", seatLimit: ACCEPTANCE_SEAT_LIMIT };
   }
   return failure(403, "TEAM_ENTITLEMENT_REQUIRED", "An active Meetro Business Trial or paid plan is required to add Team members.");
 }
@@ -750,6 +753,7 @@ async function getMyTeamAuthority({ pool, authenticatedActor }) {
 }
 
 module.exports = {
+  ACCEPTANCE_SEAT_LIMIT,
   INVITABLE_TEAM_ROLES,
   INVITATION_LIFETIME_DAYS,
   ROLE_PERMISSIONS,

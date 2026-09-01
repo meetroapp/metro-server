@@ -3,6 +3,10 @@
 const { createHash } = require("node:crypto");
 const { getSubscriptionCatalog, planForCode, planForProductId, planForStripePriceId } = require("./subscriptionCatalog");
 const { createAppleSubscriptionVerifier } = require("./appleSubscriptionVerifier");
+const {
+  SUBSCRIPTION_ENFORCEMENT_MODES,
+  resolveSubscriptionEnforcementMode,
+} = require("./subscriptionEnforcementMode");
 
 const MEETRO_BUSINESS_TRIAL_DAYS = 14;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -16,7 +20,7 @@ function entitledStatus(status, accessEndsAt, now = Date.now()) {
     new Date(accessEndsAt).getTime() > now;
 }
 
-function serializeSubscription(row, { qaAccess = false } = {}) {
+function serializeSubscription(row) {
   if (!row) return null;
   return {
     provider: row.provider,
@@ -34,8 +38,7 @@ function serializeSubscription(row, { qaAccess = false } = {}) {
     revokedAt: row.revoked_at,
     lastVerifiedAt: row.last_verified_at,
     version: Number(row.version || 1),
-    entitled: qaAccess || entitledStatus(row.status, row.access_ends_at),
-    qaAccess,
+    entitled: entitledStatus(row.status, row.access_ends_at),
   };
 }
 
@@ -119,12 +122,17 @@ async function ensureSubscriptionAccount(client, contractorProfileId) {
   return result.rows[0];
 }
 
-function stagingQaAccess(environment = process.env, businessId = null) {
-  if (String(environment.NODE_ENV || "").toLowerCase() !== "staging" ||
-      String(environment.SUBSCRIPTION_STAGING_QA_ACCESS || "enabled").toLowerCase() !== "enabled") return false;
-  const disabled = new Set(String(environment.SUBSCRIPTION_STAGING_QA_DISABLED_BUSINESS_IDS || "")
-    .split(",").map((value) => value.trim()).filter(Boolean));
-  return businessId == null || !disabled.has(String(businessId));
+async function hasActiveBusinessAuthority(database, userId, contractorProfileId) {
+  const result = await database.query(
+    `SELECT 1
+       FROM business_team_memberships memberships
+      WHERE memberships.user_id = $1
+        AND memberships.contractor_profile_id = $2
+        AND memberships.status = 'ACTIVE'
+      LIMIT 1`,
+    [Number(userId), Number(contractorProfileId)]
+  );
+  return Boolean(result.rows[0]);
 }
 
 async function getSubscriptionState({ pool, authenticatedActor, environment = process.env }) {
@@ -134,11 +142,34 @@ async function getSubscriptionState({ pool, authenticatedActor, environment = pr
   const context = await loadBusinessContext(pool, Number(authenticatedActor.id));
   if (!context) return failure(401, "AUTHENTICATION_REQUIRED", "Authentication required.");
   const catalog = getSubscriptionCatalog(environment);
+  const subscriptionEnforcementMode = resolveSubscriptionEnforcementMode(environment);
   if (context.account_type !== "professional") {
-    return { ok: true, status: 200, code: "SUBSCRIPTION_NOT_APPLICABLE", applicable: false, entitled: true, catalog: [] };
+    return {
+      ok: true,
+      status: 200,
+      code: "SUBSCRIPTION_NOT_APPLICABLE",
+      applicable: false,
+      businessAccessActive: true,
+      subscriptionEnforcementMode,
+      entitled: true,
+      catalog: [],
+    };
   }
   if (!context.contractor_profile_id) {
     return failure(409, "BUSINESS_PROFILE_REQUIRED", "Complete the business profile before managing a plan.");
+  }
+  const acceptanceMode =
+    subscriptionEnforcementMode === SUBSCRIPTION_ENFORCEMENT_MODES.NON_BLOCKING_ACCEPTANCE;
+  if (acceptanceMode && !await hasActiveBusinessAuthority(
+    pool,
+    context.id,
+    context.contractor_profile_id
+  )) {
+    return failure(
+      403,
+      "BUSINESS_AUTHORITY_REQUIRED",
+      "An active business membership is required."
+    );
   }
   const account = await ensureSubscriptionAccount(pool, Number(context.contractor_profile_id));
   const result = await pool.query(
@@ -154,13 +185,19 @@ async function getSubscriptionState({ pool, authenticatedActor, environment = pr
   const businessTrial = serializeBusinessTrial(trialRow, { providerConverted: Boolean(subscription) });
   const providerEntitled = Boolean(subscription && entitledStatus(subscription.status, subscription.access_ends_at));
   const trialEntitled = !subscription && businessTrial?.entitled === true;
-  const qaAccess = !subscription && !trialEntitled && stagingQaAccess(environment, context.contractor_profile_id);
+  const businessAccessActive = acceptanceMode || trialEntitled || providerEntitled;
+  const purchaseAvailable = catalog.some((plan) =>
+    plan.providers.APPLE_APP_STORE.configured || plan.providers.STRIPE.configured);
   return {
     ok: true,
     status: 200,
     code: "SUBSCRIPTION_STATE_LOADED",
     applicable: true,
-    entitled: qaAccess || trialEntitled || providerEntitled,
+    businessAccessActive,
+    subscriptionEnforcementMode,
+    entitled: businessAccessActive,
+    paidEntitlementActive: providerEntitled,
+    purchaseAvailable,
     businessId: Number(context.contractor_profile_id),
     appAccountToken: account.app_account_token,
     catalog,
@@ -168,12 +205,7 @@ async function getSubscriptionState({ pool, authenticatedActor, environment = pr
       !plan.providers.APPLE_APP_STORE.configured && !plan.providers.STRIPE.configured),
     trialEligibility: businessTrial?.status || "NOT_RESERVED",
     businessTrial,
-    subscription: serializeSubscription(subscription, { qaAccess }),
-    qaAccess: qaAccess ? {
-      source: "STAGING_EXISTING_PROFESSIONAL_COMPATIBILITY",
-      environment: "staging",
-      productionAllowed: false,
-    } : null,
+    subscription: serializeSubscription(subscription),
   };
 }
 
@@ -439,10 +471,6 @@ async function createStripeCheckout({ pool, authenticatedActor, planCode, stripe
       await client.query("ROLLBACK");
       return failure(403, "PROFESSIONAL_BUSINESS_REQUIRED", "A professional business account is required.");
     }
-    if (stagingQaAccess(environment, context.contractor_profile_id)) {
-      await client.query("ROLLBACK");
-      return failure(409, "STAGING_QA_ACCESS_ALREADY_ACTIVE", "This staging business already has QA access. Disable its QA entitlement before testing provider checkout.");
-    }
     const existing = await client.query(
       `SELECT provider, status, access_ends_at FROM professional_subscriptions
        WHERE contractor_profile_id = $1 FOR UPDATE`, [context.contractor_profile_id]
@@ -613,7 +641,6 @@ module.exports = {
   getSubscriptionState,
   serializeBusinessTrial,
   serializeSubscription,
-  stagingQaAccess,
   processStripeSubscriptionEvent,
   verifyAppleEvidence,
 };

@@ -10,9 +10,12 @@ const {
   deriveProviderState,
   deriveStripeProviderState,
   processStripeSubscriptionEvent,
-  stagingQaAccess,
   verifyAppleEvidence,
 } = require("../server/subscriptions/subscriptionService");
+const {
+  SUBSCRIPTION_ENFORCEMENT_MODE_ENV,
+  resolveSubscriptionEnforcementMode,
+} = require("../server/subscriptions/subscriptionEnforcementMode");
 const { createSubscriptionHandlers } = require("../server/subscriptions/subscriptions");
 
 const environment = {
@@ -296,10 +299,10 @@ test("provider-specific management routes Apple to Apple and Stripe to Billing P
   assert.equal(stripe.url, "https://billing.stripe.test/portal");
 });
 
-test("dedicated staging provider-test businesses can disable QA access but production can never enable it", () => {
-  assert.equal(stagingQaAccess({ NODE_ENV: "staging", SUBSCRIPTION_STAGING_QA_DISABLED_BUSINESS_IDS: "11,12" }, 12), false);
-  assert.equal(stagingQaAccess({ NODE_ENV: "staging", SUBSCRIPTION_STAGING_QA_DISABLED_BUSINESS_IDS: "11,12" }, 13), true);
-  assert.equal(stagingQaAccess({ NODE_ENV: "production", SUBSCRIPTION_STAGING_QA_ACCESS: "enabled" }, 13), false);
+test("provider flows share the exact fail-closed subscription enforcement contract", () => {
+  assert.equal(resolveSubscriptionEnforcementMode({}), "ENFORCED");
+  assert.equal(resolveSubscriptionEnforcementMode({ [SUBSCRIPTION_ENFORCEMENT_MODE_ENV]: "UNKNOWN" }), "ENFORCED");
+  assert.equal(resolveSubscriptionEnforcementMode({ [SUBSCRIPTION_ENFORCEMENT_MODE_ENV]: "NON_BLOCKING_ACCEPTANCE" }), "NON_BLOCKING_ACCEPTANCE");
 });
 
 test("Migration 66 adds only Stripe subscription authority and remains isolated from customer Job billing", () => {
