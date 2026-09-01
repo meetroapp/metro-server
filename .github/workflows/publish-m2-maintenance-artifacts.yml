@@ -1,0 +1,120 @@
+name: Publish M2 maintenance artifacts
+
+on:
+  push:
+    branches:
+      - staging
+    paths:
+      - ".github/workflows/publish-m2-maintenance-artifacts.yml"
+      - "production-maintenance/bridge-v1/**"
+      - "production-convergence/004-r1/**"
+      - "scripts/run-production-convergence-004-r1.js"
+      - "test/maintenanceBridge.test.js"
+      - "test/maintenanceBridgeProof.test.js"
+      - "test/productionConvergence004R1.test.js"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out exact M2 source
+        uses: actions/checkout@v4
+        with:
+          path: source
+
+      - name: Check out governed backend packaging authority
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: packaging
+
+      - name: Validate source and bridge context
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          test "$SOURCE_SHA" = "$(git -C source rev-parse HEAD)"
+          test -f source/production-maintenance/bridge-v1/server.js
+          test -f source/production-maintenance/bridge-v1/Dockerfile
+          cp packaging/Dockerfile source/Dockerfile
+          cp packaging/.dockerignore source/.dockerignore
+          node packaging/scripts/verify-docker-build-context.js source
+
+      - name: Record build timestamp
+        run: |
+          echo "BUILD_CREATED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+          echo "PACKAGING_SHA=$(git -C packaging rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish immutable maintenance bridge
+        id: bridge
+        uses: docker/build-push-action@v6
+        with:
+          context: source/production-maintenance/bridge-v1
+          file: source/production-maintenance/bridge-v1/Dockerfile
+          push: true
+          tags: ghcr.io/meetroapp/metro-maintenance-bridge:${{ github.sha }}
+          build-args: |
+            OCI_SOURCE=https://github.com/meetroapp/metro-server
+            OCI_REVISION=${{ github.sha }}
+            OCI_CREATED=${{ env.BUILD_CREATED_AT }}
+            OCI_VERSION=${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/meetroapp/metro-server
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ env.BUILD_CREATED_AT }}
+            org.opencontainers.image.version=${{ github.sha }}
+          platforms: linux/amd64
+          provenance: mode=max
+          sbom: true
+
+      - name: Build and publish revised immutable Meetro server
+        id: application
+        uses: docker/build-push-action@v6
+        with:
+          context: source
+          push: true
+          tags: ghcr.io/meetroapp/metro-server:${{ github.sha }}
+          build-args: |
+            OCI_SOURCE=https://github.com/meetroapp/metro-server
+            OCI_REVISION=${{ github.sha }}
+            OCI_CREATED=${{ env.BUILD_CREATED_AT }}
+            OCI_VERSION=${{ github.sha }}
+            PACKAGING_REVISION=${{ env.PACKAGING_SHA }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/meetroapp/metro-server
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ env.BUILD_CREATED_AT }}
+            org.opencontainers.image.version=${{ github.sha }}
+            io.meetro.packaging.revision=${{ env.PACKAGING_SHA }}
+          platforms: linux/amd64
+          provenance: mode=max
+          sbom: true
+
+      - name: Record immutable artifact identities
+        env:
+          BRIDGE_DIGEST: ${{ steps.bridge.outputs.digest }}
+          APPLICATION_DIGEST: ${{ steps.application.outputs.digest }}
+        run: |
+          test -n "$BRIDGE_DIGEST"
+          test -n "$APPLICATION_DIGEST"
+          {
+            echo "### M2 immutable maintenance artifacts"
+            echo "- Source SHA: ${{ github.sha }}"
+            echo "- Bridge: ghcr.io/meetroapp/metro-maintenance-bridge@$BRIDGE_DIGEST"
+            echo "- Application: ghcr.io/meetroapp/metro-server@$APPLICATION_DIGEST"
+            echo "- Built: $BUILD_CREATED_AT"
+          } >> "$GITHUB_STEP_SUMMARY"

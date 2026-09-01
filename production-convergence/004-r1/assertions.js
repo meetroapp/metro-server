@@ -19,6 +19,9 @@ const {
 } = require("./manifest");
 const { sha256 } = require("./fingerprints");
 
+const IMAGE_DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
 const REPOSITORY_ROOT = path.resolve(__dirname, "..", "..");
 const MIGRATIONS_DIRECTORY = path.join(REPOSITORY_ROOT, "migrations");
 const VARIANT_DIRECTORY = path.join(__dirname, "sql");
@@ -171,7 +174,22 @@ function inspectAuthorization(env, { execute = false } = {}) {
     if (!env.CERTIFIED_BACKUP_REFERENCE) reasons.push("BACKUP_REFERENCE_MISSING");
     if (!SHA256_PATTERN.test(env.CERTIFIED_BACKUP_SHA256 || "")) reasons.push("BACKUP_CHECKSUM_INVALID");
     if (!env.RESTORE_CERTIFICATION_REFERENCE) reasons.push("RESTORE_PROOF_MISSING");
-    if (!env.MAINTENANCE_TRAFFIC_PAUSE_PROOF) reasons.push("MAINTENANCE_PROOF_MISSING");
+    if (!env.MAINTENANCE_BRIDGE_PROOF_PATH) reasons.push("MAINTENANCE_PROOF_PATH_MISSING");
+    if (!SHA256_PATTERN.test(env.MAINTENANCE_BRIDGE_PROOF_SHA256 || "")) {
+      reasons.push("MAINTENANCE_PROOF_CHECKSUM_INVALID");
+    }
+    if (!IMAGE_DIGEST_PATTERN.test(env.EXPECTED_MAINTENANCE_BRIDGE_IMAGE_DIGEST || "")) {
+      reasons.push("EXPECTED_MAINTENANCE_BRIDGE_IMAGE_INVALID");
+    }
+    if (!UUID_PATTERN.test(env.CURRENT_MAINTENANCE_BRIDGE_DEPLOYMENT_ID || "")) {
+      reasons.push("CURRENT_MAINTENANCE_BRIDGE_DEPLOYMENT_INVALID");
+    }
+    if (!IMAGE_DIGEST_PATTERN.test(env.CURRENT_MAINTENANCE_BRIDGE_IMAGE_DIGEST || "")) {
+      reasons.push("CURRENT_MAINTENANCE_BRIDGE_IMAGE_INVALID");
+    }
+    if (env.CURRENT_MAINTENANCE_BRIDGE_IMAGE_DIGEST !== env.EXPECTED_MAINTENANCE_BRIDGE_IMAGE_DIGEST) {
+      reasons.push("CURRENT_MAINTENANCE_BRIDGE_IMAGE_MISMATCH");
+    }
     if (env.CONFIRM_PRODUCTION_CONVERGENCE !== "EXECUTE_MC_PRODUCTION_CONVERGENCE_004_R1") {
       reasons.push("EXECUTION_ACKNOWLEDGEMENT_MISMATCH");
     }

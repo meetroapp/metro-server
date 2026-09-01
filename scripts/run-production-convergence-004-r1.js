@@ -20,6 +20,12 @@ const {
   loadTargetMigrations,
 } = require("../production-convergence/004-r1/assertions");
 const { readSnapshot } = require("../production-convergence/004-r1/snapshot");
+const {
+  BRIDGE_VERSION,
+  MAINTENANCE_MECHANISM,
+  PROOF_FRESHNESS_MS,
+  loadMaintenanceProof,
+} = require("../production-convergence/004-r1/maintenanceProof");
 
 const MODES = new Set(["--describe", "--preflight", "--execute", "--postflight"]);
 
@@ -152,6 +158,9 @@ async function run({ argv = process.argv.slice(2), env = process.env, output = c
       prestateImageDigest: PRODUCTION_PRESTATE.imageDigest,
       ownerBackfillEligibility: PRODUCTION_PRESTATE.ownerBackfillEligibility,
       expectedPostLedgerRows: 75,
+      maintenanceMechanism: MAINTENANCE_MECHANISM,
+      maintenanceBridgeVersion: BRIDGE_VERSION,
+      maintenanceProofFreshnessSeconds: PROOF_FRESHNESS_MS / 1000,
       transactionCompatible: true,
     }));
     return 0;
@@ -159,6 +168,7 @@ async function run({ argv = process.argv.slice(2), env = process.env, output = c
 
   const authorization = inspectAuthorization(env, { execute: mode === "--execute" });
   if (!authorization.authorized) throw blocked("AUTHORIZATION_BLOCKED", authorization.reasons);
+  if (mode === "--execute") loadMaintenanceProof(env);
   const databaseUrl = assertDatabaseTarget(env);
   const pool = new Pool({ connectionString: databaseUrl, max: 1, connectionTimeoutMillis: 5000 });
   const client = await pool.connect();
