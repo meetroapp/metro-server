@@ -101,6 +101,7 @@ function normalizeRows(value) {
 
 const CONTENT_TEXT_LIMITS = Object.freeze({
   customerName: 240,
+  companyName: 240,
   customerEmail: 320,
   customerPhone: 80,
   customerAddress: 600,
@@ -141,7 +142,7 @@ const CONTENT_KEYS = new Set([
   ...Object.keys(CONTENT_TEXT_LIMITS), "lineItems", "materialItems", "laborItems", "conditions", "exclusions", "agreement",
 ]);
 const DEPOSIT_REQUEST_CONTENT_KEYS = new Set([
-  "customerName", "customerEmail", "customerPhone", "customerAddress",
+  "customerName", "companyName", "customerEmail", "customerPhone", "customerAddress",
   "customerLocation", "serviceLocation", "projectTitle", "notes", "dueDate",
   "terms", "paymentTerms", "paymentInstructions", "customerMessage",
   "quoteReference",
@@ -548,6 +549,8 @@ const DEPOSIT_AUTHORITY_SELECT = `
   obligations.relationship_id AS deposit_relationship_id,
   obligations.quote_id AS deposit_quote_id,
   obligations.issued_quote_version AS deposit_issued_quote_version,
+  obligations.quote_approval_id AS deposit_quote_approval_id,
+  obligations.approval_source AS deposit_approval_source,
   obligations.customer_decision_id AS deposit_customer_decision_id,
   obligations.currency AS deposit_currency,
   obligations.quote_total_minor AS deposit_quote_total_minor,
@@ -580,10 +583,21 @@ function depositAuthorityProjection(row) {
   return Object.freeze({
     paymentRequirementId: String(row.payment_requirement_id),
     jobId: String(row.deposit_job_id),
-    relationshipId: Number(row.deposit_relationship_id),
+    relationshipId:
+      row.deposit_relationship_id == null
+        ? null
+        : Number(row.deposit_relationship_id),
     quoteId: String(row.deposit_quote_id),
-    issuedQuoteVersion: Number(row.deposit_issued_quote_version),
-    customerDecisionId: String(row.deposit_customer_decision_id),
+    issuedQuoteVersion:
+      Number(row.deposit_issued_quote_version),
+    quoteApprovalId:
+      String(row.deposit_quote_approval_id),
+    approvalSource:
+      row.deposit_approval_source,
+    customerDecisionId:
+      row.deposit_customer_decision_id == null
+        ? null
+        : String(row.deposit_customer_decision_id),
     state: row.deposit_state,
     currency: row.deposit_currency,
     quoteTotalMinor: Number(row.deposit_quote_total_minor),

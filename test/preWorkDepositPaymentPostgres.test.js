@@ -161,9 +161,18 @@ async function createAcceptedQuote(pool, identities, fixture, suffix) {
        decisions.job_id, decisions.relationship_id,
        decisions.decision, decisions.issued_integrity_hash,
        decisions.customer_participant_id, decisions.decided_at,
+       approvals.id AS quote_approval_id,
+       approvals.approval_source,
        versions.currency, versions.total_minor,
        jobs.job_request_id
      FROM canonical_quote_customer_decisions decisions
+     INNER JOIN canonical_quote_approvals approvals
+       ON approvals.customer_decision_id = decisions.id
+       AND approvals.quote_id = decisions.quote_id
+       AND approvals.issued_quote_version =
+         decisions.issued_quote_version
+       AND approvals.job_id = decisions.job_id
+       AND approvals.approval_source = 'MEETRO_CUSTOMER'
      INNER JOIN canonical_quote_versions versions
        ON versions.quote_id = decisions.quote_id
        AND versions.version = decisions.issued_quote_version
@@ -184,6 +193,8 @@ async function insertObligation(pool, source, commandId, overrides = {}) {
     relationshipId: Number(source.relationship_id),
     quoteId: source.quote_id,
     quoteVersion: Number(source.issued_quote_version),
+    quoteApprovalId: source.quote_approval_id,
+    approvalSource: source.approval_source,
     decisionId: source.customer_decision_id,
     decision: source.decision,
     customerParticipantId: source.customer_participant_id,
@@ -202,15 +213,18 @@ async function insertObligation(pool, source, commandId, overrides = {}) {
   await pool.query(
     `INSERT INTO canonical_pre_work_deposit_obligations (
        id, job_id, job_request_id, relationship_id,
-       quote_id, issued_quote_version, customer_decision_id,
-       customer_decision, customer_participant_id, currency,
+       quote_id, issued_quote_version,
+       quote_approval_id, approval_source,
+       customer_decision_id, customer_decision,
+       customer_participant_id, currency,
        quote_total_minor, deposit_rule_type,
        deposit_percent_basis_points, deposit_fixed_minor,
        required_minor, source_integrity_hash, effective_at,
        created_by_participant_id, created_command_idempotency_id
      ) VALUES (
        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-       $11, $12, $13, $14, $15, $16, $17, $18, $19
+       $11, $12, $13, $14, $15, $16, $17, $18,
+       $19, $20, $21
      )`,
     [
       values.id,
@@ -219,6 +233,8 @@ async function insertObligation(pool, source, commandId, overrides = {}) {
       values.relationshipId,
       values.quoteId,
       values.quoteVersion,
+      values.quoteApprovalId,
+      values.approvalSource,
       values.decisionId,
       values.decision,
       values.customerParticipantId,
@@ -367,7 +383,8 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608310001_create_business_job_customer_message_authority.sql");
+      assert.equal(migrations[77].filename, "202609020003_generalize_pre_work_deposit_approval_authority.sql");
+      assert.equal(migrations[78].filename, "202609020004_generalize_approved_work_visit_approval_authority.sql");
       const migrated = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(migrated.success, true, JSON.stringify(migrated));
       assert.equal(migrated.applied.length, migrations.length);
@@ -409,7 +426,7 @@ test(
         jobId: fixture.jobId,
         participantId: fixture.homeownerParticipantId,
         commandName: "deposit.materialize",
-        scope: `decision:${source.customer_decision_id}`,
+        scope: `approval:${source.quote_approval_id}`,
       });
       const obligation = await insertObligation(pool, source, materialize.id);
       await insertVersion(pool, obligation, materialize.id, {
@@ -431,7 +448,7 @@ test(
         jobId: fixture.jobId,
         participantId: fixture.homeownerParticipantId,
         commandName: "deposit.materialize",
-        scope: `decision:${source.customer_decision_id}:duplicate`,
+        scope: `approval:${source.quote_approval_id}:duplicate`,
       });
       await expectPgCode(pool, "23505", (client) =>
         insertObligation(client, source, duplicateCommand.id)
@@ -464,7 +481,7 @@ test(
         jobId: crossFixture.jobId,
         participantId: crossFixture.homeownerParticipantId,
         commandName: "deposit.materialize",
-        scope: `decision:${crossSource.customer_decision_id}`,
+        scope: `approval:${crossSource.quote_approval_id}`,
       });
       const crossObligation = await insertObligation(
         pool,

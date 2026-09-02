@@ -227,6 +227,44 @@ async function insertLegacyApprovedDecision(pool, identities, fixture, quote) {
       source.rows[0].source_snapshot_integrity_hash,
     ]
   );
+
+  const approvalId = randomUUID();
+  const approval = await pool.query(
+    `INSERT INTO canonical_quote_approvals (
+       id,
+       quote_id,
+       issued_quote_version,
+       job_id,
+       approval_source,
+       decision,
+       customer_decision_id,
+       external_approval_evidence_id,
+       issued_integrity_hash,
+       approved_at
+     )
+     SELECT
+       $1,
+       decisions.quote_id,
+       decisions.issued_quote_version,
+       decisions.job_id,
+       'MEETRO_CUSTOMER',
+       'APPROVED',
+       decisions.id,
+       NULL,
+       decisions.issued_integrity_hash,
+       decisions.decided_at
+     FROM canonical_quote_customer_decisions decisions
+     WHERE decisions.id = $2
+     RETURNING id`,
+    [approvalId, decisionId]
+  );
+
+  assert.equal(
+    approval.rowCount,
+    1,
+    "Legacy approved decision fixture requires canonical Quote approval provenance."
+  );
+
   return decisionId;
 }
 
@@ -265,7 +303,8 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608310001_create_business_job_customer_message_authority.sql");
+      assert.equal(migrations[77].filename, "202609020003_generalize_pre_work_deposit_approval_authority.sql");
+      assert.equal(migrations[78].filename, "202609020004_generalize_approved_work_visit_approval_authority.sql");
       const migrated = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(migrated.success, true, JSON.stringify(migrated));
       assert.equal(migrated.applied.length, migrations.length);

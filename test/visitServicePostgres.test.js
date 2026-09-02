@@ -24,6 +24,7 @@ const {
   proposeVisit,
   requestVisitChange,
   rescheduleVisit,
+  startVisit,
 } = require("../server/workflow/visitService");
 const {
   getMigrationFiles,
@@ -86,14 +87,14 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 47);
+      assert.equal(migrations[80].filename, "202609020006_generalize_work_preparation_execution_approval.sql");
       const migrated = await runMigrationCollection(
         pool,
         migrations,
         targetMetadata()
       );
       assert.equal(migrated.success, true);
-      assert.equal(migrated.applied.length, 45);
+      assert.equal(migrated.applied.length, migrations.length);
 
       const identities = await createVisitTestIdentities(pool, suffix);
       const firstJob = await createVisitLifecycleFixture(
@@ -155,7 +156,7 @@ test(
       const automaticGrants = await pool.query(
         `SELECT count(*)::integer AS count
          FROM lifecycle_authority_grants
-         WHERE job_id = $1 AND capability LIKE 'visit.%'`,
+         WHERE job_id = $1 AND capability LIKE 'visit.%' AND scope_type = 'approved_work'`,
         [firstJob.jobId]
       );
       assert.equal(automaticGrants.rows[0].count, 0);
@@ -165,7 +166,8 @@ test(
         jobId: firstJob.jobId,
         logger: quiet,
       });
-      assert.equal(deniedBeforeGrant.code, "VISIT_AUTHORITY_REQUIRED");
+      assert.equal(deniedBeforeGrant.code, "VISITS_FOUND");
+      assert.deepEqual(deniedBeforeGrant.visits, []);
 
       await grantVisitCapabilities(pool, firstJob, {
         professional: [
@@ -174,13 +176,13 @@ test(
           "visit.reschedule",
           "visit.cancel",
           "visit.complete",
+          "visit.start",
           "visit.confirm",
         ],
         customer: [
           "visit.read",
           "visit.confirm",
           "visit.change_request",
-          "visit.cancel",
         ],
       });
 
@@ -220,7 +222,7 @@ test(
         }),
         randomUUID()
       );
-      assert.equal(rejectedApprovedWork.code, "VISIT_AUTHORITY_REQUIRED");
+      assert.equal(rejectedApprovedWork.code, "VISIT_SUBJECT_SCOPE_MISMATCH");
       assert.deepEqual(await counts(pool, firstJob), {
         visits: 0,
         versions: 0,
@@ -234,8 +236,7 @@ test(
         pool,
         identities.professionalId,
         proposal(firstJob, {
-          purpose: "EVALUATION",
-          evaluationId: firstEvaluation.id,
+          purpose: "FOLLOW_UP",
           workstreamIds: [firstWorkstream.id, secondWorkstream.id],
         }),
         proposalKey
@@ -255,8 +256,7 @@ test(
         pool,
         identities.professionalId,
         proposal(firstJob, {
-          purpose: "EVALUATION",
-          evaluationId: firstEvaluation.id,
+          purpose: "FOLLOW_UP",
           workstreamIds: [secondWorkstream.id, firstWorkstream.id],
         }),
         proposalKey
@@ -268,8 +268,7 @@ test(
         pool,
         identities.professionalId,
         proposal(firstJob, {
-          purpose: "EVALUATION",
-          evaluationId: firstEvaluation.id,
+          purpose: "FOLLOW_UP",
           workstreamIds: [firstWorkstream.id, secondWorkstream.id],
           scheduledEndAt: "2026-08-20T15:00:00.000Z",
         }),
@@ -300,7 +299,7 @@ test(
         },
         randomUUID()
       );
-      assert.equal(professionalCannotConfirm.code, "VISIT_AUTHORITY_REQUIRED");
+      assert.equal(professionalCannotConfirm.code, "VISIT_OPPOSITE_PARTY_CONFIRMATION_REQUIRED");
 
       const confirmedKey = randomUUID();
       const confirmed = await command(
@@ -366,7 +365,7 @@ test(
         rescheduleKey
       );
       assert.equal(rescheduled.visit.currentVersion, 3);
-      assert.equal(rescheduled.visit.state, "SCHEDULED");
+      assert.equal(rescheduled.visit.state, "PROPOSED");
       assert.equal(rescheduled.visit.locationMode, "REMOTE");
       const replayedReschedule = await command(
         rescheduleVisit,
@@ -416,6 +415,18 @@ test(
       );
       assert.equal(stale.code, "STALE_VISIT_VERSION");
 
+      const unstartedCompletion = await command(completeVisit, pool, identities.professionalId, {
+        jobId: firstJob.jobId, visitId: proposed.visit.id, expectedVersion: 3,
+      }, randomUUID());
+      assert.equal(unstartedCompletion.code, "INVALID_VISIT_TRANSITION");
+      const reconfirmed = await command(confirmVisit, pool, identities.homeownerId, {
+        jobId: firstJob.jobId, visitId: proposed.visit.id, expectedVersion: 3,
+      }, randomUUID());
+      assert.equal(reconfirmed.visit.state, "SCHEDULED");
+      const started = await command(startVisit, pool, identities.professionalId, {
+        jobId: firstJob.jobId, visitId: proposed.visit.id, expectedVersion: 4,
+      }, randomUUID(), { clock: () => new Date("2026-08-21T17:00:00.000Z") });
+      assert.equal(started.visit.state, "STARTED");
       const completed = await command(
         completeVisit,
         pool,
@@ -423,13 +434,13 @@ test(
         {
           jobId: firstJob.jobId,
           visitId: proposed.visit.id,
-          expectedVersion: 3,
+          expectedVersion: 5,
         },
         randomUUID(),
         { clock: () => new Date("2026-08-22T12:00:00.000Z") }
       );
       assert.equal(completed.visit.state, "COMPLETED");
-      assert.equal(completed.visit.currentVersion, 4);
+      assert.equal(completed.visit.currentVersion, 6);
       assert.equal(completed.visit.actions.canComplete, false);
 
       const detail = await getVisit({
@@ -439,14 +450,16 @@ test(
         visitId: proposed.visit.id,
         logger: quiet,
       });
-      assert.equal(detail.visit.history.versions.length, 4);
+      assert.equal(detail.visit.history.versions.length, 6);
       assert.deepEqual(
         detail.visit.history.events.map((event) => event.type),
         [
           "VISIT_PROPOSED",
           "VISIT_CONFIRMED",
           "VISIT_CHANGE_REQUESTED",
-          "VISIT_RESCHEDULED",
+          "VISIT_SCHEDULE_PROPOSED",
+          "VISIT_CONFIRMED",
+          "VISIT_STARTED",
           "VISIT_COMPLETED",
         ]
       );
@@ -526,7 +539,7 @@ test(
         randomUUID(),
         { clock: () => new Date("2026-08-13T12:00:00.000Z") }
       );
-      assert.equal(prematureCompletion.code, "VISIT_HAS_NOT_STARTED");
+      assert.equal(prematureCompletion.code, "INVALID_VISIT_TRANSITION");
 
       const concurrent = await command(
         proposeVisit,
@@ -584,7 +597,7 @@ test(
       ]);
       assert.deepEqual(
         concurrencyResults.map((result) => result.code).sort(),
-        ["STALE_VISIT_VERSION", "VISIT_RESCHEDULED"]
+        ["STALE_VISIT_VERSION", "VISIT_SCHEDULE_PROPOSED"]
       );
       const concurrentDetail = await getVisit({
         pool,
@@ -646,7 +659,7 @@ test(
         jobId: secondJob.jobId,
         logger: quiet,
       });
-      assert.equal(ungrantedOtherJob.code, "VISIT_AUTHORITY_REQUIRED");
+      assert.equal(ungrantedOtherJob.code, "VISITS_FOUND");
 
       const adjacentAfter = await pool.query(
         `SELECT

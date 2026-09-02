@@ -19,6 +19,7 @@ const filenamePattern = /^\d{12}_[a-z0-9]+(?:_[a-z0-9]+)*\.sql$/;
 const repositoryPrefix = CURRENT_PRODUCTION_LEDGER
   .filter(({ filename }) => filename !== ARCHIVE_MIGRATION.filename)
   .map(({ filename, checksum }) => ({ filename, checksum }));
+const externalLifecycleMigrations = require("./helpers/externalLifecycleMigrationInventory");
 const expectedInventory = [
   {
     filename: BASELINE_FILENAME,
@@ -26,6 +27,7 @@ const expectedInventory = [
   },
   ...repositoryPrefix,
   ...TARGET_MIGRATIONS.map(({ filename, checksum }) => ({ filename, checksum })),
+  ...externalLifecycleMigrations,
 ].sort((left, right) => left.filename.localeCompare(right.filename));
 
 function checksum(filename) {
@@ -34,13 +36,13 @@ function checksum(filename) {
     .digest("hex");
 }
 
-test("the governed repository migration inventory is the exact certified 75-file generation", () => {
+test("the governed repository migration inventory is the exact certified 81-file generation", () => {
   const actual = getMigrationFiles().map(({ filename }) => filename);
   const expected = expectedInventory.map(({ filename }) => filename);
 
-  assert.equal(expectedInventory.length, 75);
+  assert.equal(expectedInventory.length, 81);
   assert.deepEqual(actual, expected);
-  assert.equal(actual.at(-1), "202608310001_create_business_job_customer_message_authority.sql");
+  assert.equal(actual.at(-1), "202609020006_generalize_work_preparation_execution_approval.sql");
   assert.equal(new Set(actual).size, actual.length);
   assert.ok(actual.every((filename) => filenamePattern.test(filename)));
 });

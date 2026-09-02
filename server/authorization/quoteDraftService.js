@@ -30,8 +30,11 @@ const {
   createProfessionalQuoteDecisionAlertWithClient,
 } = require("../conversations/conversationMessageService");
 const {
+  materializeBusinessDocumentJob,
+} = require("../workflow/jobFoundationService");
+const {
   preWorkDepositServiceInternals: {
-    materializeApprovedDecisionDepositWithClient,
+    materializeApprovedQuoteApprovalDepositWithClient,
   },
 } = require("../finance/preWorkDepositService");
 
@@ -59,6 +62,7 @@ const QUOTE_CAPABILITIES = Object.freeze({
   APPROVE: "quote.approve",
   DECLINE: "quote.decline",
   REVISE: "quote.revise",
+  EXTERNAL_APPROVAL_RECORD: "quote.external_approval.record",
 });
 const QUOTE_COMMANDS = Object.freeze({
   CREATE: "quote.draft.create",
@@ -69,6 +73,7 @@ const QUOTE_COMMANDS = Object.freeze({
   APPROVE: "quote.customer.approve",
   DECLINE: "quote.customer.decline",
   REVISE: "quote.revision.create",
+  EXTERNAL_APPROVE: "quote.external.approve",
 });
 const QUOTE_EVIDENCE_TYPES = Object.freeze({
   CREATED: "quote_draft_created",
@@ -81,6 +86,14 @@ const CAPABILITY_MILESTONE_ID = "MC-JOB-LIFECYCLE-004F-A";
 const ISSUE_CAPABILITY_MILESTONE_ID = "MC-JOB-LIFECYCLE-004F-B";
 const CUSTOMER_CAPABILITY_MILESTONE_ID = "MC-JOB-LIFECYCLE-004F-C";
 const QUOTE_DECISIONS = Object.freeze(["APPROVED", "DECLINED"]);
+const EXTERNAL_APPROVAL_METHODS = Object.freeze([
+  "PHONE",
+  "EMAIL",
+  "TEXT_MESSAGE",
+  "IN_PERSON",
+  "SIGNED_QUOTE",
+  "OTHER",
+]);
 const QUOTE_LINEAGE_TYPES = Object.freeze(["REVISED_QUOTE", "SUPPLEMENTAL_QUOTE"]);
 const QUOTE_LINEAGE_REASONS = Object.freeze([
   "SCOPE_CHANGE",
@@ -184,6 +197,79 @@ function boundedText(value, maximum) {
   if (typeof value !== "string") return null;
   const normalized = value.trim();
   return normalized && normalized.length <= maximum ? normalized : null;
+}
+
+
+function optionalBoundedText(value, maximum) {
+  if (value == null || value === "") return null;
+  return boundedText(value, maximum);
+}
+
+function optionalCommandText(value, maximum) {
+  if (value == null || value === "") return { value: null };
+  if (typeof value !== "string") return { error: true };
+  const normalized = value.trim();
+  if (!normalized || normalized.length > maximum) return { error: true };
+  return { value: normalized };
+}
+
+function externalApprovalTimestamp(value) {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return null;
+  if (parsed > Date.now() + (5 * 60 * 1000)) return null;
+  return new Date(parsed).toISOString();
+}
+
+function canonicalQuoteCustomerSnapshotProjection(row = {}) {
+  if (!row.customer_snapshot_hash) return null;
+  const mode = String(row.customer_snapshot_mode || "");
+  if (!["EXTERNAL_CONTACT", "DOCUMENT_ONLY"].includes(mode)) return null;
+
+  return Object.freeze({
+    mode,
+    name: row.customer_snapshot_name,
+    companyName: row.customer_snapshot_company_name || null,
+    email: row.customer_snapshot_email || null,
+    phone: row.customer_snapshot_phone || null,
+    address: row.customer_snapshot_address || null,
+    businessContactId:
+      row.customer_snapshot_business_contact_id || null,
+    customerRelationshipId:
+      row.customer_snapshot_relationship_id || null,
+  });
+}
+
+function canonicalQuoteApprovalProjection(row = {}) {
+  if (!row.canonical_approval_id) return null;
+
+  const source = String(row.canonical_approval_source || "");
+  if (!["MEETRO_CUSTOMER", "EXTERNAL_EVIDENCE"].includes(source)) {
+    return null;
+  }
+
+  const value = {
+    id: String(row.canonical_approval_id),
+    source,
+    issuedQuoteVersion: Number(row.canonical_approval_quote_version),
+    approvedAt: row.canonical_approval_approved_at,
+  };
+
+  if (
+    source === "EXTERNAL_EVIDENCE" &&
+    row.external_approval_evidence_id
+  ) {
+    value.externalEvidence = Object.freeze({
+      id: String(row.external_approval_evidence_id),
+      method: row.external_approval_method,
+      recordedByParticipantId:
+        row.external_approval_recorded_by_participant_id,
+      reference: row.external_approval_reference || null,
+      note: row.external_approval_note || null,
+    });
+  }
+
+  return Object.freeze(value);
 }
 
 function safeNonNegativeInteger(value) {
@@ -823,9 +909,15 @@ async function loadJobContext(client, jobId, actorUserId, { lock = false } = {})
       jobs.job_request_id,
       jobs.source_request_relationship_id AS relationship_id,
       jobs.lifecycle_contract_version,
+      jobs.source_type AS job_source_type,
+      jobs.contractor_profile_id AS job_contractor_profile_id,
+      jobs.originating_business_document_id,
       posts.user_id AS homeowner_user_id,
       relationships.status AS relationship_status,
-      relationships.professional_user_id AS selected_professional_user_id,
+      COALESCE(
+        relationships.professional_user_id,
+        business_profiles.user_id
+      ) AS selected_professional_user_id,
       participants.id AS actor_participant_id,
       participants.user_id AS actor_user_id,
       customer_parties.contractor_profile_id AS customer_party_contractor_profile_id,
@@ -844,20 +936,47 @@ async function loadJobContext(client, jobId, actorUserId, { lock = false } = {})
           AND revocations.id IS NULL
       ) AS actor_is_primary_professional
     FROM jobs
-    INNER JOIN posts
-      ON posts.id = jobs.job_request_id
+    LEFT JOIN posts
+      ON jobs.source_type = 'ordinary_request_selection'
+      AND posts.id = jobs.job_request_id
       AND posts.lifecycle_contract_version = 2
-    INNER JOIN request_relationships relationships
-      ON relationships.id = jobs.source_request_relationship_id
+    LEFT JOIN request_relationships relationships
+      ON jobs.source_type = 'ordinary_request_selection'
+      AND relationships.id = jobs.source_request_relationship_id
       AND relationships.post_id = jobs.job_request_id
       AND relationships.emergency_request_id IS NULL
+    LEFT JOIN contractor_profiles business_profiles
+      ON jobs.source_type = 'business_document'
+      AND business_profiles.id = jobs.contractor_profile_id
     LEFT JOIN relationship_participants participants
       ON participants.job_id = jobs.id
-      AND participants.request_relationship_id = relationships.id
       AND participants.user_id = $2
+      AND (
+        (
+          jobs.source_type = 'ordinary_request_selection'
+          AND participants.request_relationship_id = relationships.id
+        )
+        OR
+        (
+          jobs.source_type = 'business_document'
+          AND participants.request_relationship_id IS NULL
+        )
+      )
     LEFT JOIN job_customer_parties customer_parties
       ON customer_parties.job_id = jobs.id
     WHERE jobs.id = $1
+      AND (
+        (
+          jobs.source_type = 'ordinary_request_selection'
+          AND posts.id IS NOT NULL
+          AND relationships.id IS NOT NULL
+        )
+        OR
+        (
+          jobs.source_type = 'business_document'
+          AND business_profiles.user_id = $2
+        )
+      )
     LIMIT 1
     ${lock ? "FOR UPDATE OF jobs" : ""}
     `,
@@ -873,9 +992,15 @@ async function loadQuoteContext(client, quoteId, actorUserId, { lock = false } =
       quotes.*,
       aggregates.current_version,
       jobs.lifecycle_contract_version,
+      jobs.source_type AS job_source_type,
+      jobs.contractor_profile_id AS job_contractor_profile_id,
+      jobs.originating_business_document_id,
       relationships.status AS relationship_status,
       relationships.homeowner_id AS homeowner_user_id,
-      relationships.professional_user_id AS selected_professional_user_id,
+      COALESCE(
+        relationships.professional_user_id,
+        business_profiles.user_id
+      ) AS selected_professional_user_id,
       participants.id AS actor_participant_id,
       participants.user_id AS actor_user_id,
       customer_parties.contractor_profile_id AS customer_party_contractor_profile_id,
@@ -898,20 +1023,49 @@ async function loadQuoteContext(client, quoteId, actorUserId, { lock = false } =
       ON aggregates.id = quotes.id
       AND aggregates.aggregate_type = 'quote'
       AND aggregates.owning_engine = $3
-    INNER JOIN jobs ON jobs.id = quotes.job_id
-    INNER JOIN request_relationships relationships
-      ON relationships.id = quotes.relationship_id
+    INNER JOIN jobs
+      ON jobs.id = quotes.job_id
+      AND jobs.source_type = quotes.job_source_type
+    LEFT JOIN request_relationships relationships
+      ON jobs.source_type = 'ordinary_request_selection'
       AND relationships.id = jobs.source_request_relationship_id
+      AND relationships.id = quotes.relationship_id
       AND relationships.post_id = quotes.job_request_id
       AND relationships.emergency_request_id IS NULL
+    LEFT JOIN contractor_profiles business_profiles
+      ON jobs.source_type = 'business_document'
+      AND business_profiles.id = jobs.contractor_profile_id
     LEFT JOIN relationship_participants participants
       ON participants.job_id = quotes.job_id
-      AND participants.request_relationship_id = quotes.relationship_id
       AND participants.user_id = $2
+      AND (
+        (
+          jobs.source_type = 'ordinary_request_selection'
+          AND participants.request_relationship_id = relationships.id
+        )
+        OR
+        (
+          jobs.source_type = 'business_document'
+          AND participants.request_relationship_id IS NULL
+        )
+      )
     LEFT JOIN canonical_quote_customer_parties customer_parties
       ON customer_parties.quote_id = quotes.id
       AND customer_parties.job_id = quotes.job_id
     WHERE quotes.id = $1
+      AND (
+        (
+          jobs.source_type = 'ordinary_request_selection'
+          AND quotes.source_context_type = 'ordinary_request'
+          AND relationships.id IS NOT NULL
+        )
+        OR
+        (
+          jobs.source_type = 'business_document'
+          AND quotes.source_context_type = 'business_document'
+          AND business_profiles.user_id = $2
+        )
+      )
     LIMIT 1
     ${lock ? "FOR UPDATE OF quotes, aggregates" : ""}
     `,
@@ -982,6 +1136,10 @@ async function loadCustomerQuoteContext(client, quoteId, actorUserId, { lock = f
 }
 
 async function requireSavedEvaluation({ client, context, logger }) {
+  if (context?.job_source_type === "business_document") {
+    return null;
+  }
+
   const result = await client.query(
     `SELECT evaluations.id, evaluations.status,
       aggregates.current_version AS evaluation_version
@@ -1064,7 +1222,7 @@ async function requireSavedEvaluation({ client, context, logger }) {
   logger.warn("Quote issuance blocked until Evaluation is finalized", {
     code: "QUOTE_EVALUATION_REQUIRED",
     jobId: context.job_id,
-    relationshipId: Number(context.relationship_id),
+    relationshipId: positiveInteger(context.relationship_id),
   });
   return failure(
     409,
@@ -1163,7 +1321,16 @@ async function requireQuoteAuthority({ client, context, capability, logger }) {
   if (Number(context.lifecycle_contract_version) !== 2) {
     return failure(409, "LIFECYCLE_V2_REQUIRED", "Quote authority requires a lifecycle-v2 Job.");
   }
-  if (context.relationship_status !== "active") {
+  const marketplaceOrigin =
+    context.job_source_type === "ordinary_request_selection";
+  const businessOrigin =
+    context.job_source_type === "business_document";
+
+  if (
+    (!marketplaceOrigin && !businessOrigin) ||
+    (marketplaceOrigin && context.relationship_status !== "active") ||
+    (businessOrigin && !context.job_contractor_profile_id)
+  ) {
     return failure(409, "QUOTE_CONTEXT_INACTIVE", "The Quote context is inactive.");
   }
   if (
@@ -1756,7 +1923,25 @@ async function loadQuoteProjection(client, quoteId) {
       source_drafts.business_customer_relationship_id AS business_source_current_relationship_id,
       customer_parties.contractor_profile_id AS customer_party_contractor_profile_id,
       customer_parties.business_contact_id,
-      customer_parties.business_customer_relationship_id
+      customer_parties.business_customer_relationship_id,
+      customer_snapshots.customer_mode AS customer_snapshot_mode,
+      customer_snapshots.business_contact_id AS customer_snapshot_business_contact_id,
+      customer_snapshots.business_customer_relationship_id AS customer_snapshot_relationship_id,
+      customer_snapshots.customer_name AS customer_snapshot_name,
+      customer_snapshots.company_name AS customer_snapshot_company_name,
+      customer_snapshots.customer_email AS customer_snapshot_email,
+      customer_snapshots.customer_phone AS customer_snapshot_phone,
+      customer_snapshots.customer_address AS customer_snapshot_address,
+      customer_snapshots.snapshot_hash AS customer_snapshot_hash,
+      approvals.id AS canonical_approval_id,
+      approvals.approval_source AS canonical_approval_source,
+      approvals.issued_quote_version AS canonical_approval_quote_version,
+      approvals.approved_at AS canonical_approval_approved_at,
+      approvals.external_approval_evidence_id,
+      external_approvals.evidence_method AS external_approval_method,
+      external_approvals.recorded_by_participant_id AS external_approval_recorded_by_participant_id,
+      external_approvals.evidence_reference AS external_approval_reference,
+      external_approvals.evidence_note AS external_approval_note
     FROM canonical_quotes quotes
     INNER JOIN commercial_authority_aggregates aggregates
       ON aggregates.id = quotes.id
@@ -1775,6 +1960,15 @@ async function loadQuoteProjection(client, quoteId) {
     LEFT JOIN canonical_quote_customer_parties customer_parties
       ON customer_parties.quote_id = quotes.id
       AND customer_parties.job_id = quotes.job_id
+    LEFT JOIN canonical_quote_customer_snapshots customer_snapshots
+      ON customer_snapshots.quote_id = quotes.id
+      AND customer_snapshots.job_id = quotes.job_id
+    LEFT JOIN canonical_quote_approvals approvals
+      ON approvals.quote_id = quotes.id
+    LEFT JOIN canonical_quote_external_approval_evidence external_approvals
+      ON external_approvals.id = approvals.external_approval_evidence_id
+      AND external_approvals.quote_id = quotes.id
+      AND external_approvals.job_id = quotes.job_id
     WHERE quotes.id = $1
     LIMIT 1
     `,
@@ -1834,8 +2028,8 @@ async function loadQuoteProjection(client, quoteId) {
   return {
     id: identity.id,
     jobId: identity.job_id,
-    requestId: Number(identity.job_request_id),
-    relationshipId: Number(identity.relationship_id),
+    requestId: positiveInteger(identity.job_request_id) || null,
+    relationshipId: positiveInteger(identity.relationship_id) || null,
     issuerParticipantId: identity.issuer_participant_id,
     parentQuoteId: identity.parent_quote_id,
     lineageType: identity.lineage_type,
@@ -1898,6 +2092,10 @@ async function loadQuoteProjection(client, quoteId) {
             identity.business_customer_relationship_id,
         })
       : null,
+    customerSnapshot:
+      canonicalQuoteCustomerSnapshotProjection(identity),
+    approval:
+      canonicalQuoteApprovalProjection(identity),
   };
 }
 
@@ -2030,16 +2228,219 @@ async function loadOwnedBusinessDocumentQuoteSource(
 async function loadOwnedBusinessDocumentQuoteMapping(client, draftId, actorUserId) {
   const result = await client.query(
     `/* quote_business_document:load_owned_mapping */
-     SELECT sources.*
+     SELECT
+       sources.*,
+       customer_snapshots.snapshot_hash AS customer_snapshot_hash
      FROM canonical_quote_business_document_sources sources
      INNER JOIN contractor_profiles profiles
        ON profiles.id = sources.contractor_profile_id
+     LEFT JOIN canonical_quote_customer_snapshots customer_snapshots
+       ON customer_snapshots.quote_id = sources.quote_id
+       AND customer_snapshots.job_id = sources.job_id
+       AND customer_snapshots.contractor_profile_id =
+         sources.contractor_profile_id
      WHERE sources.source_document_id = $1
        AND profiles.user_id = $2
      LIMIT 1`,
     [draftId, actorUserId]
   );
   return result.rows[0] || null;
+}
+
+
+async function loadExternalContactSnapshotSource(
+  client,
+  {
+    actorUserId,
+    contractorProfileId,
+    businessContactId,
+    customerRelationshipId,
+  },
+  { lock = false } = {}
+) {
+  const result = await client.query(
+    `/* quote_external_customer:load_contact_snapshot_source */
+     SELECT
+       contacts.id AS business_contact_id,
+       contacts.display_name,
+       contacts.company_name,
+       contacts.email,
+       contacts.phone,
+       contacts.address_text,
+       relationships.id AS business_customer_relationship_id
+     FROM business_contacts contacts
+     INNER JOIN business_customer_relationships relationships
+       ON relationships.business_contact_id = contacts.id
+       AND relationships.contractor_profile_id =
+         contacts.contractor_profile_id
+     INNER JOIN contractor_profiles profiles
+       ON profiles.id = contacts.contractor_profile_id
+       AND profiles.user_id = $1
+     WHERE contacts.contractor_profile_id = $2
+       AND contacts.id = $3
+       AND relationships.id = $4
+     LIMIT 1
+     ${lock ? "FOR KEY SHARE OF contacts, relationships" : ""}`,
+    [
+      actorUserId,
+      contractorProfileId,
+      businessContactId,
+      customerRelationshipId,
+    ]
+  );
+  return result.rows[0] || null;
+}
+
+async function resolveBusinessDocumentQuoteCustomerSnapshot({
+  client,
+  actorUserId,
+  contractorProfileId,
+  source,
+  conversion,
+  sourceCustomerParty,
+}) {
+  let customerMode;
+  let businessContactId = null;
+  let customerRelationshipId = null;
+  let customerName = null;
+  let companyName = null;
+  let customerEmail = null;
+  let customerPhone = null;
+  let customerAddress = null;
+
+  if (sourceCustomerParty) {
+    const contact = await loadExternalContactSnapshotSource(
+      client,
+      {
+        actorUserId,
+        contractorProfileId,
+        businessContactId: sourceCustomerParty.businessContactId,
+        customerRelationshipId:
+          sourceCustomerParty.customerRelationshipId,
+      },
+      { lock: true }
+    );
+
+    if (!contact) {
+      return {
+        error: failure(
+          404,
+          "BUSINESS_DOCUMENT_CUSTOMER_SNAPSHOT_UNAVAILABLE",
+          "The external customer identity is unavailable."
+        ),
+      };
+    }
+
+    customerMode = "EXTERNAL_CONTACT";
+    businessContactId = String(contact.business_contact_id);
+    customerRelationshipId =
+      String(contact.business_customer_relationship_id);
+    customerName = boundedText(contact.display_name, 240);
+    companyName = optionalBoundedText(contact.company_name, 240);
+    customerEmail = optionalBoundedText(contact.email, 320);
+    customerPhone = optionalBoundedText(contact.phone, 80);
+    customerAddress = optionalBoundedText(contact.address_text, 600);
+  } else {
+    const content = isPlainObject(conversion?.content)
+      ? conversion.content
+      : {};
+
+    customerMode = "DOCUMENT_ONLY";
+    customerName = boundedText(content.customerName, 240);
+    companyName = optionalBoundedText(content.companyName, 240);
+    customerEmail = optionalBoundedText(content.customerEmail, 320);
+    customerPhone = optionalBoundedText(content.customerPhone, 80);
+    customerAddress = optionalBoundedText(content.customerAddress, 600);
+  }
+
+  if (!customerName) {
+    return {
+      error: failure(
+        409,
+        "BUSINESS_DOCUMENT_CUSTOMER_SNAPSHOT_REQUIRED",
+        "A customer name is required before the Quick Quote becomes canonical."
+      ),
+    };
+  }
+
+  const snapshot = {
+    schemaVersion: 1,
+    customerMode,
+    contractorProfileId,
+    businessContactId,
+    customerRelationshipId,
+    customerName,
+    companyName,
+    customerEmail,
+    customerPhone,
+    customerAddress,
+  };
+
+  return {
+    snapshot: Object.freeze({
+      ...snapshot,
+      snapshotHash: fingerprint(snapshot),
+    }),
+  };
+}
+
+async function insertCanonicalQuoteCustomerSnapshot(
+  client,
+  {
+    quoteId,
+    jobId,
+    actorUserId,
+    contractorProfileId,
+    snapshot,
+  }
+) {
+  if (!snapshot) {
+    throw new Error("Canonical Quote customer snapshot source is missing.");
+  }
+
+  const result = await client.query(
+    `/* quote_external_customer:insert_canonical_snapshot */
+     INSERT INTO canonical_quote_customer_snapshots (
+       quote_id,
+       job_id,
+       contractor_profile_id,
+       created_by_user_id,
+       customer_mode,
+       business_contact_id,
+       business_customer_relationship_id,
+       customer_name,
+       company_name,
+       customer_email,
+       customer_phone,
+       customer_address,
+       snapshot_hash
+     ) VALUES (
+       $1, $2, $3, $4, $5, $6, $7,
+       $8, $9, $10, $11, $12, $13
+     )
+     RETURNING *`,
+    [
+      quoteId,
+      jobId,
+      contractorProfileId,
+      actorUserId,
+      snapshot.customerMode,
+      snapshot.businessContactId,
+      snapshot.customerRelationshipId,
+      snapshot.customerName,
+      snapshot.companyName,
+      snapshot.customerEmail,
+      snapshot.customerPhone,
+      snapshot.customerAddress,
+      snapshot.snapshotHash,
+    ]
+  );
+
+  if (!result.rows[0]) {
+    throw new Error("Canonical Quote customer snapshot creation failed.");
+  }
+
+  return result.rows[0];
 }
 
 async function loadBusinessDocumentQuoteReviewIdentity(
@@ -2049,14 +2450,30 @@ async function loadBusinessDocumentQuoteReviewIdentity(
 ) {
   const result = await client.query(
     `/* quote_business_document:load_review_identity */
-     SELECT drafts.id AS document_id, drafts.version AS document_version,
-       drafts.job_id, jobs.job_request_id,
+     SELECT drafts.id AS document_id,
+       drafts.version AS document_version,
+       drafts.job_id,
+       jobs.job_request_id,
        jobs.source_request_relationship_id AS relationship_id,
        jobs.lifecycle_contract_version,
-       posts.title AS project_title,
+       jobs.source_type AS job_source_type,
+       COALESCE(
+         NULLIF(BTRIM(posts.title), ''),
+         NULLIF(BTRIM(drafts.content ->> 'projectTitle'), ''),
+         NULLIF(BTRIM(drafts.content ->> 'projectDescription'), ''),
+         'Quick Quote'
+       ) AS project_title,
        relationships.status AS relationship_status,
-       relationships.professional_user_id AS selected_professional_user_id,
-       customers.username AS customer_name,
+       COALESCE(
+         relationships.professional_user_id,
+         profiles.user_id
+       ) AS selected_professional_user_id,
+       COALESCE(
+         NULLIF(BTRIM(customers.username), ''),
+         NULLIF(BTRIM(contacts.display_name), ''),
+         NULLIF(BTRIM(drafts.content ->> 'customerName'), ''),
+         'Customer'
+       ) AS customer_name,
        participants.id AS actor_participant_id,
        EXISTS (
          SELECT 1
@@ -2070,51 +2487,84 @@ async function loadBusinessDocumentQuoteReviewIdentity(
            AND (roles.valid_until IS NULL OR roles.valid_until > CURRENT_TIMESTAMP)
            AND revocations.id IS NULL
        ) AS actor_is_primary_professional,
-       EXISTS (
-         SELECT 1
-         FROM lifecycle_authority_grants grants
-         LEFT JOIN lifecycle_authority_grant_revocations revocations
-           ON revocations.authority_grant_id = grants.id
-         WHERE grants.grantee_participant_id = participants.id
-           AND grants.job_id = jobs.id
-           AND grants.scope_type = 'job'
-           AND grants.scope_job_id = jobs.id
-           AND grants.scope_concern_id IS NULL
-           AND grants.capability = 'participant.read'
-           AND grants.valid_from <= CURRENT_TIMESTAMP
-           AND (grants.valid_until IS NULL OR grants.valid_until > CURRENT_TIMESTAMP)
-           AND revocations.id IS NULL
-       ) AS actor_can_read_participant
+       CASE
+         WHEN drafts.job_id IS NULL THEN TRUE
+         ELSE EXISTS (
+           SELECT 1
+           FROM lifecycle_authority_grants grants
+           LEFT JOIN lifecycle_authority_grant_revocations revocations
+             ON revocations.authority_grant_id = grants.id
+           WHERE grants.grantee_participant_id = participants.id
+             AND grants.job_id = jobs.id
+             AND grants.scope_type = 'job'
+             AND grants.scope_job_id = jobs.id
+             AND grants.scope_concern_id IS NULL
+             AND grants.capability = 'participant.read'
+             AND grants.valid_from <= CURRENT_TIMESTAMP
+             AND (grants.valid_until IS NULL OR grants.valid_until > CURRENT_TIMESTAMP)
+             AND revocations.id IS NULL
+         )
+       END AS actor_can_read_participant
      FROM business_document_working_drafts drafts
      INNER JOIN contractor_profiles profiles
        ON profiles.id = drafts.contractor_profile_id
        AND profiles.user_id = $2
-     INNER JOIN jobs
+     LEFT JOIN jobs
        ON jobs.id = drafts.job_id
-     INNER JOIN posts
-       ON posts.id = jobs.job_request_id
+     LEFT JOIN posts
+       ON jobs.source_type = 'ordinary_request_selection'
+       AND posts.id = jobs.job_request_id
        AND posts.lifecycle_contract_version = 2
        AND posts.cancelled_at IS NULL
-     INNER JOIN request_relationships relationships
-       ON relationships.id = jobs.source_request_relationship_id
+     LEFT JOIN request_relationships relationships
+       ON jobs.source_type = 'ordinary_request_selection'
+       AND relationships.id = jobs.source_request_relationship_id
        AND relationships.post_id = jobs.job_request_id
        AND relationships.emergency_request_id IS NULL
-     INNER JOIN request_selections selections
-       ON selections.id = jobs.source_request_selection_id
+     LEFT JOIN request_selections selections
+       ON jobs.source_type = 'ordinary_request_selection'
+       AND selections.id = jobs.source_request_selection_id
        AND selections.request_relationship_id = relationships.id
        AND selections.post_id = jobs.job_request_id
        AND selections.professional_user_id = $2
        AND selections.ended_at IS NULL
-     INNER JOIN relationship_participants participants
+     LEFT JOIN relationship_participants participants
        ON participants.job_id = jobs.id
-       AND participants.request_relationship_id = relationships.id
        AND participants.user_id = $2
-     INNER JOIN users customers
-       ON customers.id = relationships.homeowner_id
+       AND (
+         (
+           jobs.source_type = 'ordinary_request_selection'
+           AND participants.request_relationship_id = relationships.id
+         )
+         OR
+         (
+           jobs.source_type = 'business_document'
+           AND participants.request_relationship_id IS NULL
+         )
+       )
+     LEFT JOIN users customers
+       ON jobs.source_type = 'ordinary_request_selection'
+       AND customers.id = relationships.homeowner_id
        AND customers.id = posts.user_id
+     LEFT JOIN business_contacts contacts
+       ON contacts.id = drafts.business_contact_id
+       AND contacts.contractor_profile_id = drafts.contractor_profile_id
      WHERE drafts.id = $1
        AND drafts.document_type = 'QUOTE'
        AND drafts.draft_status = 'WORKING_DRAFT'
+       AND (
+         drafts.job_id IS NULL
+         OR (
+           jobs.source_type = 'ordinary_request_selection'
+           AND posts.id IS NOT NULL
+           AND relationships.id IS NOT NULL
+           AND selections.id IS NOT NULL
+         )
+         OR (
+           jobs.source_type = 'business_document'
+           AND jobs.contractor_profile_id = drafts.contractor_profile_id
+         )
+       )
      LIMIT 1`,
     [draftId, actorUserId]
   );
@@ -2128,9 +2578,9 @@ function businessDocumentQuoteReviewProjection(row) {
   return Object.freeze({
     documentId: normalizedUuid(row.document_id),
     documentVersion: positiveInteger(row.document_version),
-    jobId: normalizedUuid(row.job_id),
-    requestId: positiveInteger(row.job_request_id),
-    relationshipId: positiveInteger(row.relationship_id),
+    jobId: normalizedUuid(row.job_id) || null,
+    requestId: positiveInteger(row.job_request_id) || null,
+    relationshipId: positiveInteger(row.relationship_id) || null,
     customerName,
     projectTitle,
   });
@@ -2177,13 +2627,32 @@ async function getBusinessDocumentDraftQuoteReview(input = {}) {
         "The working Quote version is stale."
       );
     }
-    if (
-      Number(row.lifecycle_contract_version) !== 2 ||
-      row.relationship_status !== "active" ||
-      Number(row.selected_professional_user_id) !== Number(validated.id) ||
-      row.actor_is_primary_professional !== true ||
-      row.actor_can_read_participant !== true
-    ) {
+    const joblessBusinessDocument = !normalizedUuid(row.job_id);
+    const marketplaceOrigin =
+      row.job_source_type === "ordinary_request_selection";
+    const businessOrigin =
+      row.job_source_type === "business_document";
+
+    const reviewAuthorityValid =
+      Number(row.selected_professional_user_id) === Number(validated.id) &&
+      (
+        joblessBusinessDocument ||
+        (
+          marketplaceOrigin &&
+          Number(row.lifecycle_contract_version) === 2 &&
+          row.relationship_status === "active" &&
+          row.actor_is_primary_professional === true &&
+          row.actor_can_read_participant === true
+        ) ||
+        (
+          businessOrigin &&
+          Number(row.lifecycle_contract_version) === 2 &&
+          row.actor_is_primary_professional === true &&
+          row.actor_can_read_participant === true
+        )
+      );
+
+    if (!reviewAuthorityValid) {
       await client.query("COMMIT");
       started = false;
       return failure(
@@ -2196,9 +2665,16 @@ async function getBusinessDocumentDraftQuoteReview(input = {}) {
     if (
       !review?.documentId ||
       !review?.documentVersion ||
-      !review?.jobId ||
-      !review?.requestId ||
-      !review?.relationshipId
+      !review?.customerName ||
+      !review?.projectTitle ||
+      (
+        !joblessBusinessDocument &&
+        !review?.jobId
+      ) ||
+      (
+        marketplaceOrigin &&
+        (!review?.requestId || !review?.relationshipId)
+      )
     ) {
       await client.query("COMMIT");
       started = false;
@@ -2234,8 +2710,16 @@ function validateBusinessDocumentQuoteSource(source) {
   if (source.document_type !== "QUOTE") {
     return failure(409, "BUSINESS_DOCUMENT_QUOTE_REQUIRED", "A saved working Quote is required.");
   }
-  if (!normalizedUuid(source.job_id)) {
-    return failure(409, "BUSINESS_DOCUMENT_QUOTE_JOB_REQUIRED", "The working Quote must be connected to a Job.");
+  if (
+    source.job_id != null &&
+    String(source.job_id).trim() !== "" &&
+    !normalizedUuid(source.job_id)
+  ) {
+    return failure(
+      409,
+      "BUSINESS_DOCUMENT_QUOTE_JOB_INVALID",
+      "The working Quote Job identity is invalid."
+    );
   }
   if (!BUSINESS_DOCUMENT_NUMBER_PATTERN.test(String(source.document_number || ""))) {
     return failure(409, "BUSINESS_DOCUMENT_QUOTE_NUMBER_REQUIRED", "The working Quote must have a server-assigned Quote number.");
@@ -2290,10 +2774,42 @@ async function importBusinessDocumentDraftQuote(input = {}) {
       if (sourceError) return { abort: sourceError };
     }
 
+    if (!mapping && !normalizedUuid(source?.job_id)) {
+      const materializedJob = await materializeBusinessDocumentJob({
+        client,
+        document: source,
+        actorUserId: validated.actorId,
+        logger,
+      });
+      const createdJobId = normalizedUuid(materializedJob?.job?.id);
+      if (!createdJobId) {
+        throw new Error("Business-origin Job materialization failed.");
+      }
+
+      const linked = await client.query(
+        `UPDATE business_document_working_drafts
+         SET job_id = $2
+         WHERE id = $1
+           AND contractor_profile_id = $3
+           AND job_id IS NULL
+         RETURNING job_id`,
+        [draftId, createdJobId, Number(source.contractor_profile_id)]
+      );
+      if (!linked.rows[0]) {
+        throw new Error("Business-origin working Quote Job linkage failed.");
+      }
+
+      source.job_id = createdJobId;
+    }
+
     const jobId = normalizedUuid(mapping?.job_id || source?.job_id);
     if (!jobId) {
       return {
-        abort: failure(409, "BUSINESS_DOCUMENT_QUOTE_JOB_REQUIRED", "The working Quote must be connected to a Job."),
+        abort: failure(
+          409,
+          "BUSINESS_DOCUMENT_QUOTE_JOB_REQUIRED",
+          "The working Quote must be connected to a Job."
+        ),
       };
     }
     const context = await loadJobContext(client, jobId, validated.actorId, { lock: true });
@@ -2305,8 +2821,12 @@ async function importBusinessDocumentDraftQuote(input = {}) {
     });
     if (authorityError) return { abort: authorityError };
 
+    const businessOrigin =
+      context.job_source_type === "business_document";
+
     let conversion = null;
     let sourceCustomerParty = null;
+    let sourceCustomerSnapshot = null;
     let sourceHash = mapping?.source_snapshot_integrity_hash || null;
     if (!mapping) {
       const hasContact = Boolean(source.business_contact_id);
@@ -2339,6 +2859,26 @@ async function importBusinessDocumentDraftQuote(input = {}) {
           ),
         };
       }
+      if (businessOrigin) {
+        const resolvedCustomerSnapshot =
+          await resolveBusinessDocumentQuoteCustomerSnapshot({
+            client,
+            actorUserId: validated.actorId,
+            contractorProfileId:
+              Number(source.contractor_profile_id),
+            source,
+            conversion,
+            sourceCustomerParty,
+          });
+
+        if (resolvedCustomerSnapshot.error) {
+          return { abort: resolvedCustomerSnapshot.error };
+        }
+
+        sourceCustomerSnapshot =
+          resolvedCustomerSnapshot.snapshot;
+      }
+
       sourceHash = businessDocumentSourceFingerprint({
         draftId,
         documentVersion: Number(source.version),
@@ -2349,11 +2889,17 @@ async function importBusinessDocumentDraftQuote(input = {}) {
       });
     }
 
+    const customerSnapshotHash =
+      sourceCustomerSnapshot?.snapshotHash ||
+      mapping?.customer_snapshot_hash ||
+      null;
+
     const requestFingerprint = fingerprint({
       command: QUOTE_COMMANDS.IMPORT_BUSINESS_DOCUMENT,
       draftId,
       expectedDocumentVersion,
       sourceSnapshotIntegrityHash: sourceHash,
+      customerSnapshotHash,
     });
     const idempotency = await reserveIdempotency({
       client,
@@ -2408,36 +2954,53 @@ async function importBusinessDocumentDraftQuote(input = {}) {
     }
 
     const quoteId = randomUUID();
+    const sourceContextType = businessOrigin
+      ? "business_document"
+      : "ordinary_request";
+
     const aggregateResult = await client.query(
       `INSERT INTO commercial_authority_aggregates (
         id, aggregate_type, owning_engine, source_context_type,
         ordinary_request_id, emergency_request_id, relationship_id,
-        source_owner_user_id, created_by_user_id, current_version
-      ) VALUES ($1, 'quote', $2, 'ordinary_request', $3, NULL, $4, $5, $6, 1)
+        source_owner_user_id, created_by_user_id, current_version,
+        business_document_id, contractor_profile_id
+      ) VALUES (
+        $1, 'quote', $2, $3, $4, NULL, $5, $6, $7, 1, $8, $9
+      )
       RETURNING *`,
       [
         quoteId,
         OWNING_ENGINE,
-        Number(context.job_request_id),
-        Number(context.relationship_id),
-        Number(context.homeowner_user_id),
+        sourceContextType,
+        businessOrigin ? null : Number(context.job_request_id),
+        businessOrigin ? null : Number(context.relationship_id),
+        businessOrigin
+          ? validated.actorId
+          : Number(context.homeowner_user_id),
         validated.actorId,
+        businessOrigin ? draftId : null,
+        businessOrigin
+          ? Number(context.job_contractor_profile_id)
+          : null,
       ]
     );
     if (!aggregateResult.rows[0]) throw new Error("Canonical Quote aggregate creation failed.");
     const quoteIdentity = await client.query(
       `INSERT INTO canonical_quotes (
         id, job_id, job_request_id, relationship_id,
-        issuer_participant_id, currency, status
-      ) VALUES ($1, $2, $3, $4, $5, $6, 'DRAFT')
+        issuer_participant_id, currency, status,
+        source_context_type, job_source_type
+      ) VALUES ($1, $2, $3, $4, $5, $6, 'DRAFT', $7, $8)
       RETURNING *`,
       [
         quoteId,
         jobId,
-        Number(context.job_request_id),
-        Number(context.relationship_id),
+        businessOrigin ? null : Number(context.job_request_id),
+        businessOrigin ? null : Number(context.relationship_id),
         context.actor_participant_id,
         conversion.currency,
+        sourceContextType,
+        context.job_source_type,
       ]
     );
     if (!quoteIdentity.rows[0]) throw new Error("Canonical Quote identity creation failed.");
@@ -2509,11 +3072,28 @@ async function importBusinessDocumentDraftQuote(input = {}) {
         validated.actorId,
       ]
     );
-    if (!provenance.rows[0]) throw new Error("Canonical working-Quote provenance creation failed.");
+    if (!provenance.rows[0]) {
+      throw new Error("Canonical working-Quote provenance creation failed.");
+    }
+
+    if (businessOrigin) {
+      await insertCanonicalQuoteCustomerSnapshot(
+        client,
+        {
+          quoteId,
+          jobId,
+          actorUserId: validated.actorId,
+          contractorProfileId:
+            Number(source.contractor_profile_id),
+          snapshot: sourceCustomerSnapshot,
+        }
+      );
+    }
+
     const evidence = await insertQuoteEvidence({
       client,
       quoteId,
-      relationshipId: Number(context.relationship_id),
+      relationshipId: positiveInteger(context.relationship_id),
       actorUserId: validated.actorId,
       idempotencyId: idempotency.reservation.id,
       evidenceType: QUOTE_EVIDENCE_TYPES.CREATED,
@@ -2671,7 +3251,7 @@ async function createDraftQuote(input = {}) {
     const evidence = await insertQuoteEvidence({
       client,
       quoteId,
-      relationshipId: Number(context.relationship_id),
+      relationshipId: positiveInteger(context.relationship_id),
       actorUserId: validated.actorId,
       idempotencyId: idempotency.reservation.id,
       evidenceType: QUOTE_EVIDENCE_TYPES.CREATED,
@@ -2840,7 +3420,7 @@ async function addDraftScopeItem(input = {}) {
     const evidence = await insertQuoteEvidence({
       client,
       quoteId,
-      relationshipId: Number(context.relationship_id),
+      relationshipId: positiveInteger(context.relationship_id),
       actorUserId: validated.actorId,
       idempotencyId: idempotency.reservation.id,
       evidenceType: QUOTE_EVIDENCE_TYPES.SCOPE_ADDED,
@@ -2990,7 +3570,7 @@ async function removeDraftScopeItem(input = {}) {
     const evidence = await insertQuoteEvidence({
       client,
       quoteId,
-      relationshipId: Number(context.relationship_id),
+      relationshipId: positiveInteger(context.relationship_id),
       actorUserId: validated.actorId,
       idempotencyId: idempotency.reservation.id,
       evidenceType: QUOTE_EVIDENCE_TYPES.SCOPE_REMOVED,
@@ -3220,7 +3800,7 @@ async function issueQuote(input = {}) {
     const evidence = await insertQuoteEvidence({
       client,
       quoteId,
-      relationshipId: Number(context.relationship_id),
+      relationshipId: positiveInteger(context.relationship_id),
       actorUserId: validated.actorId,
       idempotencyId: idempotency.reservation.id,
       evidenceType: QUOTE_EVIDENCE_TYPES.ISSUED,
@@ -3335,6 +3915,62 @@ async function getCustomerIssuedQuote(input = {}) {
     code: "CUSTOMER_QUOTE_FOUND",
     quote: customerQuoteDetailProjection(quote, { canApprove, canDecline }),
   };
+}
+
+
+async function insertCanonicalQuoteApprovalFromCustomerDecision(
+  client,
+  decisionRow
+) {
+  const decisionId = normalizedUuid(decisionRow?.id);
+  if (!decisionId) {
+    throw new Error(
+      "Canonical customer Quote approval requires a valid customer decision."
+    );
+  }
+
+  const result = await client.query(
+    `/* quote_approval:from_customer_decision */
+     INSERT INTO canonical_quote_approvals (
+       id,
+       quote_id,
+       issued_quote_version,
+       job_id,
+       approval_source,
+       decision,
+       customer_decision_id,
+       external_approval_evidence_id,
+       issued_integrity_hash,
+       approved_at
+     )
+     SELECT
+       $1,
+       decisions.quote_id,
+       decisions.issued_quote_version,
+       decisions.job_id,
+       'MEETRO_CUSTOMER',
+       'APPROVED',
+       decisions.id,
+       NULL,
+       decisions.issued_integrity_hash,
+       decisions.decided_at
+     FROM canonical_quote_customer_decisions decisions
+     WHERE decisions.id = $2
+       AND decisions.decision = 'APPROVED'
+     RETURNING *`,
+    [
+      randomUUID(),
+      decisionId,
+    ]
+  );
+
+  if (!result.rows[0]) {
+    throw new Error(
+      "Canonical customer Quote approval creation failed."
+    );
+  }
+
+  return result.rows[0];
 }
 
 async function decideIssuedQuote(input = {}, decision) {
@@ -3460,13 +4096,22 @@ async function decideIssuedQuote(input = {}, decision) {
     await invokeFailure(input.failureInjector, "after_write");
     let approvedDeposit = null;
     if (decision === "APPROVED") {
-      approvedDeposit = await materializeApprovedDecisionDepositWithClient({
-        client,
-        jobId: context.job_id,
-        decisionId: decisionResult.rows[0].id,
-        actorParticipantId: context.actor_participant_id,
-        idempotencyKey: `approval:${decisionResult.rows[0].id}`,
-      });
+      const quoteApproval =
+        await insertCanonicalQuoteApprovalFromCustomerDecision(
+          client,
+          decisionResult.rows[0]
+        );
+
+      approvedDeposit =
+        await materializeApprovedQuoteApprovalDepositWithClient({
+          client,
+          jobId: context.job_id,
+          approvalId: quoteApproval.id,
+          actorParticipantId:
+            context.actor_participant_id,
+          idempotencyKey:
+            `approval:${quoteApproval.id}`,
+        });
       if (approvedDeposit.error) return { abort: approvedDeposit.error };
     }
     const quote = await loadQuoteProjection(client, quoteId);
@@ -3510,6 +4155,401 @@ function approveIssuedQuote(input = {}) {
 
 function declineIssuedQuote(input = {}) {
   return decideIssuedQuote(input, "DECLINED");
+}
+
+async function recordExternalQuoteApproval(input = {}) {
+  const validated = validateCommand(input, [
+    "quoteId",
+    "expectedIssuedVersion",
+    "evidenceMethod",
+    "approvedAt",
+    "evidenceReference",
+    "evidenceNote",
+  ]);
+  if (validated.error) return validated.error;
+
+  const quoteId = normalizedUuid(input.quoteId);
+  const expectedIssuedVersion =
+    positiveInteger(input.expectedIssuedVersion);
+  const evidenceMethod =
+    String(input.evidenceMethod || "").trim().toUpperCase();
+  const approvedAt = externalApprovalTimestamp(input.approvedAt);
+  const reference = optionalCommandText(
+    input.evidenceReference,
+    1000
+  );
+  const note = optionalCommandText(
+    input.evidenceNote,
+    8000
+  );
+
+  if (
+    !quoteId ||
+    !expectedIssuedVersion ||
+    !EXTERNAL_APPROVAL_METHODS.includes(evidenceMethod) ||
+    !approvedAt ||
+    reference.error ||
+    note.error
+  ) {
+    return failure(
+      400,
+      "INVALID_QUOTE_EXTERNAL_APPROVAL",
+      "The external Quote approval evidence is invalid."
+    );
+  }
+
+  const logger = safeLogger(input.logger);
+
+  return runTransaction(input.pool, async (client) => {
+    const context = await loadQuoteContext(
+      client,
+      quoteId,
+      validated.actorId,
+      { lock: true }
+    );
+
+    const authorityError = await requireQuoteAuthority({
+      client,
+      context,
+      capability:
+        QUOTE_CAPABILITIES.EXTERNAL_APPROVAL_RECORD,
+      logger,
+    });
+    if (authorityError) return { abort: authorityError };
+
+    if (
+      context.job_source_type !== "business_document" ||
+      context.source_context_type !== "business_document"
+    ) {
+      return {
+        abort: failure(
+          409,
+          "QUOTE_EXTERNAL_APPROVAL_UNAVAILABLE",
+          "External approval evidence is available only for a business-origin Quick Quote."
+        ),
+      };
+    }
+
+    if (
+      context.status !== QUOTE_STATUS.ISSUED ||
+      Number(context.current_version) !==
+        expectedIssuedVersion
+    ) {
+      return {
+        abort: failure(
+          404,
+          "QUOTE_UNAVAILABLE",
+          "The Quote is unavailable."
+        ),
+      };
+    }
+
+    const issuanceResult = await client.query(
+      `/* quote_external_approval:load_issuance */
+       SELECT
+         quote_version,
+         source_snapshot_integrity_hash,
+         issued_at
+       FROM canonical_quote_issuances
+       WHERE quote_id = $1
+         AND quote_version = $2
+         AND job_id = $3
+       LIMIT 1`,
+      [
+        quoteId,
+        expectedIssuedVersion,
+        context.job_id,
+      ]
+    );
+
+    const issuance = issuanceResult.rows[0];
+    if (!issuance) {
+      return {
+        abort: failure(
+          404,
+          "QUOTE_UNAVAILABLE",
+          "The Quote is unavailable."
+        ),
+      };
+    }
+
+    const issuedAtMillis =
+      Date.parse(issuance.issued_at);
+    const approvedAtMillis =
+      Date.parse(approvedAt);
+
+    if (
+      !Number.isFinite(issuedAtMillis) ||
+      !Number.isFinite(approvedAtMillis) ||
+      approvedAtMillis < issuedAtMillis
+    ) {
+      return {
+        abort: failure(
+          409,
+          "QUOTE_EXTERNAL_APPROVAL_TIME_INVALID",
+          "External approval cannot predate the issued Quote."
+        ),
+      };
+    }
+
+    const snapshotResult = await client.query(
+      `/* quote_external_approval:load_customer_snapshot */
+       SELECT *
+       FROM canonical_quote_customer_snapshots
+       WHERE quote_id = $1
+         AND job_id = $2
+         AND contractor_profile_id = $3
+       LIMIT 1
+       FOR SHARE`,
+      [
+        quoteId,
+        context.job_id,
+        Number(context.job_contractor_profile_id),
+      ]
+    );
+
+    const customerSnapshot =
+      snapshotResult.rows[0];
+    if (!customerSnapshot) {
+      return {
+        abort: failure(
+          409,
+          "QUOTE_EXTERNAL_APPROVAL_CUSTOMER_SNAPSHOT_REQUIRED",
+          "The exact external customer snapshot is required before approval can be recorded."
+        ),
+      };
+    }
+
+    const requestFingerprint = fingerprint({
+      command: QUOTE_COMMANDS.EXTERNAL_APPROVE,
+      quoteId,
+      expectedIssuedVersion,
+      evidenceMethod,
+      approvedAt,
+      evidenceReference: reference.value,
+      evidenceNote: note.value,
+    });
+
+    const idempotency = await reserveIdempotency({
+      client,
+      actorUserId: validated.actorId,
+      commandName:
+        QUOTE_COMMANDS.EXTERNAL_APPROVE,
+      commandScope:
+        `quote:${quoteId}:external-approval`,
+      idempotencyKey: validated.idempotencyKey,
+      requestFingerprint,
+    });
+
+    if (idempotency.error) {
+      return { abort: idempotency.error };
+    }
+
+    if (idempotency.replay) {
+      return {
+        result: {
+          ...idempotency.replay,
+          replayed: true,
+        },
+        afterCommit: () =>
+          logger.info(
+            "External Quote approval replayed",
+            {
+              code:
+                "QUOTE_EXTERNAL_APPROVAL_REPLAYED",
+              quoteId,
+              jobId: context.job_id,
+              expectedIssuedVersion,
+            }
+          ),
+      };
+    }
+
+    const existingApproval = await client.query(
+      `/* quote_external_approval:load_existing */
+       SELECT id, approval_source
+       FROM canonical_quote_approvals
+       WHERE quote_id = $1
+       LIMIT 1
+       FOR UPDATE`,
+      [quoteId]
+    );
+
+    if (existingApproval.rows[0]) {
+      return {
+        abort: failure(
+          409,
+          "QUOTE_APPROVAL_FINAL",
+          "The Quote already has canonical approval evidence."
+        ),
+      };
+    }
+
+    const externalEvidenceResult =
+      await client.query(
+        `/* quote_external_approval:insert_evidence */
+         INSERT INTO canonical_quote_external_approval_evidence (
+           id,
+           quote_id,
+           issued_quote_version,
+           job_id,
+           contractor_profile_id,
+           customer_snapshot_hash,
+           recorded_by_participant_id,
+           evidence_method,
+           approved_at,
+           evidence_reference,
+           evidence_note,
+           issued_integrity_hash,
+           idempotency_id
+         ) VALUES (
+           $1, $2, $3, $4, $5, $6, $7,
+           $8, $9, $10, $11, $12, $13
+         )
+         RETURNING *`,
+        [
+          randomUUID(),
+          quoteId,
+          expectedIssuedVersion,
+          context.job_id,
+          Number(
+            context.job_contractor_profile_id
+          ),
+          customerSnapshot.snapshot_hash,
+          context.actor_participant_id,
+          evidenceMethod,
+          approvedAt,
+          reference.value,
+          note.value,
+          issuance.source_snapshot_integrity_hash,
+          idempotency.reservation.id,
+        ]
+      );
+
+    const externalEvidence =
+      externalEvidenceResult.rows[0];
+    if (!externalEvidence) {
+      throw new Error(
+        "External Quote approval evidence creation failed."
+      );
+    }
+
+    const approvalResult = await client.query(
+      `/* quote_external_approval:insert_common_approval */
+       INSERT INTO canonical_quote_approvals (
+         id,
+         quote_id,
+         issued_quote_version,
+         job_id,
+         approval_source,
+         decision,
+         customer_decision_id,
+         external_approval_evidence_id,
+         issued_integrity_hash,
+         approved_at
+       ) VALUES (
+         $1, $2, $3, $4,
+         'EXTERNAL_EVIDENCE',
+         'APPROVED',
+         NULL,
+         $5,
+         $6,
+         $7
+       )
+       RETURNING *`,
+      [
+        randomUUID(),
+        quoteId,
+        expectedIssuedVersion,
+        context.job_id,
+        externalEvidence.id,
+        issuance.source_snapshot_integrity_hash,
+        approvedAt,
+      ]
+    );
+
+    const approval = approvalResult.rows[0];
+    if (!approval) {
+      throw new Error(
+        "Canonical external Quote approval creation failed."
+      );
+    }
+
+    const approvedDeposit =
+      await materializeApprovedQuoteApprovalDepositWithClient({
+        client,
+        jobId: context.job_id,
+        approvalId: approval.id,
+        actorParticipantId:
+          context.actor_participant_id,
+        idempotencyKey:
+          `approval:${approval.id}`,
+      });
+
+    if (approvedDeposit.error) {
+      return { abort: approvedDeposit.error };
+    }
+
+    await invokeFailure(
+      input.failureInjector,
+      "after_write"
+    );
+
+    const quote =
+      await loadQuoteProjection(client, quoteId);
+
+    const externalApproval = Object.freeze({
+      approvalId: String(approval.id),
+      evidenceId: String(externalEvidence.id),
+      quoteId,
+      issuedQuoteVersion:
+        expectedIssuedVersion,
+      method: evidenceMethod,
+      approvedAt:
+        externalEvidence.approved_at,
+      reference:
+        externalEvidence.evidence_reference || null,
+      note:
+        externalEvidence.evidence_note || null,
+    });
+
+    const result = quoteResult(
+      "QUOTE_EXTERNAL_APPROVAL_RECORDED",
+      200,
+      quote,
+      { externalApproval }
+    );
+
+    if (
+      !(await completeIdempotency(
+        client,
+        idempotency.reservation.id,
+        quoteId,
+        result
+      ))
+    ) {
+      throw new Error(
+        "External Quote approval idempotency completion failed."
+      );
+    }
+
+    return {
+      result,
+      afterCommit: () =>
+        logger.info(
+          "External Quote approval recorded",
+          {
+            code:
+              "QUOTE_EXTERNAL_APPROVAL_RECORDED",
+            quoteId,
+            jobId: context.job_id,
+            issuedQuoteVersion:
+              expectedIssuedVersion,
+            evidenceMethod,
+          }
+        ),
+    };
+  });
 }
 
 async function createDerivedDraftQuote(input = {}) {
@@ -3664,7 +4704,7 @@ async function createDerivedDraftQuote(input = {}) {
     const evidence = await insertQuoteEvidence({
       client,
       quoteId,
-      relationshipId: Number(context.relationship_id),
+      relationshipId: positiveInteger(context.relationship_id),
       actorUserId: validated.actorId,
       idempotencyId: idempotency.reservation.id,
       evidenceType: QUOTE_EVIDENCE_TYPES.REVISION_CREATED,
@@ -3755,6 +4795,7 @@ module.exports = {
   QUOTE_COMMANDS,
   QUOTE_EVIDENCE_TYPES,
   QUOTE_DECISIONS,
+  EXTERNAL_APPROVAL_METHODS,
   QUOTE_LINEAGE_REASONS,
   QUOTE_LINEAGE_TYPES,
   QUOTE_STATUS,
@@ -3771,6 +4812,7 @@ module.exports = {
   getDraftQuote,
   importBusinessDocumentDraftQuote,
   issueQuote,
+  recordExternalQuoteApproval,
   listDraftQuotesByJob,
   removeDraftScopeItem,
   validateScopeItem,
@@ -3779,9 +4821,15 @@ module.exports = {
     QUOTE_INTEGRITY_VERSION_V1,
     QUOTE_INTEGRITY_VERSION_V2,
     customerQuoteDetailProjection,
+    canonicalQuoteCustomerSnapshotProjection,
+    canonicalQuoteApprovalProjection,
     deriveCommercialSnapshots,
     integrityHash,
     businessDocumentSourceFingerprint,
+    externalApprovalTimestamp,
+    resolveBusinessDocumentQuoteCustomerSnapshot,
+    insertCanonicalQuoteCustomerSnapshot,
+    insertCanonicalQuoteApprovalFromCustomerDecision,
     buildWorkingQuoteTerms,
     businessDocumentQuoteReviewProjection,
     loadQuoteContext,

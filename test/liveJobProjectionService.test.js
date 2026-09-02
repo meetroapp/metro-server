@@ -59,6 +59,8 @@ function approvedWorkScheduling(overrides = {}) {
   return [{
     quoteId: "approved-parent",
     approvedQuoteDecisionId: "approved-decision",
+    quoteApprovalId: null,
+    approvalSource: null,
     authorityState: "AVAILABLE",
     visitState: null,
     ...overrides,
@@ -802,6 +804,8 @@ test("canonical state projects exact approved-work authority without changing Qu
   assert.deepEqual(canonical.approvedWorkScheduling, [{
     quoteId: "approved-parent",
     approvedQuoteDecisionId: "approved-decision",
+    quoteApprovalId: null,
+    approvalSource: null,
     authorityState: "AVAILABLE",
     visitState: null,
     deposit: {
@@ -945,7 +949,7 @@ test("authorized context excludes cancelled requests and contains no mutation st
   );
   assert.match(source, /posts\.cancelled_at IS NULL/);
   assert.match(source, /scope_type = 'approved_work'/);
-  assert.match(source, /scope_approved_quote_decision_id = decisions\.id/);
+  assert.match(source, /scope_approved_quote_decision_id=approvals\.customer_decision_id/);
   assert.match(source, /customer\.user_id = relationships\.homeowner_id/);
   assert.match(source, /visits\.purpose = 'APPROVED_WORK'/);
   assert.doesNotMatch(source, /\b(?:INSERT INTO|UPDATE|DELETE FROM)\b/i);

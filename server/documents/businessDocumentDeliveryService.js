@@ -174,6 +174,8 @@ async function loadOwnedContext(client, actorUserId, draftId, { lock = false } =
             obligations.relationship_id AS deposit_relationship_id,
             obligations.quote_id AS deposit_quote_id,
             obligations.issued_quote_version AS deposit_issued_quote_version,
+            obligations.quote_approval_id AS deposit_quote_approval_id,
+            obligations.approval_source AS deposit_approval_source,
             obligations.customer_decision_id AS deposit_customer_decision_id,
             obligations.currency AS deposit_currency,
             obligations.quote_total_minor AS deposit_quote_total_minor,
@@ -253,10 +255,21 @@ async function loadOwnedContext(client, actorUserId, draftId, { lock = false } =
     ? Object.freeze({
         paymentRequirementId: String(row.payment_requirement_id),
         jobId: String(row.deposit_job_id),
-        relationshipId: Number(row.deposit_relationship_id),
+        relationshipId:
+          row.deposit_relationship_id == null
+            ? null
+            : Number(row.deposit_relationship_id),
         quoteId: String(row.deposit_quote_id),
-        issuedQuoteVersion: Number(row.deposit_issued_quote_version),
-        customerDecisionId: String(row.deposit_customer_decision_id),
+        issuedQuoteVersion:
+          Number(row.deposit_issued_quote_version),
+        quoteApprovalId:
+          String(row.deposit_quote_approval_id),
+        approvalSource:
+          row.deposit_approval_source,
+        customerDecisionId:
+          row.deposit_customer_decision_id == null
+            ? null
+            : String(row.deposit_customer_decision_id),
         state: row.deposit_state,
         currency: row.deposit_currency,
         quoteTotalMinor: Number(row.deposit_quote_total_minor),

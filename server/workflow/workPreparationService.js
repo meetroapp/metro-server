@@ -7,6 +7,7 @@ const {
 } = require("../authorization/commercialAuthorityService");
 const {
   evaluateApprovedWorkDepositGateWithClient,
+  preWorkDepositServiceInternals,
 } = require("../finance/preWorkDepositService");
 
 const {
@@ -19,6 +20,8 @@ const {
   validateAuthenticatedActor,
   validateIdempotencyKey,
 } = commercialAuthorityInternals;
+
+const { hasActiveLifecycleGrant } = require("../authorization/lifecycleAuthorityService");
 
 const CONTRACT_VERSION = 1;
 const CAPABILITIES = Object.freeze({
@@ -92,6 +95,8 @@ function canonicalJson(value) {
 function hash(value) {
   return createHash("sha256").update(canonicalJson(value)).digest("hex");
 }
+
+function nullableInteger(value) { return value == null ? null : Number(value); }
 
 function safeLogger(value) {
   return value && typeof value.info === "function" && typeof value.warn === "function"
@@ -202,9 +207,9 @@ async function runTransaction(pool, mode, action) {
 
 async function loadProfessionalContext(client, jobId, actorId, { lock = false } = {}) {
   const result = await client.query(
-    `SELECT jobs.id AS job_id, jobs.job_request_id,
+    `SELECT jobs.id AS job_id, jobs.source_type, jobs.job_request_id,
       jobs.source_request_relationship_id AS relationship_id,
-      relationships.professional_user_id, relationships.homeowner_id,
+      professional.user_id AS professional_user_id, relationships.homeowner_id,
       professional.id AS professional_participant_id,
       customer.id AS customer_participant_id,
       roles.id AS professional_role_assignment_id,
@@ -222,19 +227,22 @@ async function loadProfessionalContext(client, jobId, actorId, { lock = false } 
           AND revocations.id IS NULL
       ) AS active_capabilities
      FROM jobs
-     INNER JOIN posts ON posts.id = jobs.job_request_id
+     LEFT JOIN posts ON posts.id = jobs.job_request_id
        AND posts.lifecycle_contract_version = 2 AND posts.cancelled_at IS NULL
-     INNER JOIN request_relationships relationships
+     LEFT JOIN request_relationships relationships
        ON relationships.id = jobs.source_request_relationship_id
        AND relationships.post_id = jobs.job_request_id
        AND relationships.status = 'active'
        AND relationships.emergency_request_id IS NULL
        AND relationships.professional_user_id = $2
+     LEFT JOIN contractor_profiles profiles
+       ON jobs.source_type='business_document' AND profiles.id=jobs.contractor_profile_id AND profiles.user_id=$2
      INNER JOIN relationship_participants professional
        ON professional.job_id = jobs.id
-       AND professional.request_relationship_id = relationships.id
-       AND professional.user_id = relationships.professional_user_id
-     INNER JOIN relationship_participants customer
+       AND professional.user_id=$2
+       AND ((jobs.source_type='ordinary_request_selection' AND professional.request_relationship_id=relationships.id)
+         OR (jobs.source_type='business_document' AND professional.request_relationship_id IS NULL))
+     LEFT JOIN relationship_participants customer
        ON customer.job_id = jobs.id
        AND customer.request_relationship_id = relationships.id
        AND customer.user_id = relationships.homeowner_id
@@ -249,8 +257,11 @@ async function loadProfessionalContext(client, jobId, actorId, { lock = false } 
      WHERE jobs.id = $1
        AND jobs.lifecycle_contract_version = 2
        AND role_revocations.id IS NULL
+       AND ((jobs.source_type='ordinary_request_selection' AND posts.id IS NOT NULL AND relationships.id IS NOT NULL AND customer.id IS NOT NULL)
+         OR (jobs.source_type='business_document' AND profiles.id IS NOT NULL AND jobs.job_request_id IS NULL
+           AND jobs.source_request_relationship_id IS NULL AND jobs.originating_business_document_id IS NOT NULL))
      LIMIT 1
-     ${lock ? "FOR UPDATE OF jobs, relationships" : ""}`,
+     ${lock ? "FOR UPDATE OF jobs" : ""}`,
     [jobId, actorId, ["quote.read", ...Object.values(CAPABILITIES)]]
   );
   return result.rows[0] || null;
@@ -270,16 +281,35 @@ function requireCapability(context, capability, { bootstrap = false } = {}) {
     : failure(404, "WORK_PREPARATION_UNAVAILABLE", "Work Preparation is unavailable.");
 }
 
+async function requirePlanCapability(client, context, plan, capability) {
+  if (!context || !plan) {
+    return failure(404, "WORK_PREPARATION_UNAVAILABLE", "Work Preparation is unavailable.");
+  }
+  const allowed = await hasActiveLifecycleGrant({
+    client,
+    participantId: context.professional_participant_id,
+    jobId: context.job_id,
+    capability,
+    quoteApprovalId: plan.quote_approval_id,
+    approvedQuoteDecisionId: plan.approved_customer_decision_id,
+    allowJobScope: false,
+  });
+  return allowed ? null : failure(404, "WORK_PREPARATION_UNAVAILABLE", "Work Preparation is unavailable.");
+}
+
 async function loadPlan(client, jobId, planId = null, { lock = false } = {}) {
   const values = [jobId];
   const planFilter = planId ? `AND plans.id = $${values.push(planId)}` : "";
   const result = await client.query(
     `SELECT plans.*,
+      COALESCE(plans.quote_approval_id, common_approval.id) AS quote_approval_id,
+      COALESCE(plans.approval_source, common_approval.approval_source) AS approval_source,
       current.version AS current_version,
       current.planning_state, current.work_start_policy,
       current.internal_notes, current.integrity_hash AS current_integrity_hash,
       current.created_at AS current_version_created_at
      FROM canonical_work_preparation_plans plans
+     LEFT JOIN canonical_quote_approvals common_approval ON common_approval.customer_decision_id=plans.approved_customer_decision_id
      INNER JOIN LATERAL (
        SELECT versions.version, versions.planning_state,
          versions.work_start_policy, versions.internal_notes,
@@ -298,14 +328,15 @@ async function loadPlan(client, jobId, planId = null, { lock = false } = {}) {
   return result.rows[0] || null;
 }
 
-async function loadPlanByDecision(client, jobId, decisionId, { lock = false } = {}) {
+async function loadPlanByApproval(client, jobId, quoteApprovalId, decisionId, { lock = false } = {}) {
   const result = await client.query(
     `SELECT plans.id
      FROM canonical_work_preparation_plans plans
-     WHERE plans.job_id = $1 AND plans.approved_customer_decision_id = $2
+     WHERE plans.job_id = $1 AND (plans.quote_approval_id = $3
+       OR (plans.quote_approval_id IS NULL AND plans.approved_customer_decision_id = $2))
      LIMIT 1
      ${lock ? "FOR UPDATE" : ""}`,
-    [jobId, decisionId]
+    [jobId, decisionId, quoteApprovalId]
   );
   return result.rows[0]
     ? loadPlan(client, jobId, result.rows[0].id, { lock })
@@ -376,7 +407,7 @@ function replayResult(value) {
   return { ...value, replayed: true };
 }
 
-async function grantPlanCapabilities(client, context, planId, decisionId) {
+async function grantPlanCapabilities(client, context, planId, decisionId, quoteApprovalId, approvalSource) {
   const grants = [
     [context.professional_participant_id, CAPABILITIES.READ],
     [context.professional_participant_id, CAPABILITIES.WRITE],
@@ -384,23 +415,23 @@ async function grantPlanCapabilities(client, context, planId, decisionId) {
     [context.professional_participant_id, CAPABILITIES.PREPARATION],
     [context.customer_participant_id, CAPABILITIES.READ_CUSTOMER],
   ];
-  for (const [participantId, capability] of grants) {
-    const key = `work-preparation:${decisionId}:${participantId}:${capability}`;
+  for (const [participantId, capability] of grants.filter(([participantId]) => participantId)) {
+    const key = `work-preparation:${quoteApprovalId}:${participantId}:${capability}`;
     await client.query(
       `INSERT INTO lifecycle_authority_grants (
         id, grantee_participant_id, grantor_participant_id, job_id,
         capability, scope_type, scope_job_id, scope_concern_id,
         scope_evaluation_id, scope_approved_quote_decision_id,
         scope_approved_quote_decision, source_evidence_type,
-        source_evidence_reference, idempotency_key
-       ) VALUES ($1,$2,$3,$4,$5,'approved_work',$4,NULL,NULL,$6,'APPROVED',
-         'canonical_work_preparation_plan',$7,$8)
+        source_evidence_reference, idempotency_key, scope_quote_approval_id, scope_quote_approval_source
+       ) VALUES ($1,$2,$3,$4,$5,'approved_work',$4,NULL,NULL,$6,CASE WHEN $6::uuid IS NULL THEN NULL ELSE 'APPROVED' END,
+         'canonical_work_preparation_plan',$7,$8,$9,$10)
        ON CONFLICT (
          grantor_participant_id, grantee_participant_id, capability,
          scope_type, scope_job_id, idempotency_key
        ) DO NOTHING`,
       [randomUUID(), participantId, context.professional_participant_id,
-        context.job_id, capability, decisionId, planId, key]
+        context.job_id, capability, decisionId, planId, key, quoteApprovalId, approvalSource]
     );
   }
 }
@@ -453,6 +484,7 @@ async function evaluateCommitmentGate(client, plan) {
     client,
     jobId: plan.job_id,
     approvedQuoteDecisionId: plan.approved_customer_decision_id,
+    quoteApprovalId: plan.quote_approval_id,
     lock: true,
   });
   const evidence = depositEvidence(gate);
@@ -661,11 +693,13 @@ function planProjection(plan, rows, gate, { customerSafe = false } = {}) {
     exists: true,
     id: plan.id,
     jobId: plan.job_id,
-    relationshipId: Number(plan.relationship_id),
+    relationshipId: nullableInteger(plan.relationship_id),
     source: {
       quoteId: plan.quote_id,
       issuedQuoteVersion: Number(plan.issued_quote_version),
       approvedCustomerDecisionId: plan.approved_customer_decision_id,
+      quoteApprovalId: plan.quote_approval_id || null,
+      approvalSource: plan.approval_source || null,
     },
     currentVersion: Number(plan.current_version),
     planningState: plan.planning_state,
@@ -722,6 +756,7 @@ async function projectPlanWithClient(client, plan, { customerSafe = false, lockD
     client,
     jobId: plan.job_id,
     approvedQuoteDecisionId: plan.approved_customer_decision_id,
+    quoteApprovalId: plan.quote_approval_id,
     lock: lockDeposit,
   });
   return planProjection(plan, rows, gate, { customerSafe });
@@ -733,11 +768,9 @@ async function getWorkPreparation(input = {}) {
   return runTransaction(input.pool, "REPEATABLE READ READ ONLY", async (client) => {
     const context = await loadProfessionalContext(client, validated.jobId, validated.actorId);
     const plan = await loadPlan(client, validated.jobId);
-    const authorityError = requireCapability(
-      context,
-      CAPABILITIES.READ,
-      { bootstrap: !plan }
-    );
+    const authorityError = plan
+      ? await requirePlanCapability(client, context, plan, CAPABILITIES.READ)
+      : requireCapability(context, CAPABILITIES.READ, { bootstrap: true });
     if (authorityError) return { abort: authorityError };
     if (!plan) {
       return {
@@ -766,12 +799,14 @@ async function getWorkPreparation(input = {}) {
 async function materializeWorkPreparation(input = {}) {
   const validated = validateInput(
     input,
-    ["jobId", "approvedCustomerDecisionId", "idempotencyKey"],
+    ["jobId", "approvedCustomerDecisionId", "quoteApprovalId", "idempotencyKey"],
     { idempotency: true }
   );
   if (validated.error) return validated.error;
-  const decisionId = normalizedUuid(input.approvedCustomerDecisionId);
-  if (!decisionId) {
+  let decisionId = input.approvedCustomerDecisionId == null ? null : normalizedUuid(input.approvedCustomerDecisionId);
+  const quoteApprovalId = input.quoteApprovalId == null ? null : normalizedUuid(input.quoteApprovalId);
+  if ((!decisionId && !quoteApprovalId) || (input.approvedCustomerDecisionId != null && !decisionId) ||
+      (input.quoteApprovalId != null && !quoteApprovalId)) {
     return failure(400, "INVALID_APPROVED_CUSTOMER_DECISION", "An approved customer decision is required.");
   }
   return runTransaction(input.pool, "SERIALIZABLE", async (client) => {
@@ -783,13 +818,19 @@ async function materializeWorkPreparation(input = {}) {
     );
     const authorityError = requireCapability(context, CAPABILITIES.WRITE, { bootstrap: true });
     if (authorityError) return { abort: authorityError };
+    const approval = await preWorkDepositServiceInternals.loadApprovedQuoteApprovalSource(client, {
+      jobId:validated.jobId,approvalId:quoteApprovalId,customerDecisionId:decisionId,lock:true,
+    });
+    if (!approval) return {abort:failure(404,"APPROVED_WORK_PREPARATION_SOURCE_UNAVAILABLE","The exact Quote approval is unavailable.")};
+    decisionId=approval.customer_decision_id;
     const idempotency = await reserveCommand(client, {
       jobId: validated.jobId,
       participantId: context.professional_participant_id,
       commandName: COMMANDS.MATERIALIZE,
-      commandScope: `decision:${decisionId}`,
+      commandScope: decisionId ? `decision:${decisionId}` : `approval:${approval.quote_approval_id}`,
       idempotencyKey: validated.idempotencyKey,
-      requestFingerprint: hash({ jobId: validated.jobId, decisionId }),
+      requestFingerprint: hash({ jobId: validated.jobId, decisionId,
+        ...(decisionId ? {} : {quoteApprovalId:approval.quote_approval_id}) }),
     });
     if (idempotency.error) return { abort: idempotency.error };
     if (idempotency.replay) return { result: replayResult(idempotency.replay) };
@@ -798,13 +839,14 @@ async function materializeWorkPreparation(input = {}) {
       client,
       jobId: validated.jobId,
       approvedQuoteDecisionId: decisionId,
+      quoteApprovalId: approval.quote_approval_id,
       lock: true,
     });
     const source = gate.source;
     if (
       !source ||
       source.customer_decision_id !== decisionId ||
-      Number(source.relationship_id) !== Number(context.relationship_id) ||
+      nullableInteger(source.relationship_id) !== nullableInteger(context.relationship_id) ||
       source.decision !== "APPROVED"
     ) {
       return {
@@ -815,7 +857,7 @@ async function materializeWorkPreparation(input = {}) {
         ),
       };
     }
-    const existing = await loadPlanByDecision(client, validated.jobId, decisionId, { lock: true });
+    const existing = await loadPlanByApproval(client, validated.jobId, approval.quote_approval_id, decisionId, { lock: true });
     if (existing) {
       const result = {
         ok: true,
@@ -835,13 +877,13 @@ async function materializeWorkPreparation(input = {}) {
         issued_quote_version, approved_customer_decision_id,
         customer_participant_id, commercial_currency, source_integrity_hash,
         created_by_professional_participant_id, created_by_role_assignment_id,
-        created_command_idempotency_id
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-      [planId, validated.jobId, Number(source.job_request_id), Number(source.relationship_id),
+        created_command_idempotency_id,quote_approval_id,approval_source,approved_customer_decision
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+      [planId, validated.jobId, nullableInteger(source.job_request_id), nullableInteger(source.relationship_id),
         source.quote_id, Number(source.issued_quote_version), decisionId,
         source.customer_participant_id, source.currency, source.issued_integrity_hash,
         context.professional_participant_id, context.professional_role_assignment_id,
-        idempotency.row.id]
+        idempotency.row.id,source.quote_approval_id,source.approval_source,decisionId ? "APPROVED" : null]
     );
     await client.query(
       `INSERT INTO canonical_work_preparation_plan_versions (
@@ -849,11 +891,11 @@ async function materializeWorkPreparation(input = {}) {
         work_start_policy, internal_notes, recorded_by_participant_id,
         command_idempotency_id, integrity_hash
        ) VALUES ($1,1,$2,$3,'PLANNING','NONE',NULL,$4,$5,$6)`,
-      [planId, validated.jobId, Number(source.relationship_id),
+      [planId, validated.jobId, nullableInteger(source.relationship_id),
         context.professional_participant_id, idempotency.row.id,
         hash({ planId, version: 1, planningState: "PLANNING", workStartPolicy: "NONE" })]
     );
-    await grantPlanCapabilities(client, context, planId, decisionId);
+    await grantPlanCapabilities(client, context, planId, decisionId,source.quote_approval_id,source.approval_source);
     const plan = await loadPlan(client, validated.jobId, planId);
     const result = {
       ok: true,
@@ -996,9 +1038,9 @@ async function reviseWorkPreparation(input = {}) {
   }
   return runTransaction(input.pool, "SERIALIZABLE", async (client) => {
     const context = await loadProfessionalContext(client, validated.jobId, validated.actorId, { lock: true });
-    const authorityError = requireCapability(context, CAPABILITIES.WRITE);
-    if (authorityError) return { abort: authorityError };
     const plan = await loadPlan(client, validated.jobId, planId, { lock: true });
+    const authorityError = await requirePlanCapability(client, context, plan, CAPABILITIES.WRITE);
+    if (authorityError) return { abort: authorityError };
     if (!plan) return { abort: failure(404, "WORK_PREPARATION_UNAVAILABLE", "Work Preparation is unavailable.") };
     const normalizedItems = input.items.map((item) => validateRevisionItem(item, plan));
     if (
@@ -1069,7 +1111,7 @@ async function reviseWorkPreparation(input = {}) {
         work_start_policy, internal_notes, recorded_by_participant_id,
         command_idempotency_id, integrity_hash
        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-      [planId, version, validated.jobId, Number(plan.relationship_id), planningState,
+      [planId, version, validated.jobId, nullableInteger(plan.relationship_id), planningState,
         workStartPolicy, internalNotes, context.professional_participant_id,
         idempotency.row.id, requestFingerprint]
     );
@@ -1092,7 +1134,7 @@ async function reviseWorkPreparation(input = {}) {
             id, plan_id, job_id, relationship_id,
             created_by_participant_id, created_command_idempotency_id
            ) VALUES ($1,$2,$3,$4,$5,$6)`,
-          [item.id, planId, validated.jobId, Number(plan.relationship_id),
+          [item.id, planId, validated.jobId, nullableInteger(plan.relationship_id),
             context.professional_participant_id, child.row.id]
         );
         await completeCommand(client, child.row.id, {
@@ -1113,7 +1155,7 @@ async function reviseWorkPreparation(input = {}) {
           source_quote_id, source_quote_version, source_scope_item_id,
           recorded_by_participant_id, command_idempotency_id
          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
-        [planId, version, item.id, validated.jobId, Number(plan.relationship_id),
+        [planId, version, item.id, validated.jobId, nullableInteger(plan.relationship_id),
           item.sequence, item.kind, item.description, item.quantity, item.unit,
           item.provider, item.commercial, item.visibility, item.required,
           item.internalCost, item.internalCurrency, item.sourceLineage,
@@ -1178,7 +1220,7 @@ async function insertEvent(client, {
       recorded_by_participant_id, command_idempotency_id
      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`,
     [id, plan.id, planVersion, itemId, plan.job_id,
-      Number(plan.relationship_id), identity.sequence, identity.previousId,
+      nullableInteger(plan.relationship_id), identity.sequence, identity.previousId,
       eventType, dimension, state, visibility, customerVisibleNote, internalNote,
       purchaseId, correctionId, deposit.gateType, deposit.obligationId,
       deposit.obligationVersion, deposit.obligationState, deposit.currency,
@@ -1231,9 +1273,9 @@ async function recordMaterialPurchase(input = {}) {
 
   return runTransaction(input.pool, "SERIALIZABLE", async (client) => {
     const context = await loadProfessionalContext(client, validated.jobId, validated.actorId, { lock: true });
-    const authorityError = requireCapability(context, CAPABILITIES.PURCHASE);
-    if (authorityError) return { abort: authorityError };
     const plan = await loadPlan(client, validated.jobId, planId, { lock: true });
+    const authorityError = await requirePlanCapability(client, context, plan, CAPABILITIES.PURCHASE);
+    if (authorityError) return { abort: authorityError };
     if (!plan) return { abort: failure(404, "WORK_PREPARATION_UNAVAILABLE", "Work Preparation is unavailable.") };
     const idempotency = await reserveCommand(client, {
       jobId: validated.jobId,
@@ -1276,7 +1318,7 @@ async function recordMaterialPurchase(input = {}) {
         deposit_obligation_state, deposit_currency,
         recorded_by_participant_id, command_idempotency_id
        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
-      [purchaseId, validated.jobId, Number(plan.relationship_id), planId,
+      [purchaseId, validated.jobId, nullableInteger(plan.relationship_id), planId,
         expectedVersion, itemId, quantity, unit, internalCost, internalCurrency,
         vendor, purchasedAt, externalReference, visibility, gate.gateType,
         gate.obligationId, gate.obligationVersion, gate.obligationState,
@@ -1346,9 +1388,9 @@ async function correctMaterialPurchase(input = {}) {
 
   return runTransaction(input.pool, "SERIALIZABLE", async (client) => {
     const context = await loadProfessionalContext(client, validated.jobId, validated.actorId, { lock: true });
-    const authorityError = requireCapability(context, CAPABILITIES.PURCHASE);
-    if (authorityError) return { abort: authorityError };
     const plan = await loadPlan(client, validated.jobId, planId, { lock: true });
+    const authorityError = await requirePlanCapability(client, context, plan, CAPABILITIES.PURCHASE);
+    if (authorityError) return { abort: authorityError };
     if (!plan) return { abort: failure(404, "WORK_PREPARATION_UNAVAILABLE", "Work Preparation is unavailable.") };
     const idempotency = await reserveCommand(client, {
       jobId: validated.jobId,
@@ -1400,7 +1442,7 @@ async function correctMaterialPurchase(input = {}) {
         reversed_internal_cost_minor, reason_category, reason, corrected_at,
         recorded_by_participant_id, command_idempotency_id
        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
-      [correctionId, purchaseId, validated.jobId, Number(plan.relationship_id),
+      [correctionId, purchaseId, validated.jobId, nullableInteger(plan.relationship_id),
         planId, Number(purchase.basis_plan_version), purchase.item_id,
         reversedQuantity, reversedCost, reasonCategory, reason, correctedAt,
         context.professional_participant_id, idempotency.row.id]
@@ -1507,9 +1549,9 @@ async function recordPreparationEvent(input = {}) {
 
   return runTransaction(input.pool, "SERIALIZABLE", async (client) => {
     const context = await loadProfessionalContext(client, validated.jobId, validated.actorId, { lock: true });
-    const authorityError = requireCapability(context, CAPABILITIES.PREPARATION);
-    if (authorityError) return { abort: authorityError };
     const plan = await loadPlan(client, validated.jobId, planId, { lock: true });
+    const authorityError = await requirePlanCapability(client, context, plan, CAPABILITIES.PREPARATION);
+    if (authorityError) return { abort: authorityError };
     if (!plan) return { abort: failure(404, "WORK_PREPARATION_UNAVAILABLE", "Work Preparation is unavailable.") };
     const idempotency = await reserveCommand(client, {
       jobId: validated.jobId,
@@ -1597,9 +1639,9 @@ async function attachEvidenceReference(input = {}) {
   ) return failure(400, "INVALID_WORK_PREPARATION_EVIDENCE", "The evidence reference is invalid.");
   return runTransaction(input.pool, "SERIALIZABLE", async (client) => {
     const context = await loadProfessionalContext(client, validated.jobId, validated.actorId, { lock: true });
-    const authorityError = requireCapability(context, CAPABILITIES.PREPARATION);
-    if (authorityError) return { abort: authorityError };
     const plan = await loadPlan(client, validated.jobId, planId, { lock: true });
+    const authorityError = await requirePlanCapability(client, context, plan, CAPABILITIES.PREPARATION);
+    if (authorityError) return { abort: authorityError };
     if (!plan) return { abort: failure(404, "WORK_PREPARATION_UNAVAILABLE", "Work Preparation is unavailable.") };
     const idempotency = await reserveCommand(client, {
       jobId: validated.jobId,
@@ -1620,7 +1662,7 @@ async function attachEvidenceReference(input = {}) {
         reference_namespace, reference_id, visibility,
         recorded_by_participant_id, command_idempotency_id
        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-      [evidenceId, planId, validated.jobId, Number(plan.relationship_id),
+      [evidenceId, planId, validated.jobId, nullableInteger(plan.relationship_id),
         purchaseId, correctionId, eventId, evidenceType, referenceNamespace,
         referenceId, visibility, context.professional_participant_id,
         idempotency.row.id]
@@ -1640,19 +1682,20 @@ async function attachEvidenceReference(input = {}) {
 async function evaluateWorkPreparationStartWithClient({
   client,
   jobId,
-  approvedCustomerDecisionId,
+  approvedCustomerDecisionId = null,
+  quoteApprovalId = null,
   execution = null,
   lock = false,
 }) {
   const decisionId = normalizedUuid(approvedCustomerDecisionId);
-  if (!decisionId) {
+  if (!decisionId && !normalizedUuid(quoteApprovalId)) {
     return {
       allowed: false,
       code: "WORK_PREPARATION_DECISION_REQUIRED",
       plan: null,
     };
   }
-  const plan = await loadPlanByDecision(client, jobId, decisionId, { lock });
+  const plan = await loadPlanByApproval(client, jobId, quoteApprovalId, decisionId, { lock });
   if (!plan) {
     return {
       allowed: true,
@@ -1666,10 +1709,11 @@ async function evaluateWorkPreparationStartWithClient({
   }
   if (
     execution && (
+      plan.quote_approval_id !== execution.quote_approval_id ||
       plan.approved_customer_decision_id !== execution.approved_customer_decision_id ||
       plan.quote_id !== execution.quote_id ||
       Number(plan.issued_quote_version) !== Number(execution.issued_quote_version) ||
-      Number(plan.relationship_id) !== Number(execution.relationship_id)
+      nullableInteger(plan.relationship_id) !== nullableInteger(execution.relationship_id)
     )
   ) {
     return {

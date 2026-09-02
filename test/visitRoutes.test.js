@@ -19,7 +19,7 @@ function response() {
   };
 }
 
-test("Visit routes expose exactly nine authenticated bounded endpoints", () => {
+test("Visit routes expose exactly ten authenticated bounded endpoints", () => {
   const routes = [];
   const app = {
     get(path, ...handlers) { routes.push({ method: "GET", path, handlers }); },
@@ -32,13 +32,14 @@ test("Visit routes expose exactly nine authenticated bounded endpoints", () => {
     getPool: () => ({}),
     sendPublicDatabaseError: () => {},
   });
-  assert.equal(routes.length, 9);
+  assert.equal(routes.length, 10);
   assert.equal(routes.every((route) => route.handlers[0] === authMiddleware), true);
   assert.deepEqual(routes.map(({ method, path }) => `${method} ${path}`), [
     "GET /jobs/:jobId/visits",
     "GET /jobs/:jobId/visits/:visitId",
     "POST /jobs/:jobId/visits",
     "POST /jobs/:jobId/visits/:visitId/confirm",
+    "POST /jobs/:jobId/visits/:visitId/external-confirmation",
     "POST /jobs/:jobId/visits/:visitId/change-request",
     "POST /jobs/:jobId/visits/:visitId/reschedule",
     "POST /jobs/:jobId/visits/:visitId/cancel",
@@ -97,6 +98,7 @@ test("handlers forward only governed Visit fields from authenticated boundaries"
         evaluationId: undefined,
         workstreamIds: undefined,
         approvedQuoteDecisionId: undefined,
+        quoteApprovalId: undefined,
         reason: "A governed reason",
         idempotencyKey: "visit-key",
       },

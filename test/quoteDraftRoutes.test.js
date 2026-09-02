@@ -44,6 +44,7 @@ test("Quote routes register bounded Draft, issue, customer decision, and lineage
     ["GET", "/quotes/:quoteId/customer"],
     ["POST", "/quotes/:quoteId/approve"],
     ["POST", "/quotes/:quoteId/decline"],
+    ["POST", "/quotes/:quoteId/external-approval"],
     ["POST", "/quotes/:quoteId/derived-quotes"],
   ]);
   assert.equal(routes.some(([, path]) => /procurement|payment|invoice/.test(path)), false);

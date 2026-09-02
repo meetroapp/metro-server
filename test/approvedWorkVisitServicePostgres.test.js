@@ -13,6 +13,7 @@ const {
   createVisitTestIdentities,
   createVisitWorkstream,
   ensureVisitEvaluation,
+  ensureCompletedVisitEvaluation,
   quiet,
 } = require("./helpers/visitLifecycleFixture");
 const {
@@ -123,7 +124,7 @@ async function createIssuedQuote(pool, identities, fixture, suffix) {
     `approved-work-pending-scope-${suffix}`
   );
   assert.equal(scoped.ok, true, scoped.code);
-  await ensureVisitEvaluation(pool, identities, fixture, suffix);
+  await ensureCompletedVisitEvaluation(pool, identities, fixture, suffix);
   const issued = await quoteCommand(
     issueQuote,
     pool,
@@ -135,6 +136,10 @@ async function createIssuedQuote(pool, identities, fixture, suffix) {
     `approved-work-pending-issue-${suffix}`
   );
   assert.equal(issued.ok, true, issued.code);
+  const delivered = await require("../server/authorization/quoteDeliveryService").sendQuoteInMeetro({
+    pool,authenticatedActor:{id:identities.professionalId},quoteId:issued.quote.id,
+    expectedIssuedVersion:issued.quote.currentVersion,idempotencyKey:`pending-deliver-${suffix}`,logger:quiet});
+  assert.equal(delivered.ok,true,delivered.code);
   return issued.quote;
 }
 
@@ -178,10 +183,10 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 47);
+      assert.equal(migrations[78].filename, "202609020004_generalize_approved_work_visit_approval_authority.sql");
       const migrated = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(migrated.success, true);
-      assert.equal(migrated.applied.length, 45);
+      assert.equal(migrated.applied.length, migrations.length);
 
       const identities = await createVisitTestIdentities(pool, suffix);
       const fixture = await createVisitLifecycleFixture(pool, identities, `${suffix}-a`);
@@ -302,7 +307,7 @@ test(
       assert.equal(activated.code, "APPROVED_WORK_VISIT_AUTHORITY_ACTIVATED");
       assert.equal(activated.authority.state, "ACTIVE");
       assert.equal(activated.authority.customerCapabilities.length, 3);
-      assert.equal(activated.authority.professionalCapabilities.length, 5);
+      assert.equal(activated.authority.professionalCapabilities.length, 6);
       const replayed = await authorityCommand(
         pool,
         identities.professionalId,
@@ -322,7 +327,7 @@ test(
          ORDER BY grants.grantee_participant_id, grants.capability`,
         [fixture.jobId, "approved_work_visit_activation"]
       );
-      assert.equal(grants.rows.length, 8);
+      assert.equal(grants.rows.length, 9);
       assert.equal(grants.rows.every((row) => row.scope_type === "approved_work"), true);
       assert.equal(
         grants.rows.every((row) =>
@@ -346,7 +351,7 @@ test(
           approvedQuoteDecisionId: null,
         }
       );
-      assert.equal(rejectedEvaluation.code, "VISIT_AUTHORITY_REQUIRED");
+      assert.equal(rejectedEvaluation.code, "VISIT_SUBJECT_SCOPE_MISMATCH");
       const rejectedFollowUp = await visitCommand(
         proposeVisit,
         pool,
@@ -364,7 +369,7 @@ test(
         identities.professionalId,
         proposal(fixture, crossDecision)
       );
-      assert.equal(crossSubject.code, "VISIT_AUTHORITY_REQUIRED");
+      assert.equal(crossSubject.code, "VISIT_SUBJECT_SCOPE_MISMATCH");
       const customerProposal = await visitCommand(
         proposeVisit,
         pool,
@@ -435,7 +440,7 @@ test(
           reason: "Customer timing request accepted.",
         }
       );
-      assert.equal(rescheduled.code, "VISIT_RESCHEDULED");
+      assert.equal(rescheduled.code, "VISIT_SCHEDULE_PROPOSED");
       const cancelled = await visitCommand(
         cancelVisit,
         pool,
@@ -456,7 +461,11 @@ test(
         randomUUID(),
         () => new Date("2026-08-21T16:00:00.000Z")
       );
-      assert.equal(completed.code, "VISIT_COMPLETED");
+      assert.equal(completed.code, "INVALID_VISIT_TRANSITION");
+      // A new proposal cannot complete without confirmation and canonical start.
+      const cancelledProposal = await visitCommand(cancelVisit,pool,identities.professionalId,
+        {jobId:fixture.jobId,visitId:first.visit.id,expectedVersion:3,reason:"Close scheduling-only fixture."});
+      assert.equal(cancelledProposal.code,"VISIT_CANCELLED");
 
       const readable = await listVisits({
         pool,

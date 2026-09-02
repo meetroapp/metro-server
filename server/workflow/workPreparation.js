@@ -58,6 +58,7 @@ function createWorkPreparationHandlers({
       service.materializeWorkPreparation({
         ...common(req),
         approvedCustomerDecisionId: req.body?.approvedCustomerDecisionId,
+      quoteApprovalId: req.body?.quoteApprovalId,
         idempotencyKey: req.headers?.["idempotency-key"],
       })
     ),

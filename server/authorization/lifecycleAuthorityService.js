@@ -33,6 +33,7 @@ async function hasActiveLifecycleGrant({
   concernId = null,
   evaluationId = null,
   approvedQuoteDecisionId = null,
+  quoteApprovalId = null,
   allowJobScope = true,
   allowEvaluationVisitScope = false,
   at = null,
@@ -45,13 +46,15 @@ async function hasActiveLifecycleGrant({
   const normalizedApprovedQuoteDecisionId = approvedQuoteDecisionId == null
     ? null
     : uuid(approvedQuoteDecisionId);
+  const normalizedQuoteApprovalId = quoteApprovalId == null ? null : uuid(quoteApprovalId);
   const normalizedCapability = String(capability || "").trim();
   if (
     !normalizedParticipantId ||
     !normalizedJobId ||
     !normalizedCapability ||
     (evaluationId != null && !normalizedEvaluationId) ||
-    (approvedQuoteDecisionId != null && !normalizedApprovedQuoteDecisionId)
+    (approvedQuoteDecisionId != null && !normalizedApprovedQuoteDecisionId) ||
+    (quoteApprovalId != null && !normalizedQuoteApprovalId)
   ) {
     return false;
   }
@@ -82,12 +85,25 @@ async function hasActiveLifecycleGrant({
           AND lifecycle_authority_grants.scope_evaluation_id = $5
         )
         OR (
-          $6::uuid IS NOT NULL
-          AND lifecycle_authority_grants.scope_type = 'approved_work'
+          lifecycle_authority_grants.scope_type = 'approved_work'
           AND lifecycle_authority_grants.scope_concern_id IS NULL
           AND lifecycle_authority_grants.scope_evaluation_id IS NULL
-          AND lifecycle_authority_grants.scope_approved_quote_decision_id = $6
-          AND lifecycle_authority_grants.scope_approved_quote_decision = 'APPROVED'
+          AND EXISTS (
+            SELECT 1 FROM canonical_quote_approvals approvals
+            WHERE approvals.job_id = $3
+              AND ($10::uuid IS NULL OR approvals.id = $10)
+              AND ($6::uuid IS NULL OR approvals.customer_decision_id = $6)
+              AND ($10::uuid IS NOT NULL OR $6::uuid IS NOT NULL)
+              AND (
+                (lifecycle_authority_grants.scope_quote_approval_id = approvals.id
+                 AND lifecycle_authority_grants.scope_quote_approval_source = approvals.approval_source)
+                OR
+                (lifecycle_authority_grants.scope_quote_approval_id IS NULL
+                 AND approvals.approval_source = 'MEETRO_CUSTOMER'
+                 AND lifecycle_authority_grants.scope_approved_quote_decision_id = approvals.customer_decision_id
+                 AND lifecycle_authority_grants.scope_approved_quote_decision = 'APPROVED')
+              )
+          )
         )
         OR (
           $9::boolean = TRUE
@@ -116,6 +132,7 @@ async function hasActiveLifecycleGrant({
       allowJobScope === true,
       at,
       allowEvaluationVisitScope === true,
+      normalizedQuoteApprovalId,
     ]
   );
 

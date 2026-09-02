@@ -34,7 +34,7 @@ function response() {
   };
 }
 
-test("D4 uses one exact-decision readiness gate for Activity and Approved Work Visit start", () => {
+test("D4 uses one exact-approval readiness gate for Activity and Approved Work Visit start", () => {
   const execution = source("approvedWorkExecutionService.js");
   const preparation = source("workPreparationService.js");
   const workstream = source("workstreamService.js");
@@ -43,7 +43,7 @@ test("D4 uses one exact-decision readiness gate for Activity and Approved Work V
   assert.match(execution, /async function evaluateApprovedWorkStartReadinessWithClient/);
   assert.match(workstream, /evaluateApprovedWorkStartReadinessWithClient\(/);
   assert.match(visit, /evaluateApprovedWorkStartReadinessWithClient\(/);
-  assert.match(preparation, /loadPlanByDecision\(client, jobId, decisionId/);
+  assert.match(preparation, /loadPlanByApproval\(client, jobId, quoteApprovalId, decisionId/);
   assert.doesNotMatch(
     preparation.slice(
       preparation.indexOf("async function evaluateWorkPreparationStartWithClient"),
@@ -68,6 +68,7 @@ test("Approved Work Visit start is gated while Evaluation Visit timing behavior 
   const visit = source("visitService.js");
   assert.match(visit, /current\.purpose === "APPROVED_WORK"/);
   assert.match(visit, /approvedCustomerDecisionId: current\.approved_quote_decision_id/);
+  assert.match(visit, /quoteApprovalId: current\.quote_approval_id/);
   assert.match(visit, /sourceType: "APPROVED_WORK_VISIT"/);
   assert.match(visit, /current\.purpose !== "APPROVED_WORK"/);
   assert.match(visit, /EARLY_START_WINDOW_MS = 30 \* 60 \* 1000/);

@@ -195,55 +195,358 @@ async function runTransaction(pool, mode, action) {
   }
 }
 
-async function loadProfessionalJobContext(client, jobId, actorId, { lock = false } = {}) {
-  const result = await client.query(
-    `SELECT jobs.id AS job_id, jobs.job_request_id,
-      jobs.source_request_relationship_id AS relationship_id,
-      relationships.status AS relationship_status,
-      relationships.homeowner_id, relationships.professional_user_id,
-      conversations.id AS conversation_id,
-      professional.id AS professional_participant_id,
-      customer.id AS customer_participant_id,
-      EXISTS (
-        SELECT 1 FROM participant_role_assignments roles
-        LEFT JOIN participant_role_revocations revocations
-          ON revocations.role_assignment_id = roles.id
-        WHERE roles.participant_id = professional.id
-          AND roles.job_id = jobs.id
-          AND roles.role = 'PRIMARY_PROFESSIONAL'
-          AND roles.valid_from <= CURRENT_TIMESTAMP
-          AND (roles.valid_until IS NULL OR roles.valid_until > CURRENT_TIMESTAMP)
-          AND revocations.id IS NULL
-      ) AS primary_professional_active
+async function loadProfessionalJobContext(
+  client,
+  jobId,
+  actorId,
+  { lock = false } = {}
+) {
+  const jobResult = await client.query(
+    `SELECT source_type
      FROM jobs
-     INNER JOIN posts
-       ON posts.id = jobs.job_request_id
-       AND posts.lifecycle_contract_version = 2
-       AND posts.cancelled_at IS NULL
-     INNER JOIN request_relationships relationships
-       ON relationships.id = jobs.source_request_relationship_id
-       AND relationships.post_id = jobs.job_request_id
-       AND relationships.emergency_request_id IS NULL
-       AND relationships.status = 'active'
-       AND relationships.professional_user_id = $2
-     INNER JOIN relationship_participants professional
-       ON professional.job_id = jobs.id
-       AND professional.request_relationship_id = relationships.id
-       AND professional.user_id = relationships.professional_user_id
-     INNER JOIN relationship_participants customer
-       ON customer.job_id = jobs.id
-       AND customer.request_relationship_id = relationships.id
-       AND customer.user_id = relationships.homeowner_id
-     LEFT JOIN conversations
-       ON conversations.relationship_id = relationships.id
-       AND conversations.status = 'active'
-     WHERE jobs.id = $1 AND jobs.lifecycle_contract_version = 2
+     WHERE id = $1
+       AND lifecycle_contract_version = 2
      LIMIT 1
-     ${lock ? "FOR UPDATE OF jobs, relationships" : ""}`,
-    [jobId, actorId]
+     ${lock ? "FOR UPDATE" : ""}`,
+    [jobId]
   );
-  const context = result.rows[0] || null;
-  return context && context.primary_professional_active === true ? context : null;
+
+  const job = jobResult.rows[0] || null;
+  if (!job) return null;
+
+  if (job.source_type === "ordinary_request_selection") {
+    const result = await client.query(
+      `SELECT
+        jobs.id AS job_id,
+        jobs.job_request_id,
+        jobs.source_request_relationship_id AS relationship_id,
+        jobs.source_type,
+        relationships.status AS relationship_status,
+        relationships.homeowner_id,
+        relationships.professional_user_id,
+        conversations.id AS conversation_id,
+        professional.id AS professional_participant_id,
+        customer.id AS customer_participant_id,
+        EXISTS (
+          SELECT 1
+          FROM participant_role_assignments roles
+          LEFT JOIN participant_role_revocations revocations
+            ON revocations.role_assignment_id = roles.id
+          WHERE roles.participant_id = professional.id
+            AND roles.job_id = jobs.id
+            AND roles.role = 'PRIMARY_PROFESSIONAL'
+            AND roles.valid_from <= CURRENT_TIMESTAMP
+            AND (
+              roles.valid_until IS NULL
+              OR roles.valid_until > CURRENT_TIMESTAMP
+            )
+            AND revocations.id IS NULL
+        ) AS primary_professional_active
+       FROM jobs
+       INNER JOIN posts
+         ON posts.id = jobs.job_request_id
+        AND posts.lifecycle_contract_version = 2
+        AND posts.cancelled_at IS NULL
+       INNER JOIN request_relationships relationships
+         ON relationships.id =
+            jobs.source_request_relationship_id
+        AND relationships.post_id = jobs.job_request_id
+        AND relationships.emergency_request_id IS NULL
+        AND relationships.status = 'active'
+        AND relationships.professional_user_id = $2
+       INNER JOIN relationship_participants professional
+         ON professional.job_id = jobs.id
+        AND professional.request_relationship_id =
+            relationships.id
+        AND professional.user_id =
+            relationships.professional_user_id
+       INNER JOIN relationship_participants customer
+         ON customer.job_id = jobs.id
+        AND customer.request_relationship_id =
+            relationships.id
+        AND customer.user_id = relationships.homeowner_id
+       LEFT JOIN conversations
+         ON conversations.relationship_id = relationships.id
+        AND conversations.status = 'active'
+       WHERE jobs.id = $1
+         AND jobs.lifecycle_contract_version = 2
+         AND jobs.source_type =
+             'ordinary_request_selection'
+       LIMIT 1
+       ${lock ? "FOR UPDATE OF relationships" : ""}`,
+      [jobId, actorId]
+    );
+
+    const context = result.rows[0] || null;
+    return context &&
+      context.primary_professional_active === true
+      ? context
+      : null;
+  }
+
+  if (job.source_type === "business_document") {
+    const result = await client.query(
+      `SELECT
+        jobs.id AS job_id,
+        jobs.job_request_id,
+        jobs.source_request_relationship_id AS relationship_id,
+        jobs.source_type,
+        NULL::text AS relationship_status,
+        NULL::integer AS homeowner_id,
+        professional.user_id AS professional_user_id,
+        NULL::integer AS conversation_id,
+        professional.id AS professional_participant_id,
+        NULL::uuid AS customer_participant_id,
+        EXISTS (
+          SELECT 1
+          FROM participant_role_assignments roles
+          LEFT JOIN participant_role_revocations revocations
+            ON revocations.role_assignment_id = roles.id
+          WHERE roles.participant_id = professional.id
+            AND roles.job_id = jobs.id
+            AND roles.role = 'PRIMARY_PROFESSIONAL'
+            AND roles.valid_from <= CURRENT_TIMESTAMP
+            AND (
+              roles.valid_until IS NULL
+              OR roles.valid_until > CURRENT_TIMESTAMP
+            )
+            AND revocations.id IS NULL
+        ) AS primary_professional_active
+       FROM jobs
+       INNER JOIN contractor_profiles profiles
+         ON profiles.id = jobs.contractor_profile_id
+        AND profiles.user_id = $2
+       INNER JOIN relationship_participants professional
+         ON professional.job_id = jobs.id
+        AND professional.request_relationship_id IS NULL
+        AND professional.user_id = $2
+       WHERE jobs.id = $1
+         AND jobs.lifecycle_contract_version = 2
+         AND jobs.source_type = 'business_document'
+         AND jobs.job_request_id IS NULL
+         AND jobs.source_request_relationship_id IS NULL
+         AND jobs.originating_business_document_id IS NOT NULL
+       LIMIT 1`,
+      [jobId, actorId]
+    );
+
+    const context = result.rows[0] || null;
+    return context &&
+      context.primary_professional_active === true
+      ? context
+      : null;
+  }
+
+  return null;
+}
+
+async function loadApprovedQuoteApprovalSource(client, {
+  jobId,
+  approvalId = null,
+  customerDecisionId = null,
+  lock = false,
+} = {}) {
+  const values = [jobId];
+  const filters = [];
+
+  if (approvalId) {
+    values.push(approvalId);
+    filters.push(`AND approvals.id = $${values.length}`);
+  }
+
+  if (customerDecisionId) {
+    values.push(customerDecisionId);
+    filters.push(
+      `AND approvals.customer_decision_id = $${values.length}`
+    );
+  }
+
+  const result = await client.query(
+    `SELECT
+      jobs.id AS job_id,
+      jobs.job_request_id,
+      jobs.source_request_relationship_id AS relationship_id,
+      jobs.source_type AS job_source_type,
+
+      relationships.status AS relationship_status,
+
+      professional.id AS professional_participant_id,
+      professional.user_id AS professional_user_id,
+
+      customer.id AS customer_participant_id,
+      customer.user_id AS customer_user_id,
+
+      approvals.id AS quote_approval_id,
+      approvals.approval_source,
+      approvals.decision,
+      approvals.customer_decision_id,
+      approvals.external_approval_evidence_id,
+      approvals.issued_quote_version,
+      approvals.issued_integrity_hash,
+      approvals.approved_at,
+      approvals.approved_at AS decided_at,
+
+      decisions.customer_participant_id
+        AS decision_customer_participant_id,
+      decisions.decision AS customer_decision,
+
+      quotes.id AS quote_id,
+      quotes.status AS quote_status,
+
+      versions.status AS quote_version_status,
+      versions.currency,
+      versions.total_minor,
+      versions.customer_terms_snapshot,
+      versions.integrity_hash
+        AS quote_version_integrity_hash,
+
+      issuances.source_snapshot_integrity_hash
+        AS issuance_integrity_hash
+
+     FROM jobs
+
+     LEFT JOIN request_relationships relationships
+       ON jobs.source_type = 'ordinary_request_selection'
+      AND relationships.id =
+        jobs.source_request_relationship_id
+      AND relationships.post_id = jobs.job_request_id
+      AND relationships.emergency_request_id IS NULL
+      AND relationships.status = 'active'
+
+     LEFT JOIN relationship_participants professional
+       ON professional.job_id = jobs.id
+      AND (
+        (
+          jobs.source_type = 'ordinary_request_selection'
+          AND professional.request_relationship_id =
+            relationships.id
+          AND professional.user_id =
+            relationships.professional_user_id
+        )
+        OR
+        (
+          jobs.source_type = 'business_document'
+          AND professional.request_relationship_id IS NULL
+          AND professional.user_id =
+            jobs.created_by_user_id
+        )
+      )
+
+     LEFT JOIN relationship_participants customer
+       ON jobs.source_type = 'ordinary_request_selection'
+      AND customer.job_id = jobs.id
+      AND customer.request_relationship_id =
+        relationships.id
+      AND customer.user_id = relationships.homeowner_id
+
+     INNER JOIN canonical_quote_approvals approvals
+       ON approvals.job_id = jobs.id
+      AND approvals.decision = 'APPROVED'
+
+     LEFT JOIN canonical_quote_customer_decisions decisions
+       ON decisions.id = approvals.customer_decision_id
+      AND decisions.quote_id = approvals.quote_id
+      AND decisions.job_id = approvals.job_id
+
+     INNER JOIN canonical_quotes quotes
+       ON quotes.id = approvals.quote_id
+      AND quotes.job_id = jobs.id
+      AND quotes.status = 'ISSUED'
+
+     INNER JOIN canonical_quote_versions versions
+       ON versions.quote_id = approvals.quote_id
+      AND versions.job_id = jobs.id
+      AND versions.version =
+        approvals.issued_quote_version
+      AND versions.status = 'ISSUED'
+
+     INNER JOIN canonical_quote_issuances issuances
+       ON issuances.quote_id = approvals.quote_id
+      AND issuances.job_id = jobs.id
+      AND issuances.quote_version =
+        approvals.issued_quote_version
+      AND issuances.source_snapshot_integrity_hash =
+        approvals.issued_integrity_hash
+
+     WHERE jobs.id = $1
+       AND jobs.lifecycle_contract_version = 2
+
+       ${filters.join("\n       ")}
+
+       AND (
+         (
+           approvals.approval_source =
+             'MEETRO_CUSTOMER'
+           AND jobs.source_type =
+             'ordinary_request_selection'
+           AND relationships.id IS NOT NULL
+           AND customer.id IS NOT NULL
+           AND approvals.customer_decision_id IS NOT NULL
+           AND approvals.external_approval_evidence_id IS NULL
+         )
+         OR
+         (
+           approvals.approval_source =
+             'EXTERNAL_EVIDENCE'
+           AND jobs.source_type = 'business_document'
+           AND jobs.job_request_id IS NULL
+           AND jobs.source_request_relationship_id IS NULL
+           AND approvals.customer_decision_id IS NULL
+           AND approvals.external_approval_evidence_id
+             IS NOT NULL
+         )
+       )
+
+     ORDER BY approvals.approved_at DESC, approvals.id DESC
+     LIMIT 1
+
+     ${lock ? "FOR UPDATE OF jobs, quotes, approvals" : ""}`,
+    values
+  );
+
+  const source = result.rows[0] || null;
+  if (!source) return null;
+
+  const commonInvalid =
+    source.decision !== "APPROVED" ||
+    source.quote_status !== "ISSUED" ||
+    source.quote_version_status !== "ISSUED" ||
+    source.issued_integrity_hash !==
+      source.quote_version_integrity_hash ||
+    source.issued_integrity_hash !==
+      source.issuance_integrity_hash;
+
+  const meetroInvalid =
+    source.approval_source === "MEETRO_CUSTOMER" &&
+    (
+      source.job_source_type !==
+        "ordinary_request_selection" ||
+      source.relationship_status !== "active" ||
+      !source.customer_decision_id ||
+      source.customer_decision !== "APPROVED" ||
+      !source.customer_participant_id ||
+      source.customer_participant_id !==
+        source.decision_customer_participant_id
+    );
+
+  const externalInvalid =
+    source.approval_source === "EXTERNAL_EVIDENCE" &&
+    (
+      source.job_source_type !== "business_document" ||
+      source.job_request_id !== null ||
+      source.relationship_id !== null ||
+      source.customer_decision_id !== null ||
+      source.customer_participant_id !== null ||
+      !source.external_approval_evidence_id
+    );
+
+  if (commonInvalid || meetroInvalid || externalInvalid) {
+    throw new Error(
+      "Pre-work deposit canonical Quote approval integrity failed."
+    );
+  }
+
+  return source;
 }
 
 async function loadApprovedDecisionSource(client, {
@@ -251,90 +554,14 @@ async function loadApprovedDecisionSource(client, {
   decisionId = null,
   lock = false,
 } = {}) {
-  const values = [jobId];
-  let decisionFilter = "";
-  if (decisionId) {
-    values.push(decisionId);
-    decisionFilter = `AND decisions.id = $${values.length}`;
-  }
-  const result = await client.query(
-    `SELECT jobs.id AS job_id, jobs.job_request_id,
-      jobs.source_request_relationship_id AS relationship_id,
-      relationships.status AS relationship_status,
-      professional.id AS professional_participant_id,
-      customer.id AS customer_participant_id,
-      professional.user_id AS professional_user_id,
-      customer.user_id AS customer_user_id,
-      decisions.id AS customer_decision_id,
-      decisions.decision, decisions.issued_quote_version,
-      decisions.issued_integrity_hash, decisions.decided_at,
-      decisions.customer_participant_id AS decision_customer_participant_id,
-      quotes.id AS quote_id, quotes.status AS quote_status,
-      versions.status AS quote_version_status,
-      versions.currency, versions.total_minor,
-      versions.customer_terms_snapshot,
-      versions.integrity_hash AS quote_version_integrity_hash,
-      issuances.source_snapshot_integrity_hash AS issuance_integrity_hash
-     FROM jobs
-     INNER JOIN request_relationships relationships
-       ON relationships.id = jobs.source_request_relationship_id
-       AND relationships.post_id = jobs.job_request_id
-       AND relationships.emergency_request_id IS NULL
-       AND relationships.status = 'active'
-     INNER JOIN relationship_participants professional
-       ON professional.job_id = jobs.id
-       AND professional.request_relationship_id = relationships.id
-       AND professional.user_id = relationships.professional_user_id
-     INNER JOIN relationship_participants customer
-       ON customer.job_id = jobs.id
-       AND customer.request_relationship_id = relationships.id
-       AND customer.user_id = relationships.homeowner_id
-     INNER JOIN canonical_quote_customer_decisions decisions
-       ON decisions.job_id = jobs.id
-       AND decisions.relationship_id = relationships.id
-       AND decisions.customer_participant_id = customer.id
-       AND decisions.decision = 'APPROVED'
-     INNER JOIN canonical_quotes quotes
-       ON quotes.id = decisions.quote_id
-       AND quotes.job_id = jobs.id
-       AND quotes.relationship_id = relationships.id
-       AND quotes.status = 'ISSUED'
-     INNER JOIN canonical_quote_versions versions
-       ON versions.quote_id = quotes.id
-       AND versions.job_id = jobs.id
-       AND versions.version = decisions.issued_quote_version
-       AND versions.status = 'ISSUED'
-     INNER JOIN canonical_quote_issuances issuances
-       ON issuances.quote_id = quotes.id
-       AND issuances.job_id = jobs.id
-       AND issuances.quote_version = decisions.issued_quote_version
-       AND issuances.source_snapshot_integrity_hash = decisions.issued_integrity_hash
-     WHERE jobs.id = $1
-       AND jobs.lifecycle_contract_version = 2
-       ${decisionFilter}
-     ORDER BY decisions.decided_at DESC, decisions.id DESC
-     LIMIT 1
-     ${lock ? "FOR UPDATE OF jobs, relationships, quotes, decisions" : ""}`,
-    values
-  );
-  const source = result.rows[0] || null;
-  if (
-    source &&
-    (
-      source.decision !== "APPROVED" ||
-      source.quote_status !== "ISSUED" ||
-      source.quote_version_status !== "ISSUED" ||
-      source.issued_integrity_hash !== source.quote_version_integrity_hash ||
-      source.issued_integrity_hash !== source.issuance_integrity_hash ||
-      source.customer_participant_id !== source.decision_customer_participant_id
-    )
-  ) {
-    throw new Error("Pre-work deposit commercial source integrity failed.");
-  }
-  return source;
+  return loadApprovedQuoteApprovalSource(client, {
+    jobId,
+    customerDecisionId: decisionId,
+    lock,
+  });
 }
 
-async function loadObligation(client, decisionId, { lock = false } = {}) {
+async function loadObligation(client, quoteApprovalId, { lock = false } = {}) {
   const result = await client.query(
     `SELECT obligations.*,
       latest.version AS latest_version,
@@ -352,10 +579,10 @@ async function loadObligation(client, decisionId, { lock = false } = {}) {
        ORDER BY versions.version DESC
        LIMIT 1
      ) latest ON TRUE
-     WHERE obligations.customer_decision_id = $1
+     WHERE obligations.quote_approval_id = $1
      LIMIT 1
      ${lock ? "FOR UPDATE OF obligations" : ""}`,
-    [decisionId]
+    [quoteApprovalId]
   );
   return result.rows[0] || null;
 }
@@ -404,9 +631,15 @@ function depositProjection(source, requirement, obligation, history = []) {
     return {
       contractVersion: CONTRACT_VERSION,
       jobId: source.job_id,
+      relationshipId:
+        source.relationship_id == null
+          ? null
+          : Number(source.relationship_id),
       quoteId: source.quote_id,
       issuedQuoteVersion: Number(source.issued_quote_version),
-      customerDecisionId: source.customer_decision_id,
+      quoteApprovalId: source.quote_approval_id,
+      approvalSource: source.approval_source,
+      customerDecisionId: source.customer_decision_id || null,
       materialized: false,
       state: "NOT_REQUIRED",
       schedulingLocked: false,
@@ -432,9 +665,15 @@ function depositProjection(source, requirement, obligation, history = []) {
   return {
     contractVersion: CONTRACT_VERSION,
     jobId: source.job_id,
+    relationshipId:
+      source.relationship_id == null
+        ? null
+        : Number(source.relationship_id),
     quoteId: source.quote_id,
     issuedQuoteVersion: Number(source.issued_quote_version),
-    customerDecisionId: source.customer_decision_id,
+    quoteApprovalId: source.quote_approval_id,
+    approvalSource: source.approval_source,
+    customerDecisionId: source.customer_decision_id || null,
     obligationId: obligation?.id || null,
     materialized: Boolean(obligation),
     state,
@@ -543,31 +782,71 @@ async function completeCommand(client, commandId, result) {
   }
 }
 
-async function insertInitialObligation(client, source, requirement, commandId, actorParticipantId) {
+async function insertInitialObligation(
+  client,
+  source,
+  requirement,
+  commandId,
+  actorParticipantId
+) {
   const obligationId = randomUUID();
   const createdEventId = randomUUID();
+
+  const jobRequestId =
+    source.job_request_id == null
+      ? null
+      : Number(source.job_request_id);
+
+  const relationshipId =
+    source.relationship_id == null
+      ? null
+      : Number(source.relationship_id);
+
+  const customerDecision =
+    source.customer_decision_id
+      ? "APPROVED"
+      : null;
+
   await client.query(
     `INSERT INTO canonical_pre_work_deposit_obligations (
-      id, job_id, job_request_id, relationship_id,
-      quote_id, issued_quote_version, customer_decision_id,
-      customer_decision, customer_participant_id, currency,
-      quote_total_minor, deposit_rule_type,
-      deposit_percent_basis_points, deposit_fixed_minor,
-      required_minor, source_integrity_hash, effective_at,
-      created_by_participant_id, created_command_idempotency_id
+      id,
+      job_id,
+      job_request_id,
+      relationship_id,
+      quote_id,
+      issued_quote_version,
+      quote_approval_id,
+      approval_source,
+      customer_decision_id,
+      customer_decision,
+      customer_participant_id,
+      currency,
+      quote_total_minor,
+      deposit_rule_type,
+      deposit_percent_basis_points,
+      deposit_fixed_minor,
+      required_minor,
+      source_integrity_hash,
+      effective_at,
+      created_by_participant_id,
+      created_command_idempotency_id
      ) VALUES (
-      $1, $2, $3, $4, $5, $6, $7, 'APPROVED', $8, $9,
-      $10, $11, $12, $13, $14, $15, $16, $17, $18
+      $1, $2, $3, $4, $5, $6, $7, $8,
+      $9, $10, $11, $12, $13, $14, $15,
+      $16, $17, $18, $19, $20, $21
      )`,
     [
       obligationId,
       source.job_id,
-      Number(source.job_request_id),
-      Number(source.relationship_id),
+      jobRequestId,
+      relationshipId,
       source.quote_id,
       Number(source.issued_quote_version),
-      source.customer_decision_id,
-      source.customer_participant_id,
+      source.quote_approval_id,
+      source.approval_source,
+      source.customer_decision_id || null,
+      customerDecision,
+      source.customer_participant_id || null,
       source.currency,
       Number(source.total_minor),
       requirement.ruleType,
@@ -575,11 +854,12 @@ async function insertInitialObligation(client, source, requirement, commandId, a
       requirement.fixedMinor,
       requirement.requiredMinor,
       source.issued_integrity_hash,
-      source.decided_at,
+      source.approved_at,
       actorParticipantId,
       commandId,
     ]
   );
+
   const integrityHash = hash({
     obligationId,
     version: 1,
@@ -588,16 +868,29 @@ async function insertInitialObligation(client, source, requirement, commandId, a
     appliedMinor: 0,
     remainingMinor: requirement.requiredMinor,
   });
+
   await client.query(
     `INSERT INTO canonical_pre_work_deposit_versions (
-      obligation_id, version, job_id, relationship_id, currency,
-      state, required_minor, applied_minor, remaining_minor,
-      recorded_by_participant_id, command_idempotency_id, integrity_hash
-     ) VALUES ($1, 1, $2, $3, $4, 'DUE', $5, 0, $5, $6, $7, $8)`,
+      obligation_id,
+      version,
+      job_id,
+      relationship_id,
+      currency,
+      state,
+      required_minor,
+      applied_minor,
+      remaining_minor,
+      recorded_by_participant_id,
+      command_idempotency_id,
+      integrity_hash
+     ) VALUES (
+      $1, 1, $2, $3, $4, 'DUE',
+      $5, 0, $5, $6, $7, $8
+     )`,
     [
       obligationId,
       source.job_id,
-      Number(source.relationship_id),
+      relationshipId,
       source.currency,
       requirement.requiredMinor,
       actorParticipantId,
@@ -605,33 +898,63 @@ async function insertInitialObligation(client, source, requirement, commandId, a
       integrityHash,
     ]
   );
+
   await client.query(
     `INSERT INTO canonical_pre_work_deposit_events (
-      id, obligation_id, obligation_version, previous_obligation_version,
-      job_id, event_type, obligation_state,
-      recorded_by_participant_id, command_idempotency_id
-     ) VALUES ($1, $2, 1, NULL, $3, 'DEPOSIT_OBLIGATION_CREATED',
-       'DUE', $4, $5)`,
-    [createdEventId, obligationId, source.job_id, actorParticipantId, commandId]
+      id,
+      obligation_id,
+      obligation_version,
+      previous_obligation_version,
+      job_id,
+      event_type,
+      obligation_state,
+      recorded_by_participant_id,
+      command_idempotency_id
+     ) VALUES (
+      $1, $2, 1, NULL, $3,
+      'DEPOSIT_OBLIGATION_CREATED',
+      'DUE',
+      $4,
+      $5
+     )`,
+    [
+      createdEventId,
+      obligationId,
+      source.job_id,
+      actorParticipantId,
+      commandId,
+    ]
   );
-  const obligation = await loadObligation(client, source.customer_decision_id, {
-    lock: true,
-  });
-  return obligation ? { ...obligation, created_event_id: createdEventId } : null;
+
+  const obligation = await loadObligation(
+    client,
+    source.quote_approval_id,
+    { lock: true }
+  );
+
+  return obligation
+    ? {
+        ...obligation,
+        created_event_id: createdEventId,
+      }
+    : null;
 }
 
-async function materializeApprovedDecisionDepositWithClient({
+async function materializeApprovedQuoteApprovalDepositWithClient({
   client,
   jobId,
-  decisionId,
+  approvalId = null,
+  customerDecisionId = null,
   actorParticipantId,
   idempotencyKey,
 }) {
-  const source = await loadApprovedDecisionSource(client, {
+  const source = await loadApprovedQuoteApprovalSource(client, {
     jobId,
-    decisionId,
+    approvalId,
+    customerDecisionId,
     lock: true,
   });
+
   if (!source) {
     return {
       error: failure(
@@ -641,42 +964,84 @@ async function materializeApprovedDecisionDepositWithClient({
       ),
     };
   }
+
   const requirement = deriveDepositRequirement({
-    customerTermsSnapshot: source.customer_terms_snapshot,
+    customerTermsSnapshot:
+      source.customer_terms_snapshot,
     totalMinor: Number(source.total_minor),
   });
+
   if (requirement.kind !== "REQUIRED") {
-    return { source, requirement, obligation: null, materialized: false };
+    return {
+      source,
+      requirement,
+      obligation: null,
+      materialized: false,
+    };
   }
+
+  const relationshipId =
+    source.relationship_id == null
+      ? null
+      : Number(source.relationship_id);
+
   const requestFingerprint = hash({
     command: COMMANDS.MATERIALIZE,
     jobId: source.job_id,
-    relationshipId: Number(source.relationship_id),
+    relationshipId,
     quoteId: source.quote_id,
-    issuedQuoteVersion: Number(source.issued_quote_version),
-    customerDecisionId: source.customer_decision_id,
-    sourceIntegrityHash: source.issued_integrity_hash,
-    requiredMinor: requirement.requiredMinor,
+    issuedQuoteVersion:
+      Number(source.issued_quote_version),
+    quoteApprovalId:
+      source.quote_approval_id,
+    approvalSource:
+      source.approval_source,
+    customerDecisionId:
+      source.customer_decision_id || null,
+    sourceIntegrityHash:
+      source.issued_integrity_hash,
+    requiredMinor:
+      requirement.requiredMinor,
   });
+
   const reserved = await reserveCommand(client, {
     jobId: source.job_id,
     participantId: actorParticipantId,
     commandName: COMMANDS.MATERIALIZE,
-    commandScope: `decision:${source.customer_decision_id}`,
+    commandScope:
+      `approval:${source.quote_approval_id}`,
     idempotencyKey,
     requestFingerprint,
   });
-  if (reserved.error) return { error: reserved.error };
-  if (reserved.replay) {
-    const obligation = await loadObligation(client, source.customer_decision_id, {
-      lock: true,
-    });
-    return { source, requirement, obligation, materialized: false, replayed: true };
+
+  if (reserved.error) {
+    return { error: reserved.error };
   }
-  let obligation = await loadObligation(client, source.customer_decision_id, {
-    lock: true,
-  });
+
+  if (reserved.replay) {
+    const obligation = await loadObligation(
+      client,
+      source.quote_approval_id,
+      { lock: true }
+    );
+
+    return {
+      source,
+      requirement,
+      obligation,
+      materialized: false,
+      replayed: true,
+    };
+  }
+
+  let obligation = await loadObligation(
+    client,
+    source.quote_approval_id,
+    { lock: true }
+  );
+
   const materialized = !obligation;
+
   if (!obligation) {
     obligation = await insertInitialObligation(
       client,
@@ -686,37 +1051,85 @@ async function materializeApprovedDecisionDepositWithClient({
       actorParticipantId
     );
   }
-  if (materialized) {
+
+  const customerUserId =
+    positiveInteger(source.customer_user_id);
+
+  if (materialized && customerUserId) {
     await createCanonicalLifecycleAlertWithClient({
       client,
-      recipientUserId: Number(source.customer_user_id),
+      recipientUserId: customerUserId,
       sourceDomain: "commercial",
       sourceEventType: "deposit.required",
       sourceEntityType: "deposit_obligation",
       sourceEntityId: obligation.id,
-      sourceEventId: obligation.created_event_id,
+      sourceEventId:
+        obligation.created_event_id,
       category: "payment",
       priority: "high",
-      titleKey: "alerts.payment.depositRequired.title",
-      messageKey: "alerts.payment.depositRequired.message",
-      safePayload: { shortPreview: "Deposit required before scheduling" },
+      titleKey:
+        "alerts.payment.depositRequired.title",
+      messageKey:
+        "alerts.payment.depositRequired.message",
+      safePayload: {
+        shortPreview:
+          "Deposit required before scheduling",
+      },
       destination: {
         type: "quote",
-        payload: { jobId: source.job_id, quoteId: source.quote_id },
+        payload: {
+          jobId: source.job_id,
+          quoteId: source.quote_id,
+        },
       },
-      availableAt: source.decided_at || null,
+      availableAt:
+        source.approved_at || null,
     });
   }
+
   const result = {
     code: materialized
       ? "PRE_WORK_DEPOSIT_MATERIALIZED"
       : "PRE_WORK_DEPOSIT_ALREADY_MATERIALIZED",
     obligationId: obligation.id,
-    customerDecisionId: source.customer_decision_id,
-    latestVersion: Number(obligation.latest_version),
+    quoteApprovalId:
+      source.quote_approval_id,
+    approvalSource:
+      source.approval_source,
+    customerDecisionId:
+      source.customer_decision_id || null,
+    latestVersion:
+      Number(obligation.latest_version),
   };
-  await completeCommand(client, reserved.row.id, result);
-  return { source, requirement, obligation, materialized };
+
+  await completeCommand(
+    client,
+    reserved.row.id,
+    result
+  );
+
+  return {
+    source,
+    requirement,
+    obligation,
+    materialized,
+  };
+}
+
+async function materializeApprovedDecisionDepositWithClient({
+  client,
+  jobId,
+  decisionId,
+  actorParticipantId,
+  idempotencyKey,
+}) {
+  return materializeApprovedQuoteApprovalDepositWithClient({
+    client,
+    jobId,
+    customerDecisionId: decisionId || null,
+    actorParticipantId,
+    idempotencyKey,
+  });
 }
 
 async function getProfessionalDepositStatus(input = {}) {
@@ -733,7 +1146,9 @@ async function getProfessionalDepositStatus(input = {}) {
         abort: failure(404, "PRE_WORK_DEPOSIT_UNAVAILABLE", "The deposit record is unavailable."),
       };
     }
-    const source = await loadApprovedDecisionSource(client, { jobId: validated.jobId });
+    const source = await loadApprovedQuoteApprovalSource(client, {
+      jobId: validated.jobId,
+    });
     if (!source) {
       return {
         abort: failure(
@@ -747,7 +1162,7 @@ async function getProfessionalDepositStatus(input = {}) {
       customerTermsSnapshot: source.customer_terms_snapshot,
       totalMinor: Number(source.total_minor),
     });
-    const obligation = await loadObligation(client, source.customer_decision_id);
+    const obligation = await loadObligation(client, source.quote_approval_id);
     const history = await loadPaymentHistory(client, obligation?.id);
     return {
       result: {
@@ -782,7 +1197,7 @@ async function materializePreWorkDepositObligation(input = {}) {
         abort: failure(404, "PRE_WORK_DEPOSIT_UNAVAILABLE", "The deposit record is unavailable."),
       };
     }
-    const source = await loadApprovedDecisionSource(client, {
+    const source = await loadApprovedQuoteApprovalSource(client, {
       jobId: validated.jobId,
       lock: true,
     });
@@ -795,13 +1210,16 @@ async function materializePreWorkDepositObligation(input = {}) {
         ),
       };
     }
-    const outcome = await materializeApprovedDecisionDepositWithClient({
-      client,
-      jobId: validated.jobId,
-      decisionId: source.customer_decision_id,
-      actorParticipantId: context.professional_participant_id,
-      idempotencyKey: idempotency.idempotencyKey,
-    });
+    const outcome =
+      await materializeApprovedQuoteApprovalDepositWithClient({
+        client,
+        jobId: validated.jobId,
+        approvalId: source.quote_approval_id,
+        actorParticipantId:
+          context.professional_participant_id,
+        idempotencyKey:
+          idempotency.idempotencyKey,
+      });
     if (outcome.error) return { abort: outcome.error };
     if (outcome.requirement.kind === "UNVERIFIED") {
       return {
@@ -887,7 +1305,9 @@ async function insertNextVersion(client, {
       obligation.id,
       version,
       obligation.job_id,
-      Number(obligation.relationship_id),
+      obligation.relationship_id == null
+        ? null
+        : Number(obligation.relationship_id),
       obligation.currency,
       state,
       Number(obligation.required_minor),
@@ -954,7 +1374,7 @@ async function confirmDepositReceived(input = {}) {
         abort: failure(404, "PRE_WORK_DEPOSIT_UNAVAILABLE", "The deposit record is unavailable."),
       };
     }
-    const source = await loadApprovedDecisionSource(client, {
+    const source = await loadApprovedQuoteApprovalSource(client, {
       jobId: validated.jobId,
       lock: true,
     });
@@ -967,13 +1387,16 @@ async function confirmDepositReceived(input = {}) {
         ),
       };
     }
-    const ensured = await materializeApprovedDecisionDepositWithClient({
-      client,
-      jobId: validated.jobId,
-      decisionId: source.customer_decision_id,
-      actorParticipantId: context.professional_participant_id,
-      idempotencyKey: `ensure:${source.customer_decision_id}`,
-    });
+    const ensured =
+      await materializeApprovedQuoteApprovalDepositWithClient({
+        client,
+        jobId: validated.jobId,
+        approvalId: source.quote_approval_id,
+        actorParticipantId:
+          context.professional_participant_id,
+        idempotencyKey:
+          `ensure:${source.quote_approval_id}`,
+      });
     if (ensured.error) return { abort: ensured.error };
     if (ensured.requirement.kind === "UNVERIFIED") {
       return {
@@ -993,10 +1416,16 @@ async function confirmDepositReceived(input = {}) {
         ),
       };
     }
-    let obligation = await loadObligation(client, source.customer_decision_id, {
+    let obligation = await loadObligation(client, source.quote_approval_id, {
       lock: true,
     });
     if (!obligation) throw new Error("Required pre-work deposit obligation is missing.");
+
+    const relationshipId =
+      context.relationship_id == null
+        ? null
+        : Number(context.relationship_id);
+
     const requestFingerprint = hash({
       command: COMMANDS.RECORD,
       jobId: validated.jobId,
@@ -1075,7 +1504,7 @@ async function confirmDepositReceived(input = {}) {
       [
         receiptId,
         validated.jobId,
-        Number(context.relationship_id),
+        relationshipId,
         amountMinor,
         currency,
         normalizedMethod,
@@ -1125,7 +1554,7 @@ async function confirmDepositReceived(input = {}) {
         receiptId,
         obligation.id,
         validated.jobId,
-        Number(context.relationship_id),
+        relationshipId,
         currency,
         allocatedMinor,
         context.professional_participant_id,
@@ -1166,18 +1595,21 @@ async function confirmDepositReceived(input = {}) {
         allocationCommand.row.id,
       ]
     );
-    if (state === "SATISFIED") {
+    const customerUserId =
+      positiveInteger(source.customer_user_id);
+
+    if (state === "SATISFIED" && customerUserId) {
       await resolveCanonicalLifecycleAlertsWithClient({
         client,
         sourceDomain: "commercial",
         sourceEntityType: "deposit_obligation",
         sourceEntityId: obligation.id,
         sourceEventTypes: ["deposit.required"],
-        recipientUserId: Number(source.customer_user_id),
+        recipientUserId: customerUserId,
       });
       await createCanonicalLifecycleAlertWithClient({
         client,
-        recipientUserId: Number(source.customer_user_id),
+        recipientUserId: customerUserId,
         sourceDomain: "commercial",
         sourceEventType: "deposit.satisfied",
         sourceEntityType: "deposit_obligation",
@@ -1228,55 +1660,69 @@ async function confirmDepositReceived(input = {}) {
       },
       deposit: depositProjection(source, ensured.requirement, obligation, history),
     };
-    if (!positiveInteger(context.conversation_id)) {
-      return {
-        abort: failure(
-          409,
-          "PRE_WORK_DEPOSIT_CONVERSATION_UNAVAILABLE",
-          "The received Payment cannot be represented in the customer relationship."
-        ),
-      };
-    }
-    await createPaymentLifecycleMessageWithClient({
-      client,
-      conversation: {
-        id: Number(context.conversation_id),
-        homeowner_id: Number(context.homeowner_id),
-        professional_user_id: Number(context.professional_user_id),
-        status: "active",
-      },
-      senderUserId: Number(context.professional_user_id),
-      recipientUserId: Number(context.homeowner_id),
-      messageText: state === "SATISFIED"
-        ? "Payment received. The deposit requirement is satisfied."
-        : "Payment received. A remaining deposit is still due.",
-      messageType: "payment_received",
-      workflowType: "PAYMENT_RECEIVED",
-      quoteId: source.quote_id,
-      jobId: source.job_id,
-      workflowPayload: {
-        schemaVersion: 1,
+    if (source.approval_source === "MEETRO_CUSTOMER") {
+      if (!positiveInteger(context.conversation_id)) {
+        return {
+          abort: failure(
+            409,
+            "PRE_WORK_DEPOSIT_CONVERSATION_UNAVAILABLE",
+            "The received Payment cannot be represented in the customer relationship."
+          ),
+        };
+      }
+
+      await createPaymentLifecycleMessageWithClient({
+        client,
+        conversation: {
+          id: Number(context.conversation_id),
+          homeowner_id: Number(context.homeowner_id),
+          professional_user_id:
+            Number(context.professional_user_id),
+          status: "active",
+        },
+        senderUserId:
+          Number(context.professional_user_id),
+        recipientUserId:
+          Number(context.homeowner_id),
+        messageText: state === "SATISFIED"
+          ? "Payment received. The deposit requirement is satisfied."
+          : "Payment received. A remaining deposit is still due.",
+        messageType: "payment_received",
+        workflowType: "PAYMENT_RECEIVED",
         quoteId: source.quote_id,
         jobId: source.job_id,
-        issuedQuoteVersion: Number(source.issued_quote_version),
-        state: state === "SATISFIED" ? "DEPOSIT_RECEIVED" : "PARTIALLY_RECEIVED",
-        currency,
-        quoteTotalMinor: Number(source.total_minor),
-        requiredMinor: Number(obligation.required_minor),
-        receivedMinor: appliedMinor,
-        remainingMinor,
-        balanceRemainingMinor: Number(source.total_minor) - appliedMinor,
-        paymentTerms: ensured.requirement.paymentTerms || null,
-        payment: {
-          receiptId,
-          grossAmountMinor: amountMinor,
-          allocatedMinor,
-          displayMethod: displayMethod || normalizedMethod,
-          receivedAt,
-          externalReference,
+        workflowPayload: {
+          schemaVersion: 1,
+          quoteId: source.quote_id,
+          jobId: source.job_id,
+          issuedQuoteVersion:
+            Number(source.issued_quote_version),
+          state: state === "SATISFIED"
+            ? "DEPOSIT_RECEIVED"
+            : "PARTIALLY_RECEIVED",
+          currency,
+          quoteTotalMinor:
+            Number(source.total_minor),
+          requiredMinor:
+            Number(obligation.required_minor),
+          receivedMinor: appliedMinor,
+          remainingMinor,
+          balanceRemainingMinor:
+            Number(source.total_minor) - appliedMinor,
+          paymentTerms:
+            ensured.requirement.paymentTerms || null,
+          payment: {
+            receiptId,
+            grossAmountMinor: amountMinor,
+            allocatedMinor,
+            displayMethod:
+              displayMethod || normalizedMethod,
+            receivedAt,
+            externalReference,
+          },
         },
-      },
-    });
+      });
+    }
     await completeCommand(client, reserved.row.id, result);
     return { result };
   });
@@ -1327,8 +1773,14 @@ async function reverseDepositAllocation(input = {}) {
         abort: failure(404, "PRE_WORK_DEPOSIT_UNAVAILABLE", "The deposit record is unavailable."),
       };
     }
+    const relationshipId =
+      context.relationship_id == null
+        ? null
+        : Number(context.relationship_id);
+
     const allocationResult = await client.query(
       `SELECT allocations.*, receipts.gross_amount_minor,
+        obligations.quote_approval_id,
         obligations.customer_decision_id,
         (
           SELECT COALESCE(sum(reversals.reversed_minor), 0)
@@ -1339,19 +1791,22 @@ async function reverseDepositAllocation(input = {}) {
        INNER JOIN canonical_pre_work_payment_receipts receipts
          ON receipts.id = allocations.receipt_id
          AND receipts.job_id = allocations.job_id
-         AND receipts.relationship_id = allocations.relationship_id
+         AND receipts.relationship_id
+             IS NOT DISTINCT FROM allocations.relationship_id
          AND receipts.currency = allocations.currency
        INNER JOIN canonical_pre_work_deposit_obligations obligations
          ON obligations.id = allocations.obligation_id
          AND obligations.job_id = allocations.job_id
-         AND obligations.relationship_id = allocations.relationship_id
+         AND obligations.relationship_id
+             IS NOT DISTINCT FROM allocations.relationship_id
          AND obligations.currency = allocations.currency
        WHERE allocations.id = $1
          AND allocations.job_id = $2
-         AND allocations.relationship_id = $3
+         AND allocations.relationship_id
+             IS NOT DISTINCT FROM $3
        LIMIT 1
        FOR UPDATE OF allocations`,
-      [allocationId, validated.jobId, Number(context.relationship_id)]
+      [allocationId, validated.jobId, relationshipId]
     );
     const allocation = allocationResult.rows[0];
     if (!allocation) {
@@ -1359,9 +1814,11 @@ async function reverseDepositAllocation(input = {}) {
         abort: failure(404, "PRE_WORK_DEPOSIT_ALLOCATION_UNAVAILABLE", "The payment allocation is unavailable."),
       };
     }
-    let obligation = await loadObligation(client, allocation.customer_decision_id, {
-      lock: true,
-    });
+    let obligation = await loadObligation(
+      client,
+      allocation.quote_approval_id,
+      { lock: true }
+    );
     if (!obligation || obligation.id !== allocation.obligation_id) {
       throw new Error("Deposit reversal obligation identity failed.");
     }
@@ -1429,7 +1886,7 @@ async function reverseDepositAllocation(input = {}) {
         allocation.receipt_id,
         obligation.id,
         validated.jobId,
-        Number(context.relationship_id),
+        relationshipId,
         obligation.currency,
         amountMinor,
         reversalEffect,
@@ -1497,9 +1954,9 @@ async function reverseDepositAllocation(input = {}) {
        ) AS work_started`,
       [validated.jobId]
     );
-    const source = await loadApprovedDecisionSource(client, {
+    const source = await loadApprovedQuoteApprovalSource(client, {
       jobId: validated.jobId,
-      decisionId: obligation.customer_decision_id,
+      approvalId: obligation.quote_approval_id,
     });
     obligation = {
       ...obligation,
@@ -1540,14 +1997,20 @@ async function reverseDepositAllocation(input = {}) {
 async function evaluateApprovedWorkDepositGateWithClient({
   client,
   jobId,
-  approvedQuoteDecisionId,
+  quoteApprovalId = null,
+  approvedQuoteDecisionId = null,
   lock = false,
 }) {
-  const source = await loadApprovedDecisionSource(client, {
-    jobId,
-    decisionId: approvedQuoteDecisionId,
-    lock,
-  });
+  // Scheduling always binds an exact approval; never fall back to the latest
+  // approval when neither common authority nor legacy provenance is supplied.
+  const source = (quoteApprovalId || approvedQuoteDecisionId)
+    ? await loadApprovedQuoteApprovalSource(client, {
+        jobId,
+        approvalId: quoteApprovalId,
+        customerDecisionId: approvedQuoteDecisionId,
+        lock,
+      })
+    : null;
   if (!source) {
     return {
       allowed: false,
@@ -1579,7 +2042,7 @@ async function evaluateApprovedWorkDepositGateWithClient({
       obligation: null,
     };
   }
-  const obligation = await loadObligation(client, source.customer_decision_id, { lock });
+  const obligation = await loadObligation(client, source.quote_approval_id, { lock });
   if (!obligation) {
     return {
       allowed: false,
@@ -1626,7 +2089,9 @@ module.exports = {
     deriveDepositRequirement,
     fixedDepositMinor,
     hash,
+    loadApprovedQuoteApprovalSource,
     materializeApprovedDecisionDepositWithClient,
+    materializeApprovedQuoteApprovalDepositWithClient,
     schedulingGateFailure,
   }),
   reverseDepositAllocation,

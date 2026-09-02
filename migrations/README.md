@@ -93,6 +93,12 @@ Current inventory:
 73. `202608300009_add_business_time_settings_authority.sql`
 74. `202608300010_allow_pending_team_invitation_token_rotation.sql`
 75. `202608310001_create_business_job_customer_message_authority.sql`
+76. `202609020001_add_business_origin_commercial_job_foundation.sql`
+77. `202609020002_create_quote_external_approval_authority.sql`
+78. `202609020003_generalize_pre_work_deposit_approval_authority.sql`
+79. `202609020004_generalize_approved_work_visit_approval_authority.sql`
+80. `202609020005_create_external_visit_schedule_confirmation.sql`
+81. `202609020006_generalize_work_preparation_execution_approval.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.

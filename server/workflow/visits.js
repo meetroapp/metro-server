@@ -1,6 +1,6 @@
 "use strict";
 
-const visitService = require("./visitService");
+const visitService = { ...require("./visitService"), ...require("./externalVisitConfirmationService") };
 
 function sendVisitResult(res, result) {
   if (!result?.ok) {
@@ -93,9 +93,16 @@ function createVisitHandlers({
       evaluationId: req.body?.evaluationId,
       workstreamIds: req.body?.workstreamIds,
       approvedQuoteDecisionId: req.body?.approvedQuoteDecisionId,
+      quoteApprovalId: req.body?.quoteApprovalId,
       reason: req.body?.reason,
       idempotencyKey: req.headers?.["idempotency-key"],
     })),
+    recordExternalVisitConfirmation: handle("record_external_visit_confirmation", (req) =>
+      service.recordExternalVisitConfirmation({ ...versionCommand(req),
+        quoteApprovalId:req.body?.quoteApprovalId,expectedProposalIntegrityHash:req.body?.expectedProposalIntegrityHash,
+        evidenceMethod:req.body?.evidenceMethod,confirmedAt:req.body?.confirmedAt,
+        evidenceReference:req.body?.evidenceReference,evidenceNote:req.body?.evidenceNote })
+    ),
     confirmVisit: handle("confirm_visit", (req) =>
       service.confirmVisit(versionCommand(req))
     ),
@@ -170,6 +177,11 @@ function registerVisitRoutes({
     "/jobs/:jobId/visits/:visitId/confirm",
     authMiddleware,
     handlers.confirmVisit
+  );
+  app.post(
+    "/jobs/:jobId/visits/:visitId/external-confirmation",
+    authMiddleware,
+    handlers.recordExternalVisitConfirmation
   );
   app.post(
     "/jobs/:jobId/visits/:visitId/change-request",

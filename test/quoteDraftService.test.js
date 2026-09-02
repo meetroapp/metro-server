@@ -24,6 +24,7 @@ test("Quote exposes only bounded Draft, issue, customer decision, and revision c
   assert.deepEqual(Object.values(service.QUOTE_CAPABILITIES), [
     "quote.create", "quote.read", "quote.scope.manage", "quote.issue",
     "quote.read_customer", "quote.approve", "quote.decline", "quote.revise",
+    "quote.external_approval.record",
   ]);
   assert.deepEqual(Object.values(service.QUOTE_STATUS), ["DRAFT", "ISSUED"]);
   assert.deepEqual(service.QUOTE_DECISIONS, ["APPROVED", "DECLINED"]);
@@ -288,6 +289,32 @@ test("Quote issuance requires exactly one finalized physical or remote Evaluatio
     message: "A completed Evaluation with a confirmed on-site visit or remote assessment is required before the Quote can be issued.",
   });
   assert.equal(warnings[0].evidence.jobId, context.job_id);
+});
+
+
+test("business-origin Quick Quote bypasses Evaluation prerequisite without weakening marketplace Evaluation authority", async () => {
+  let queryCount = 0;
+
+  const allowed = await service.quoteDraftServiceInternals.requireSavedEvaluation({
+    client: {
+      async query() {
+        queryCount += 1;
+        throw new Error("Business-origin Quick Quote must not query marketplace Evaluation authority.");
+      },
+    },
+    context: {
+      job_id: "00000000-0000-4000-8000-000000000001",
+      job_source_type: "business_document",
+      job_request_id: null,
+      relationship_id: null,
+      actor_user_id: 24,
+      actor_participant_id: "20000000-0000-4000-8000-000000000001",
+    },
+    logger: { warn() {} },
+  });
+
+  assert.equal(allowed, null);
+  assert.equal(queryCount, 0);
 });
 
 test("the canonical issue command invokes the saved-Evaluation gate and customer acceptance stays account-type neutral", () => {

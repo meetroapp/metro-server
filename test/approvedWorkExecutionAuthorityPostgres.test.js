@@ -342,9 +342,11 @@ async function grantExecutionRuntime(db, fixture, execution) {
          id, grantee_participant_id, grantor_participant_id, job_id,
          capability, scope_type, scope_job_id,
          scope_approved_quote_decision_id, scope_approved_quote_decision,
-         source_evidence_type, source_evidence_reference, idempotency_key
+         source_evidence_type, source_evidence_reference, idempotency_key,
+         scope_quote_approval_id, scope_quote_approval_source
        ) VALUES ($1,$2,$2,$3,$4,'approved_work',$3,$5,'APPROVED',
-         'canonical_approved_work_execution',$6,$7)`,
+         'canonical_approved_work_execution',$6,$7,
+         (SELECT id FROM canonical_quote_approvals WHERE customer_decision_id=$5), 'MEETRO_CUSTOMER')`,
       [randomUUID(), fixture.professionalParticipantId, fixture.jobId,
         capability, execution.decisionId, execution.id,
         `execution-runtime-grant:${execution.id}:${capability}`]
@@ -572,7 +574,8 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608310001_create_business_job_customer_message_authority.sql");
+      assert.equal(migrations[74].filename, "202608310001_create_business_job_customer_message_authority.sql");
+      assert.equal(migrations[80].filename, "202609020006_generalize_work_preparation_execution_approval.sql");
       const migrated = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(migrated.success, true, JSON.stringify(migrated));
       assert.equal(migrated.applied.length, migrations.length);

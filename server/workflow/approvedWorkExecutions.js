@@ -71,6 +71,7 @@ function createApprovedWorkExecutionHandlers({
       service.materializeApprovedWorkExecution({
         ...common(req),
         approvedCustomerDecisionId: req.body?.approvedCustomerDecisionId,
+      quoteApprovalId: req.body?.quoteApprovalId,
         idempotencyKey: req.headers?.["idempotency-key"],
       })
     ),

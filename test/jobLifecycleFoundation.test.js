@@ -9,7 +9,9 @@ const {
   CUSTOMER_EVALUATION_VISIT_CAPABILITIES,
   PROFESSIONAL_BOOTSTRAP_CAPABILITIES,
   PROFESSIONAL_EVALUATION_VISIT_CAPABILITIES,
+  BUSINESS_DOCUMENT_PROFESSIONAL_CAPABILITIES,
   bootstrapLifecycleJob,
+  materializeBusinessDocumentJob,
 } = require("../server/workflow/jobFoundationService");
 const {
   MANAGEMENT_CAPABILITIES,
@@ -203,6 +205,40 @@ test("canonical selection bootstraps one Job, two known participants, roles, and
     ),
     false
   );
+});
+
+
+test("business-document Job authority contains only the real professional participant and no customer approval grants", () => {
+  const source = String(materializeBusinessDocumentJob);
+
+  assert.match(source, /INSERT INTO jobs/);
+  assert.match(source, /'business_document'/);
+  assert.match(source, /INSERT INTO relationship_participants/);
+  assert.match(source, /request_relationship_id/);
+  assert.match(source, /NULL/);
+  assert.match(source, /PRIMARY_PROFESSIONAL/);
+
+  assert.equal(
+    BUSINESS_DOCUMENT_PROFESSIONAL_CAPABILITIES.includes("quote.create"),
+    true
+  );
+  assert.equal(
+    BUSINESS_DOCUMENT_PROFESSIONAL_CAPABILITIES.includes("quote.issue"),
+    true
+  );
+  assert.equal(
+    BUSINESS_DOCUMENT_PROFESSIONAL_CAPABILITIES.includes("quote.approve"),
+    false
+  );
+  assert.equal(
+    BUSINESS_DOCUMENT_PROFESSIONAL_CAPABILITIES.includes("quote.decline"),
+    false
+  );
+
+  assert.doesNotMatch(source, /CUSTOMER_REPRESENTATIVE/);
+  assert.doesNotMatch(source, /INSERT INTO users/);
+  assert.doesNotMatch(source, /INSERT INTO request_relationships/);
+  assert.doesNotMatch(source, /INSERT INTO request_selections/);
 });
 
 test("legacy selection creates no Job and v2 fails closed without concern truth", async () => {

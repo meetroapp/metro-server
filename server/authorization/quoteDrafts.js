@@ -155,6 +155,27 @@ function createQuoteDraftHandlers({
         idempotencyKey: req.headers?.["idempotency-key"],
       })
     ),
+    recordExternalQuoteApproval: handle(
+      "record_external_quote_approval",
+      (req) =>
+        service.recordExternalQuoteApproval({
+          pool: getPool(req),
+          authenticatedActor: req.user,
+          quoteId: req.params.quoteId,
+          expectedIssuedVersion:
+            req.body?.expectedIssuedVersion,
+          evidenceMethod:
+            req.body?.evidenceMethod,
+          approvedAt:
+            req.body?.approvedAt,
+          evidenceReference:
+            req.body?.evidenceReference,
+          evidenceNote:
+            req.body?.evidenceNote,
+          idempotencyKey:
+            req.headers?.["idempotency-key"],
+        })
+    ),
     createDerivedDraftQuote: handle("create_derived_draft_quote", (req) =>
       service.createDerivedDraftQuote({
         pool: getPool(req),
@@ -208,6 +229,11 @@ function registerQuoteDraftRoutes({
   app.get("/quotes/:quoteId/customer", authMiddleware, handlers.getCustomerIssuedQuote);
   app.post("/quotes/:quoteId/approve", authMiddleware, handlers.approveIssuedQuote);
   app.post("/quotes/:quoteId/decline", authMiddleware, handlers.declineIssuedQuote);
+  app.post(
+    "/quotes/:quoteId/external-approval",
+    authMiddleware,
+    handlers.recordExternalQuoteApproval
+  );
   app.post(
     "/quotes/:quoteId/derived-quotes",
     authMiddleware,

@@ -34,21 +34,22 @@ test("runtime uses only Migration 61 capabilities, commands, and states", () => 
   assert.deepEqual(EXECUTION_STATES, new Set(["ACTIVE", "SUPERSEDED", "CLOSED"]));
 });
 
-test("materialization resolves exact approved decision and immutable issuance integrity", () => {
-  assert.match(source, /decisions\.id = \$2/);
-  assert.match(source, /decisions\.decision = 'APPROVED'/);
-  assert.match(source, /quotes\.status = 'ISSUED'/);
-  assert.match(source, /versions\.version = decisions\.issued_quote_version/);
-  assert.match(source, /issuances\.source_snapshot_integrity_hash = decisions\.issued_integrity_hash/);
-  assert.match(source, /source\.issued_integrity_hash !== source\.quote_version_integrity_hash/);
-  assert.match(source, /source\.issued_integrity_hash !== source\.issuance_integrity_hash/);
+test("materialization resolves exact common approval and immutable issuance integrity", () => {
+  const commonSource = readFileSync(join(__dirname,"..","server","finance","preWorkDepositService.js"),"utf8");
+  assert.match(source, /preWorkDepositServiceInternals\.loadApprovedQuoteApprovalSource/);
+  assert.match(source, /customerDecisionId:decisionId,approvalId:quoteApprovalId/);
+  assert.match(commonSource, /approvals\.decision = 'APPROVED'/);
+  assert.match(commonSource, /quotes\.status = 'ISSUED'/);
+  assert.match(commonSource, /source\.issued_integrity_hash !==\s+source\.quote_version_integrity_hash/);
+  assert.match(commonSource, /source\.issued_integrity_hash !==\s+source\.issuance_integrity_hash/);
   assert.match(source, /roles\.role = 'PRIMARY_PROFESSIONAL'/);
 });
 
-test("explicit materialization bootstraps decision-scoped execution capabilities from Quote read", () => {
+test("explicit materialization bootstraps common approval execution capabilities from Quote read", () => {
   assert.match(source, /capability: QUOTE_READ_CAPABILITY/);
   assert.match(source, /scope_type = 'approved_work'/);
-  assert.match(source, /scope_approved_quote_decision_id = \$4/);
+  assert.match(source, /scope_quote_approval_id,scope_quote_approval_source/);
+  assert.match(source, /approvedQuoteDecisionId:decisionId,quoteApprovalId,allowJobScope:false/);
   assert.match(source, /canonical_approved_work_execution/);
   assert.doesNotMatch(source, /approved_work\.execution\.[a-z_]+[^\n]*lifecycle_capabilities/i);
 });
@@ -99,7 +100,7 @@ test("runtime records D4 start evidence without mutating base Workstream, Activi
 
 test("writes use SERIALIZABLE transactions, locks, expected versions, and append-only INSERTs", () => {
   assert.match(source, /runTransaction\(input\.pool, "SERIALIZABLE"/);
-  assert.match(source, /FOR UPDATE OF jobs, relationships/);
+  assert.match(source, /FOR UPDATE OF jobs/);
   assert.match(source, /STALE_APPROVED_WORK_EXECUTION_VERSION/);
   assert.match(source, /STALE_WORK_ACTIVITY_VERSION/);
   assert.match(source, /INSERT INTO canonical_approved_work_execution_versions/);

@@ -37,6 +37,7 @@ test(
         waitingOnCustomer: 0,
         changeRequested: 0,
         upcoming: 0,
+        inProgress: 0,
       });
 
       const history = await getProfessionalSchedule({

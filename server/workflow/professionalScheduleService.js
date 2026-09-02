@@ -18,6 +18,9 @@ const ACTIVE_STATES = new Set(["PROPOSED", "SCHEDULED"]);
 const CANCELLABLE_STATES = new Set(["PROPOSED", "SCHEDULED", "STARTED"]);
 const HISTORY_STATES = new Set(["CANCELLED", "COMPLETED"]);
 
+const { visitServiceInternals } = require("./visitService");
+const { evaluateApprovedWorkDepositGateWithClient } = require("../finance/preWorkDepositService");
+
 function iso(value) {
   if (value == null) return null;
   const parsed = value instanceof Date ? value : new Date(value);
@@ -102,12 +105,13 @@ const PROFESSIONAL_JOBS_CTE = `
   professional_jobs AS (
     SELECT DISTINCT
       jobs.id AS job_id,
+      jobs.source_type,
       jobs.job_request_id,
       jobs.source_request_relationship_id AS relationship_id,
       relationships.homeowner_id,
       professional.id AS professional_participant_id,
       customer.id AS customer_participant_id,
-      posts.title AS job_title,
+      COALESCE(posts.title, 'Approved Work') AS job_title,
       posts.category AS job_category,
       posts.location_intake_mode,
       posts.location_normalization_status,
@@ -117,14 +121,14 @@ const PROFESSIONAL_JOBS_CTE = `
       posts.service_postal_code,
       posts.service_country_code,
       posts.discovery_area_label,
-      homeowners.username AS customer_name,
+      COALESCE(homeowners.username, customer_snapshot.customer_name) AS customer_name,
       jobs.created_at AS job_created_at
     FROM jobs
-    INNER JOIN posts
+    LEFT JOIN posts
       ON posts.id = jobs.job_request_id
       AND posts.lifecycle_contract_version = 2
       AND posts.cancelled_at IS NULL
-    INNER JOIN request_relationships relationships
+    LEFT JOIN request_relationships relationships
       ON relationships.id = jobs.source_request_relationship_id
       AND relationships.post_id = jobs.job_request_id
       AND relationships.emergency_request_id IS NULL
@@ -132,8 +136,11 @@ const PROFESSIONAL_JOBS_CTE = `
       AND relationships.professional_user_id = $1
     INNER JOIN relationship_participants professional
       ON professional.job_id = jobs.id
-      AND professional.request_relationship_id = relationships.id
-      AND professional.user_id = relationships.professional_user_id
+      AND professional.user_id = $1
+      AND ((jobs.source_type = 'ordinary_request_selection'
+            AND professional.request_relationship_id = relationships.id)
+        OR (jobs.source_type = 'business_document'
+            AND professional.request_relationship_id IS NULL))
     INNER JOIN participant_role_assignments professional_roles
       ON professional_roles.participant_id = professional.id
       AND professional_roles.job_id = jobs.id
@@ -142,11 +149,11 @@ const PROFESSIONAL_JOBS_CTE = `
       AND (professional_roles.valid_until IS NULL OR professional_roles.valid_until > CURRENT_TIMESTAMP)
     LEFT JOIN participant_role_revocations professional_role_revocations
       ON professional_role_revocations.role_assignment_id = professional_roles.id
-    INNER JOIN relationship_participants customer
+    LEFT JOIN relationship_participants customer
       ON customer.job_id = jobs.id
       AND customer.request_relationship_id = relationships.id
       AND customer.user_id = relationships.homeowner_id
-    INNER JOIN participant_role_assignments customer_roles
+    LEFT JOIN participant_role_assignments customer_roles
       ON customer_roles.participant_id = customer.id
       AND customer_roles.job_id = jobs.id
       AND customer_roles.role = 'CUSTOMER_REPRESENTATIVE'
@@ -154,10 +161,27 @@ const PROFESSIONAL_JOBS_CTE = `
       AND (customer_roles.valid_until IS NULL OR customer_roles.valid_until > CURRENT_TIMESTAMP)
     LEFT JOIN participant_role_revocations customer_role_revocations
       ON customer_role_revocations.role_assignment_id = customer_roles.id
-    INNER JOIN users homeowners ON homeowners.id = relationships.homeowner_id
+    LEFT JOIN users homeowners ON homeowners.id = relationships.homeowner_id
+    LEFT JOIN contractor_profiles profiles
+      ON jobs.source_type = 'business_document'
+      AND profiles.id = jobs.contractor_profile_id AND profiles.user_id = $1
+    LEFT JOIN LATERAL (
+      SELECT snapshots.customer_name
+      FROM canonical_quote_customer_snapshots snapshots
+      INNER JOIN canonical_quote_approvals approvals
+        ON approvals.quote_id = snapshots.quote_id AND approvals.job_id = snapshots.job_id
+      WHERE approvals.job_id = jobs.id AND approvals.approval_source = 'EXTERNAL_EVIDENCE'
+      ORDER BY approvals.approved_at DESC, approvals.id DESC LIMIT 1
+    ) customer_snapshot ON TRUE
     WHERE jobs.lifecycle_contract_version = 2
       AND professional_role_revocations.id IS NULL
       AND customer_role_revocations.id IS NULL
+      AND ((jobs.source_type = 'ordinary_request_selection'
+            AND posts.id IS NOT NULL AND relationships.id IS NOT NULL
+            AND customer.id IS NOT NULL AND customer_roles.id IS NOT NULL)
+        OR (jobs.source_type = 'business_document' AND profiles.id IS NOT NULL
+            AND jobs.job_request_id IS NULL AND jobs.source_request_relationship_id IS NULL
+            AND jobs.originating_business_document_id IS NOT NULL))
   )`;
 
 const ACTIVE_GRANT = `
@@ -175,6 +199,8 @@ async function loadOpportunities(client, actorId, limit) {
         NULL::uuid AS evaluation_id,
         NULL::uuid AS quote_id,
         NULL::uuid AS approved_quote_decision_id,
+        NULL::uuid AS quote_approval_id,
+        NULL::text AS approval_source,
         'ACTIVE'::text AS authority_state,
         jobs.job_created_at AS authority_activated_at,
         jobs.*,
@@ -244,6 +270,8 @@ async function loadOpportunities(client, actorId, limit) {
         subjects.evaluation_id,
         NULL::uuid AS quote_id,
         NULL::uuid AS approved_quote_decision_id,
+        NULL::uuid AS quote_approval_id,
+        NULL::text AS approval_source,
         CASE WHEN activations.id IS NULL THEN 'AVAILABLE' ELSE 'ACTIVE' END AS authority_state,
         activations.created_at AS authority_activated_at,
         jobs.*,
@@ -311,20 +339,25 @@ async function loadOpportunities(client, actorId, limit) {
         jobs.job_id,
         NULL::uuid AS evaluation_id,
         quotes.id AS quote_id,
-        decisions.id AS approved_quote_decision_id,
+        approvals.customer_decision_id AS approved_quote_decision_id,
+        approvals.id AS quote_approval_id,
+        approvals.approval_source,
         CASE WHEN activations.id IS NULL THEN 'AVAILABLE' ELSE 'ACTIVE' END AS authority_state,
         activations.created_at AS authority_activated_at,
         jobs.*,
-        decisions.decided_at AS subject_updated_at
+        approvals.approved_at AS subject_updated_at
       FROM professional_jobs jobs
       INNER JOIN canonical_quotes quotes
-        ON quotes.job_id = jobs.job_id AND quotes.relationship_id = jobs.relationship_id
+        ON quotes.job_id = jobs.job_id AND quotes.relationship_id IS NOT DISTINCT FROM jobs.relationship_id
         AND quotes.status = 'ISSUED'
-      INNER JOIN canonical_quote_customer_decisions decisions
-        ON decisions.quote_id = quotes.id AND decisions.job_id = jobs.job_id
-        AND decisions.decision = 'APPROVED'
+      INNER JOIN canonical_quote_approvals approvals
+        ON approvals.quote_id = quotes.id AND approvals.job_id = jobs.job_id
+        AND approvals.decision = 'APPROVED'
+        AND ((jobs.source_type = 'ordinary_request_selection' AND approvals.approval_source = 'MEETRO_CUSTOMER')
+          OR (jobs.source_type = 'business_document' AND approvals.approval_source = 'EXTERNAL_EVIDENCE'))
       LEFT JOIN canonical_approved_work_visit_authority_activations activations
-        ON activations.job_id = jobs.job_id AND activations.approved_quote_decision_id = decisions.id
+        ON activations.job_id = jobs.job_id AND (activations.quote_approval_id = approvals.id OR
+          (activations.quote_approval_id IS NULL AND activations.approved_quote_decision_id = approvals.customer_decision_id))
       WHERE EXISTS (
         SELECT 1 FROM lifecycle_authority_grants grants
         LEFT JOIN lifecycle_authority_grant_revocations revocations ON revocations.authority_grant_id = grants.id
@@ -344,21 +377,28 @@ async function loadOpportunities(client, actorId, limit) {
              AND grants.job_id = jobs.job_id AND grants.scope_type = 'approved_work'
              AND grants.scope_job_id = jobs.job_id AND grants.scope_concern_id IS NULL
              AND grants.scope_evaluation_id IS NULL
-             AND grants.scope_approved_quote_decision_id = decisions.id
-             AND grants.scope_approved_quote_decision = 'APPROVED'
-             AND grants.capability = ANY(ARRAY['visit.read','visit.propose','visit.reschedule','visit.cancel','visit.complete'])
-             AND ${ACTIVE_GRANT}) = 5
+             AND ((grants.scope_quote_approval_id = approvals.id AND grants.scope_quote_approval_source = approvals.approval_source)
+               OR (grants.scope_quote_approval_id IS NULL
+                 AND grants.scope_approved_quote_decision_id = approvals.customer_decision_id
+                 AND grants.scope_approved_quote_decision = 'APPROVED'))
+             AND grants.capability = ANY(CASE WHEN approvals.approval_source = 'EXTERNAL_EVIDENCE'
+               THEN ARRAY['visit.read','visit.propose','visit.reschedule','visit.cancel']
+               ELSE ARRAY['visit.read','visit.propose','visit.reschedule','visit.cancel','visit.complete'] END)
+             AND ${ACTIVE_GRANT}) = CASE WHEN approvals.approval_source = 'EXTERNAL_EVIDENCE' THEN 4 ELSE 5 END
           AND
+          (approvals.approval_source = 'EXTERNAL_EVIDENCE' OR
           (SELECT count(DISTINCT grants.capability) FROM lifecycle_authority_grants grants
            LEFT JOIN lifecycle_authority_grant_revocations revocations ON revocations.authority_grant_id = grants.id
            WHERE grants.grantee_participant_id = jobs.customer_participant_id
              AND grants.job_id = jobs.job_id AND grants.scope_type = 'approved_work'
              AND grants.scope_job_id = jobs.job_id AND grants.scope_concern_id IS NULL
              AND grants.scope_evaluation_id IS NULL
-             AND grants.scope_approved_quote_decision_id = decisions.id
-             AND grants.scope_approved_quote_decision = 'APPROVED'
+             AND ((grants.scope_quote_approval_id = approvals.id AND grants.scope_quote_approval_source = approvals.approval_source)
+               OR (grants.scope_quote_approval_id IS NULL
+                 AND grants.scope_approved_quote_decision_id = approvals.customer_decision_id
+                 AND grants.scope_approved_quote_decision = 'APPROVED'))
              AND grants.capability = ANY(ARRAY['visit.read','visit.confirm','visit.change_request'])
-             AND ${ACTIVE_GRANT}) = 3
+             AND ${ACTIVE_GRANT}) = 3)
         )
       )
       AND NOT EXISTS (
@@ -369,7 +409,8 @@ async function loadOpportunities(client, actorId, limit) {
           ORDER BY version DESC LIMIT 1
         ) current_visit ON TRUE
         WHERE visits.job_id = jobs.job_id AND visits.purpose = 'APPROVED_WORK'
-          AND visits.approved_quote_decision_id = decisions.id
+          AND (visits.quote_approval_id = approvals.id OR
+            (visits.quote_approval_id IS NULL AND visits.approved_quote_decision_id = approvals.customer_decision_id))
           AND current_visit.state IN ('PROPOSED','SCHEDULED','STARTED')
       )
     )
@@ -381,7 +422,7 @@ async function loadOpportunities(client, actorId, limit) {
       SELECT * FROM approved_work_opportunities
     ) opportunities
     ORDER BY subject_updated_at DESC, purpose ASC,
-      COALESCE(evaluation_id, approved_quote_decision_id) DESC
+      COALESCE(evaluation_id, quote_approval_id, approved_quote_decision_id) DESC
     LIMIT $2`,
     [actorId, limit]
   );
@@ -397,11 +438,18 @@ async function loadVisits(client, actorId, view, limit) {
     SELECT
       visits.id, visits.job_id, visits.purpose, visits.created_at,
       visits.approved_quote_decision_id, visits.approved_quote_decision,
+      visits.quote_approval_id, visits.quote_approval_source AS approval_source,
       versions.version, versions.state, versions.scheduled_start_at,
       versions.scheduled_end_at, versions.time_zone, versions.location_mode,
       versions.cancellation_reason, versions.started_at, versions.cancelled_at, versions.completed_at,
       versions.recorded_by_participant_id,
       versions.created_at AS version_created_at,
+      (SELECT to_jsonb(evidence) FROM canonical_visit_external_confirmation_evidence evidence
+        WHERE evidence.visit_id=visits.id AND evidence.scheduled_visit_version<=versions.version
+          AND NOT EXISTS (SELECT 1 FROM canonical_visit_versions intervening
+            WHERE intervening.visit_id=visits.id AND intervening.version>evidence.scheduled_visit_version
+              AND intervening.version<=versions.version AND intervening.state='PROPOSED')
+        ORDER BY evidence.scheduled_visit_version DESC LIMIT 1) AS external_confirmation,
       evaluation_links.evaluation_id,
       jobs.job_title, jobs.job_category, jobs.customer_name,
       jobs.location_intake_mode, jobs.location_normalization_status,
@@ -421,7 +469,7 @@ async function loadVisits(client, actorId, view, limit) {
           AND grants.scope_job_id = visits.job_id
           AND grants.scope_concern_id IS NULL
           AND grants.capability = ANY(ARRAY[
-            'visit.read','visit.confirm','visit.reschedule','visit.cancel','visit.start','visit.complete'
+            'visit.read','visit.confirm','visit.reschedule','visit.cancel','visit.start','visit.complete','visit.external_confirmation.record'
           ])
           AND (
             (visits.purpose = 'EVALUATION' AND (
@@ -437,15 +485,18 @@ async function loadVisits(client, actorId, view, limit) {
             OR
             (visits.purpose = 'APPROVED_WORK' AND grants.scope_type = 'approved_work'
               AND grants.scope_evaluation_id IS NULL
-              AND grants.scope_approved_quote_decision_id = visits.approved_quote_decision_id
-              AND grants.scope_approved_quote_decision = 'APPROVED')
+              AND ((grants.scope_quote_approval_id = visits.quote_approval_id
+                    AND grants.scope_quote_approval_source = visits.quote_approval_source)
+                OR (grants.scope_approved_quote_decision_id = visits.approved_quote_decision_id
+                    AND grants.scope_approved_quote_decision = 'APPROVED'
+                    AND (grants.scope_quote_approval_id IS NULL OR visits.quote_approval_id IS NULL))))
           )
           AND ${ACTIVE_GRANT}
         ORDER BY grants.capability
       ) AS active_capabilities,
       count(*) FILTER (
         WHERE versions.state = 'PROPOSED'
-          AND versions.recorded_by_participant_id <> jobs.customer_participant_id
+          AND versions.recorded_by_participant_id IS DISTINCT FROM jobs.customer_participant_id
           AND change_request.created_at IS NULL
       ) OVER()
         AS waiting_on_customer_total,
@@ -502,8 +553,11 @@ async function loadVisits(client, actorId, view, limit) {
             OR
             (visits.purpose = 'APPROVED_WORK' AND grants.scope_type = 'approved_work'
               AND grants.scope_evaluation_id IS NULL
-              AND grants.scope_approved_quote_decision_id = visits.approved_quote_decision_id
-              AND grants.scope_approved_quote_decision = 'APPROVED')
+              AND ((grants.scope_quote_approval_id = visits.quote_approval_id
+                    AND grants.scope_quote_approval_source = visits.quote_approval_source)
+                OR (grants.scope_approved_quote_decision_id = visits.approved_quote_decision_id
+                    AND grants.scope_approved_quote_decision = 'APPROVED'
+                    AND (grants.scope_quote_approval_id IS NULL OR visits.quote_approval_id IS NULL))))
           )
           AND ${ACTIVE_GRANT}
       )
@@ -549,24 +603,26 @@ function customerProjection(row) {
 }
 
 function opportunityProjection(row) {
-  const subjectId = row.evaluation_id || row.approved_quote_decision_id || row.job_id;
+  const subjectId = row.evaluation_id || row.quote_approval_id || row.approved_quote_decision_id || row.job_id;
   const sortAt = iso(row.subject_updated_at || row.authority_activated_at || row.job_created_at);
   return {
     kind: "opportunity",
     identity: `${row.purpose}:${subjectId}`,
     sortAt,
-    semanticState: "READY_TO_SCHEDULE",
+    semanticState: row.deposit_gate?.allowed === false ? "DEPOSIT_REQUIRED" : "READY_TO_SCHEDULE",
     jobId: row.job_id,
     purpose: row.purpose,
     evaluationId: row.evaluation_id || null,
     quoteId: row.quote_id || null,
     approvedQuoteDecisionId: row.approved_quote_decision_id || null,
-    authority: { state: row.authority_state },
+    quoteApprovalId: row.quote_approval_id || null,
+    approvalSource: row.approval_source || null,
+    authority: { state: row.deposit_gate?.allowed === false ? "LOCKED" : row.authority_state },
     job: jobProjection(row),
     customer: customerProjection(row),
     location: locationProjection(row, "JOB_SERVICE_LOCATION"),
     actions: {
-      canStartScheduling: true,
+      canStartScheduling: row.deposit_gate?.allowed !== false,
       canViewJob: true,
     },
   };
@@ -609,6 +665,9 @@ function visitProjection(row, now) {
     cancelledAt: iso(row.cancelled_at),
     completedAt: iso(row.completed_at),
     evaluationId: row.evaluation_id || null,
+    quoteApprovalId: row.quote_approval_id || null,
+    approvalSource: row.approval_source || null,
+    externalScheduleConfirmation: visitServiceInternals.externalScheduleConfirmationProjection(row.external_confirmation),
     approvedQuoteDecisionEvidence: row.approved_quote_decision_id ? {
       decisionId: row.approved_quote_decision_id,
       decision: row.approved_quote_decision,
@@ -627,6 +686,8 @@ function visitProjection(row, now) {
         row.state === "PROPOSED" &&
         row.proposal_by_customer === true &&
         capabilities.has("visit.confirm"),
+      canRecordExternalConfirmation: row.state === "PROPOSED" && row.approval_source === "EXTERNAL_EVIDENCE" &&
+        capabilities.has("visit.external_confirmation.record"),
       canReschedule: ACTIVE_STATES.has(row.state) && capabilities.has("visit.reschedule"),
       canCancel: CANCELLABLE_STATES.has(row.state) && capabilities.has("visit.cancel"),
       canStart:
@@ -672,6 +733,14 @@ async function getProfessionalSchedule(input = {}) {
       view === "active" ? loadOpportunities(client, actorId, queryLimit) : [],
       loadVisits(client, actorId, view, queryLimit),
     ]);
+    for (const row of opportunityRows) {
+      if (row.purpose === "APPROVED_WORK") {
+        row.deposit_gate = await evaluateApprovedWorkDepositGateWithClient({
+          client, jobId: row.job_id, quoteApprovalId: row.quote_approval_id,
+          approvedQuoteDecisionId: row.approved_quote_decision_id,
+        });
+      }
+    }
     const canonicalItems = [
       ...opportunityRows.map(opportunityProjection),
       ...visitRows.map((row) => visitProjection(row, now)),

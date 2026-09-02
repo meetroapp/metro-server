@@ -72,6 +72,8 @@ test("Approved Work authority DTO is allowlisted and hides grant internals", () 
     "authoritySource",
     "jobId",
     "quoteId",
+    "approvalSource",
+    "quoteApprovalId",
     "approvedQuoteDecisionId",
     "issuedQuoteVersion",
     "purpose",

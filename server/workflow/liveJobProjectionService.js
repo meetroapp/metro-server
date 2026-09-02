@@ -368,6 +368,10 @@ function result({
   };
 }
 
+function quoteApproved(quote) {
+  return quote.quote_approval_id ? quote.approval_decision === "APPROVED" : quote.customer_decision === "APPROVED";
+}
+
 function deriveCanonicalLiveJob(state = {}, { derivedAt = new Date().toISOString() } = {}) {
   const workstreams = Array.isArray(state.workstreams) ? state.workstreams : [];
   const activities = Array.isArray(state.activities) ? state.activities : [];
@@ -504,7 +508,7 @@ function deriveCanonicalLiveJob(state = {}, { derivedAt = new Date().toISOString
   }
 
   const approvedQuote = quotes.find(
-    (quote) => quote.status === "ISSUED" && quote.customer_decision === "APPROVED"
+    (quote) => quote.status === "ISSUED" && quoteApproved(quote)
   );
   const approvedQuoteDeposit = approvedQuote
     ? deriveQuoteDepositGate({
@@ -524,7 +528,7 @@ function deriveCanonicalLiveJob(state = {}, { derivedAt = new Date().toISOString
         (quote) =>
           quote.id === item.quoteId &&
           quote.status === "ISSUED" &&
-          quote.customer_decision === "APPROVED"
+          quoteApproved(quote)
       )
   );
   const schedulableApprovedQuote = approvedWorkSchedule &&
@@ -661,13 +665,13 @@ function deriveCanonicalLiveJob(state = {}, { derivedAt = new Date().toISOString
   const pendingIssuedQuote = quotes.find(
     (quote) =>
       quote.status === "ISSUED" &&
-      !quote.customer_decision &&
+      !quote.customer_decision && !quote.quote_approval_id &&
       quote.delivery_confirmed === true
   );
   const undeliveredIssuedQuote = quotes.find(
     (quote) =>
       quote.status === "ISSUED" &&
-      !quote.customer_decision &&
+      !quote.customer_decision && !quote.quote_approval_id &&
       quote.delivery_confirmed !== true
   );
   if (undeliveredIssuedQuote) {
@@ -812,12 +816,13 @@ async function loadAuthorizedJob(pool, jobId, actorUserId) {
     /* live_job:authorized_context */
     SELECT
       jobs.id AS job_id,
+      jobs.source_type,
       jobs.job_request_id,
       jobs.source_request_relationship_id AS relationship_id,
       jobs.lifecycle_contract_version,
       jobs.created_at AS job_created_at,
       request_relationships.status AS relationship_status,
-      request_relationships.professional_user_id AS selected_professional_user_id,
+      COALESCE(request_relationships.professional_user_id, profiles.user_id) AS selected_professional_user_id,
       request_relationships.homeowner_id AS customer_user_id,
       users.account_type AS actor_account_type,
       relationship_participants.id AS actor_participant_id,
@@ -859,25 +864,32 @@ async function loadAuthorizedJob(pool, jobId, actorUserId) {
         ORDER BY lifecycle_authority_grants.capability
       ) AS active_capabilities
     FROM jobs
-    INNER JOIN posts
+    LEFT JOIN posts
       ON posts.id = jobs.job_request_id
       AND posts.lifecycle_contract_version = 2
       AND posts.cancelled_at IS NULL
-    INNER JOIN request_relationships
+    LEFT JOIN request_relationships
       ON request_relationships.id = jobs.source_request_relationship_id
       AND request_relationships.post_id = jobs.job_request_id
       AND request_relationships.emergency_request_id IS NULL
-    INNER JOIN request_selections
+    LEFT JOIN request_selections
       ON request_selections.id = jobs.source_request_selection_id
       AND request_selections.request_relationship_id = request_relationships.id
       AND request_selections.post_id = jobs.job_request_id
+    LEFT JOIN contractor_profiles profiles ON jobs.source_type='business_document'
+      AND profiles.id=jobs.contractor_profile_id AND profiles.user_id=$2
     INNER JOIN relationship_participants
       ON relationship_participants.job_id = jobs.id
-      AND relationship_participants.request_relationship_id = request_relationships.id
+      AND ((jobs.source_type='ordinary_request_selection' AND relationship_participants.request_relationship_id=request_relationships.id)
+        OR (jobs.source_type='business_document' AND relationship_participants.request_relationship_id IS NULL))
       AND relationship_participants.user_id = $2
     INNER JOIN users ON users.id = $2
     WHERE jobs.id = $1
       AND jobs.lifecycle_contract_version = 2
+      AND ((jobs.source_type='ordinary_request_selection' AND posts.id IS NOT NULL
+            AND request_relationships.id IS NOT NULL AND request_selections.id IS NOT NULL)
+        OR (jobs.source_type='business_document' AND profiles.id IS NOT NULL AND jobs.job_request_id IS NULL
+            AND jobs.source_request_relationship_id IS NULL AND jobs.originating_business_document_id IS NOT NULL))
     LIMIT 1
     `,
     [jobId, actorUserId, [...LIVE_JOB_CAPABILITIES]]
@@ -964,6 +976,7 @@ async function loadCanonicalState(pool, context) {
            canonical_quote_versions.customer_terms_snapshot,
            canonical_quote_versions.total_minor,
            canonical_quote_versions.currency,
+           approvals.id AS quote_approval_id, approvals.approval_source, approvals.decision AS approval_decision,
            decisions.decision AS customer_decision,
            decisions.id AS customer_decision_id,
            decisions.issued_quote_version AS customer_decision_quote_version,
@@ -976,6 +989,7 @@ async function loadCanonicalState(pool, context) {
            WHERE quote_id = canonical_quotes.id
            ORDER BY version DESC LIMIT 1
          ) AS canonical_quote_versions ON TRUE
+         LEFT JOIN canonical_quote_approvals approvals ON approvals.quote_id=canonical_quotes.id AND approvals.job_id=canonical_quotes.job_id
          LEFT JOIN canonical_quote_customer_decisions decisions
            ON decisions.quote_id = canonical_quotes.id
          LEFT JOIN LATERAL (
@@ -1025,7 +1039,7 @@ async function loadCanonicalState(pool, context) {
            AND EXISTS (
              SELECT 1
              FROM canonical_quote_scope_item_snapshots snapshots
-             INNER JOIN canonical_quote_customer_decisions decisions
+             INNER JOIN canonical_quote_approvals decisions
                ON decisions.quote_id = snapshots.quote_id
                AND decisions.job_id = snapshots.job_id
                AND decisions.issued_quote_version = snapshots.quote_version
@@ -1059,7 +1073,7 @@ async function loadCanonicalState(pool, context) {
            AND EXISTS (
              SELECT 1
              FROM canonical_quote_scope_item_snapshots snapshots
-             INNER JOIN canonical_quote_customer_decisions decisions
+             INNER JOIN canonical_quote_approvals decisions
                ON decisions.quote_id = snapshots.quote_id
                AND decisions.job_id = snapshots.job_id
                AND decisions.issued_quote_version = snapshots.quote_version
@@ -1093,7 +1107,7 @@ async function loadCanonicalState(pool, context) {
            AND EXISTS (
              SELECT 1
              FROM canonical_quote_scope_item_snapshots snapshots
-             INNER JOIN canonical_quote_customer_decisions decisions
+             INNER JOIN canonical_quote_approvals decisions
                ON decisions.quote_id = snapshots.quote_id
                AND decisions.job_id = snapshots.job_id
                AND decisions.issued_quote_version = snapshots.quote_version
@@ -1114,7 +1128,8 @@ async function loadCanonicalState(pool, context) {
       () => pool.query(
         `/* live_job:approved_work_scheduling */
          SELECT canonical_quotes.id AS quote_id,
-           decisions.id AS approved_quote_decision_id,
+           approvals.customer_decision_id AS approved_quote_decision_id,
+           approvals.id AS quote_approval_id, approvals.approval_source,
            activations.id AS activation_id,
            COALESCE(active_grants.grant_count, 0)::integer AS active_grant_count,
            latest_visit.state AS visit_state,
@@ -1126,18 +1141,18 @@ async function loadCanonicalState(pool, context) {
            deposit_versions.remaining_minor AS deposit_remaining_minor,
            deposit_obligations.currency AS deposit_currency
          FROM canonical_quotes
-         INNER JOIN canonical_quote_customer_decisions decisions
-           ON decisions.quote_id = canonical_quotes.id
-           AND decisions.job_id = canonical_quotes.job_id
-           AND decisions.decision = 'APPROVED'
-         INNER JOIN request_relationships relationships
+         INNER JOIN canonical_quote_approvals approvals
+           ON approvals.quote_id = canonical_quotes.id
+           AND approvals.job_id = canonical_quotes.job_id
+           AND approvals.decision = 'APPROVED'
+         LEFT JOIN request_relationships relationships
            ON relationships.id = canonical_quotes.relationship_id
            AND relationships.status = 'active'
-         INNER JOIN relationship_participants customer
+         LEFT JOIN relationship_participants customer
            ON customer.job_id = canonical_quotes.job_id
            AND customer.request_relationship_id = canonical_quotes.relationship_id
            AND customer.user_id = relationships.homeowner_id
-         INNER JOIN participant_role_assignments customer_roles
+         LEFT JOIN participant_role_assignments customer_roles
            ON customer_roles.participant_id = customer.id
            AND customer_roles.job_id = canonical_quotes.job_id
            AND customer_roles.role = 'CUSTOMER_REPRESENTATIVE'
@@ -1146,21 +1161,22 @@ async function loadCanonicalState(pool, context) {
          LEFT JOIN participant_role_revocations customer_role_revocations
            ON customer_role_revocations.role_assignment_id = customer_roles.id
          LEFT JOIN canonical_approved_work_visit_authority_activations activations
-           ON activations.approved_quote_decision_id = decisions.id
+           ON (activations.quote_approval_id=approvals.id OR
+             (activations.quote_approval_id IS NULL AND activations.approved_quote_decision_id=approvals.customer_decision_id))
            AND activations.job_id = canonical_quotes.job_id
          LEFT JOIN canonical_pre_work_deposit_obligations deposit_obligations
-           ON deposit_obligations.customer_decision_id = decisions.id
+           ON deposit_obligations.quote_approval_id = approvals.id
            AND deposit_obligations.quote_id = canonical_quotes.id
-           AND deposit_obligations.issued_quote_version = decisions.issued_quote_version
+           AND deposit_obligations.issued_quote_version = approvals.issued_quote_version
            AND deposit_obligations.job_id = canonical_quotes.job_id
-           AND deposit_obligations.relationship_id = canonical_quotes.relationship_id
+           AND deposit_obligations.relationship_id IS NOT DISTINCT FROM canonical_quotes.relationship_id
          LEFT JOIN LATERAL (
            SELECT versions.version, versions.state, versions.required_minor,
              versions.applied_minor, versions.remaining_minor
            FROM canonical_pre_work_deposit_versions versions
            WHERE versions.obligation_id = deposit_obligations.id
              AND versions.job_id = deposit_obligations.job_id
-             AND versions.relationship_id = deposit_obligations.relationship_id
+             AND versions.relationship_id IS NOT DISTINCT FROM deposit_obligations.relationship_id
              AND versions.currency = deposit_obligations.currency
            ORDER BY versions.version DESC LIMIT 1
          ) deposit_versions ON TRUE
@@ -1171,12 +1187,14 @@ async function loadCanonicalState(pool, context) {
              ON revocations.authority_grant_id = grants.id
            WHERE grants.job_id = canonical_quotes.job_id
              AND grants.scope_type = 'approved_work'
-             AND grants.scope_approved_quote_decision_id = decisions.id
-             AND grants.scope_approved_quote_decision = 'APPROVED'
+             AND ((grants.scope_quote_approval_id=approvals.id AND grants.scope_quote_approval_source=approvals.approval_source)
+               OR (grants.scope_quote_approval_id IS NULL AND grants.scope_approved_quote_decision_id=approvals.customer_decision_id
+                 AND grants.scope_approved_quote_decision='APPROVED'))
              AND (
                (
                  grants.grantee_participant_id = $3
-                 AND grants.capability = ANY($2::text[])
+                 AND grants.capability = ANY(CASE WHEN approvals.approval_source='EXTERNAL_EVIDENCE'
+                   THEN ARRAY['visit.read','visit.propose','visit.reschedule','visit.cancel'] ELSE $2::text[] END)
                )
                OR
                (
@@ -1199,13 +1217,16 @@ async function loadCanonicalState(pool, context) {
            ) AS versions ON TRUE
            WHERE visits.job_id = canonical_quotes.job_id
              AND visits.purpose = 'APPROVED_WORK'
-             AND visits.approved_quote_decision_id = decisions.id
+             AND (visits.quote_approval_id=approvals.id OR
+               (visits.quote_approval_id IS NULL AND visits.approved_quote_decision_id=approvals.customer_decision_id))
            ORDER BY visits.created_at DESC, visits.id DESC
            LIMIT 1
          ) AS latest_visit ON TRUE
          WHERE canonical_quotes.job_id = $1
            AND canonical_quotes.status = 'ISSUED'
            AND customer_role_revocations.id IS NULL
+           AND (approvals.approval_source='EXTERNAL_EVIDENCE' OR
+             (relationships.id IS NOT NULL AND customer.id IS NOT NULL AND customer_roles.id IS NOT NULL))
          ORDER BY canonical_quotes.updated_at DESC, canonical_quotes.id DESC`,
         [
           jobId,
@@ -1225,7 +1246,7 @@ async function loadCanonicalState(pool, context) {
         `/* live_job:approved_work_execution */
          SELECT executions.id AS execution_id,
            executions.quote_id, executions.issued_quote_version,
-           executions.approved_customer_decision_id,
+           executions.approved_customer_decision_id, executions.quote_approval_id, executions.approval_source,
            current.version AS execution_version,
            current.state,
            COALESCE(start_events.count, 0)::integer AS start_event_count,
@@ -1257,7 +1278,7 @@ async function loadCanonicalState(pool, context) {
         `/* live_job:approved_work_completion */
          SELECT executions.id AS execution_id,
            executions.quote_id, executions.issued_quote_version,
-           executions.approved_customer_decision_id,
+           executions.approved_customer_decision_id, executions.quote_approval_id, executions.approval_source,
            current.version AS execution_version,
            current.state, current.created_at AS completed_at,
            commands.id AS command_id
@@ -1350,10 +1371,11 @@ async function loadCanonicalState(pool, context) {
     completion: completion.rows[0] || null,
     invoice: invoice.rows[0] || null,
     approvedWorkScheduling: quoteRows
-      .filter((quote) => quote.customer_decision === "APPROVED")
+      .filter((quote) => quoteApproved(quote))
       .map((quote) => {
         const authority = approvedWorkScheduling.rows.find(
-          (row) => row.quote_id === quote.id && row.approved_quote_decision_id === quote.customer_decision_id
+          (row) => row.quote_id === quote.id && (row.quote_approval_id ? row.quote_approval_id === quote.quote_approval_id
+            : row.approved_quote_decision_id === quote.customer_decision_id)
         );
         if (!authority || !context.active_capabilities.includes("quote.read")) return null;
         const requirement = deriveDepositRequirement({
@@ -1384,13 +1406,15 @@ async function loadCanonicalState(pool, context) {
           schedulingLocked: !["NOT_REQUIRED", "SATISFIED"].includes(depositState),
         };
         const underlyingAuthorityState = authority.activation_id
-          ? Number(authority.active_grant_count) === 8
+          ? Number(authority.active_grant_count) === (authority.approval_source === "EXTERNAL_EVIDENCE" ? 4 : 9)
             ? "ACTIVE"
             : "UNAVAILABLE"
           : "AVAILABLE";
         return {
           quoteId: quote.id,
           approvedQuoteDecisionId: quote.customer_decision_id,
+          quoteApprovalId: quote.quote_approval_id || null,
+          approvalSource: quote.approval_source || null,
           authorityState: deposit.schedulingLocked
             ? "LOCKED"
             : underlyingAuthorityState,
@@ -1433,7 +1457,7 @@ async function getCanonicalLiveJob(input = {}) {
     }
     if (
       Number(context.lifecycle_contract_version) !== 2 ||
-      context.relationship_status !== "active" ||
+      (context.source_type !== "business_document" && context.relationship_status !== "active") ||
       context.actor_account_type !== "professional" ||
       Number(context.selected_professional_user_id) !== actorUserId ||
       context.is_primary_professional !== true
@@ -1444,7 +1468,8 @@ async function getCanonicalLiveJob(input = {}) {
     }
 
     const capabilities = normalizedCapabilities(context.active_capabilities);
-    for (const requiredCapability of ["participant.read", "reported_concern.read"]) {
+    for (const requiredCapability of (context.source_type === "business_document"
+      ? ["participant.read", "quote.read"] : ["participant.read", "reported_concern.read"])) {
       if (!capabilities.has(requiredCapability)) {
         const granted = await hasActiveLifecycleGrant({
           client,
@@ -1479,8 +1504,11 @@ async function getCanonicalLiveJob(input = {}) {
       code: "LIVE_JOB_STATE_LOADED",
       liveJob: {
         jobId,
-        requestId: Number(context.job_request_id),
-        relationshipId: Number(context.relationship_id),
+        requestId: context.job_request_id == null ? null : Number(context.job_request_id),
+        relationshipId: context.relationship_id == null ? null : Number(context.relationship_id),
+        quoteApprovalId: state.quotes.find(quoteApproved)?.quote_approval_id || null,
+        approvalSource: state.quotes.find(quoteApproved)?.approval_source || null,
+        approvedQuoteDecisionId: state.quotes.find(quoteApproved)?.customer_decision_id || null,
         ...projection,
       },
     };

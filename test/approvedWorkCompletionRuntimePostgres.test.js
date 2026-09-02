@@ -235,7 +235,8 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608310001_create_business_job_customer_message_authority.sql");
+      assert.equal(migrations[74].filename, "202608310001_create_business_job_customer_message_authority.sql");
+      assert.equal(migrations[80].filename, "202609020006_generalize_work_preparation_execution_approval.sql");
       const migrated = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(migrated.success, true, JSON.stringify(migrated));
       assert.equal(migrated.applied.length + migrated.skipped.length, migrations.length);

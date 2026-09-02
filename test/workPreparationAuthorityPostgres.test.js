@@ -256,7 +256,8 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608310001_create_business_job_customer_message_authority.sql");
+      assert.equal(migrations[74].filename, "202608310001_create_business_job_customer_message_authority.sql");
+      assert.equal(migrations[80].filename, "202609020006_generalize_work_preparation_execution_approval.sql");
       const migrated = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(migrated.success, true, JSON.stringify(migrated));
       assert.equal(migrated.applied.length, migrations.length);
@@ -383,7 +384,7 @@ test(
       const crossPurchaseCommand = await insertCommand(pool, crossFixture.jobId,
         crossFixture.professionalParticipantId, "work_preparation.purchase.record",
         `item:${businessItem.id}:cross-job`);
-      await expectPgCode(pool, "23514", (client) => client.query(
+      await expectPgCode(pool, "23503", (client) => client.query(
         `INSERT INTO canonical_material_purchase_records (
           id, job_id, relationship_id, plan_id, basis_plan_version, item_id,
           quantity, unit, purchased_at, deposit_gate_type,
@@ -413,9 +414,11 @@ test(
           issued_quote_version, customer_decision_id, customer_participant_id,
           currency, quote_total_minor, deposit_rule_type,
           deposit_percent_basis_points, required_minor, source_integrity_hash,
-          effective_at, created_by_participant_id, created_command_idempotency_id
+          effective_at, created_by_participant_id, created_command_idempotency_id,
+          quote_approval_id, approval_source, customer_decision
         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,10000,'PERCENT',5000,5000,$10,
-          CURRENT_TIMESTAMP,$8,$11)`,
+          CURRENT_TIMESTAMP,$8,$11,
+          (SELECT id FROM canonical_quote_approvals WHERE customer_decision_id=$7), 'MEETRO_CUSTOMER', 'APPROVED')`,
         [obligationId, plan.jobId, plan.requestId, plan.relationshipId,
           source.quote_id, Number(source.issued_quote_version), source.decision_id,
           source.customer_participant_id, source.currency,

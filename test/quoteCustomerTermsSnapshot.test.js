@@ -210,7 +210,11 @@ test("terms snapshot adds no competing decision, numbering, lifecycle, or AI aut
     join(root, "server", "intelligence", "operations", "workflowAssist.js"),
     "utf8"
   );
-  assert.doesNotMatch(serviceSource, /canonical_quote_(?:approvals|acceptances)/i);
+  // Common approval is certified provenance, separate from the terms snapshot.
+  // The terms normalizer may not create approval or acceptance authority.
+  const normalizer = internals.normalizeCustomerTermsSnapshot.toString();
+  assert.doesNotMatch(normalizer, /canonical_quote_(?:approvals|acceptances)|INSERT|UPDATE/i);
+  assert.doesNotMatch(serviceSource, /canonical_quote_acceptances/i);
   assert.doesNotMatch(serviceSource, /allocateDocumentNumber|business_document_number_sequences/i);
   assert.match(serviceSource, /canonical_quote_business_document_sources/);
   for (const source of [quoteComposeSource, workflowAssistSource]) {

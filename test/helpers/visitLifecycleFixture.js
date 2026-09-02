@@ -12,6 +12,7 @@ const {
 } = require("../../server/relationships/requestSelectionService");
 const {
   createOrdinaryJobEvaluation,
+  completeEvaluation,
 } = require("../../server/authorization/evaluationService");
 const {
   addDraftScopeItem,
@@ -22,6 +23,8 @@ const {
 const {
   createWorkstream,
 } = require("../../server/workflow/workstreamService");
+
+const { sendQuoteInMeetro } = require("../../server/authorization/quoteDeliveryService");
 
 const quiet = { info() {}, warn() {} };
 
@@ -236,8 +239,21 @@ function quoteCommand(service, pool, actorId, values, idempotencyKey) {
   });
 }
 
+async function ensureCompletedVisitEvaluation(pool, identities, fixture, suffix) {
+  const evaluation = await ensureVisitEvaluation(pool, identities, fixture, suffix);
+  const current = (await pool.query(`SELECT status,version FROM canonical_evaluation_versions
+    WHERE evaluation_id=$1 ORDER BY version DESC LIMIT 1`, [evaluation.id])).rows[0];
+  if (current.status === "completed") return evaluation;
+  const result = await completeEvaluation({pool,authenticatedActor:{id:identities.professionalId},
+    evaluationId:evaluation.id,expectedVersion:current.version,completionMode:"REMOTE",assessmentMethod:"PHONE",
+    assessmentBasis:"Reviewed the requested scope with the customer by phone.",
+    idempotencyKey:`fixture-complete-evaluation-${suffix}`,logger:quiet});
+  assert.equal(result.ok,true,result.code);
+  return result.evaluation;
+}
+
 async function createVisitApprovedDecision(pool, identities, fixture, suffix) {
-  await ensureVisitEvaluation(pool, identities, fixture, suffix);
+  await ensureCompletedVisitEvaluation(pool, identities, fixture, suffix);
   const created = await quoteCommand(
     createDraftQuote,
     pool,
@@ -277,6 +293,10 @@ async function createVisitApprovedDecision(pool, identities, fixture, suffix) {
     `visit-service-quote-issue-${suffix}`
   );
   assert.equal(issued.ok, true, issued.code);
+  const delivered = await sendQuoteInMeetro({pool,authenticatedActor:{id:identities.professionalId},
+    quoteId:issued.quote.id,expectedIssuedVersion:issued.quote.currentVersion,
+    idempotencyKey:`fixture-deliver-${suffix}`,logger:quiet});
+  assert.equal(delivered.ok,true,delivered.code);
   const approved = await quoteCommand(
     approveIssuedQuote,
     pool,
@@ -328,6 +348,7 @@ module.exports = {
   createVisitApprovedDecision,
   createVisitEvaluation,
   ensureVisitEvaluation,
+  ensureCompletedVisitEvaluation,
   createVisitLifecycleFixture,
   createVisitTestIdentities,
   createVisitWorkstream,

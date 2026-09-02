@@ -160,19 +160,39 @@ async function resolveBusinessDocumentOwner(client, actorUserId, jobId = null) {
   if (jobId) {
     const result = await client.query(
       `/* business_document_numbering:job_owner */
-       SELECT DISTINCT relationships.contractor_id AS contractor_profile_id
+       SELECT DISTINCT
+         CASE
+           WHEN jobs.source_type = 'business_document'
+             THEN jobs.contractor_profile_id
+           ELSE relationships.contractor_id
+         END AS contractor_profile_id
        FROM jobs
-       INNER JOIN request_relationships relationships
-         ON relationships.id = jobs.source_request_relationship_id
+       LEFT JOIN request_relationships relationships
+         ON jobs.source_type = 'ordinary_request_selection'
+        AND relationships.id = jobs.source_request_relationship_id
         AND relationships.professional_user_id = $1
         AND relationships.status = 'active'
        INNER JOIN contractor_profiles profiles
-         ON profiles.id = relationships.contractor_id
+         ON profiles.id = CASE
+           WHEN jobs.source_type = 'business_document'
+             THEN jobs.contractor_profile_id
+           ELSE relationships.contractor_id
+         END
         AND profiles.user_id = $1
        INNER JOIN relationship_participants participants
          ON participants.job_id = jobs.id
-        AND participants.request_relationship_id = relationships.id
         AND participants.user_id = $1
+        AND (
+          (
+            jobs.source_type = 'ordinary_request_selection'
+            AND participants.request_relationship_id = relationships.id
+          )
+          OR
+          (
+            jobs.source_type = 'business_document'
+            AND participants.request_relationship_id IS NULL
+          )
+        )
        INNER JOIN participant_role_assignments roles
          ON roles.participant_id = participants.id
         AND roles.job_id = jobs.id
@@ -183,6 +203,17 @@ async function resolveBusinessDocumentOwner(client, actorUserId, jobId = null) {
          ON revocations.role_assignment_id = roles.id
        WHERE jobs.id = $2
          AND revocations.id IS NULL
+         AND (
+           (
+             jobs.source_type = 'ordinary_request_selection'
+             AND relationships.id IS NOT NULL
+           )
+           OR
+           (
+             jobs.source_type = 'business_document'
+             AND jobs.contractor_profile_id = profiles.id
+           )
+         )
        LIMIT 2`,
       [actorUserId, jobId]
     );

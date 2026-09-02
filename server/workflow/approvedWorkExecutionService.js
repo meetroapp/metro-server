@@ -10,6 +10,7 @@ const {
 } = require("../authorization/lifecycleAuthorityService");
 const {
   evaluateApprovedWorkDepositGateWithClient,
+  preWorkDepositServiceInternals,
 } = require("../finance/preWorkDepositService");
 const {
   evaluateWorkPreparationStartWithClient,
@@ -45,6 +46,8 @@ const QUOTE_READ_CAPABILITY = "quote.read";
 const EXECUTION_STATES = new Set(["ACTIVE", "SUPERSEDED", "CLOSED"]);
 const CLASSIFICATIONS = new Set(["EXECUTION", "NON_EXECUTION"]);
 const SCOPE_BASES = new Set(["DECISION_WIDE", "QUOTE_SCOPE_ITEM"]);
+
+function nullableInteger(value) { return value == null ? null : Number(value); }
 
 function safeLogger(value) {
   return value && typeof value.info === "function" && typeof value.warn === "function"
@@ -140,27 +143,30 @@ async function invokeFailure(injector, stage) {
 
 async function loadProfessionalContext(client, jobId, actorId, { lock = false } = {}) {
   const result = await client.query(
-    `SELECT jobs.id AS job_id, jobs.job_request_id,
+    `SELECT jobs.id AS job_id, jobs.source_type, jobs.job_request_id,
       jobs.source_request_relationship_id AS relationship_id,
-      relationships.professional_user_id, relationships.homeowner_id,
+      professional.user_id AS professional_user_id, relationships.homeowner_id,
       professional.id AS professional_participant_id,
       customer.id AS customer_participant_id,
       roles.id AS professional_role_assignment_id
      FROM jobs
-     INNER JOIN posts ON posts.id = jobs.job_request_id
+     LEFT JOIN posts ON posts.id = jobs.job_request_id
        AND posts.lifecycle_contract_version = 2
        AND posts.cancelled_at IS NULL
-     INNER JOIN request_relationships relationships
+     LEFT JOIN request_relationships relationships
        ON relationships.id = jobs.source_request_relationship_id
        AND relationships.post_id = jobs.job_request_id
        AND relationships.emergency_request_id IS NULL
        AND relationships.status = 'active'
        AND relationships.professional_user_id = $2
+     LEFT JOIN contractor_profiles profiles
+       ON jobs.source_type='business_document' AND profiles.id=jobs.contractor_profile_id AND profiles.user_id=$2
      INNER JOIN relationship_participants professional
        ON professional.job_id = jobs.id
-       AND professional.request_relationship_id = relationships.id
-       AND professional.user_id = relationships.professional_user_id
-     INNER JOIN relationship_participants customer
+       AND professional.user_id=$2
+       AND ((jobs.source_type='ordinary_request_selection' AND professional.request_relationship_id=relationships.id)
+         OR (jobs.source_type='business_document' AND professional.request_relationship_id IS NULL))
+     LEFT JOIN relationship_participants customer
        ON customer.job_id = jobs.id
        AND customer.request_relationship_id = relationships.id
        AND customer.user_id = relationships.homeowner_id
@@ -175,9 +181,12 @@ async function loadProfessionalContext(client, jobId, actorId, { lock = false } 
      WHERE jobs.id = $1
        AND jobs.lifecycle_contract_version = 2
        AND role_revocations.id IS NULL
+       AND ((jobs.source_type='ordinary_request_selection' AND posts.id IS NOT NULL AND relationships.id IS NOT NULL AND customer.id IS NOT NULL)
+         OR (jobs.source_type='business_document' AND profiles.id IS NOT NULL AND jobs.job_request_id IS NULL
+           AND jobs.source_request_relationship_id IS NULL AND jobs.originating_business_document_id IS NOT NULL))
      ORDER BY roles.valid_from DESC, roles.id DESC
      LIMIT 1
-     ${lock ? "FOR UPDATE OF jobs, relationships" : ""}`,
+     ${lock ? "FOR UPDATE OF jobs" : ""}`,
     [jobId, actorId]
   );
   return result.rows[0] || null;
@@ -191,27 +200,9 @@ function unavailable() {
   );
 }
 
-async function hasDecisionCapability(client, context, capability, decisionId) {
-  const result = await client.query(
-    `SELECT EXISTS (
-       SELECT 1
-       FROM lifecycle_authority_grants grants
-       LEFT JOIN lifecycle_authority_grant_revocations revocations
-         ON revocations.authority_grant_id = grants.id
-       WHERE grants.grantee_participant_id = $1
-         AND grants.job_id = $2
-         AND grants.capability = $3
-         AND grants.scope_type = 'approved_work'
-         AND grants.scope_job_id = $2
-         AND grants.scope_approved_quote_decision_id = $4
-         AND grants.scope_approved_quote_decision = 'APPROVED'
-         AND grants.valid_from <= CURRENT_TIMESTAMP
-         AND (grants.valid_until IS NULL OR grants.valid_until > CURRENT_TIMESTAMP)
-         AND revocations.id IS NULL
-     ) AS granted`,
-    [context.professional_participant_id, context.job_id, capability, decisionId]
-  );
-  return result.rows[0]?.granted === true;
+async function hasDecisionCapability(client, context, capability, decisionId, quoteApprovalId) {
+  return hasActiveLifecycleGrant({client,participantId:context.professional_participant_id,
+    jobId:context.job_id,capability,approvedQuoteDecisionId:decisionId,quoteApprovalId,allowJobScope:false});
 }
 
 async function hasAnyExecutionCapability(client, context) {
@@ -226,7 +217,7 @@ async function hasAnyExecutionCapability(client, context) {
          AND grants.capability = ANY($3::text[])
          AND grants.scope_type = 'approved_work'
          AND grants.scope_job_id = $2
-         AND grants.scope_approved_quote_decision IS NOT NULL
+         AND (grants.scope_quote_approval_id IS NOT NULL OR grants.scope_approved_quote_decision IS NOT NULL)
          AND grants.valid_from <= CURRENT_TIMESTAMP
          AND (grants.valid_until IS NULL OR grants.valid_until > CURRENT_TIMESTAMP)
          AND revocations.id IS NULL
@@ -248,8 +239,8 @@ async function requireBootstrapAuthority(client, context, logger) {
   return granted ? null : unavailable();
 }
 
-async function requireExecutionAuthority(client, context, capability, decisionId) {
-  if (!context || !(await hasDecisionCapability(client, context, capability, decisionId))) {
+async function requireExecutionAuthority(client, context, capability, decisionId, quoteApprovalId) {
+  if (!context || !(await hasDecisionCapability(client, context, capability, decisionId, quoteApprovalId))) {
     return unavailable();
   }
   return null;
@@ -261,74 +252,12 @@ async function requireReadAuthority(client, context, logger) {
   return requireBootstrapAuthority(client, context, logger);
 }
 
-async function loadApprovedDecisionSource(client, jobId, decisionId, { lock = false } = {}) {
-  const result = await client.query(
-    `SELECT jobs.id AS job_id, jobs.job_request_id,
-      jobs.source_request_relationship_id AS relationship_id,
-      professional.id AS professional_participant_id,
-      customer.id AS customer_participant_id,
-      decisions.id AS approved_customer_decision_id,
-      decisions.decision, decisions.issued_quote_version,
-      decisions.issued_integrity_hash,
-      decisions.customer_participant_id AS decision_customer_participant_id,
-      quotes.id AS quote_id, quotes.status AS quote_status,
-      versions.status AS quote_version_status,
-      versions.currency,
-      versions.integrity_hash AS quote_version_integrity_hash,
-      issuances.source_snapshot_integrity_hash AS issuance_integrity_hash
-     FROM jobs
-     INNER JOIN request_relationships relationships
-       ON relationships.id = jobs.source_request_relationship_id
-       AND relationships.post_id = jobs.job_request_id
-       AND relationships.emergency_request_id IS NULL
-       AND relationships.status = 'active'
-     INNER JOIN relationship_participants professional
-       ON professional.job_id = jobs.id
-       AND professional.request_relationship_id = relationships.id
-       AND professional.user_id = relationships.professional_user_id
-     INNER JOIN relationship_participants customer
-       ON customer.job_id = jobs.id
-       AND customer.request_relationship_id = relationships.id
-       AND customer.user_id = relationships.homeowner_id
-     INNER JOIN canonical_quote_customer_decisions decisions
-       ON decisions.id = $2
-       AND decisions.job_id = jobs.id
-       AND decisions.relationship_id = relationships.id
-       AND decisions.customer_participant_id = customer.id
-       AND decisions.decision = 'APPROVED'
-     INNER JOIN canonical_quotes quotes
-       ON quotes.id = decisions.quote_id
-       AND quotes.job_id = jobs.id
-       AND quotes.relationship_id = relationships.id
-       AND quotes.status = 'ISSUED'
-     INNER JOIN canonical_quote_versions versions
-       ON versions.quote_id = quotes.id
-       AND versions.job_id = jobs.id
-       AND versions.version = decisions.issued_quote_version
-       AND versions.status = 'ISSUED'
-     INNER JOIN canonical_quote_issuances issuances
-       ON issuances.quote_id = quotes.id
-       AND issuances.job_id = jobs.id
-       AND issuances.quote_version = decisions.issued_quote_version
-       AND issuances.source_snapshot_integrity_hash = decisions.issued_integrity_hash
-     WHERE jobs.id = $1
-       AND jobs.lifecycle_contract_version = 2
-     LIMIT 1
-     ${lock ? "FOR UPDATE OF jobs, relationships, quotes, decisions" : ""}`,
-    [jobId, decisionId]
-  );
-  const source = result.rows[0] || null;
-  if (source && (
-    source.decision !== "APPROVED" ||
-    source.quote_status !== "ISSUED" ||
-    source.quote_version_status !== "ISSUED" ||
-    source.issued_integrity_hash !== source.quote_version_integrity_hash ||
-    source.issued_integrity_hash !== source.issuance_integrity_hash ||
-    source.customer_participant_id !== source.decision_customer_participant_id
-  )) {
-    throw new Error("Approved Work execution commercial source integrity failed.");
-  }
-  return source;
+async function loadApprovedDecisionSource(client, jobId, decisionId, {lock=false,quoteApprovalId=null}={}) {
+  if (!decisionId && !quoteApprovalId) return null;
+  const source=await preWorkDepositServiceInternals.loadApprovedQuoteApprovalSource(client, {
+    jobId,customerDecisionId:decisionId,approvalId:quoteApprovalId,lock,
+  });
+  return source ? {...source,approved_customer_decision_id:source.customer_decision_id} : null;
 }
 
 async function reserveCommand(client, {
@@ -402,11 +331,14 @@ function replayResult(value) {
 async function loadExecution(client, jobId, executionId, { lock = false } = {}) {
   const result = await client.query(
     `SELECT executions.*,
+      COALESCE(executions.quote_approval_id,common_approval.id) AS quote_approval_id,
+      COALESCE(executions.approval_source,common_approval.approval_source) AS approval_source,
       current.version AS current_version,
       current.state AS current_state,
       current.successor_execution_id,
       current.created_at AS current_version_created_at
      FROM canonical_approved_work_executions executions
+     LEFT JOIN canonical_quote_approvals common_approval ON common_approval.customer_decision_id=executions.approved_customer_decision_id
      INNER JOIN LATERAL (
        SELECT versions.version, versions.state,
          versions.successor_execution_id, versions.created_at
@@ -426,11 +358,14 @@ async function loadExecution(client, jobId, executionId, { lock = false } = {}) 
 async function loadExecutions(client, jobId) {
   const result = await client.query(
     `SELECT executions.*,
+      COALESCE(executions.quote_approval_id,common_approval.id) AS quote_approval_id,
+      COALESCE(executions.approval_source,common_approval.approval_source) AS approval_source,
       current.version AS current_version,
       current.state AS current_state,
       current.successor_execution_id,
       current.created_at AS current_version_created_at
      FROM canonical_approved_work_executions executions
+     LEFT JOIN canonical_quote_approvals common_approval ON common_approval.customer_decision_id=executions.approved_customer_decision_id
      INNER JOIN LATERAL (
        SELECT versions.version, versions.state,
          versions.successor_execution_id, versions.created_at
@@ -534,7 +469,7 @@ async function loadActivityClassificationForStart(
        ON bindings.execution_id = classifications.execution_id
        AND bindings.workstream_id = classifications.workstream_id
        AND bindings.job_id = classifications.job_id
-       AND bindings.relationship_id = classifications.relationship_id
+       AND bindings.relationship_id IS NOT DISTINCT FROM classifications.relationship_id
      WHERE classifications.activity_id = $1
        AND classifications.workstream_id = $2
        AND classifications.job_id = $3
@@ -552,6 +487,7 @@ function approvedWorkStartProjection({ execution, classification, deposit, mater
       id: execution.id,
       version: Number(execution.current_version),
       approvedCustomerDecisionId: execution.approved_customer_decision_id,
+    quoteApprovalId: execution.quote_approval_id,
     },
     activity: classification
       ? {
@@ -587,6 +523,9 @@ async function evaluateApprovedWorkStartReadinessWithClient({
   activityId = null,
   expectedActivityVersion = null,
   approvedCustomerDecisionId = null,
+  quoteApprovalId = null,
+  visitId = null,
+  expectedVisitVersion = null,
   logger = console,
 }) {
   const context = await loadProfessionalContext(client, jobId, actorUserId, { lock: true });
@@ -609,11 +548,25 @@ async function evaluateApprovedWorkStartReadinessWithClient({
   ) {
     return { error: approvedWorkStartFailure("APPROVED_WORK_EXECUTION_REQUIRED") };
   }
+  if (quoteApprovalId && execution.quote_approval_id !== quoteApprovalId) {
+    return {error:approvedWorkStartFailure("APPROVED_WORK_EXECUTION_REQUIRED")};
+  }
+  if (execution.approval_source === "EXTERNAL_EVIDENCE" && sourceType === "APPROVED_WORK_VISIT") {
+    const evidence = await client.query(`SELECT evidence.id FROM canonical_visit_external_confirmation_evidence evidence
+      JOIN canonical_visits visits ON visits.id=evidence.visit_id AND visits.job_id=evidence.job_id
+        AND visits.quote_approval_id=evidence.quote_approval_id
+      JOIN LATERAL (SELECT version,state FROM canonical_visit_versions WHERE visit_id=visits.id ORDER BY version DESC LIMIT 1) current ON TRUE
+      WHERE evidence.visit_id=$1 AND evidence.job_id=$2 AND evidence.quote_approval_id=$3
+        AND evidence.scheduled_visit_version=$4 AND current.version=$4 AND current.state='SCHEDULED'`,
+      [visitId,jobId,execution.quote_approval_id,expectedVisitVersion]);
+    if (!evidence.rows[0]) return {error:approvedWorkStartFailure("APPROVED_WORK_EXECUTION_REQUIRED")};
+  }
   const authorityError = await requireExecutionAuthority(
     client,
     context,
     CAPABILITIES.EXECUTE,
-    execution.approved_customer_decision_id
+    execution.approved_customer_decision_id,
+    execution.quote_approval_id
   );
   if (authorityError) {
     logger.warn?.("Approved Work start authority denied", {
@@ -652,6 +605,7 @@ async function evaluateApprovedWorkStartReadinessWithClient({
     client,
     jobId,
     approvedQuoteDecisionId: execution.approved_customer_decision_id,
+    quoteApprovalId: execution.quote_approval_id,
     lock: true,
   });
   if (!deposit.allowed) {
@@ -661,6 +615,7 @@ async function evaluateApprovedWorkStartReadinessWithClient({
     client,
     jobId,
     approvedCustomerDecisionId: execution.approved_customer_decision_id,
+    quoteApprovalId: execution.quote_approval_id,
     execution,
     lock: true,
   });
@@ -718,8 +673,9 @@ async function recordApprovedWorkStartWithClient({
     eventId,
     executionId: execution.id,
     jobId: execution.job_id,
-    relationshipId: Number(execution.relationship_id),
+    relationshipId: nullableInteger(execution.relationship_id),
     approvedCustomerDecisionId: execution.approved_customer_decision_id,
+    quoteApprovalId: execution.quote_approval_id,
     sourceType,
     sourceId,
     sourceVersion: Number(sourceVersion),
@@ -746,7 +702,7 @@ async function recordApprovedWorkStartWithClient({
       eventId,
       execution.id,
       execution.job_id,
-      Number(execution.relationship_id),
+      nullableInteger(execution.relationship_id),
       execution.approved_customer_decision_id,
       sourceType,
       sourceType === "EXECUTION_ACTIVITY" ? sourceId : null,
@@ -786,11 +742,13 @@ function executionBaseProjection(row) {
     contractVersion: CONTRACT_VERSION,
     id: row.id,
     jobId: row.job_id,
-    relationshipId: Number(row.relationship_id),
+    relationshipId: nullableInteger(row.relationship_id),
     source: {
       quoteId: row.quote_id,
       issuedQuoteVersion: Number(row.issued_quote_version),
       approvedCustomerDecisionId: row.approved_customer_decision_id,
+      quoteApprovalId: row.quote_approval_id || null,
+      approvalSource: row.approval_source || null,
       customerParticipantId: row.customer_participant_id,
       currency: row.commercial_currency,
     },
@@ -920,13 +878,15 @@ async function projectExecutionWithClient(client, execution, context, { detail =
     client,
     context,
     CAPABILITIES.MANAGE,
-    execution.approved_customer_decision_id
+    execution.approved_customer_decision_id,
+    execution.quote_approval_id
   );
   const canExecute = await hasDecisionCapability(
     client,
     context,
     CAPABILITIES.EXECUTE,
-    execution.approved_customer_decision_id
+    execution.approved_customer_decision_id,
+    execution.quote_approval_id
   );
   const actions = [];
   if (execution.current_state === "ACTIVE") {
@@ -952,23 +912,25 @@ async function projectExecutionWithClient(client, execution, context, { detail =
 }
 
 async function insertExecutionGrants(client, context, execution) {
-  for (const capability of Object.values(CAPABILITIES)) {
-    const key = `approved-work-execution:${execution.approved_customer_decision_id}:${capability}`;
+  const capabilities = [...Object.values(CAPABILITIES),
+    ...(execution.approval_source === "EXTERNAL_EVIDENCE" ? ["visit.start","visit.complete"] : [])];
+  for (const capability of capabilities) {
+    const key = `approved-work-execution:${execution.quote_approval_id}:${capability}`;
     await client.query(
       `INSERT INTO lifecycle_authority_grants (
          id, grantee_participant_id, grantor_participant_id, job_id,
          capability, scope_type, scope_job_id, scope_concern_id,
          scope_evaluation_id, scope_approved_quote_decision_id,
          scope_approved_quote_decision, source_evidence_type,
-         source_evidence_reference, idempotency_key
-       ) VALUES ($1,$2,$2,$3,$4,'approved_work',$3,NULL,NULL,$5,'APPROVED',
-         'canonical_approved_work_execution',$6,$7)
+         source_evidence_reference, idempotency_key,scope_quote_approval_id,scope_quote_approval_source
+       ) VALUES ($1,$2,$2,$3,$4,'approved_work',$3,NULL,NULL,$5,CASE WHEN $5::uuid IS NULL THEN NULL ELSE 'APPROVED' END,
+         'canonical_approved_work_execution',$6,$7,$8,$9)
        ON CONFLICT (
          grantor_participant_id, grantee_participant_id, capability,
          scope_type, scope_job_id, idempotency_key
        ) DO NOTHING`,
       [randomUUID(), context.professional_participant_id, context.job_id,
-        capability, execution.approved_customer_decision_id, execution.id, key]
+        capability, execution.approved_customer_decision_id, execution.id, key,execution.quote_approval_id,execution.approval_source]
     );
   }
 }
@@ -1012,12 +974,14 @@ async function getApprovedWorkExecution(input = {}) {
       client,
       context,
       CAPABILITIES.MANAGE,
-      execution.approved_customer_decision_id
+      execution.approved_customer_decision_id,
+      execution.quote_approval_id
     ) || await hasDecisionCapability(
       client,
       context,
       CAPABILITIES.EXECUTE,
-      execution.approved_customer_decision_id
+      execution.approved_customer_decision_id,
+      execution.quote_approval_id
     );
     if (!canRead && await requireBootstrapAuthority(client, context, validated.logger)) {
       return { abort: unavailable() };
@@ -1037,12 +1001,14 @@ async function getApprovedWorkExecution(input = {}) {
 async function materializeApprovedWorkExecution(input = {}) {
   const validated = validateInput(
     input,
-    ["jobId", "approvedCustomerDecisionId"],
+    ["jobId", "approvedCustomerDecisionId", "quoteApprovalId"],
     { command: true }
   );
   if (validated.error) return validated.error;
-  const decisionId = normalizedUuid(input.approvedCustomerDecisionId);
-  if (!decisionId) {
+  let decisionId = input.approvedCustomerDecisionId == null ? null : normalizedUuid(input.approvedCustomerDecisionId);
+  const quoteApprovalId = input.quoteApprovalId == null ? null : normalizedUuid(input.quoteApprovalId);
+  if ((!decisionId && !quoteApprovalId) || (input.approvedCustomerDecisionId != null && !decisionId) ||
+      (input.quoteApprovalId != null && !quoteApprovalId)) {
     return failure(
       400,
       "INVALID_APPROVED_CUSTOMER_DECISION",
@@ -1062,14 +1028,15 @@ async function materializeApprovedWorkExecution(input = {}) {
       client,
       validated.jobId,
       decisionId,
-      { lock: true }
+      { lock: true,quoteApprovalId }
     );
     if (!source ||
       source.professional_participant_id !== context.professional_participant_id ||
       source.customer_participant_id !== context.customer_participant_id ||
-      Number(source.relationship_id) !== Number(context.relationship_id)) {
+      nullableInteger(source.relationship_id) !== nullableInteger(context.relationship_id)) {
       return { abort: unavailable() };
     }
+    decisionId=source.customer_decision_id;
     const requestFingerprint = fingerprint({
       command: COMMANDS.MATERIALIZE,
       jobId: validated.jobId,
@@ -1082,7 +1049,7 @@ async function materializeApprovedWorkExecution(input = {}) {
       jobId: validated.jobId,
       participantId: context.professional_participant_id,
       commandName: COMMANDS.MATERIALIZE,
-      commandScope: `decision:${decisionId}`,
+      commandScope: decisionId ? `decision:${decisionId}` : `approval:${source.quote_approval_id}`,
       idempotencyKey: validated.idempotencyKey,
       requestFingerprint,
     });
@@ -1090,8 +1057,8 @@ async function materializeApprovedWorkExecution(input = {}) {
     if (idempotency.replay) return { result: replayResult(idempotency.replay) };
     const existing = await client.query(
       `SELECT id FROM canonical_approved_work_executions
-       WHERE approved_customer_decision_id = $1 LIMIT 1 FOR UPDATE`,
-      [decisionId]
+       WHERE quote_approval_id=$2 OR (quote_approval_id IS NULL AND approved_customer_decision_id=$1) LIMIT 1 FOR UPDATE`,
+      [decisionId,source.quote_approval_id]
     );
     if (existing.rows[0]) {
       return {
@@ -1109,14 +1076,14 @@ async function materializeApprovedWorkExecution(input = {}) {
          issued_quote_version, approved_customer_decision_id,
          commercial_currency, source_integrity_hash, customer_participant_id,
          created_by_professional_participant_id, created_by_role_assignment_id,
-         created_command_idempotency_id
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-      [executionId, validated.jobId, Number(source.job_request_id),
-        Number(source.relationship_id), source.quote_id,
+         created_command_idempotency_id,quote_approval_id,approval_source,approved_customer_decision
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+      [executionId, validated.jobId, nullableInteger(source.job_request_id),
+        nullableInteger(source.relationship_id), source.quote_id,
         Number(source.issued_quote_version), decisionId, source.currency,
         source.issued_integrity_hash, source.customer_participant_id,
         context.professional_participant_id,
-        context.professional_role_assignment_id, idempotency.row.id]
+        context.professional_role_assignment_id, idempotency.row.id,source.quote_approval_id,source.approval_source,decisionId ? "APPROVED" : null]
     );
     await client.query(
       `INSERT INTO canonical_approved_work_execution_versions (
@@ -1124,7 +1091,7 @@ async function materializeApprovedWorkExecution(input = {}) {
          customer_participant_id, state, successor_execution_id,
          recorded_by_participant_id, command_idempotency_id, integrity_hash
        ) VALUES ($1,1,$2,$3,$4,'ACTIVE',NULL,$5,$6,$7)`,
-      [executionId, validated.jobId, Number(source.relationship_id),
+      [executionId, validated.jobId, nullableInteger(source.relationship_id),
         source.customer_participant_id, context.professional_participant_id,
         idempotency.row.id, requestFingerprint]
     );
@@ -1177,7 +1144,7 @@ async function insertBinding(client, {
      RETURNING id AS binding_id, execution_id, workstream_id, job_id,
        created_at AS binding_created_at`,
     [id, execution.id, workstream.id, execution.job_id,
-      Number(execution.relationship_id), context.professional_participant_id,
+      nullableInteger(execution.relationship_id), context.professional_participant_id,
       context.professional_role_assignment_id, commandId]
   );
   return {
@@ -1211,7 +1178,8 @@ async function bindWorkstreamToExecution(input = {}) {
       client,
       context,
       CAPABILITIES.EXECUTE,
-      execution.approved_customer_decision_id
+      execution.approved_customer_decision_id,
+      execution.quote_approval_id
     );
     if (authorityError) return { abort: authorityError };
     const requestFingerprint = fingerprint({
@@ -1341,7 +1309,7 @@ async function insertClassification(client, {
      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
      RETURNING *`,
     [activity.id, Number(activity.current_version), workstream.id,
-      execution.job_id, Number(execution.relationship_id),
+      execution.job_id, nullableInteger(execution.relationship_id),
       normalized.classification,
       normalized.classification === "EXECUTION" ? execution.id : null,
       normalized.scopeBasis, sourceQuoteId, sourceQuoteVersion,
@@ -1387,7 +1355,8 @@ async function classifyWorkActivity(input = {}) {
       client,
       context,
       CAPABILITIES.EXECUTE,
-      execution.approved_customer_decision_id
+      execution.approved_customer_decision_id,
+      execution.quote_approval_id
     );
     if (authorityError) return { abort: authorityError };
     const requestFingerprint = fingerprint({
@@ -1486,14 +1455,15 @@ async function transitionExecution(input, targetState) {
       client,
       context,
       CAPABILITIES.MANAGE,
-      execution.approved_customer_decision_id
+      execution.approved_customer_decision_id,
+      execution.quote_approval_id
     );
     if (authorityError) return { abort: authorityError };
     let successor = null;
     if (targetState === "SUPERSEDED") {
       successor = await loadExecution(client, validated.jobId, successorExecutionId, { lock: true });
       if (!successor || successor.current_state !== "ACTIVE" ||
-        Number(successor.relationship_id) !== Number(execution.relationship_id) ||
+        nullableInteger(successor.relationship_id) !== nullableInteger(execution.relationship_id) ||
         successor.customer_participant_id !== execution.customer_participant_id) {
         return { abort: failure(409, "INVALID_APPROVED_WORK_EXECUTION_SUCCESSOR", "The successor execution is unavailable.") };
       }
@@ -1501,7 +1471,8 @@ async function transitionExecution(input, targetState) {
         client,
         context,
         CAPABILITIES.MANAGE,
-        successor.approved_customer_decision_id
+        successor.approved_customer_decision_id,
+        successor.quote_approval_id
       );
       if (successorAuthority) return { abort: successorAuthority };
     }
@@ -1535,7 +1506,7 @@ async function transitionExecution(input, targetState) {
          customer_participant_id, state, successor_execution_id,
          recorded_by_participant_id, command_idempotency_id, integrity_hash
        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-      [executionId, nextVersion, validated.jobId, Number(execution.relationship_id),
+      [executionId, nextVersion, validated.jobId, nullableInteger(execution.relationship_id),
         execution.customer_participant_id, targetState, successorExecutionId,
         context.professional_participant_id, idempotency.row.id, requestFingerprint]
     );
@@ -1758,7 +1729,8 @@ async function completeApprovedWork(input = {}) {
       client,
       context,
       CAPABILITIES.EXECUTE,
-      execution.approved_customer_decision_id
+      execution.approved_customer_decision_id,
+      execution.quote_approval_id
     );
     if (authorityError) return { abort: authorityError };
     const requestFingerprint = fingerprint({
@@ -1801,11 +1773,11 @@ async function completeApprovedWork(input = {}) {
       client,
       validated.jobId,
       execution.approved_customer_decision_id,
-      { lock: true }
+      { lock: true,quoteApprovalId:execution.quote_approval_id }
     );
     if (!source || source.quote_id !== execution.quote_id ||
       Number(source.issued_quote_version) !== Number(execution.issued_quote_version) ||
-      Number(source.relationship_id) !== Number(execution.relationship_id) ||
+      nullableInteger(source.relationship_id) !== nullableInteger(execution.relationship_id) ||
       source.customer_participant_id !== execution.customer_participant_id ||
       source.issued_integrity_hash !== execution.source_integrity_hash) {
       return {
@@ -1971,10 +1943,11 @@ async function completeApprovedWork(input = {}) {
       executionId,
       executionVersion,
       jobId: validated.jobId,
-      relationshipId: Number(execution.relationship_id),
+      relationshipId: nullableInteger(execution.relationship_id),
       quoteId: execution.quote_id,
       issuedQuoteVersion: Number(execution.issued_quote_version),
       approvedCustomerDecisionId: execution.approved_customer_decision_id,
+    quoteApprovalId: execution.quote_approval_id,
       participantId: context.professional_participant_id,
       completedAt: completedAt.toISOString(),
       activityReconciliation,
@@ -1987,7 +1960,7 @@ async function completeApprovedWork(input = {}) {
          recorded_by_participant_id, command_idempotency_id, integrity_hash
        ) VALUES ($1,$2,$3,$4,$5,'CLOSED',NULL,$6,$7,$8)`,
       [executionId, executionVersion, validated.jobId,
-        Number(execution.relationship_id), execution.customer_participant_id,
+        nullableInteger(execution.relationship_id), execution.customer_participant_id,
         context.professional_participant_id, idempotency.row.id,
         completionIntegrityHash]
     );
@@ -1997,12 +1970,13 @@ async function completeApprovedWork(input = {}) {
       contractVersion: CONTRACT_VERSION,
       state: "WORK_COMPLETED",
       jobId: validated.jobId,
-      relationshipId: Number(execution.relationship_id),
+      relationshipId: nullableInteger(execution.relationship_id),
       executionId,
       executionVersion: Number(transitioned.current_version),
       quoteId: execution.quote_id,
       issuedQuoteVersion: Number(execution.issued_quote_version),
       approvedCustomerDecisionId: execution.approved_customer_decision_id,
+    quoteApprovalId: execution.quote_approval_id,
       completedByParticipantId: context.professional_participant_id,
       completedAt: iso(transitioned.current_version_created_at),
       evidence: {
@@ -2083,7 +2057,8 @@ async function reconcileLegacyExecution(input = {}) {
       client,
       context,
       CAPABILITIES.EXECUTE,
-      execution.approved_customer_decision_id
+      execution.approved_customer_decision_id,
+      execution.quote_approval_id
     );
     if (authorityError) return { abort: authorityError };
     const requestFingerprint = fingerprint({

@@ -10,6 +10,7 @@ const {
 } = require("../authorization/lifecycleAuthorityService");
 const {
   evaluateApprovedWorkDepositGateWithClient,
+  preWorkDepositServiceInternals,
   schedulingGateFailure,
 } = require("../finance/preWorkDepositService");
 const {
@@ -41,6 +42,7 @@ const VISIT_CAPABILITIES = Object.freeze({
   CANCEL: "visit.cancel",
   START: "visit.start",
   COMPLETE: "visit.complete",
+  EXTERNAL_CONFIRMATION: "visit.external_confirmation.record",
 });
 
 const VISIT_COMMANDS = Object.freeze({
@@ -363,11 +365,12 @@ async function loadJobContext(client, jobId, actorUserId, { lock = false } = {})
     /* visit:job_context */
     SELECT
       jobs.id AS job_id,
+      jobs.source_type,
       jobs.job_request_id AS request_id,
       jobs.lifecycle_contract_version,
       relationships.status AS relationship_status,
       relationships.homeowner_id AS homeowner_user_id,
-      relationships.professional_user_id AS selected_professional_user_id,
+      COALESCE(relationships.professional_user_id, profiles.user_id) AS selected_professional_user_id,
       (
         SELECT conversations.id
         FROM conversations
@@ -463,6 +466,8 @@ async function loadJobContext(client, jobId, actorUserId, { lock = false } = {})
         SELECT jsonb_agg(
           jsonb_build_object(
             'decisionId', grants.scope_approved_quote_decision_id,
+            'quoteApprovalId', grants.scope_quote_approval_id,
+            'approvalSource', grants.scope_quote_approval_source,
             'capability', grants.capability
           )
           ORDER BY grants.scope_approved_quote_decision_id, grants.capability
@@ -476,26 +481,33 @@ async function loadJobContext(client, jobId, actorUserId, { lock = false } = {})
           AND grants.scope_job_id = jobs.id
           AND grants.scope_concern_id IS NULL
           AND grants.scope_evaluation_id IS NULL
-          AND grants.scope_approved_quote_decision_id IS NOT NULL
-          AND grants.scope_approved_quote_decision = 'APPROVED'
+          AND (grants.scope_quote_approval_id IS NOT NULL OR
+            (grants.scope_approved_quote_decision_id IS NOT NULL
+             AND grants.scope_approved_quote_decision = 'APPROVED'))
           AND grants.capability = ANY($3::text[])
           AND grants.valid_from <= CURRENT_TIMESTAMP
           AND (grants.valid_until IS NULL OR grants.valid_until > CURRENT_TIMESTAMP)
           AND revocations.id IS NULL
       ), '[]'::jsonb) AS active_approved_work_visit_capabilities
     FROM jobs
-    INNER JOIN posts
+    LEFT JOIN posts
       ON posts.id = jobs.job_request_id
       AND posts.lifecycle_contract_version = 2
       AND posts.cancelled_at IS NULL
-    INNER JOIN request_relationships relationships
+    LEFT JOIN request_relationships relationships
       ON relationships.id = jobs.source_request_relationship_id
       AND relationships.post_id = jobs.job_request_id
       AND relationships.emergency_request_id IS NULL
       AND relationships.status = 'active'
+    LEFT JOIN contractor_profiles profiles
+      ON jobs.source_type = 'business_document'
+      AND profiles.id = jobs.contractor_profile_id AND profiles.user_id = $2
     INNER JOIN relationship_participants participants
       ON participants.job_id = jobs.id
-      AND participants.request_relationship_id = relationships.id
+      AND ((jobs.source_type = 'ordinary_request_selection'
+            AND participants.request_relationship_id = relationships.id)
+        OR (jobs.source_type = 'business_document'
+            AND participants.request_relationship_id IS NULL))
       AND participants.user_id = $2
     LEFT JOIN canonical_evaluation_job_subjects evaluation_subjects
       ON evaluation_subjects.job_id = jobs.id
@@ -503,8 +515,13 @@ async function loadJobContext(client, jobId, actorUserId, { lock = false } = {})
       ON evaluation_subject_status.id = evaluation_subjects.evaluation_id
     WHERE jobs.id = $1
       AND jobs.lifecycle_contract_version = 2
+      AND ((jobs.source_type = 'ordinary_request_selection'
+            AND posts.id IS NOT NULL AND relationships.id IS NOT NULL)
+        OR (jobs.source_type = 'business_document' AND profiles.id IS NOT NULL
+            AND jobs.job_request_id IS NULL AND jobs.source_request_relationship_id IS NULL
+            AND jobs.originating_business_document_id IS NOT NULL))
     LIMIT 1
-    ${lock ? "FOR UPDATE OF jobs, relationships" : ""}
+    ${lock ? "FOR UPDATE OF jobs" : ""}
     `,
     [jobId, actorUserId, Object.values(VISIT_CAPABILITIES)]
   );
@@ -542,6 +559,8 @@ async function projectVisitLifecycleAlertWithClient({
   visitId,
   eventRow,
 }) {
+  // Business-origin Jobs have no Meetro customer or conversation to notify.
+  if (context?.source_type === "business_document") return null;
   const customerUserId = Number(context?.homeowner_user_id);
   const professionalUserId = Number(context?.selected_professional_user_id);
   const actorId = Number(actorUserId);
@@ -676,6 +695,7 @@ async function requireAuthority({
   lock = false,
   evaluationId = null,
   approvedQuoteDecisionId = null,
+  quoteApprovalId = null,
   allowJobScope = true,
   allowEvaluationVisitScope = false,
 }) {
@@ -695,6 +715,7 @@ async function requireAuthority({
     jobId,
     evaluationId,
     approvedQuoteDecisionId,
+    quoteApprovalId,
     allowJobScope,
     allowEvaluationVisitScope,
     logger,
@@ -727,6 +748,7 @@ async function hasPurposeVisitGrant({
     capability,
     jobId: row.job_id,
     evaluationId: row.purpose === "EVALUATION" ? row.evaluation_id : null,
+    quoteApprovalId: row.purpose === "APPROVED_WORK" ? row.quote_approval_id : null,
     approvedQuoteDecisionId: row.purpose === "APPROVED_WORK"
       ? row.approved_quote_decision_id
       : null,
@@ -758,9 +780,10 @@ function activeCapabilities(context, row = null) {
       capabilities.add(capability);
     }
   }
-  if (row?.purpose === "APPROVED_WORK" && row.approved_quote_decision_id) {
+  if (row?.purpose === "APPROVED_WORK") {
     for (const grant of context?.active_approved_work_visit_capabilities || []) {
-      if (grant.decisionId === row.approved_quote_decision_id) {
+      if ((grant.quoteApprovalId && grant.quoteApprovalId === row.quote_approval_id) ||
+          (!grant.quoteApprovalId && grant.decisionId && grant.decisionId === row.approved_quote_decision_id)) {
         capabilities.add(grant.capability);
       }
     }
@@ -778,6 +801,9 @@ function visitActions(context, row, now = new Date()) {
       state === "PROPOSED" &&
       row.recorded_by_participant_id !== context?.actor_participant_id &&
       capabilities.has(VISIT_CAPABILITIES.CONFIRM),
+    canRecordExternalConfirmation:
+      role === "PROFESSIONAL" && row.quote_approval_source === "EXTERNAL_EVIDENCE" &&
+      state === "PROPOSED" && capabilities.has(VISIT_CAPABILITIES.EXTERNAL_CONFIRMATION),
     canRequestChange:
       role === "CUSTOMER" &&
       ACTIVE_VISIT_STATES.has(state) &&
@@ -801,6 +827,17 @@ function visitActions(context, row, now = new Date()) {
   };
 }
 
+function externalScheduleConfirmationProjection(evidence) {
+  if (!evidence) return null;
+  return { id:evidence.id, source:"BUSINESS_RECORDED_EXTERNAL_EVIDENCE",
+    method:evidence.evidence_method,confirmedAt:iso(evidence.confirmed_at),
+    proposedVisitVersion:Number(evidence.proposed_visit_version),
+    scheduledVisitVersion:Number(evidence.scheduled_visit_version),
+    proposedIntegrityHash:evidence.proposed_integrity_hash,
+    recordedByParticipantId:evidence.recorded_by_participant_id,
+    recordedAt:iso(evidence.created_at) };
+}
+
 function visitProjection(row, context, now) {
   return {
     id: row.id,
@@ -818,6 +855,10 @@ function visitProjection(row, context, now) {
     completedAt: iso(row.completed_at),
     evaluationId: row.evaluation_id || null,
     workstreamIds: (row.workstream_ids || []).map(String),
+    quoteApprovalId: row.quote_approval_id || null,
+    approvalSource: row.quote_approval_source || null,
+    approvedQuoteDecisionId: row.approved_quote_decision_id || null,
+    externalScheduleConfirmation: externalScheduleConfirmationProjection(row.external_confirmation),
     approvedQuoteDecisionEvidence: row.approved_quote_decision_id
       ? {
           decisionId: row.approved_quote_decision_id,
@@ -870,6 +911,7 @@ async function loadVisit(client, jobId, visitId, { lock = false } = {}) {
     SELECT
       visits.id, visits.job_id, visits.purpose,
       visits.created_by_participant_id,
+      visits.quote_approval_id, visits.quote_approval_source,
       visits.approved_quote_decision_id,
       visits.approved_quote_decision,
       visits.created_at,
@@ -879,6 +921,14 @@ async function loadVisit(client, jobId, visitId, { lock = false } = {}) {
       versions.cancellation_reason, versions.started_at, versions.cancelled_at,
       versions.completed_at, versions.recorded_by_participant_id,
       versions.created_at AS version_created_at,
+      versions.integrity_hash AS version_integrity_hash,
+      (SELECT to_jsonb(evidence) FROM canonical_visit_external_confirmation_evidence evidence
+        WHERE evidence.visit_id=visits.id AND evidence.job_id=visits.job_id
+          AND evidence.scheduled_visit_version<=versions.version
+          AND NOT EXISTS (SELECT 1 FROM canonical_visit_versions intervening
+            WHERE intervening.visit_id=visits.id AND intervening.version>evidence.scheduled_visit_version
+              AND intervening.version<=versions.version AND intervening.state='PROPOSED')
+        ORDER BY evidence.scheduled_visit_version DESC LIMIT 1) AS external_confirmation,
       evaluation_links.evaluation_id,
       COALESCE(workstream_links.workstream_ids, ARRAY[]::uuid[]) AS workstream_ids
     FROM canonical_visits visits
@@ -886,7 +936,7 @@ async function loadVisit(client, jobId, visitId, { lock = false } = {}) {
       SELECT
         version, state, scheduled_start_at, scheduled_end_at,
         time_zone, location_mode, cancellation_reason, started_at, cancelled_at,
-        completed_at, recorded_by_participant_id, created_at
+        completed_at, recorded_by_participant_id, created_at, integrity_hash
       FROM canonical_visit_versions
       WHERE visit_id = visits.id AND job_id = visits.job_id
       ORDER BY version DESC
@@ -1243,7 +1293,8 @@ async function listVisits(input = {}) {
       SELECT
         visits.id, visits.job_id, visits.purpose,
         visits.created_by_participant_id,
-        visits.approved_quote_decision_id,
+        visits.quote_approval_id, visits.quote_approval_source,
+      visits.approved_quote_decision_id,
         visits.approved_quote_decision,
         visits.created_at,
         versions.version, versions.state,
@@ -1252,6 +1303,14 @@ async function listVisits(input = {}) {
         versions.cancellation_reason, versions.started_at, versions.cancelled_at,
         versions.completed_at, versions.recorded_by_participant_id,
         versions.created_at AS version_created_at,
+      versions.integrity_hash AS version_integrity_hash,
+      (SELECT to_jsonb(evidence) FROM canonical_visit_external_confirmation_evidence evidence
+        WHERE evidence.visit_id=visits.id AND evidence.job_id=visits.job_id
+          AND evidence.scheduled_visit_version<=versions.version
+          AND NOT EXISTS (SELECT 1 FROM canonical_visit_versions intervening
+            WHERE intervening.visit_id=visits.id AND intervening.version>evidence.scheduled_visit_version
+              AND intervening.version<=versions.version AND intervening.state='PROPOSED')
+        ORDER BY evidence.scheduled_visit_version DESC LIMIT 1) AS external_confirmation,
         evaluation_links.evaluation_id,
         COALESCE(workstream_links.workstream_ids, ARRAY[]::uuid[]) AS workstream_ids
       FROM canonical_visits visits
@@ -1259,7 +1318,7 @@ async function listVisits(input = {}) {
         SELECT
           version, state, scheduled_start_at, scheduled_end_at,
           time_zone, location_mode, cancellation_reason, started_at, cancelled_at,
-          completed_at, recorded_by_participant_id, created_at
+          completed_at, recorded_by_participant_id, created_at, integrity_hash
         FROM canonical_visit_versions
         WHERE visit_id = visits.id AND job_id = visits.job_id
         ORDER BY version DESC
@@ -1335,6 +1394,7 @@ async function validateProposedSubjects({
   evaluationId,
   workstreamIds,
   approvedQuoteDecisionId,
+  quoteApprovalId,
 }) {
   if (evaluationId) {
     const evaluation = await client.query(
@@ -1349,15 +1409,11 @@ async function validateProposedSubjects({
     );
     if (!evaluation.rows[0]) return false;
   }
-  if (approvedQuoteDecisionId) {
-    const decision = await client.query(
-      `SELECT id
-       FROM canonical_quote_customer_decisions
-       WHERE id = $1 AND job_id = $2 AND decision = 'APPROVED'
-       LIMIT 1`,
-      [approvedQuoteDecisionId, jobId]
-    );
-    if (!decision.rows[0]) return false;
+  if (quoteApprovalId) {
+    const approval = await preWorkDepositServiceInternals.loadApprovedQuoteApprovalSource(client, {
+      jobId, approvalId: quoteApprovalId, customerDecisionId: approvedQuoteDecisionId,
+    });
+    if (!approval) return false;
   }
   if (workstreamIds.length > 0) {
     const workstreams = await client.query(
@@ -1371,13 +1427,13 @@ async function validateProposedSubjects({
   return (
     (purpose === "EVALUATION" &&
       evaluationId === null &&
-      approvedQuoteDecisionId === null) ||
+      approvedQuoteDecisionId === null && quoteApprovalId === null) ||
     (purpose === "APPROVED_WORK" &&
       evaluationId === null &&
-      approvedQuoteDecisionId !== null) ||
+      quoteApprovalId !== null) ||
     (purpose === "FOLLOW_UP" &&
       evaluationId === null &&
-      approvedQuoteDecisionId === null)
+      approvedQuoteDecisionId === null && quoteApprovalId === null)
   );
 }
 
@@ -1392,6 +1448,7 @@ async function proposeVisit(input = {}) {
     "evaluationId",
     "workstreamIds",
     "approvedQuoteDecisionId",
+    "quoteApprovalId",
     "reason",
   ]);
   if (validated.error) return validated.error;
@@ -1401,9 +1458,10 @@ async function proposeVisit(input = {}) {
   const evaluationId = input.evaluationId == null
     ? null
     : normalizedUuid(input.evaluationId);
-  const approvedQuoteDecisionId = input.approvedQuoteDecisionId == null
+  let approvedQuoteDecisionId = input.approvedQuoteDecisionId == null
     ? null
     : normalizedUuid(input.approvedQuoteDecisionId);
+  let quoteApprovalId = input.quoteApprovalId == null ? null : normalizedUuid(input.quoteApprovalId);
   const workstreamIds = normalizedWorkstreamIds(input.workstreamIds);
   const reason = input.reason == null
     ? null
@@ -1414,6 +1472,8 @@ async function proposeVisit(input = {}) {
     !schedule ||
     (input.evaluationId != null && !evaluationId) ||
     (input.approvedQuoteDecisionId != null && !approvedQuoteDecisionId) ||
+    (input.quoteApprovalId != null && !quoteApprovalId) ||
+    (purpose !== "APPROVED_WORK" && (quoteApprovalId || approvedQuoteDecisionId)) ||
     workstreamIds === null ||
     (input.reason != null && !reason)
   ) {
@@ -1429,6 +1489,22 @@ async function proposeVisit(input = {}) {
   const logger = safeLogger(input.logger);
 
   return runTransaction(input.pool, async (client) => {
+    let approvalSource = null;
+    if (purpose === "APPROVED_WORK") {
+      if (!quoteApprovalId && !approvedQuoteDecisionId) {
+        return { abort: failure(409, "VISIT_SUBJECT_SCOPE_MISMATCH", "An exact Quote approval is required.") };
+      }
+      const approval = await preWorkDepositServiceInternals.loadApprovedQuoteApprovalSource(client, {
+        jobId, approvalId: quoteApprovalId, customerDecisionId: approvedQuoteDecisionId, lock: true,
+      });
+      if (!approval) {
+        return { abort: failure(409, "VISIT_SUBJECT_SCOPE_MISMATCH", "The Quote approval does not belong to this Job.") };
+      }
+      quoteApprovalId = approval.quote_approval_id;
+      approvalSource = approval.approval_source;
+      approvedQuoteDecisionId = approval.customer_decision_id;
+    }
+
     const authorized = await requireAuthority({
       client,
       actorUserId: validated.actorId,
@@ -1438,6 +1514,7 @@ async function proposeVisit(input = {}) {
       logger,
       lock: true,
       evaluationId: purpose === "EVALUATION" ? evaluationId : null,
+      quoteApprovalId,
       approvedQuoteDecisionId: purpose === "APPROVED_WORK"
         ? approvedQuoteDecisionId
         : null,
@@ -1450,6 +1527,7 @@ async function proposeVisit(input = {}) {
         client,
         jobId,
         approvedQuoteDecisionId,
+        quoteApprovalId,
         lock: true,
       });
       if (!depositGate.allowed) {
@@ -1464,6 +1542,7 @@ async function proposeVisit(input = {}) {
       evaluationId,
       workstreamIds,
       approvedQuoteDecisionId,
+      quoteApprovalId,
     });
     if (!subjectValid) {
       return {
@@ -1488,6 +1567,7 @@ async function proposeVisit(input = {}) {
         evaluationId,
         workstreamIds,
         approvedQuoteDecisionId,
+        ...(approvalSource === "EXTERNAL_EVIDENCE" ? { quoteApprovalId } : {}),
         reason,
       }),
     });
@@ -1507,8 +1587,9 @@ async function proposeVisit(input = {}) {
       `INSERT INTO canonical_visits (
         id, job_id, purpose, created_by_participant_id,
         created_command_idempotency_id,
-        approved_quote_decision_id, approved_quote_decision
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        approved_quote_decision_id, approved_quote_decision,
+        quote_approval_id, quote_approval_source
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
       [
         visitId,
         jobId,
@@ -1517,6 +1598,8 @@ async function proposeVisit(input = {}) {
         idempotency.reservation.id,
         approvedQuoteDecisionId,
         approvedQuoteDecisionId ? "APPROVED" : null,
+        quoteApprovalId,
+        approvalSource,
       ]
     );
     await insertVisitVersion(client, {
@@ -1893,6 +1976,7 @@ async function runVersionCommand({
         client,
         jobId,
         approvedQuoteDecisionId: current.approved_quote_decision_id,
+        quoteApprovalId: current.quote_approval_id,
         lock: true,
       });
       if (!depositGate.allowed) {
@@ -2060,6 +2144,9 @@ async function runVersionCommand({
         expectedExecutionVersion,
         sourceType: "APPROVED_WORK_VISIT",
         approvedCustomerDecisionId: current.approved_quote_decision_id,
+        quoteApprovalId: current.quote_approval_id,
+        visitId,
+        expectedVisitVersion:expectedVersion,
         logger,
       });
       if (approvedWorkStart.error) return { abort: approvedWorkStart.error };
@@ -2535,6 +2622,9 @@ module.exports = {
   rescheduleVisit,
   startVisit,
   visitServiceInternals: Object.freeze({
+    validatedVersionCommand, runTransaction, requireActorRole, loadVisit, reserveCommand,
+    completeCommand, insertVisitVersion, insertVisitEvent, currentSchedule, currentInstant,
+    externalScheduleConfirmationProjection,
     canonicalTimeZone,
     classifyVisitStart,
     linkDraftEvaluationOnVisitCompletion,

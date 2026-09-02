@@ -42,6 +42,22 @@ const PROFESSIONAL_APPROVED_WORK_VISIT_CAPABILITIES = Object.freeze([
   "visit.complete",
 ]);
 
+const EXTERNAL_SCHEDULING_CAPABILITIES = Object.freeze([
+  "visit.read", "visit.propose", "visit.reschedule", "visit.cancel",
+  "visit.external_confirmation.record",
+]);
+
+function professionalCapabilitiesFor(context) {
+  return context.approval_source === "EXTERNAL_EVIDENCE"
+    ? EXTERNAL_SCHEDULING_CAPABILITIES
+    : PROFESSIONAL_APPROVED_WORK_VISIT_CAPABILITIES;
+}
+
+function customerCapabilitiesFor(context) {
+  return context.approval_source === "EXTERNAL_EVIDENCE"
+    ? [] : CUSTOMER_APPROVED_WORK_VISIT_CAPABILITIES;
+}
+
 function safeLogger(value) {
   return value && typeof value.info === "function" && typeof value.warn === "function"
     ? value
@@ -108,10 +124,13 @@ async function loadContext(client, { jobId, quoteId, actorUserId, lock = false }
       quotes.id AS quote_id,
       decisions.id AS approved_quote_decision_id,
       decisions.decision AS approved_quote_decision,
-      decisions.issued_quote_version,
+      approvals.issued_quote_version,
+      approvals.id AS quote_approval_id,
+      approvals.approval_source,
+      jobs.source_type,
       professional.id AS professional_participant_id,
       customer.id AS customer_participant_id,
-      relationships.professional_user_id,
+      professional.user_id AS professional_user_id,
       relationships.homeowner_id,
       EXISTS (
         SELECT 1
@@ -138,11 +157,11 @@ async function loadContext(client, { jobId, quoteId, actorUserId, lock = false }
           AND revocations.id IS NULL
       ) AS customer_role_active
     FROM jobs
-    INNER JOIN posts
+    LEFT JOIN posts
       ON posts.id = jobs.job_request_id
       AND posts.lifecycle_contract_version = 2
       AND posts.cancelled_at IS NULL
-    INNER JOIN request_relationships relationships
+    LEFT JOIN request_relationships relationships
       ON relationships.id = jobs.source_request_relationship_id
       AND relationships.post_id = jobs.job_request_id
       AND relationships.emergency_request_id IS NULL
@@ -151,24 +170,45 @@ async function loadContext(client, { jobId, quoteId, actorUserId, lock = false }
     INNER JOIN canonical_quotes quotes
       ON quotes.id = $2
       AND quotes.job_id = jobs.id
-      AND quotes.relationship_id = jobs.source_request_relationship_id
+      AND quotes.relationship_id IS NOT DISTINCT FROM jobs.source_request_relationship_id
       AND quotes.status = 'ISSUED'
-    INNER JOIN canonical_quote_customer_decisions decisions
-      ON decisions.quote_id = quotes.id
+    INNER JOIN canonical_quote_approvals approvals
+      ON approvals.quote_id = quotes.id AND approvals.job_id = jobs.id
+      AND approvals.decision = 'APPROVED'
+    LEFT JOIN contractor_profiles profiles
+      ON profiles.id = jobs.contractor_profile_id AND profiles.user_id = $3
+    LEFT JOIN canonical_quote_customer_decisions decisions
+      ON decisions.id = approvals.customer_decision_id
+      AND decisions.quote_id = quotes.id
       AND decisions.job_id = jobs.id
       AND decisions.decision = 'APPROVED'
     INNER JOIN relationship_participants professional
       ON professional.job_id = jobs.id
-      AND professional.request_relationship_id = relationships.id
-      AND professional.user_id = relationships.professional_user_id
-    INNER JOIN relationship_participants customer
+      AND professional.user_id = $3
+      AND ((jobs.source_type = 'ordinary_request_selection'
+            AND professional.request_relationship_id = relationships.id)
+        OR (jobs.source_type = 'business_document'
+            AND professional.request_relationship_id IS NULL))
+    LEFT JOIN relationship_participants customer
       ON customer.job_id = jobs.id
       AND customer.request_relationship_id = relationships.id
       AND customer.user_id = relationships.homeowner_id
     WHERE jobs.id = $1
       AND jobs.lifecycle_contract_version = 2
+      AND (
+        (jobs.source_type = 'ordinary_request_selection'
+         AND posts.id IS NOT NULL AND relationships.id IS NOT NULL
+         AND customer.id IS NOT NULL AND decisions.id IS NOT NULL
+         AND approvals.approval_source = 'MEETRO_CUSTOMER')
+        OR
+        (jobs.source_type = 'business_document'
+         AND jobs.job_request_id IS NULL AND jobs.source_request_relationship_id IS NULL
+         AND jobs.originating_business_document_id IS NOT NULL AND profiles.id IS NOT NULL
+         AND approvals.approval_source = 'EXTERNAL_EVIDENCE'
+         AND approvals.customer_decision_id IS NULL AND customer.id IS NULL)
+      )
     LIMIT 1
-    ${lock ? "FOR UPDATE OF jobs, relationships, quotes" : ""}
+    ${lock ? "FOR UPDATE OF jobs, quotes" : ""}
     `,
     [jobId, quoteId, actorUserId]
   );
@@ -178,9 +218,10 @@ async function loadContext(client, { jobId, quoteId, actorUserId, lock = false }
 async function requireActivationAuthority({ client, context, actorUserId, logger }) {
   if (
     !context ||
-    context.approved_quote_decision !== "APPROVED" ||
+    !context.quote_approval_id ||
+    (context.approval_source !== "EXTERNAL_EVIDENCE" &&
+      (context.approved_quote_decision !== "APPROVED" || context.customer_role_active !== true)) ||
     context.professional_role_active !== true ||
-    context.customer_role_active !== true ||
     Number(context.professional_user_id) !== actorUserId
   ) {
     logger.warn("Approved Work Visit activation context denied", {
@@ -205,15 +246,16 @@ async function requireActivationAuthority({ client, context, actorUserId, logger
     : failure(403, "QUOTE_AUTHORITY_REQUIRED", "Quote authority is required.");
 }
 
-async function loadActivation(client, jobId, approvedQuoteDecisionId) {
+async function loadActivation(client, jobId, approvedQuoteDecisionId, quoteApprovalId) {
   const result = await client.query(
-    `SELECT id, quote_id, approved_quote_decision_id, approved_quote_decision,
+    `SELECT id, quote_id, quote_approval_id, approval_source, approved_quote_decision_id, approved_quote_decision,
       job_id, activated_by_participant_id, idempotency_key,
       request_fingerprint, created_at
      FROM canonical_approved_work_visit_authority_activations
-     WHERE approved_quote_decision_id = $1 AND job_id = $2
+     WHERE job_id = $2 AND (quote_approval_id = $3
+       OR (quote_approval_id IS NULL AND approved_quote_decision_id = $1))
      LIMIT 1`,
-    [approvedQuoteDecisionId, jobId]
+    [approvedQuoteDecisionId, jobId, quoteApprovalId]
   );
   return result.rows[0] || null;
 }
@@ -229,8 +271,10 @@ async function loadActiveCapabilities(client, context) {
        AND grants.scope_job_id = $1
        AND grants.scope_concern_id IS NULL
        AND grants.scope_evaluation_id IS NULL
-       AND grants.scope_approved_quote_decision_id = $2
-       AND grants.scope_approved_quote_decision = 'APPROVED'
+       AND ((grants.scope_quote_approval_id = $4 AND grants.scope_quote_approval_source = $5)
+         OR (grants.scope_quote_approval_id IS NULL
+           AND grants.scope_approved_quote_decision_id = $2
+           AND grants.scope_approved_quote_decision = 'APPROVED'))
        AND grants.grantee_participant_id = ANY($3::uuid[])
        AND grants.valid_from <= CURRENT_TIMESTAMP
        AND (grants.valid_until IS NULL OR grants.valid_until > CURRENT_TIMESTAMP)
@@ -239,7 +283,9 @@ async function loadActiveCapabilities(client, context) {
     [
       context.job_id,
       context.approved_quote_decision_id,
-      [context.customer_participant_id, context.professional_participant_id],
+      [context.customer_participant_id, context.professional_participant_id].filter(Boolean),
+      context.quote_approval_id,
+      context.approval_source,
     ]
   );
   return result.rows;
@@ -284,17 +330,17 @@ function authorityProjection(
   const customerCapabilities = capabilitiesFor(
     grantRows,
     context.customer_participant_id,
-    CUSTOMER_APPROVED_WORK_VISIT_CAPABILITIES
+    customerCapabilitiesFor(context)
   );
   const professionalCapabilities = capabilitiesFor(
     grantRows,
     context.professional_participant_id,
-    PROFESSIONAL_APPROVED_WORK_VISIT_CAPABILITIES
+    professionalCapabilitiesFor(context)
   );
   const complete = Boolean(
     activation &&
-    customerCapabilities.length === CUSTOMER_APPROVED_WORK_VISIT_CAPABILITIES.length &&
-    professionalCapabilities.length === PROFESSIONAL_APPROVED_WORK_VISIT_CAPABILITIES.length
+    customerCapabilities.length === customerCapabilitiesFor(context).length &&
+    professionalCapabilities.length === professionalCapabilitiesFor(context).length
   );
   const active = complete && depositGate.allowed === true;
   return {
@@ -310,7 +356,9 @@ function authorityProjection(
       authoritySource: APPROVED_WORK_VISIT_AUTHORITY_SOURCE,
       jobId: context.job_id,
       quoteId: context.quote_id,
-      approvedQuoteDecisionId: context.approved_quote_decision_id,
+      approvalSource: context.approval_source || null,
+      quoteApprovalId: context.quote_approval_id || null,
+      approvedQuoteDecisionId: context.approved_quote_decision_id || null,
       issuedQuoteVersion: Number(context.issued_quote_version),
       purpose: "APPROVED_WORK",
       state: active
@@ -403,13 +451,15 @@ async function getApprovedWorkVisitAuthority(input = {}) {
     const activation = await loadActivation(
       client,
       validated.jobId,
-      context.approved_quote_decision_id
+      context.approved_quote_decision_id,
+      context.quote_approval_id
     );
     const grants = await loadActiveCapabilities(client, context);
     const depositGate = await evaluateApprovedWorkDepositGateWithClient({
       client,
       jobId: context.job_id,
-      approvedQuoteDecisionId: context.approved_quote_decision_id,
+      quoteApprovalId: context.quote_approval_id || null,
+      approvedQuoteDecisionId: context.approved_quote_decision_id || null,
     });
     return authorityProjection(context, activation, grants, { depositGate });
   });
@@ -417,17 +467,18 @@ async function getApprovedWorkVisitAuthority(input = {}) {
 
 async function insertGrant({ client, context, activationId, participantId, role, capability }) {
   const idempotencyKey =
-    `approved-work-visit:${context.approved_quote_decision_id}:${role}:${capability}`;
+    `approved-work-visit:${context.grant_identity || context.quote_approval_id}:${role}:${capability}`;
   const result = await client.query(
     `INSERT INTO lifecycle_authority_grants (
       id, grantee_participant_id, grantor_participant_id, job_id,
       capability, scope_type, scope_job_id, scope_concern_id,
       scope_evaluation_id, scope_approved_quote_decision_id,
       scope_approved_quote_decision, source_evidence_type,
-      source_evidence_reference, idempotency_key
+      source_evidence_reference, idempotency_key,
+      scope_quote_approval_id, scope_quote_approval_source
      ) VALUES (
       $1, $2, $3, $4, $5, 'approved_work', $4, NULL,
-      NULL, $6, 'APPROVED', $7, $8, $9
+      NULL, $6, CASE WHEN $6::uuid IS NULL THEN NULL ELSE 'APPROVED' END, $7, $8, $9, $10, $11
      )
      ON CONFLICT (
        grantor_participant_id, grantee_participant_id, capability,
@@ -444,6 +495,8 @@ async function insertGrant({ client, context, activationId, participantId, role,
       APPROVED_WORK_VISIT_SOURCE_TYPE,
       activationId,
       idempotencyKey,
+      context.quote_approval_id,
+      context.approval_source,
     ]
   );
   if (result.rows[0]) return;
@@ -458,8 +511,9 @@ async function insertGrant({ client, context, activationId, participantId, role,
        AND scope_job_id = $3
        AND scope_concern_id IS NULL
        AND scope_evaluation_id IS NULL
-       AND scope_approved_quote_decision_id = $5
-       AND scope_approved_quote_decision = 'APPROVED'
+       AND (scope_quote_approval_id = $9 OR
+         (scope_quote_approval_id IS NULL AND scope_approved_quote_decision_id = $5
+          AND scope_approved_quote_decision = 'APPROVED'))
        AND source_evidence_type = $6
        AND source_evidence_reference = $7
        AND idempotency_key = $8
@@ -473,6 +527,7 @@ async function insertGrant({ client, context, activationId, participantId, role,
       APPROVED_WORK_VISIT_SOURCE_TYPE,
       activationId,
       idempotencyKey,
+      context.quote_approval_id,
     ]
   );
   if (!existing.rows[0]) {
@@ -500,7 +555,8 @@ async function activateApprovedWorkVisitAuthority(input = {}) {
     const depositGate = await evaluateApprovedWorkDepositGateWithClient({
       client,
       jobId: context.job_id,
-      approvedQuoteDecisionId: context.approved_quote_decision_id,
+      quoteApprovalId: context.quote_approval_id || null,
+      approvedQuoteDecisionId: context.approved_quote_decision_id || null,
       lock: true,
     });
     if (!depositGate.allowed) {
@@ -511,13 +567,15 @@ async function activateApprovedWorkVisitAuthority(input = {}) {
       command: "approved_work.visit.activate",
       jobId: validated.jobId,
       quoteId: validated.quoteId,
-      approvedQuoteDecisionId: context.approved_quote_decision_id,
+      ...(context.approval_source === "EXTERNAL_EVIDENCE" ? { quoteApprovalId: context.quote_approval_id } : {}),
+      approvedQuoteDecisionId: context.approved_quote_decision_id || null,
       actorUserId: validated.actorId,
     });
     let activation = await loadActivation(
       client,
       validated.jobId,
-      context.approved_quote_decision_id
+      context.approved_quote_decision_id,
+      context.quote_approval_id
     );
     let replayed = false;
     if (activation) {
@@ -539,8 +597,8 @@ async function activateApprovedWorkVisitAuthority(input = {}) {
         `INSERT INTO canonical_approved_work_visit_authority_activations (
           id, quote_id, approved_quote_decision_id, approved_quote_decision,
           job_id, activated_by_participant_id, idempotency_key,
-          request_fingerprint
-         ) VALUES ($1, $2, $3, 'APPROVED', $4, $5, $6, $7)
+          request_fingerprint, quote_approval_id, approval_source
+         ) VALUES ($1, $2, $3, CASE WHEN $3::uuid IS NULL THEN NULL ELSE 'APPROVED' END, $4, $5, $6, $7, $8, $9)
          RETURNING id, quote_id, approved_quote_decision_id,
            approved_quote_decision, job_id, activated_by_participant_id,
            idempotency_key, request_fingerprint, created_at`,
@@ -552,12 +610,17 @@ async function activateApprovedWorkVisitAuthority(input = {}) {
           context.professional_participant_id,
           validated.idempotencyKey,
           requestFingerprint,
+          context.quote_approval_id,
+          context.approval_source,
         ]
       );
       activation = inserted.rows[0];
     }
 
-    for (const capability of CUSTOMER_APPROVED_WORK_VISIT_CAPABILITIES) {
+    // Historical activations retain their original grant idempotency identity.
+    context.grant_identity = replayed && !activation.quote_approval_id
+      ? context.approved_quote_decision_id : context.quote_approval_id;
+    for (const capability of customerCapabilitiesFor(context)) {
       await insertGrant({
         client,
         context,
@@ -567,7 +630,7 @@ async function activateApprovedWorkVisitAuthority(input = {}) {
         capability,
       });
     }
-    for (const capability of PROFESSIONAL_APPROVED_WORK_VISIT_CAPABILITIES) {
+    for (const capability of professionalCapabilitiesFor(context)) {
       await insertGrant({
         client,
         context,
@@ -601,7 +664,8 @@ async function activateApprovedWorkVisitAuthority(input = {}) {
           actorUserId: validated.actorId,
           jobId: validated.jobId,
           quoteId: validated.quoteId,
-          approvedQuoteDecisionId: context.approved_quote_decision_id,
+          quoteApprovalId: context.quote_approval_id || null,
+      approvedQuoteDecisionId: context.approved_quote_decision_id || null,
           replayed,
         }
       ),
@@ -612,6 +676,7 @@ async function activateApprovedWorkVisitAuthority(input = {}) {
 module.exports = {
   APPROVED_WORK_VISIT_AUTHORITY_SOURCE,
   CUSTOMER_APPROVED_WORK_VISIT_CAPABILITIES,
+  EXTERNAL_SCHEDULING_CAPABILITIES,
   PROFESSIONAL_APPROVED_WORK_VISIT_CAPABILITIES,
   activateApprovedWorkVisitAuthority,
   approvedWorkVisitServiceInternals: Object.freeze({

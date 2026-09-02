@@ -1,0 +1,835 @@
+{
+  "status": "PASS",
+  "date": "2026-09-02",
+  "repository": "/Users/williammolina/meetro-server/meetro-server",
+  "startingBaseline": {
+    "branch": "staging",
+    "head": "4819151546087e495cd116d6283c74bd16f7f63d",
+    "status": [
+      " M server/authorization/quoteDraftService.js",
+      " M server/authorization/quoteDrafts.js",
+      " M server/documents/businessDocumentDeliveryService.js",
+      " M server/documents/businessDocumentDraftService.js",
+      " M server/documents/businessDocumentNumberingService.js",
+      " M server/finance/preWorkDepositService.js",
+      " M server/workflow/jobFoundationService.js",
+      " M test/businessDocumentQuoteReviewIdentity.test.js",
+      " M test/jobLifecycleFoundation.test.js",
+      " M test/preWorkDepositPaymentPostgres.test.js",
+      " M test/preWorkDepositRuntimePostgres.test.js",
+      " M test/quoteBusinessDocumentBridge.test.js",
+      " M test/quoteDraftRoutes.test.js",
+      " M test/quoteDraftService.test.js",
+      "?? .DS_Store",
+      "?? migrations/202609020001_add_business_origin_commercial_job_foundation.sql",
+      "?? migrations/202609020002_create_quote_external_approval_authority.sql",
+      "?? migrations/202609020003_generalize_pre_work_deposit_approval_authority.sql",
+      "?? migrations/202609020004_generalize_approved_work_visit_approval_authority.sql"
+    ]
+  },
+  "tests": {
+    "focused": {
+      "tests": 296,
+      "pass": 296,
+      "fail": 0,
+      "skipped": 0
+    },
+    "full": {
+      "tests": 2255,
+      "pass": 2189,
+      "fail": 0,
+      "skipped": 66
+    },
+    "consolidatedPostgres": {
+      "tests": 24,
+      "pass": 24,
+      "fail": 0,
+      "skipped": 0
+    },
+    "marketplacePostgres": {
+      "tests": 14,
+      "pass": 14,
+      "fail": 0,
+      "skipped": 0
+    },
+    "externalPostgres": {
+      "tests": 9,
+      "pass": 9,
+      "fail": 0,
+      "skipped": 0
+    },
+    "historicalCompatibilityPostgres": {
+      "tests": 1,
+      "pass": 1,
+      "fail": 0,
+      "skipped": 0
+    }
+  },
+  "migrationCertification": {
+    "status": "PASS",
+    "migrations": [
+      {
+        "filename": "202609020001_add_business_origin_commercial_job_foundation.sql",
+        "checksum": "332eb2ef7f08340931e1d583b3056ae727a724ed15851bba76076258444ed41d"
+      },
+      {
+        "filename": "202609020002_create_quote_external_approval_authority.sql",
+        "checksum": "dc371b7540461320eff30a686c86ec889e7de07fcfd62528b6182ba2d7abb776"
+      },
+      {
+        "filename": "202609020003_generalize_pre_work_deposit_approval_authority.sql",
+        "checksum": "42093e98ae8cd962ac19aa188153e2188efef1c01bd94773ea5564068064fcf9"
+      },
+      {
+        "filename": "202609020004_generalize_approved_work_visit_approval_authority.sql",
+        "checksum": "448481c6a55de4fbc750201db6b54e3a42812e399209dfbdbcd1cc9598ee5fde"
+      },
+      {
+        "filename": "202609020005_create_external_visit_schedule_confirmation.sql",
+        "checksum": "7cb1b75536b425dbb9cdfa0aef96b5a1aaa11950b67d0cacc625185e4c8e0d0a"
+      },
+      {
+        "filename": "202609020006_generalize_work_preparation_execution_approval.sql",
+        "checksum": "4dda2aac1af54904293128be0dd95b5957304f30a31b9d5678776787cccfa853"
+      }
+    ],
+    "databases": [
+      {
+        "file": "workPreparationRuntimePostgres.test.js",
+        "env": "WORK_PREPARATION_RUNTIME_DATABASE_URL",
+        "database": "meetro_test_lifecycle_cert_20260902_01",
+        "ledgerBefore": {
+          "max": 81,
+          "count": 81
+        },
+        "completionApplied": [],
+        "ledger": {
+          "max": 81,
+          "count": 81
+        },
+        "replay": {
+          "applied": 0,
+          "skipped": 81,
+          "failed": []
+        }
+      },
+      {
+        "file": "workPreparationAuthorityPostgres.test.js",
+        "env": "WORK_PREPARATION_DATABASE_URL",
+        "database": "meetro_test_lifecycle_cert_20260902_02",
+        "ledgerBefore": {
+          "max": 81,
+          "count": 81
+        },
+        "completionApplied": [],
+        "ledger": {
+          "max": 81,
+          "count": 81
+        },
+        "replay": {
+          "applied": 0,
+          "skipped": 81,
+          "failed": []
+        }
+      },
+      {
+        "file": "approvedWorkExecutionRuntimePostgres.test.js",
+        "env": "APPROVED_WORK_EXECUTION_RUNTIME_DATABASE_URL",
+        "database": "meetro_test_lifecycle_cert_20260902_03",
+        "ledgerBefore": {
+          "max": 81,
+          "count": 81
+        },
+        "completionApplied": [],
+        "ledger": {
+          "max": 81,
+          "count": 81
+        },
+        "replay": {
+          "applied": 0,
+          "skipped": 81,
+          "failed": []
+        }
+      },
+      {
+        "file": "approvedWorkExecutionAuthorityPostgres.test.js",
+        "env": "APPROVED_WORK_EXECUTION_DATABASE_URL",
+        "database": "meetro_test_lifecycle_cert_20260902_04",
+        "ledgerBefore": {
+          "max": 81,
+          "count": 81
+        },
+        "completionApplied": [],
+        "ledger": {
+          "max": 81,
+          "count": 81
+        },
+        "replay": {
+          "applied": 0,
+          "skipped": 81,
+          "failed": []
+        }
+      },
+      {
+        "file": "approvedWorkStartRuntimePostgres.test.js",
+        "env": "APPROVED_WORK_START_RUNTIME_DATABASE_URL",
+        "database": "meetro_test_lifecycle_cert_20260902_05",
+        "ledgerBefore": {
+          "max": 81,
+          "count": 81
+        },
+        "completionApplied": [],
+        "ledger": {
+          "max": 81,
+          "count": 81
+        },
+        "replay": {
+          "applied": 0,
+          "skipped": 81,
+          "failed": []
+        }
+      },
+      {
+        "file": "approvedWorkCompletionRuntimePostgres.test.js",
+        "env": "APPROVED_WORK_COMPLETION_DATABASE_URL",
+        "database": "meetro_test_lifecycle_cert_20260902_06",
+        "ledgerBefore": {
+          "max": 81,
+          "count": 81
+        },
+        "completionApplied": [],
+        "ledger": {
+          "max": 81,
+          "count": 81
+        },
+        "replay": {
+          "applied": 0,
+          "skipped": 81,
+          "failed": []
+        }
+      },
+      {
+        "file": "visitServicePostgres.test.js",
+        "env": "VISIT_SERVICE_DATABASE_URL",
+        "database": "meetro_test_lifecycle_cert_20260902_07",
+        "ledgerBefore": {
+          "max": 81,
+          "count": 81
+        },
+        "completionApplied": [],
+        "ledger": {
+          "max": 81,
+          "count": 81
+        },
+        "replay": {
+          "applied": 0,
+          "skipped": 81,
+          "failed": []
+        }
+      },
+      {
+        "file": "professionalScheduleServicePostgres.test.js",
+        "env": "PROFESSIONAL_SCHEDULE_DATABASE_URL",
+        "database": "meetro_test_lifecycle_cert_20260902_08",
+        "ledgerBefore": {
+          "max": 81,
+          "count": 81
+        },
+        "completionApplied": [],
+        "ledger": {
+          "max": 81,
+          "count": 81
+        },
+        "replay": {
+          "applied": 0,
+          "skipped": 81,
+          "failed": []
+        }
+      },
+      {
+        "file": "preWorkDepositRuntimePostgres.test.js",
+        "env": "PRE_WORK_DEPOSIT_RUNTIME_DATABASE_URL",
+        "database": "meetro_test_lifecycle_cert_20260902_09",
+        "ledgerBefore": {
+          "max": 81,
+          "count": 81
+        },
+        "completionApplied": [],
+        "ledger": {
+          "max": 81,
+          "count": 81
+        },
+        "replay": {
+          "applied": 0,
+          "skipped": 81,
+          "failed": []
+        }
+      },
+      {
+        "file": "preWorkDepositPaymentPostgres.test.js",
+        "env": "PRE_WORK_PAYMENT_DATABASE_URL",
+        "database": "meetro_test_lifecycle_cert_20260902_10",
+        "ledgerBefore": {
+          "max": 81,
+          "count": 81
+        },
+        "completionApplied": [],
+        "ledger": {
+          "max": 81,
+          "count": 81
+        },
+        "replay": {
+          "applied": 0,
+          "skipped": 81,
+          "failed": []
+        }
+      },
+      {
+        "file": "approvedWorkVisitServicePostgres.test.js",
+        "env": "APPROVED_WORK_VISIT_DATABASE_URL",
+        "database": "meetro_test_lifecycle_cert_20260902_11",
+        "ledgerBefore": {
+          "max": 81,
+          "count": 81
+        },
+        "completionApplied": [],
+        "ledger": {
+          "max": 81,
+          "count": 81
+        },
+        "replay": {
+          "applied": 0,
+          "skipped": 81,
+          "failed": []
+        }
+      },
+      {
+        "file": "approvedWorkVisitServicePostgres.test.js",
+        "env": "APPROVED_WORK_VISIT_UPGRADE_DATABASE_URL",
+        "database": "meetro_test_lifecycle_cert_20260902_12",
+        "ledgerBefore": {
+          "max": 38,
+          "count": 38
+        },
+        "completionApplied": [
+          "202608140001_create_canonical_quote_delivery_foundation.sql",
+          "202608150001_activate_customer_safe_efr.sql",
+          "202608150002_activate_work_plan_execution.sql",
+          "202608150003_create_job_completion_history.sql",
+          "202608150004_create_canonical_invoice_payment_foundation.sql",
+          "202608150005_create_ask_meetro_workflow_review.sql",
+          "202608180001_expand_ask_meetro_workflow_review_operations.sql",
+          "202608190001_create_quick_quote_analysis_session_foundation.sql",
+          "202608190002_expand_ask_meetro_analysis_continuation_review.sql",
+          "202608210001_create_business_document_working_drafts.sql",
+          "202608210002_create_business_document_delivery_foundation.sql",
+          "202608230001_add_business_document_numbers.sql",
+          "202608230002_add_canonical_quote_customer_terms_snapshot.sql",
+          "202608230003_create_canonical_quote_business_document_sources.sql",
+          "202608230004_create_business_contact_foundation.sql",
+          "202608230005_create_business_customer_relationship_foundation.sql",
+          "202608240001_create_customer_party_linkage_foundation.sql",
+          "202608250001_correct_evaluation_visit_authority_and_negotiation.sql",
+          "202608260001_create_evaluation_remote_provenance.sql",
+          "202608270001_add_canonical_visit_start_authority.sql",
+          "202608280001_create_pre_work_deposit_payment_authority.sql",
+          "202608280002_create_canonical_materials_work_preparation_authority.sql",
+          "202608280003_create_canonical_approved_work_execution_authority.sql",
+          "202608290001_add_invoice_line_source_authority.sql",
+          "202608290002_add_deposit_request_document_authority.sql",
+          "202608290003_add_canonical_alert_event_identity.sql",
+          "202608300001_create_professional_subscription_foundation.sql",
+          "202608300002_add_stripe_subscription_authority.sql",
+          "202608300003_add_professional_subscription_plan.sql",
+          "202608300004_create_meetro_business_trial_authority.sql",
+          "202608300005_create_business_team_membership_authority.sql",
+          "202608300006_create_business_job_assignment_authority.sql",
+          "202608300007_create_business_job_field_operations_authority.sql",
+          "202608300008_create_business_time_evidence_authority.sql",
+          "202608300009_add_business_time_settings_authority.sql",
+          "202608300010_allow_pending_team_invitation_token_rotation.sql",
+          "202608310001_create_business_job_customer_message_authority.sql",
+          "202609020001_add_business_origin_commercial_job_foundation.sql",
+          "202609020002_create_quote_external_approval_authority.sql",
+          "202609020003_generalize_pre_work_deposit_approval_authority.sql",
+          "202609020004_generalize_approved_work_visit_approval_authority.sql",
+          "202609020005_create_external_visit_schedule_confirmation.sql",
+          "202609020006_generalize_work_preparation_execution_approval.sql"
+        ],
+        "ledger": {
+          "max": 81,
+          "count": 81
+        },
+        "replay": {
+          "applied": 0,
+          "skipped": 81,
+          "failed": []
+        }
+      },
+      {
+        "file": "externalApprovedWorkSchedulingPostgres.test.js",
+        "env": "EXTERNAL_SCHEDULING_DATABASE_URL",
+        "database": "meetro_test_lifecycle_cert_20260902_13",
+        "ledgerBefore": {
+          "max": 81,
+          "count": 81
+        },
+        "completionApplied": [],
+        "ledger": {
+          "max": 81,
+          "count": 81
+        },
+        "replay": {
+          "applied": 0,
+          "skipped": 81,
+          "failed": []
+        }
+      },
+      {
+        "file": "externalVisitConfirmationPostgres.test.js",
+        "env": "EXTERNAL_CONFIRMATION_DATABASE_URL",
+        "database": "meetro_test_lifecycle_cert_20260902_14",
+        "ledgerBefore": {
+          "max": 81,
+          "count": 81
+        },
+        "completionApplied": [],
+        "ledger": {
+          "max": 81,
+          "count": 81
+        },
+        "replay": {
+          "applied": 0,
+          "skipped": 81,
+          "failed": []
+        }
+      },
+      {
+        "file": "externalApprovedWorkExecutionPostgres.test.js",
+        "env": "EXTERNAL_EXECUTION_DATABASE_URL",
+        "database": "meetro_test_lifecycle_cert_20260902_15",
+        "ledgerBefore": {
+          "max": 81,
+          "count": 81
+        },
+        "completionApplied": [],
+        "ledger": {
+          "max": 81,
+          "count": 81
+        },
+        "replay": {
+          "applied": 0,
+          "skipped": 81,
+          "failed": []
+        }
+      },
+      {
+        "file": "visitStartRuntimePostgres.test.js",
+        "env": "VISIT_START_RUNTIME_DATABASE_URL",
+        "database": "meetro_test_lifecycle_cert_20260902_16",
+        "ledgerBefore": {
+          "max": 81,
+          "count": 81
+        },
+        "completionApplied": [],
+        "ledger": {
+          "max": 81,
+          "count": 81
+        },
+        "replay": {
+          "applied": 0,
+          "skipped": 81,
+          "failed": []
+        }
+      },
+      {
+        "file": "alertB1VisitPostgres.test.js",
+        "env": "ALERT_B1_DATABASE_URL",
+        "database": "meetro_test_lifecycle_cert_20260902_17",
+        "ledgerBefore": {
+          "max": 81,
+          "count": 81
+        },
+        "completionApplied": [],
+        "ledger": {
+          "max": 81,
+          "count": 81
+        },
+        "replay": {
+          "applied": 0,
+          "skipped": 81,
+          "failed": []
+        }
+      },
+      {
+        "file": "commercialLifecycleHistoryPostgres.test.js",
+        "env": "COMMERCIAL_LIFECYCLE_HISTORY_DATABASE_URL",
+        "database": "meetro_test_lifecycle_cert_20260902_18",
+        "ledgerBefore": {
+          "max": 81,
+          "count": 81
+        },
+        "completionApplied": [],
+        "ledger": {
+          "max": 81,
+          "count": 81
+        },
+        "replay": {
+          "applied": 0,
+          "skipped": 81,
+          "failed": []
+        }
+      }
+    ]
+  },
+  "safety": {
+    "status": "PASS",
+    "syntaxFiles": 79,
+    "diffCheck": "PASS",
+    "branch": "staging",
+    "head": "4819151546087e495cd116d6283c74bd16f7f63d",
+    "dsStoreSha256": "066e2de7f3070c598aecb4139535ce4705616752c773df719bc71cf4e3c98350",
+    "certifiedMigrations76to79Unchanged": true,
+    "preExistingFilesExtended": [
+      "server/finance/preWorkDepositService.js",
+      "test/preWorkDepositPaymentPostgres.test.js",
+      "test/preWorkDepositRuntimePostgres.test.js"
+    ],
+    "preExistingFilesOtherwiseUnchanged": [
+      ".DS_Store",
+      "migrations/202609020001_add_business_origin_commercial_job_foundation.sql",
+      "migrations/202609020002_create_quote_external_approval_authority.sql",
+      "migrations/202609020003_generalize_pre_work_deposit_approval_authority.sql",
+      "migrations/202609020004_generalize_approved_work_visit_approval_authority.sql",
+      "server/authorization/quoteDraftService.js",
+      "server/authorization/quoteDrafts.js",
+      "server/documents/businessDocumentDeliveryService.js",
+      "server/documents/businessDocumentDraftService.js",
+      "server/documents/businessDocumentNumberingService.js",
+      "server/workflow/jobFoundationService.js",
+      "test/businessDocumentQuoteReviewIdentity.test.js",
+      "test/jobLifecycleFoundation.test.js",
+      "test/quoteBusinessDocumentBridge.test.js",
+      "test/quoteDraftRoutes.test.js",
+      "test/quoteDraftService.test.js"
+    ],
+    "finalWorkingTreeFiles": [
+      "docs/external-customer-commercial-lifecycle-20260902.json",
+      "docs/external-customer-commercial-lifecycle-20260902.md",
+      "migrations/202609020001_add_business_origin_commercial_job_foundation.sql",
+      "migrations/202609020002_create_quote_external_approval_authority.sql",
+      "migrations/202609020003_generalize_pre_work_deposit_approval_authority.sql",
+      "migrations/202609020004_generalize_approved_work_visit_approval_authority.sql",
+      "migrations/202609020005_create_external_visit_schedule_confirmation.sql",
+      "migrations/202609020006_generalize_work_preparation_execution_approval.sql",
+      "migrations/README.md",
+      "server/authorization/lifecycleAuthorityService.js",
+      "server/authorization/quoteDraftService.js",
+      "server/authorization/quoteDrafts.js",
+      "server/documents/businessDocumentDeliveryService.js",
+      "server/documents/businessDocumentDraftService.js",
+      "server/documents/businessDocumentNumberingService.js",
+      "server/finance/preWorkDepositService.js",
+      "server/workflow/approvedWorkExecutionService.js",
+      "server/workflow/approvedWorkExecutions.js",
+      "server/workflow/approvedWorkVisitService.js",
+      "server/workflow/externalVisitConfirmationService.js",
+      "server/workflow/jobFoundationService.js",
+      "server/workflow/liveJobProjectionService.js",
+      "server/workflow/professionalScheduleService.js",
+      "server/workflow/visitService.js",
+      "server/workflow/visits.js",
+      "server/workflow/workPreparation.js",
+      "server/workflow/workPreparationService.js",
+      "test/alertB1VisitPostgres.test.js",
+      "test/approvedWorkCompletionRuntimePostgres.test.js",
+      "test/approvedWorkExecutionAuthorityMigration.test.js",
+      "test/approvedWorkExecutionAuthorityPostgres.test.js",
+      "test/approvedWorkExecutionRuntimePostgres.test.js",
+      "test/approvedWorkExecutionService.test.js",
+      "test/approvedWorkStartIntegration.test.js",
+      "test/approvedWorkStartRuntimePostgres.test.js",
+      "test/approvedWorkVisitActivationMigration.test.js",
+      "test/approvedWorkVisitService.test.js",
+      "test/approvedWorkVisitServicePostgres.test.js",
+      "test/askMeetroWorkflowMigration.test.js",
+      "test/businessContactMigration.test.js",
+      "test/businessCustomerRelationshipMigration.test.js",
+      "test/businessDocumentQuoteReviewIdentity.test.js",
+      "test/businessPortfolioAuthorityMigration.test.js",
+      "test/commercialLifecycleHistoryPostgres.test.js",
+      "test/customerPartyMigration.test.js",
+      "test/efrActivationMigration.test.js",
+      "test/evaluationRemoteProvenanceMigration.test.js",
+      "test/evaluationVisitActivationMigration.test.js",
+      "test/evaluationVisitAuthorityNegotiationMigration.test.js",
+      "test/externalApprovedWorkExecutionPostgres.test.js",
+      "test/externalApprovedWorkSchedulingPostgres.test.js",
+      "test/externalVisitConfirmationPostgres.test.js",
+      "test/helpers/externalLifecycleFixture.js",
+      "test/helpers/externalLifecycleMigrationInventory.js",
+      "test/helpers/visitLifecycleFixture.js",
+      "test/invoicePaymentMigration.test.js",
+      "test/jobCompletionMigration.test.js",
+      "test/jobLifecycleFoundation.test.js",
+      "test/liveJobProjectionService.test.js",
+      "test/migrationInventoryGovernance.test.js",
+      "test/ordinaryEvaluationFindingMigration.test.js",
+      "test/preWorkDepositPaymentMigration.test.js",
+      "test/preWorkDepositPaymentPostgres.test.js",
+      "test/preWorkDepositRuntimePostgres.test.js",
+      "test/professionalScheduleService.test.js",
+      "test/professionalScheduleServicePostgres.test.js",
+      "test/quickQuoteAnalysisContinuationReviewMigration.test.js",
+      "test/quickQuotePhotoAssistReviewMigration.test.js",
+      "test/quoteBusinessDocumentBridge.test.js",
+      "test/quoteBusinessDocumentBridgeMigration.test.js",
+      "test/quoteCompositionFeedbackMigration.test.js",
+      "test/quoteCustomerTermsMigration.test.js",
+      "test/quoteCustomerTermsSnapshot.test.js",
+      "test/quoteDeliveryMigration.test.js",
+      "test/quoteDraftRoutes.test.js",
+      "test/quoteDraftService.test.js",
+      "test/quoteFoundationMigration.test.js",
+      "test/recommendationFoundationMigration.test.js",
+      "test/visitFoundationMigration.test.js",
+      "test/visitRoutes.test.js",
+      "test/visitService.test.js",
+      "test/visitServicePostgres.test.js",
+      "test/visitStartAuthorityMigration.test.js",
+      "test/workPlanActivationMigration.test.js",
+      "test/workPreparationAuthorityMigration.test.js",
+      "test/workPreparationAuthorityPostgres.test.js",
+      "test/workPreparationRuntimePostgres.test.js",
+      "test/workstreamFoundationMigration.test.js"
+    ],
+    "stagedFiles": []
+  },
+  "changedInThisTask": [
+    "docs/external-customer-commercial-lifecycle-20260902.json",
+    "docs/external-customer-commercial-lifecycle-20260902.md",
+    "migrations/202609020005_create_external_visit_schedule_confirmation.sql",
+    "migrations/202609020006_generalize_work_preparation_execution_approval.sql",
+    "migrations/README.md",
+    "server/authorization/lifecycleAuthorityService.js",
+    "server/finance/preWorkDepositService.js",
+    "server/workflow/approvedWorkExecutionService.js",
+    "server/workflow/approvedWorkExecutions.js",
+    "server/workflow/approvedWorkVisitService.js",
+    "server/workflow/externalVisitConfirmationService.js",
+    "server/workflow/liveJobProjectionService.js",
+    "server/workflow/professionalScheduleService.js",
+    "server/workflow/visitService.js",
+    "server/workflow/visits.js",
+    "server/workflow/workPreparation.js",
+    "server/workflow/workPreparationService.js",
+    "test/alertB1VisitPostgres.test.js",
+    "test/approvedWorkCompletionRuntimePostgres.test.js",
+    "test/approvedWorkExecutionAuthorityMigration.test.js",
+    "test/approvedWorkExecutionAuthorityPostgres.test.js",
+    "test/approvedWorkExecutionRuntimePostgres.test.js",
+    "test/approvedWorkExecutionService.test.js",
+    "test/approvedWorkStartIntegration.test.js",
+    "test/approvedWorkStartRuntimePostgres.test.js",
+    "test/approvedWorkVisitActivationMigration.test.js",
+    "test/approvedWorkVisitService.test.js",
+    "test/approvedWorkVisitServicePostgres.test.js",
+    "test/askMeetroWorkflowMigration.test.js",
+    "test/businessContactMigration.test.js",
+    "test/businessCustomerRelationshipMigration.test.js",
+    "test/businessPortfolioAuthorityMigration.test.js",
+    "test/commercialLifecycleHistoryPostgres.test.js",
+    "test/customerPartyMigration.test.js",
+    "test/efrActivationMigration.test.js",
+    "test/evaluationRemoteProvenanceMigration.test.js",
+    "test/evaluationVisitActivationMigration.test.js",
+    "test/evaluationVisitAuthorityNegotiationMigration.test.js",
+    "test/externalApprovedWorkExecutionPostgres.test.js",
+    "test/externalApprovedWorkSchedulingPostgres.test.js",
+    "test/externalVisitConfirmationPostgres.test.js",
+    "test/helpers/externalLifecycleFixture.js",
+    "test/helpers/externalLifecycleMigrationInventory.js",
+    "test/helpers/visitLifecycleFixture.js",
+    "test/invoicePaymentMigration.test.js",
+    "test/jobCompletionMigration.test.js",
+    "test/liveJobProjectionService.test.js",
+    "test/migrationInventoryGovernance.test.js",
+    "test/ordinaryEvaluationFindingMigration.test.js",
+    "test/preWorkDepositPaymentMigration.test.js",
+    "test/preWorkDepositPaymentPostgres.test.js",
+    "test/preWorkDepositRuntimePostgres.test.js",
+    "test/professionalScheduleService.test.js",
+    "test/professionalScheduleServicePostgres.test.js",
+    "test/quickQuoteAnalysisContinuationReviewMigration.test.js",
+    "test/quickQuotePhotoAssistReviewMigration.test.js",
+    "test/quoteBusinessDocumentBridgeMigration.test.js",
+    "test/quoteCompositionFeedbackMigration.test.js",
+    "test/quoteCustomerTermsMigration.test.js",
+    "test/quoteCustomerTermsSnapshot.test.js",
+    "test/quoteDeliveryMigration.test.js",
+    "test/quoteFoundationMigration.test.js",
+    "test/recommendationFoundationMigration.test.js",
+    "test/visitFoundationMigration.test.js",
+    "test/visitRoutes.test.js",
+    "test/visitService.test.js",
+    "test/visitServicePostgres.test.js",
+    "test/visitStartAuthorityMigration.test.js",
+    "test/workPlanActivationMigration.test.js",
+    "test/workPreparationAuthorityMigration.test.js",
+    "test/workPreparationAuthorityPostgres.test.js",
+    "test/workPreparationRuntimePostgres.test.js",
+    "test/workstreamFoundationMigration.test.js"
+  ],
+  "inheritedUnchangedWorkingTreeFiles": [
+    "migrations/202609020001_add_business_origin_commercial_job_foundation.sql",
+    "migrations/202609020002_create_quote_external_approval_authority.sql",
+    "migrations/202609020003_generalize_pre_work_deposit_approval_authority.sql",
+    "migrations/202609020004_generalize_approved_work_visit_approval_authority.sql",
+    "server/authorization/quoteDraftService.js",
+    "server/authorization/quoteDrafts.js",
+    "server/documents/businessDocumentDeliveryService.js",
+    "server/documents/businessDocumentDraftService.js",
+    "server/documents/businessDocumentNumberingService.js",
+    "server/workflow/jobFoundationService.js",
+    "test/businessDocumentQuoteReviewIdentity.test.js",
+    "test/jobLifecycleFoundation.test.js",
+    "test/quoteBusinessDocumentBridge.test.js",
+    "test/quoteDraftRoutes.test.js",
+    "test/quoteDraftService.test.js"
+  ],
+  "certifiedSourceSha256": {
+    "migrations/202609020001_add_business_origin_commercial_job_foundation.sql": "332eb2ef7f08340931e1d583b3056ae727a724ed15851bba76076258444ed41d",
+    "migrations/202609020002_create_quote_external_approval_authority.sql": "dc371b7540461320eff30a686c86ec889e7de07fcfd62528b6182ba2d7abb776",
+    "migrations/202609020003_generalize_pre_work_deposit_approval_authority.sql": "42093e98ae8cd962ac19aa188153e2188efef1c01bd94773ea5564068064fcf9",
+    "migrations/202609020004_generalize_approved_work_visit_approval_authority.sql": "448481c6a55de4fbc750201db6b54e3a42812e399209dfbdbcd1cc9598ee5fde",
+    "migrations/202609020005_create_external_visit_schedule_confirmation.sql": "7cb1b75536b425dbb9cdfa0aef96b5a1aaa11950b67d0cacc625185e4c8e0d0a",
+    "migrations/202609020006_generalize_work_preparation_execution_approval.sql": "4dda2aac1af54904293128be0dd95b5957304f30a31b9d5678776787cccfa853",
+    "migrations/README.md": "28877b37316ea5cc0d83ea292c0a133a0701d1b702f086b303ab4dfba0776964",
+    "server/authorization/lifecycleAuthorityService.js": "c21bf80c594e8f7dfef6b8e20f2202a370c41383c658a8e9d36f11b44e254a9f",
+    "server/authorization/quoteDraftService.js": "b36a5f884b9daf3b4be3da39f6c97fd60c4a055bae00fe212372046a0ad08853",
+    "server/authorization/quoteDrafts.js": "c5b51c55e16bba90aa39e750a7d411d3685c2ce6b1255e8b814b0337b4196ba9",
+    "server/documents/businessDocumentDeliveryService.js": "3643575fd4f23f99b4fce16d2ec13642cb00823bdcce0e9073ac9e73cc644f51",
+    "server/documents/businessDocumentDraftService.js": "ef4f528b3473c7e5e4dfd042408643f8b03549894634a4bc8ddea6d4318868fb",
+    "server/documents/businessDocumentNumberingService.js": "d2c01062f61995d703d2f4da0fdc338efee2a81792697f83bf3bc97215ddc32c",
+    "server/finance/preWorkDepositService.js": "375c294e074ee42967e3940c54fdfa707b68fe50e32e6f59d4a145192c243c81",
+    "server/workflow/approvedWorkExecutionService.js": "e16c5f2ffa30170b9412284b54c74b122040b8d2f16b006806722ffe783ad346",
+    "server/workflow/approvedWorkExecutions.js": "a277534f157f06f7145f350c0322ead19bfefccf6069af21c11030e20c3dd1be",
+    "server/workflow/approvedWorkVisitService.js": "41378708154ca36cd20858c67b34031e2128c6f239fbf0f27055199409ccea56",
+    "server/workflow/externalVisitConfirmationService.js": "139124e1c5b56784be6307c63cbb47a0ca0cfe70918fd2427cd4e77e539276f0",
+    "server/workflow/jobFoundationService.js": "08b33da42163a825cecead905711365b741221bc08f968abd869c28239d3820b",
+    "server/workflow/liveJobProjectionService.js": "408fccff6da70128d038088e02989b93f1b80b80359d82ea1bc62043b4a25e3d",
+    "server/workflow/professionalScheduleService.js": "237990951c98b2a01127b237bbc92c8d752df29d5d0ffd8fd629eff2a90254cf",
+    "server/workflow/visitService.js": "f805ffe10e8150db7e31bc369fea91fab3e2548dd0602afbd8f7d0dda38a8692",
+    "server/workflow/visits.js": "43b5508fe42906c4424728ad8e2ed7db097f93b2fb3a2d24876194a7e5b19e43",
+    "server/workflow/workPreparation.js": "25317ae45bb37d69697eb0825c07d965320dcfdbdb92bcf8c392ba5d89b79307",
+    "server/workflow/workPreparationService.js": "f9e4844278910ec91cfd6daa4b698a3bc88d936a12a639c398a24a0b259d1c22",
+    "test/alertB1VisitPostgres.test.js": "14342e0109da83e0a7b7aba77d230f1f7799a55902a31f7d7713c34d1bd4a1bc",
+    "test/approvedWorkCompletionRuntimePostgres.test.js": "85cbbee1fdf6db9697f1c984a9efb96b1e1481cdecf341f78a636597d6d4eadd",
+    "test/approvedWorkExecutionAuthorityMigration.test.js": "975133eca64c222fd807733fe87ad5097828ebd0bc9c271ef1253da7110fa65f",
+    "test/approvedWorkExecutionAuthorityPostgres.test.js": "0cb9fd803c73e17d711f2e1522ac9d515b29a1c5f294154ab1dc1bc7dfdeff2d",
+    "test/approvedWorkExecutionRuntimePostgres.test.js": "e7709efff59a2d586443a53d56b95a26fcfc26c81bdfbdd7623c04735ff9032e",
+    "test/approvedWorkExecutionService.test.js": "12b3f4ba0f20e66816968aeb25e03f05d91f3083df526d922a8d0aebd6aac56e",
+    "test/approvedWorkStartIntegration.test.js": "f6784cc6b87d385fc2dd2342791b39a0d6a00b5c42b74b8bd9a36bbbdbed0318",
+    "test/approvedWorkStartRuntimePostgres.test.js": "1ace43b709a9c881542c6f55db9b4adf799c58edf14eb15cbf6188bcfee4f7c0",
+    "test/approvedWorkVisitActivationMigration.test.js": "cd254f06b39971f1b108c1b1c5b9547052bfd5cff09c00c2a7d12991a46ed08c",
+    "test/approvedWorkVisitService.test.js": "e138b2f43b740049df0d8e688661139331220baa9273f5b20af9352915adc7fe",
+    "test/approvedWorkVisitServicePostgres.test.js": "4b7d8c844dc454748a01d1b2fbaebea574363e87f4b0d56dd9200d335a386702",
+    "test/askMeetroWorkflowMigration.test.js": "ce5cc538ae7f573a1a08f60adbc7f9b3537ee95590baf845b86a9b21311fa1da",
+    "test/businessContactMigration.test.js": "a9424359a6e1c76414d2c0679db958aef7e0659d9aa6db7543a17b7f7982c7ac",
+    "test/businessCustomerRelationshipMigration.test.js": "8924c4193c3d85cd0d154d8d39d4754d809459a9147c6485384f0f74c80d0b37",
+    "test/businessDocumentQuoteReviewIdentity.test.js": "5d3a006cc74019f12737d7c21bdc2a797bae469a67f1e3fb88f19afc4bf80231",
+    "test/businessPortfolioAuthorityMigration.test.js": "e88610a4de4bcbf32b189139f2ba60886cb258de3218dc97ff28f027bade954b",
+    "test/commercialLifecycleHistoryPostgres.test.js": "1927cfd6fbb962879dd8d12be25523d67496d9378c7db09951f7e487b520667b",
+    "test/customerPartyMigration.test.js": "981f4974a18a8e6b945e05ad707724fe0d245d3ff84b008efc2042e8afb3b934",
+    "test/efrActivationMigration.test.js": "d7dc22447a3e31880f4527b37012e94cbeaa5842996c47c947cf5a9d8575a3be",
+    "test/evaluationRemoteProvenanceMigration.test.js": "aa88336c0a17f73372fb611e6f28286fbceb06774c8d0050fdcc0deca9ea4e2b",
+    "test/evaluationVisitActivationMigration.test.js": "299633738b4ae03cdaae28c545b03e40f31ffa2512824b658106e0eae7a77ee9",
+    "test/evaluationVisitAuthorityNegotiationMigration.test.js": "c052ce350d7512abe2d75b634cf029d3fe13b52dc991a24739e37791e8e5c54e",
+    "test/externalApprovedWorkExecutionPostgres.test.js": "4eea53c9d1a2ec16edec403dae7578d278730cf34abc0a88ab799d6e4ba96c3a",
+    "test/externalApprovedWorkSchedulingPostgres.test.js": "f277b8d774f6ce3ca5260fb0bfde907325c88935013b4d435e705b7b1baeb8c1",
+    "test/externalVisitConfirmationPostgres.test.js": "299f42177b327d82cba0ae391950bb68f0cd368733e1880f5536dda0e1dd56f8",
+    "test/helpers/externalLifecycleFixture.js": "e366ddd7414fe5c725823bd1fb10d2247cf17552d223a309d776bbc385d11991",
+    "test/helpers/externalLifecycleMigrationInventory.js": "0de7d755bf4403b42b70188d43c22296ca3161a68b85d49fbd8054b31dbd458e",
+    "test/helpers/visitLifecycleFixture.js": "b62d3c192a0958b67b56c2a4c659fe3b8d4d8a755a97aeab08fa921682ac548f",
+    "test/invoicePaymentMigration.test.js": "f1dff0d05b8f764b96ecb1bb7663219ed8b3caf481b423b81f7dbf53aaf9524a",
+    "test/jobCompletionMigration.test.js": "50dfc029694c273077561e20520ff0b7d469c636cb8e21f88086ce752c838fdc",
+    "test/jobLifecycleFoundation.test.js": "c09466e7e9c5fbe833f4d1de74e67f19da42031b05e12bcd166fa68843656c26",
+    "test/liveJobProjectionService.test.js": "75b6785c3338b2058e1ec97c739478eb3173c7e2bb67d8aba2064d3214cef2d8",
+    "test/migrationInventoryGovernance.test.js": "086fb9194ce2b061ffeb79e65c7bc87d33c0c34205c1395fe65f6aacda4758b0",
+    "test/ordinaryEvaluationFindingMigration.test.js": "a05af5c4f42f761ee5291b2c5d98c19f2844bc21a258df893dad34a80f86ec98",
+    "test/preWorkDepositPaymentMigration.test.js": "ebc29a64ac37c67b9066eb817b76939e3ab52d4c019c947a577e8da4ffce8432",
+    "test/preWorkDepositPaymentPostgres.test.js": "9a0400bec7e1941591f8c77f5c6bcb39b9234a8ae535842d2a8463510a5a2013",
+    "test/preWorkDepositRuntimePostgres.test.js": "cd48eb6acaf15a2036abfa95e8c3270a43b8cbd80873f9fa93870c9ec20ca723",
+    "test/professionalScheduleService.test.js": "e49e303980556040ea2b8a20f18d4e230db967bb0e25111572557688f07bb598",
+    "test/professionalScheduleServicePostgres.test.js": "bb27dec44a7f3fe7ba7bf4bf28eace7cc723a2aceb0e63b9d1c68f8e2a31188c",
+    "test/quickQuoteAnalysisContinuationReviewMigration.test.js": "3fd3148932f261fecbc434c314f683878fc193417e0f35c26448fb5bab0081df",
+    "test/quickQuotePhotoAssistReviewMigration.test.js": "03c8535d73292438a9b316f5dd0edfd85c207dc54ad3682fbd473a140b29100a",
+    "test/quoteBusinessDocumentBridge.test.js": "098b269c557b7965e0246458f0f3299f3791f2a05cfc12d3001d6d59f94a74f1",
+    "test/quoteBusinessDocumentBridgeMigration.test.js": "f20520875b33ff8d6d135149472129b602ffa57eb42c5b8b0b96dfa61a2f0faa",
+    "test/quoteCompositionFeedbackMigration.test.js": "34bd2cc1040852fa46e95c4729992496f16948ab9b697a8fa06cebab6990d5b9",
+    "test/quoteCustomerTermsMigration.test.js": "b2ee4f1d759728db7cc9185fc9ba4b66eac8c7fa78928521d2dc990b03e05617",
+    "test/quoteCustomerTermsSnapshot.test.js": "5cc5dcb5dec62b5f56f33a02d9698e59bd4b529308d83089dfe19ad1ed77a2be",
+    "test/quoteDeliveryMigration.test.js": "d7e5422fe03a4353e8903b6a0a8ef22c87c8b89a2abc677879308bfaae9f6db2",
+    "test/quoteDraftRoutes.test.js": "016fd862c9010131b11d747c28d649979a62b817aaaefa7dfd8e8d883ddf9312",
+    "test/quoteDraftService.test.js": "7f65704d2312b710a4e3a1bd0477e69e6b174056b85c52afe332de7315ea67fc",
+    "test/quoteFoundationMigration.test.js": "c3072c8826d5aec0d124a0ac33377ca8d3d6d753ceb06ba37ef2d8a64bb88319",
+    "test/recommendationFoundationMigration.test.js": "e5149190987d3d1cae4b96f13b03fde12f88a367b642c12b5243dc93f591cb0e",
+    "test/visitFoundationMigration.test.js": "fbabe83a73df60ec3c8b1ab11b02b01444343a72818eb369ca1842607ba3bf83",
+    "test/visitRoutes.test.js": "d80b7145acf2d31b7cc2e6aa6230ec09d91f5ea654764fdae0fe87992cef7d66",
+    "test/visitService.test.js": "3fa272d10a065210700e591f6c68be08e203fffca2a4fd8bbbc662a9c3ee4875",
+    "test/visitServicePostgres.test.js": "2e0a97db46869b6b32ae390a8b0d8b0fcdaf0417390ae7acef4efda0aca12ca9",
+    "test/visitStartAuthorityMigration.test.js": "79bc22e6d7bd04a9107e6a9eb70ddcbc967186236d44661b90a07b7d725c0364",
+    "test/workPlanActivationMigration.test.js": "86013cf8a53286355f6f6b04c58539e2059f9281c70cf28c58b28923d03cc54f",
+    "test/workPreparationAuthorityMigration.test.js": "2034be979b4af0a3f2d1dcb970a006a2affbcc23d5641616a4b3ec9960ff6636",
+    "test/workPreparationAuthorityPostgres.test.js": "a602f748c2adf34f86c3d19d66c2e6a9a02be0c9048c5dfbe82690f9f30cf222",
+    "test/workPreparationRuntimePostgres.test.js": "097fe4428dc8e2d2b5d61ecd2fa190fab2dff28f5c06139828d99fcc9f1bad76",
+    "test/workstreamFoundationMigration.test.js": "3216e22956b21c069f343fde572deebad1bfbe7003f86ead29cba3356d6038ec"
+  },
+  "focusedTestFiles": [
+    "test/approvedWorkExecutionAuthorityMigration.test.js",
+    "test/approvedWorkExecutionRoutes.test.js",
+    "test/approvedWorkExecutionService.test.js",
+    "test/approvedWorkStartIntegration.test.js",
+    "test/approvedWorkVisitActivationMigration.test.js",
+    "test/approvedWorkVisitRoutes.test.js",
+    "test/approvedWorkVisitService.test.js",
+    "test/businessDocumentQuoteReviewIdentity.test.js",
+    "test/jobLifecycleFoundation.test.js",
+    "test/jobLifecycleFoundationMigration.test.js",
+    "test/liveJobProjectionService.test.js",
+    "test/preWorkDepositPaymentMigration.test.js",
+    "test/preWorkDepositRoutes.test.js",
+    "test/preWorkDepositService.test.js",
+    "test/professionalScheduleRoutes.test.js",
+    "test/professionalScheduleService.test.js",
+    "test/quoteBusinessDocumentBridge.test.js",
+    "test/quoteBusinessDocumentBridgeMigration.test.js",
+    "test/quoteCompositionFeedbackMigration.test.js",
+    "test/quoteCompositionOperation.test.js",
+    "test/quoteCompositionReviewService.test.js",
+    "test/quoteCompositionRoutes.test.js",
+    "test/quoteCustomerDeliveryAuthority.test.js",
+    "test/quoteCustomerTermsMigration.test.js",
+    "test/quoteCustomerTermsSnapshot.test.js",
+    "test/quoteDecisionHandoff.test.js",
+    "test/quoteDeliveryMigration.test.js",
+    "test/quoteDeliveryService.test.js",
+    "test/quoteDraftPhotoMedia.test.js",
+    "test/quoteDraftRoutes.test.js",
+    "test/quoteDraftService.test.js",
+    "test/quoteFoundationMigration.test.js",
+    "test/quotePricingPresentation.test.js",
+    "test/visitFoundationMigration.test.js",
+    "test/visitRoutes.test.js",
+    "test/visitService.test.js",
+    "test/visitStartAuthorityMigration.test.js",
+    "test/workPreparationAuthorityMigration.test.js",
+    "test/workPreparationRoutes.test.js",
+    "test/workPreparationService.test.js"
+  ],
+  "evidenceLogs": {
+    "postgres": "/tmp/meetro_consolidated_gate.log",
+    "focused": "/tmp/meetro_lifecycle_focused_final.log",
+    "full": "/tmp/meetro_lifecycle_full_suite_final.log"
+  }
+}

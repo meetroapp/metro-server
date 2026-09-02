@@ -163,6 +163,7 @@ test("scheduled professional actions reuse state, time, and exact capability tru
   assert.equal(projected.semanticState, "SCHEDULED");
   assert.deepEqual(projected.actions, {
     canConfirm: false,
+    canRecordExternalConfirmation: false,
     canReschedule: true,
     canCancel: true,
     canStart: true,
@@ -181,6 +182,7 @@ test("customer-authored proposal is actionable by the professional without becom
   assert.equal(projected.semanticState, "CHANGE_REQUESTED");
   assert.deepEqual(projected.actions, {
     canConfirm: true,
+    canRecordExternalConfirmation: false,
     canReschedule: true,
     canCancel: false,
     canStart: false,
@@ -230,8 +232,11 @@ test("SQL fails closed to exact professional roles, approved decisions, grants, 
   assert.match(sql, /relationships\.professional_user_id = \$1/);
   assert.match(sql, /professional_roles\.role = 'PRIMARY_PROFESSIONAL'/);
   assert.match(sql, /customer_roles\.role = 'CUSTOMER_REPRESENTATIVE'/);
-  assert.match(sql, /decisions\.decision = 'APPROVED'/);
+  assert.match(sql, /approvals\.decision = 'APPROVED'/);
   assert.match(sql, /quotes\.status = 'ISSUED'/);
+  assert.match(sql, /approvals\.approval_source = 'EXTERNAL_EVIDENCE'/);
+  assert.match(sql, /grants\.scope_quote_approval_id = approvals\.id/);
+  assert.match(sql, /grants\.scope_approved_quote_decision_id = approvals\.customer_decision_id/);
   assert.match(sql, /grants\.capability = 'visit\.read'/);
   assert.match(sql, /visits\.purpose IN \('EVALUATION','APPROVED_WORK'\)/);
   assert.doesNotMatch(sql, /FOLLOW_UP/);
