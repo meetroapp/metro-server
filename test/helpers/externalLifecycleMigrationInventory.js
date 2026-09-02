@@ -1,6 +1,7 @@
 "use strict";
 
-// Frozen local lifecycle sequence; the historical production convergence manifest stays unchanged.
+// Certified lifecycle sequence; migration 78 revised after its staging rollback.
+// Migrations 76–77 and 79–81, and the production convergence manifest, remain unchanged.
 module.exports = [
   {
     "filename": "202609020001_add_business_origin_commercial_job_foundation.sql",
@@ -12,7 +13,7 @@ module.exports = [
   },
   {
     "filename": "202609020003_generalize_pre_work_deposit_approval_authority.sql",
-    "checksum": "42093e98ae8cd962ac19aa188153e2188efef1c01bd94773ea5564068064fcf9"
+    "checksum": "8c7a089876eaad046c2db00fd50d64eb13393e474f4a1b29737228426e9bda93"
   },
   {
     "filename": "202609020004_generalize_approved_work_visit_approval_authority.sql",

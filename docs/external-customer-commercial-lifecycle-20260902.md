@@ -1,5 +1,7 @@
 # External customer commercial lifecycle — release certification
 
+> **Post-release migration-78 remediation:** The original certification below is retained as history and is superseded for the revised source. See section 15 and `postReleaseMigration78Remediation` in the JSON certificate. Local remediation gates pass; this artifact records readiness for staging retry, not a completed staging retry.
+
 ## 1. STATUS
 
 **PASS** — D3B1, D3B2, and D3C are complete in the local server working tree. Marketplace, EXTERNAL_CONTACT, and DOCUMENT_ONLY paths pass real PostgreSQL certification. No deployment was performed.
@@ -256,3 +258,44 @@ Reproduction: provide the environment names in the JSON certificate to these tes
 Machine-readable evidence: [docs/external-customer-commercial-lifecycle-20260902.json](/Users/williammolina/meetro-server/meetro-server/docs/external-customer-commercial-lifecycle-20260902.json).
 
 Local logs: [consolidated PostgreSQL](/tmp/meetro_consolidated_gate.log), [focused suite](/tmp/meetro_lifecycle_focused_final.log), [full suite](/tmp/meetro_lifecycle_full_suite_final.log).
+
+## 15. POST-RELEASE MIGRATION-78 REMEDIATION CERTIFICATION
+
+**READY_FOR_STAGING_RETRY.** Original release: `b98be2b3d297ab3f59b280b2e2b0c5e869ec3152`; staging ledger at certification: **77**. This addendum invalidates the original migration-78 checksum for the revised source while preserving the original test history above.
+
+The original migration-78 statement at lines 32–47 attempted an `UPDATE canonical_pre_work_deposit_obligations ... FROM canonical_quote_approvals`. Read-only staging catalog inspection and SELECT/EXPLAIN proved that exactly one historical APPROVED marketplace obligation matched. Trigger `canonical_pre_work_deposit_obligations_append_only`, BEFORE UPDATE OR DELETE FOR EACH ROW, invokes `prevent_lifecycle_append_only_mutation()` and raises SQLSTATE **55000**: “Lifecycle append-only records cannot be mutated.” This is a direct historical backfill conflict, with a historical-fixture coverage gap. Fresh financial tests had applied migration 78 before seeding obligations; the old historical fixture started at ledger 79.
+
+The correction validates exact historical approval provenance without updating the obligation. Legacy rows retain NULL common identity; new rows must carry common approval under the new-row check and origin guards. Append-only protection remains unchanged. Two runtime deposit reads resolve the exact legacy approval from customer decision, Quote/version, Job and integrity hash, so legacy status, materialization, payment and reversal continue to work. No other runtime file changes.
+
+Migration 78 checksum:
+
+- Prior: `42093e98ae8cd962ac19aa188153e2188efef1c01bd94773ea5564068064fcf9` — never recorded successfully on staging.
+- Revised: `8c7a089876eaad046c2db00fd50d64eb13393e474f4a1b29737228426e9bda93`.
+- Migrations **76–77 and 79–81 remain byte-for-byte unchanged**. Production was never targeted.
+
+| Remediation gate | Tests | Passed | Failed | Skipped |
+|---|---:|---:|---:|---:|
+| Consolidated PostgreSQL | 25 | 25 | 0 | 0 |
+| Mandatory marketplace (included above) | 14 | 14 | 0 | 0 |
+| Financial runtime (included above) | 1 | 1 | 0 | 0 |
+| Financial integrity (included above) | 1 | 1 | 0 | 0 |
+| External lifecycle (included above) | 9 | 9 | 0 | 0 |
+| Historical upgrade + fresh install (included above) | 2 | 2 | 0 | 0 |
+| Focused lifecycle, inventory and history | 301 | 301 | 0 | 0 |
+
+Both EXTERNAL_CONTACT and DOCUMENT_ONLY pass the dedicated scheduling, confirmation, execution and completion regressions, including zero fabricated customer authority assertions. Gate totals overlap and must not be added together. The full server suite was not rerun; the original **2,189 passes / 0 failures / 66 skips** remains historical only.
+
+The synthetic ledger-77 fixture uses isolated pre-generalization application code from Git revision `4819151546087e495cd116d6283c74bd16f7f63d` to create historical marketplace evidence; only the explicit local history test requires that revision. The original update reproduces **55000**. Corrected migrations **78–81 apply four migrations with no failure**, preserving all existing columns and provenance. Before/after comparison covers one obligation, two versions, one receipt, one allocation, two deposit events, three payment commands, one customer decision, one common approval, one Quote, three Quote versions and one issuance. New nullable identity columns remain NULL on the historical obligation. New legacy-shaped inserts are rejected, and an otherwise valid UPDATE remains blocked by the original append-only trigger. Legacy reads, reversal and payment satisfaction pass after upgrade; all original rows remain preserved while new evidence is appended.
+
+Fresh installation applies all **81** migrations. All **21** new disposable certification databases have the exact 81 filenames/checksums; every final replay reports **applied 0 / skipped 81 / failed []**. The separate 37→38 upgrade fixture was advanced by 43 migrations after its test. No real staging customer data was copied.
+
+The original release boundary remains **88 historical files**. This remediation changes **six files**, five already in that boundary plus one new regression test; the combined boundary is **89 unique files**, excluding `.DS_Store`. Exact remediation files:
+
+- [docs/external-customer-commercial-lifecycle-20260902.json](/Users/williammolina/meetro-server/meetro-server/docs/external-customer-commercial-lifecycle-20260902.json)
+- [docs/external-customer-commercial-lifecycle-20260902.md](/Users/williammolina/meetro-server/meetro-server/docs/external-customer-commercial-lifecycle-20260902.md)
+- [migrations/202609020003_generalize_pre_work_deposit_approval_authority.sql](/Users/williammolina/meetro-server/meetro-server/migrations/202609020003_generalize_pre_work_deposit_approval_authority.sql)
+- [server/finance/preWorkDepositService.js](/Users/williammolina/meetro-server/meetro-server/server/finance/preWorkDepositService.js)
+- [test/helpers/externalLifecycleMigrationInventory.js](/Users/williammolina/meetro-server/meetro-server/test/helpers/externalLifecycleMigrationInventory.js)
+- [test/preWorkDepositHistoryPostgres.test.js](/Users/williammolina/meetro-server/meetro-server/test/preWorkDepositHistoryPostgres.test.js)
+
+Current source hashes, exact database names, migration checksums, replay results and local test logs are recorded under `postReleaseMigration78Remediation` in the JSON certificate. The original certificate fields retain their historical meaning. Staging deployment, migration retry and bounded live checks occur only after the remediation commit; their results must be reported separately.

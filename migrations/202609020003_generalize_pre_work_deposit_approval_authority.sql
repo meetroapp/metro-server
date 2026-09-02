@@ -29,30 +29,21 @@ ALTER TABLE canonical_pre_work_deposit_obligations
   ADD COLUMN IF NOT EXISTS quote_approval_id UUID,
   ADD COLUMN IF NOT EXISTS approval_source TEXT;
 
-UPDATE canonical_pre_work_deposit_obligations obligations
-SET
-  quote_approval_id = approvals.id,
-  approval_source = approvals.approval_source
-FROM canonical_quote_approvals approvals
-WHERE obligations.customer_decision_id IS NOT NULL
-  AND approvals.customer_decision_id =
-    obligations.customer_decision_id
-  AND approvals.quote_id =
-    obligations.quote_id
-  AND approvals.issued_quote_version =
-    obligations.issued_quote_version
-  AND approvals.job_id =
-    obligations.job_id
-  AND approvals.issued_integrity_hash =
-    obligations.source_integrity_hash;
-
+-- Historical obligations are append-only. Verify their exact marketplace
+-- approval provenance without writing the new identity into old evidence.
 DO $$
 BEGIN
   IF EXISTS (
     SELECT 1
-    FROM canonical_pre_work_deposit_obligations
-    WHERE quote_approval_id IS NULL
-       OR approval_source IS NULL
+    FROM canonical_pre_work_deposit_obligations obligations
+    LEFT JOIN canonical_quote_approvals approvals
+      ON approvals.customer_decision_id = obligations.customer_decision_id
+     AND approvals.quote_id = obligations.quote_id
+     AND approvals.issued_quote_version = obligations.issued_quote_version
+     AND approvals.job_id = obligations.job_id
+     AND approvals.issued_integrity_hash = obligations.source_integrity_hash
+     AND approvals.approval_source = 'MEETRO_CUSTOMER'
+    WHERE approvals.id IS NULL
   ) THEN
     RAISE EXCEPTION
       'Existing deposit obligations could not be reconciled to canonical Quote approvals.';
@@ -60,9 +51,13 @@ BEGIN
 END;
 $$;
 
+-- NOT VALID preserves historical NULL identity while enforcing common approval
+-- on every new obligation. Existing append-only protection remains intact.
 ALTER TABLE canonical_pre_work_deposit_obligations
-  ALTER COLUMN quote_approval_id SET NOT NULL,
-  ALTER COLUMN approval_source SET NOT NULL,
+  ADD CONSTRAINT canonical_pre_work_deposit_new_approval_required
+  CHECK (quote_approval_id IS NOT NULL AND approval_source IS NOT NULL) NOT VALID;
+
+ALTER TABLE canonical_pre_work_deposit_obligations
   ALTER COLUMN job_request_id DROP NOT NULL,
   ALTER COLUMN relationship_id DROP NOT NULL,
   ALTER COLUMN customer_decision_id DROP NOT NULL,
@@ -305,14 +300,14 @@ BEGIN
   END IF;
 
   IF v_source_type = 'ordinary_request_selection' THEN
-    IF NEW.approval_source <> 'MEETRO_CUSTOMER'
+    IF NEW.approval_source IS DISTINCT FROM 'MEETRO_CUSTOMER'
        OR NEW.job_request_id IS DISTINCT FROM v_job_request_id
        OR NEW.relationship_id IS DISTINCT FROM v_relationship_id THEN
       RAISE EXCEPTION
         'Marketplace deposit obligation source does not match its Job.';
     END IF;
   ELSIF v_source_type = 'business_document' THEN
-    IF NEW.approval_source <> 'EXTERNAL_EVIDENCE'
+    IF NEW.approval_source IS DISTINCT FROM 'EXTERNAL_EVIDENCE'
        OR NEW.job_request_id IS NOT NULL
        OR NEW.relationship_id IS NOT NULL THEN
       RAISE EXCEPTION
@@ -433,7 +428,7 @@ BEGIN
       (
         jobs.source_type = 'ordinary_request_selection'
         AND (
-          obligations.approval_source <> 'MEETRO_CUSTOMER'
+          COALESCE(obligations.approval_source, 'MEETRO_CUSTOMER') <> 'MEETRO_CUSTOMER'
           OR obligations.job_request_id
              IS DISTINCT FROM jobs.job_request_id
           OR obligations.relationship_id
@@ -538,7 +533,7 @@ $$;
 
 COMMENT ON COLUMN
 canonical_pre_work_deposit_obligations.quote_approval_id IS
-  'Origin-neutral canonical Quote approval that authorizes this deposit obligation.';
+  'Origin-neutral approval for new obligations; historical marketplace rows retain NULL and resolve exact approval from immutable customer-decision provenance.';
 
 COMMENT ON COLUMN
 canonical_pre_work_deposit_obligations.approval_source IS

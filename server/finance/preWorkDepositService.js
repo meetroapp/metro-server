@@ -564,6 +564,8 @@ async function loadApprovedDecisionSource(client, {
 async function loadObligation(client, quoteApprovalId, { lock = false } = {}) {
   const result = await client.query(
     `SELECT obligations.*,
+      approvals.id AS quote_approval_id,
+      approvals.approval_source,
       latest.version AS latest_version,
       latest.state AS latest_state,
       latest.required_minor AS latest_required_minor,
@@ -571,6 +573,15 @@ async function loadObligation(client, quoteApprovalId, { lock = false } = {}) {
       latest.remaining_minor AS latest_remaining_minor,
       latest.created_at AS latest_version_created_at
      FROM canonical_pre_work_deposit_obligations obligations
+     INNER JOIN canonical_quote_approvals approvals
+       ON approvals.quote_id = obligations.quote_id
+       AND approvals.issued_quote_version = obligations.issued_quote_version
+       AND approvals.job_id = obligations.job_id
+       AND approvals.issued_integrity_hash = obligations.source_integrity_hash
+       AND (approvals.id = obligations.quote_approval_id
+         OR (obligations.quote_approval_id IS NULL
+           AND approvals.approval_source = 'MEETRO_CUSTOMER'
+           AND approvals.customer_decision_id = obligations.customer_decision_id))
      INNER JOIN LATERAL (
        SELECT versions.version, versions.state, versions.required_minor,
          versions.applied_minor, versions.remaining_minor, versions.created_at
@@ -579,7 +590,7 @@ async function loadObligation(client, quoteApprovalId, { lock = false } = {}) {
        ORDER BY versions.version DESC
        LIMIT 1
      ) latest ON TRUE
-     WHERE obligations.quote_approval_id = $1
+     WHERE approvals.id = $1
      LIMIT 1
      ${lock ? "FOR UPDATE OF obligations" : ""}`,
     [quoteApprovalId]
@@ -1780,7 +1791,7 @@ async function reverseDepositAllocation(input = {}) {
 
     const allocationResult = await client.query(
       `SELECT allocations.*, receipts.gross_amount_minor,
-        obligations.quote_approval_id,
+        approvals.id AS quote_approval_id,
         obligations.customer_decision_id,
         (
           SELECT COALESCE(sum(reversals.reversed_minor), 0)
@@ -1800,6 +1811,15 @@ async function reverseDepositAllocation(input = {}) {
          AND obligations.relationship_id
              IS NOT DISTINCT FROM allocations.relationship_id
          AND obligations.currency = allocations.currency
+       INNER JOIN canonical_quote_approvals approvals
+         ON approvals.quote_id = obligations.quote_id
+         AND approvals.issued_quote_version = obligations.issued_quote_version
+         AND approvals.job_id = obligations.job_id
+         AND approvals.issued_integrity_hash = obligations.source_integrity_hash
+         AND (approvals.id = obligations.quote_approval_id
+           OR (obligations.quote_approval_id IS NULL
+             AND approvals.approval_source = 'MEETRO_CUSTOMER'
+             AND approvals.customer_decision_id = obligations.customer_decision_id))
        WHERE allocations.id = $1
          AND allocations.job_id = $2
          AND allocations.relationship_id
