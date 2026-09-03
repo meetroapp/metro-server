@@ -376,6 +376,226 @@ async function createPaymentLifecycleMessageWithClient({
   return message;
 }
 
+
+async function createPaymentReminderMessageWithClient({
+  client,
+  conversation,
+  senderUserId,
+  recipientUserId,
+  messageText,
+  workflowPayload,
+  jobId,
+}) {
+  requireDatabasePool(client);
+
+  const uuid = (value) =>
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+      ? value.toLowerCase()
+      : null;
+
+  const sourceType = workflowPayload?.sourceType;
+  const reminderId = uuid(workflowPayload?.reminderId);
+  const canonicalJobId = uuid(jobId);
+  const payloadJobId = uuid(workflowPayload?.jobId);
+  const invoiceId = uuid(workflowPayload?.invoiceId);
+  const paymentRequirementId =
+    uuid(workflowPayload?.paymentRequirementId);
+
+  const sourceVersion = Number(workflowPayload?.sourceVersion);
+  const amountMinor = Number(workflowPayload?.amountMinor);
+  const classifiedOn =
+    typeof workflowPayload?.classifiedOn === "string" &&
+    /^\d{4}-\d{2}-\d{2}$/.test(workflowPayload.classifiedOn)
+      ? workflowPayload.classifiedOn
+      : null;
+
+  let reminderTimeZone = null;
+
+  try {
+    const submitted =
+      typeof workflowPayload?.timeZone === "string"
+        ? workflowPayload.timeZone.trim()
+        : "";
+
+    if (
+      submitted.includes("/") &&
+      submitted.length >= 3 &&
+      submitted.length <= 100
+    ) {
+      reminderTimeZone =
+        new Intl.DateTimeFormat(
+          "en-US",
+          {
+            timeZone:
+              submitted,
+          }
+        )
+          .resolvedOptions()
+          .timeZone ||
+        submitted;
+    }
+  } catch {
+    reminderTimeZone =
+      null;
+  }
+
+  const classifications = sourceType === "INVOICE"
+    ? new Set(["UPCOMING_DUE", "DUE_TODAY", "OVERDUE"])
+    : new Set(["DEPOSIT_DUE", "DEPOSIT_REMAINING"]);
+
+  const due = workflowPayload?.due;
+  const invoiceDueValid =
+    sourceType === "INVOICE" &&
+    due &&
+    typeof due === "object" &&
+    !Array.isArray(due) &&
+    ["DUE_ON_RECEIPT", "SPECIFIC_DATE"].includes(due.mode) &&
+    typeof due.effectiveDate === "string" &&
+    /^\d{4}-\d{2}-\d{2}$/.test(due.effectiveDate) &&
+    (
+      (
+        due.mode === "DUE_ON_RECEIPT" &&
+        due.date == null
+      )
+      ||
+      (
+        due.mode === "SPECIFIC_DATE" &&
+        typeof due.date === "string" &&
+        /^\d{4}-\d{2}-\d{2}$/.test(due.date) &&
+        due.date === due.effectiveDate
+      )
+    );
+
+  const sourceValid =
+    (
+      sourceType === "INVOICE" &&
+      invoiceId &&
+      !paymentRequirementId &&
+      invoiceDueValid
+    )
+    ||
+    (
+      sourceType === "DEPOSIT" &&
+      !invoiceId &&
+      paymentRequirementId &&
+      due == null
+    );
+
+  if (
+    workflowPayload?.schemaVersion !== 1 ||
+    !conversation?.id ||
+    conversation.status !== "active" ||
+    !parsePositiveInteger(senderUserId) ||
+    !parsePositiveInteger(recipientUserId) ||
+    senderUserId === recipientUserId ||
+    !textForBusinessDelivery(messageText) ||
+    !reminderId ||
+    !canonicalJobId ||
+    payloadJobId !== canonicalJobId ||
+    !Number.isSafeInteger(sourceVersion) ||
+    sourceVersion < 1 ||
+    !Number.isSafeInteger(amountMinor) ||
+    amountMinor < 1 ||
+    !classifiedOn ||
+    !reminderTimeZone ||
+    workflowPayload?.timeZone !== reminderTimeZone ||
+    !/^[A-Z]{3}$/.test(workflowPayload?.currency || "") ||
+    !classifications.has(workflowPayload?.classification) ||
+    !sourceValid
+  ) {
+    throw new TypeError(
+      "A governed Payment Reminder Conversation message is required."
+    );
+  }
+
+  await ensureConversationParticipantStatesWithClient({
+    client,
+    conversationId: conversation.id,
+  });
+
+  const attention =
+    await getCommunicationAttentionWindowWithClient({
+      client,
+      conversationId: conversation.id,
+      recipientUserId,
+    });
+
+  const inserted = await client.query(
+    `/* conversation_message:payment_reminder */
+     INSERT INTO messages (
+       quote_request_id,
+       conversation_id,
+       sender_id,
+       receiver_id,
+       message_text,
+       image_url,
+       message_type,
+       workflow_type,
+       workflow_status,
+       workflow_payload
+     )
+     VALUES (
+       NULL,
+       $1,
+       $2,
+       $3,
+       $4,
+       NULL,
+       'payment_reminder',
+       'PAYMENT_REMINDER',
+       'SENT',
+       $5::jsonb
+     )
+     RETURNING *`,
+    [
+      conversation.id,
+      senderUserId,
+      recipientUserId,
+      textForBusinessDelivery(messageText),
+      JSON.stringify(workflowPayload),
+    ]
+  );
+
+  const message = inserted.rows[0];
+
+  if (!message) {
+    throw new Error(
+      "The Payment Reminder Conversation message was not returned."
+    );
+  }
+
+  await advanceConversationParticipantReadStateWithClient({
+    client,
+    conversation,
+    participantUserId: senderUserId,
+    lastReadMessageId: message.id,
+    lastReadAt: message.created_at || null,
+  });
+
+  const activity = await client.query(
+    "UPDATE conversations SET updated_at = COALESCE($2, CURRENT_TIMESTAMP) WHERE id = $1",
+    [conversation.id, message.created_at || null]
+  );
+
+  if (activity.rowCount === 0) {
+    throw new Error(
+      "Conversation activity could not be updated."
+    );
+  }
+
+  await createOrRefreshCommunicationMessageAlert({
+    client,
+    conversation,
+    senderUserId,
+    recipientUserId,
+    recipientLastReadMessageId: attention.lastReadMessageId,
+    message,
+  });
+
+  return message;
+}
+
 function textForBusinessDelivery(value) {
   const normalized = typeof value === "string" ? value.trim() : "";
   return normalized && normalized.length <= MAX_MESSAGE_TEXT_LENGTH ? normalized : null;
@@ -959,6 +1179,7 @@ module.exports = {
   createConversationMessage,
   createBusinessDocumentDeliveryMessageWithClient,
   createPaymentLifecycleMessageWithClient,
+  createPaymentReminderMessageWithClient,
   decodeMessageCursor,
   encodeMessageCursor,
   listConversationMessages,

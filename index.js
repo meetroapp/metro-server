@@ -216,6 +216,9 @@ const {
   registerInvoicePaymentRoutes,
 } = require("./server/finance/invoicePayments");
 const {
+  registerPaymentReminderRoutes,
+} = require("./server/finance/paymentReminders");
+const {
   registerBusinessDocumentDraftRoutes,
 } = require("./server/documents/businessDocumentDrafts");
 const {
@@ -1090,6 +1093,13 @@ registerJobCompletionRoutes({
 });
 
 registerInvoicePaymentRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerPaymentReminderRoutes({
   app,
   authMiddleware,
   getPool,

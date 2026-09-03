@@ -585,10 +585,179 @@ function normalizePaymentLifecyclePayload(row = {}) {
   };
 }
 
+
+function normalizePaymentReminderPayload(row = {}) {
+  const payload =
+    normalizeMessageWorkflowPayload(row.workflow_payload);
+
+  if (
+    row.message_type !== "payment_reminder" ||
+    row.workflow_type !== "PAYMENT_REMINDER" ||
+    row.workflow_status !== "SENT" ||
+    payload.schemaVersion !== 1
+  ) {
+    return {};
+  }
+
+  const uuid = (value) =>
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+      ? value.toLowerCase()
+      : null;
+
+  const integer = (value) => {
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) && parsed >= 0
+      ? parsed
+      : null;
+  };
+
+  const date = (value) =>
+    typeof value === "string" &&
+    /^\d{4}-\d{2}-\d{2}$/.test(value)
+      ? value
+      : null;
+
+  const reminderId = uuid(payload.reminderId);
+  const jobId = uuid(payload.jobId);
+  const invoiceId = uuid(payload.invoiceId);
+  const paymentRequirementId =
+    uuid(payload.paymentRequirementId);
+
+  const sourceType = payload.sourceType;
+  const sourceVersion = integer(payload.sourceVersion);
+  const amountMinor = integer(payload.amountMinor);
+  const classifiedOn = date(payload.classifiedOn);
+
+  let reminderTimeZone = null;
+
+  try {
+    const submitted =
+      typeof payload.timeZone === "string"
+        ? payload.timeZone.trim()
+        : "";
+
+    if (
+      submitted.includes("/") &&
+      submitted.length >= 3 &&
+      submitted.length <= 100
+    ) {
+      reminderTimeZone =
+        new Intl.DateTimeFormat(
+          "en-US",
+          {
+            timeZone:
+              submitted,
+          }
+        )
+          .resolvedOptions()
+          .timeZone ||
+        submitted;
+    }
+  } catch {
+    reminderTimeZone =
+      null;
+  }
+
+  const currency =
+    typeof payload.currency === "string" &&
+    /^[A-Z]{3}$/.test(payload.currency)
+      ? payload.currency
+      : null;
+
+  const invoiceClassifications =
+    new Set(["UPCOMING_DUE", "DUE_TODAY", "OVERDUE"]);
+
+  const depositClassifications =
+    new Set(["DEPOSIT_DUE", "DEPOSIT_REMAINING"]);
+
+  let due = null;
+
+  if (sourceType === "INVOICE") {
+    const mode = payload.due?.mode;
+    const dueDate =
+      payload.due?.date == null
+        ? null
+        : date(payload.due.date);
+    const effectiveDate =
+      date(payload.due?.effectiveDate);
+
+    if (
+      !invoiceId ||
+      paymentRequirementId ||
+      !invoiceClassifications.has(payload.classification) ||
+      !["DUE_ON_RECEIPT", "SPECIFIC_DATE"].includes(mode) ||
+      !effectiveDate ||
+      (
+        mode === "DUE_ON_RECEIPT" &&
+        payload.due?.date != null
+      ) ||
+      (
+        mode === "SPECIFIC_DATE" &&
+        (!dueDate || dueDate !== effectiveDate)
+      )
+    ) {
+      return {};
+    }
+
+    due = {
+      mode,
+      date: dueDate,
+      effectiveDate,
+    };
+  } else if (sourceType === "DEPOSIT") {
+    if (
+      invoiceId ||
+      !paymentRequirementId ||
+      !depositClassifications.has(payload.classification) ||
+      payload.due != null
+    ) {
+      return {};
+    }
+  } else {
+    return {};
+  }
+
+  if (
+    !reminderId ||
+    !jobId ||
+    sourceVersion == null ||
+    sourceVersion < 1 ||
+    amountMinor == null ||
+    amountMinor < 1 ||
+    !classifiedOn ||
+    !reminderTimeZone ||
+    payload.timeZone !== reminderTimeZone ||
+    !currency
+  ) {
+    return {};
+  }
+
+  return {
+    schemaVersion: 1,
+    reminderId,
+    sourceType,
+    invoiceId: sourceType === "INVOICE" ? invoiceId : null,
+    paymentRequirementId:
+      sourceType === "DEPOSIT"
+        ? paymentRequirementId
+        : null,
+    jobId,
+    sourceVersion,
+    classification: payload.classification,
+    classifiedOn,
+    timeZone: reminderTimeZone,
+    currency,
+    amountMinor,
+    due,
+  };
+}
+
 function serializeConversationMessage(row = {}, viewerUserId) {
   const quoteShared = row.message_type === "quote_shared";
   const invoiceShared = row.message_type === "invoice_shared";
   const paymentLifecycle = ["payment_request", "payment_received"].includes(row.message_type);
+  const paymentReminder = row.message_type === "payment_reminder";
   const value = {
     id: row.id,
     sender: {
@@ -613,7 +782,9 @@ function serializeConversationMessage(row = {}, viewerUserId) {
           ? normalizeInvoiceSharedPayload(row)
           : paymentLifecycle
             ? normalizePaymentLifecyclePayload(row)
-          : normalizeMessageWorkflowPayload(row.workflow_payload),
+            : paymentReminder
+              ? normalizePaymentReminderPayload(row)
+              : normalizeMessageWorkflowPayload(row.workflow_payload),
     },
     createdAt: row.created_at || null,
   };
@@ -650,6 +821,16 @@ function serializeConversationMessage(row = {}, viewerUserId) {
     value.reference = {
       type: "payment",
       quoteId: value.workflow.payload.quoteId || null,
+      jobId: value.workflow.payload.jobId || null,
+    };
+  }
+  if (paymentReminder) {
+    value.reference = {
+      type: "payment_reminder",
+      sourceType: value.workflow.payload.sourceType || null,
+      invoiceId: value.workflow.payload.invoiceId || null,
+      paymentRequirementId:
+        value.workflow.payload.paymentRequirementId || null,
       jobId: value.workflow.payload.jobId || null,
     };
   }
@@ -770,6 +951,7 @@ module.exports = {
   participantArchiveField,
   normalizeInvoiceSharedPayload,
   normalizePaymentLifecyclePayload,
+  normalizePaymentReminderPayload,
   normalizeQuoteSharedPayload,
   serializeConversationForHomeowner,
   serializeConversationForProfessional,

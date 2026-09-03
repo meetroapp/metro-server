@@ -5,6 +5,7 @@ const test = require("node:test");
 
 const {
   normalizePaymentLifecyclePayload,
+  normalizePaymentReminderPayload,
   serializeConversationMessage,
 } = require("../server/conversations/conversations");
 const {
@@ -89,6 +90,121 @@ test("partial $200 then cumulative $510 Payment projections preserve remaining d
     payment: { receiptId: "receipt-2", grossAmountMinor: 31000, allocatedMinor: 31000, displayMethod: "Check", receivedAt: "2026-08-29T17:00:00.000Z", externalReference: null },
   }));
   assert.equal(satisfied.remainingMinor, 0);
+});
+
+
+test("Payment Reminder conversation projection remains separate from Payment evidence", () => {
+  const reminderId =
+    "88888888-8888-4888-8888-888888888888";
+  const invoiceId =
+    "11111111-1111-4111-8111-111111111111";
+
+  const payload = {
+    schemaVersion: 1,
+    reminderId,
+    sourceType: "INVOICE",
+    invoiceId,
+    paymentRequirementId: null,
+    jobId: JOB_ID,
+    sourceVersion: 3,
+    classification: "OVERDUE",
+    classifiedOn: "2026-09-02",
+    timeZone: "America/New_York",
+    currency: "USD",
+    amountMinor: 17000,
+    due: {
+      mode: "SPECIFIC_DATE",
+      date: "2026-08-31",
+      effectiveDate: "2026-08-31",
+    },
+  };
+
+  const reminderRow = {
+    id: 777,
+    sender_id: 65,
+    receiver_id: 64,
+    message_text:
+      "Payment reminder: $170.00 remains due.",
+    image_url: null,
+    message_type: "payment_reminder",
+    workflow_type: "PAYMENT_REMINDER",
+    workflow_status: "SENT",
+    workflow_payload: payload,
+    quote_id: null,
+    invoice_id: null,
+    job_id: null,
+    created_at: "2026-09-02T22:00:00.000Z",
+  };
+
+  assert.deepEqual(
+    normalizePaymentReminderPayload(reminderRow),
+    payload
+  );
+
+  const message =
+    serializeConversationMessage(reminderRow, 64);
+
+  assert.deepEqual(message.reference, {
+    type: "payment_reminder",
+    sourceType: "INVOICE",
+    invoiceId,
+    paymentRequirementId: null,
+    jobId: JOB_ID,
+  });
+
+  assert.equal(
+    message.workflow.payload.amountMinor,
+    17000
+  );
+
+  assert.equal(
+    Object.hasOwn(message.workflow.payload, "payment"),
+    false
+  );
+});
+
+test("Deposit Reminder projection preserves only canonical remaining amount", () => {
+  const paymentRequirementId =
+    "77777777-7777-4777-8777-777777777777";
+
+  const payload = {
+    schemaVersion: 1,
+    reminderId:
+      "99999999-9999-4999-8999-999999999999",
+    sourceType: "DEPOSIT",
+    invoiceId: null,
+    paymentRequirementId,
+    jobId: JOB_ID,
+    sourceVersion: 2,
+    classification: "DEPOSIT_REMAINING",
+    classifiedOn: "2026-09-02",
+    timeZone: "America/New_York",
+    currency: "USD",
+    amountMinor: 31000,
+    due: null,
+  };
+
+  const row = {
+    id: 778,
+    sender_id: 65,
+    receiver_id: 64,
+    message_text:
+      "Payment reminder: $310.00 of the deposit remains due.",
+    image_url: null,
+    message_type: "payment_reminder",
+    workflow_type: "PAYMENT_REMINDER",
+    workflow_status: "SENT",
+    workflow_payload: payload,
+    quote_id: null,
+    invoice_id: null,
+    job_id: null,
+    created_at: "2026-09-02T22:01:00.000Z",
+  };
+
+  assert.deepEqual(
+    normalizePaymentReminderPayload(row),
+    payload
+  );
 });
 
 test("approved Payment terms become server-owned Invoice terms and conflicts fail closed", () => {
