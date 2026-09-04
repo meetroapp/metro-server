@@ -550,7 +550,7 @@ test(
         destination: row.destination_type,
       })), [
         { recipient: identities.homeownerId, event: "invoice.delivered", state: "resolved", destination: "invoice" },
-        { recipient: identities.homeownerId, event: "invoice.payment_recorded", state: "active", destination: "invoice" },
+        { recipient: identities.homeownerId, event: "invoice.payment_recorded", state: "resolved", destination: "invoice" },
         { recipient: identities.homeownerId, event: "invoice.paid", state: "active", destination: "invoice" },
       ]);
       assert.equal(

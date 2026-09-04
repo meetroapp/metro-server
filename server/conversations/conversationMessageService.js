@@ -77,6 +77,10 @@ async function createProfessionalQuoteDecisionAlertWithClient({
     : { state: "NONE" };
   const safePayload = {
     shortPreview: boundedDecisionAlertText(context.job_title) || "Customer project",
+    workCenterStage:
+      approved && deposit.state === "DEPOSIT_DUE"
+        ? "deposit"
+        : "quote",
     projectTitle: boundedDecisionAlertText(context.job_title) || "Customer project",
     customerLabel: boundedDecisionAlertText(context.customer_display_name) || "Customer",
     quoteNumber: boundedDecisionAlertText(quote.documentNumber, 80) || "Quote",

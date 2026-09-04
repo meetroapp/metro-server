@@ -101,6 +101,7 @@ test("approved decision creates one bounded professional alert with resource-onl
   const inserted = calls[1].values;
   assert.deepEqual(JSON.parse(inserted[11]), {
     shortPreview: "Inspect damaged cabinet door and trim",
+    workCenterStage: "deposit",
     projectTitle: "Inspect damaged cabinet door and trim",
     customerLabel: "Antony Guzman",
     quoteNumber: "Q-0000001",

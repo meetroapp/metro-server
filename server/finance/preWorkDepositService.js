@@ -1085,6 +1085,7 @@ async function materializeApprovedQuoteApprovalDepositWithClient({
       safePayload: {
         shortPreview:
           "Deposit required before scheduling",
+        workCenterStage: "deposit",
       },
       destination: {
         type: "quote",
@@ -1609,13 +1610,30 @@ async function confirmDepositReceived(input = {}) {
     const customerUserId =
       positiveInteger(source.customer_user_id);
 
+    if (customerUserId) {
+      await resolveCanonicalLifecycleAlertsWithClient({
+        client,
+        sourceDomain: "commercial",
+        sourceEntityType: "deposit_obligation",
+        sourceEntityId: obligation.id,
+        sourceEventTypes: [
+          "deposit.payment_recorded",
+        ],
+        recipientUserId: customerUserId,
+      });
+    }
+
     if (state === "SATISFIED" && customerUserId) {
       await resolveCanonicalLifecycleAlertsWithClient({
         client,
         sourceDomain: "commercial",
         sourceEntityType: "deposit_obligation",
         sourceEntityId: obligation.id,
-        sourceEventTypes: ["deposit.required"],
+        sourceEventTypes: [
+          "deposit.required",
+          "deposit.request_sent",
+          "deposit.payment_recorded",
+        ],
         recipientUserId: customerUserId,
       });
       await createCanonicalLifecycleAlertWithClient({
@@ -1630,10 +1648,43 @@ async function confirmDepositReceived(input = {}) {
         priority: "normal",
         titleKey: "alerts.payment.depositSatisfied.title",
         messageKey: "alerts.payment.depositSatisfied.message",
-        safePayload: { shortPreview: "Deposit requirement satisfied" },
+        safePayload: {
+          shortPreview: "Deposit requirement satisfied",
+          workCenterStage: "deposit",
+        },
         destination: {
           type: "quote",
           payload: { jobId: source.job_id, quoteId: source.quote_id },
+        },
+      });
+    } else if (customerUserId) {
+      await createCanonicalLifecycleAlertWithClient({
+        client,
+        recipientUserId: customerUserId,
+        sourceDomain: "commercial",
+        sourceEventType:
+          "deposit.payment_recorded",
+        sourceEntityType:
+          "deposit_obligation",
+        sourceEntityId: obligation.id,
+        sourceEventId: depositEventId,
+        category: "payment",
+        priority: "normal",
+        titleKey:
+          "alerts.payment.depositPaymentRecorded.title",
+        messageKey:
+          "alerts.payment.depositPaymentRecorded.message",
+        safePayload: {
+          shortPreview:
+            "Deposit payment recorded; balance remains",
+          workCenterStage: "deposit",
+        },
+        destination: {
+          type: "quote",
+          payload: {
+            jobId: source.job_id,
+            quoteId: source.quote_id,
+          },
         },
       });
     }

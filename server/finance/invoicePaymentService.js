@@ -1006,6 +1006,18 @@ async function issueInvoice(input = {}) {
       recipientLastReadMessageId: attention.lastReadMessageId,
       message,
     });
+    await resolveCanonicalLifecycleAlertsWithClient({
+      client,
+      sourceDomain: "workflow",
+      sourceEntityType: "job",
+      sourceEntityId: context.job_id,
+      sourceEventTypes: [
+        "work.completed",
+      ],
+      recipientUserId: receiverId,
+      resolvedAt: issuedAt,
+    });
+
     await createCanonicalLifecycleAlertWithClient({
       client,
       recipientUserId: receiverId,
@@ -1020,6 +1032,7 @@ async function issueInvoice(input = {}) {
       messageKey: "alerts.invoice.delivered.message",
       safePayload: {
         shortPreview: "Invoice ready for review",
+        workCenterStage: "invoice",
         invoiceVersion: nextVersion,
       },
       destination: {
@@ -1138,6 +1151,19 @@ async function recordPayment(input = {}) {
         customerReference, context.professional_participant_id,
         evidenceHash, recordedAt]
     );
+    await resolveCanonicalLifecycleAlertsWithClient({
+      client,
+      sourceDomain: "commercial",
+      sourceEntityType: "invoice",
+      sourceEntityId: context.invoice_id,
+      sourceEventTypes: [
+        "invoice.payment_recorded",
+      ],
+      recipientUserId:
+        Number(context.homeowner_id),
+      resolvedAt: recordedAt,
+    });
+
     if (status === "PAID") {
       await resolveCanonicalLifecycleAlertsWithClient({
         client,
@@ -1171,6 +1197,10 @@ async function recordPayment(input = {}) {
         shortPreview: status === "PAID"
           ? "Invoice paid"
           : "Invoice payment recorded",
+        workCenterStage:
+          status === "PAID"
+            ? "completion"
+            : "invoice",
         invoiceVersion: nextVersion,
       },
       destination: {

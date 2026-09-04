@@ -545,6 +545,20 @@ function actorRole(context) {
   return null;
 }
 
+function workCenterStageForVisit(purpose, eventType) {
+  if (purpose === "EVALUATION") return "evaluation";
+
+  if (purpose === "APPROVED_WORK") {
+    return ["VISIT_STARTED", "VISIT_COMPLETED"].includes(eventType)
+      ? "work"
+      : "schedule";
+  }
+
+  if (purpose === "FOLLOW_UP") return "work";
+
+  return null;
+}
+
 const ACTIONABLE_VISIT_ALERT_TYPES = Object.freeze([
   "visit.proposed",
   "visit.schedule_proposed",
@@ -557,6 +571,7 @@ async function projectVisitLifecycleAlertWithClient({
   actorUserId,
   jobId,
   visitId,
+  purpose,
   eventRow,
 }) {
   // Business-origin Jobs have no Meetro customer or conversation to notify.
@@ -633,8 +648,30 @@ async function projectVisitLifecycleAlertWithClient({
       preview: "Visit cancelled",
       priority: "high",
     },
+    VISIT_STARTED: {
+      eventType: "visit.started",
+      titleKey: "alerts.schedule.visitStarted.title",
+      messageKey: "alerts.schedule.visitStarted.message",
+      preview: "Visit started",
+      priority: "informational",
+    },
+    VISIT_COMPLETED: {
+      eventType: "visit.completed",
+      titleKey: "alerts.schedule.visitCompleted.title",
+      messageKey: "alerts.schedule.visitCompleted.message",
+      preview: "Visit completed",
+      priority: "normal",
+    },
   }[eventRow.event_type];
   if (!policy) return { created: false };
+
+  const workCenterStage = workCenterStageForVisit(
+    purpose,
+    eventRow.event_type
+  );
+  if (!workCenterStage) {
+    throw new TypeError("Canonical Visit Work Center stage is required.");
+  }
 
   return createCanonicalLifecycleAlertWithClient({
     client,
@@ -648,7 +685,10 @@ async function projectVisitLifecycleAlertWithClient({
     priority: policy.priority,
     titleKey: policy.titleKey,
     messageKey: policy.messageKey,
-    safePayload: { shortPreview: policy.preview },
+    safePayload: {
+      shortPreview: policy.preview,
+      workCenterStage,
+    },
     destination: {
       type: "visit",
       payload: { conversationId, jobId, requestId, visitId },
@@ -1637,6 +1677,7 @@ async function proposeVisit(input = {}) {
       actorUserId: validated.actorId,
       jobId,
       visitId,
+      purpose,
       eventRow,
     });
     await invokeFailure(input.failureInjector, "after_write");
@@ -2205,6 +2246,7 @@ async function runVersionCommand({
       actorUserId: validated.actorId,
       jobId,
       visitId,
+      purpose: current.purpose,
       eventRow,
     });
     if (
@@ -2630,6 +2672,7 @@ module.exports = {
     linkDraftEvaluationOnVisitCompletion,
     normalizedSchedule,
     strictInstant,
+    workCenterStageForVisit,
     visitEventProjection,
     visitProjection,
     visitVersionProjection,

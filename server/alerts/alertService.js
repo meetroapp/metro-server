@@ -39,6 +39,10 @@ const {
   resolveAlertsBySourceWithClient,
 } = require("./alertRepository");
 const {
+  countWorkCenterAttentionForRecipientWithClient,
+  projectWorkCenterAttention,
+} = require("./workCenterAttention");
+const {
   logSafeServerError,
 } = require("../errors/publicErrors");
 
@@ -659,7 +663,7 @@ async function getAlertCountsForRecipient({
   const database = client || pool;
   try {
     requireDatabasePool(database);
-    const [rows, communicationRows] = await Promise.all([
+    const [rows, communicationRows, workCenterRows] = await Promise.all([
       countAlertsForRecipientWithClient({
         client: database,
         recipientUserId: parsedRecipientId,
@@ -668,8 +672,16 @@ async function getAlertCountsForRecipient({
         client: database,
         recipientUserId: parsedRecipientId,
       }),
+      countWorkCenterAttentionForRecipientWithClient({
+        client: database,
+        recipientUserId: parsedRecipientId,
+      }),
     ]);
-    if (!Array.isArray(rows) || !Array.isArray(communicationRows)) {
+    if (
+      !Array.isArray(rows) ||
+      !Array.isArray(communicationRows) ||
+      !Array.isArray(workCenterRows)
+    ) {
       throw new TypeError("Alert count rows are invalid.");
     }
 
@@ -730,11 +742,19 @@ async function getAlertCountsForRecipient({
     communication.byJob = [...jobScopes.values()];
     communication.byConversation = [...conversationScopes.values()];
 
+    const workCenter = projectWorkCenterAttention(workCenterRows);
+
     return {
       ok: true,
       status: 200,
       code: "ALERT_COUNTS_RETRIEVED",
-      counts: { active, unread, byCategory, communication },
+      counts: {
+        active,
+        unread,
+        byCategory,
+        communication,
+        workCenter,
+      },
     };
   } catch (error) {
     logSafeServerError(logger, {

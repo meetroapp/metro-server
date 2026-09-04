@@ -96,6 +96,7 @@ test("B1 permits only the bounded canonical Alert producer and resolver set", ()
     "server/conversations/conversationMessageService.js",
     "server/conversations/conversationParticipantStateService.js",
     "server/authorization/quoteDeliveryService.js",
+    "server/documents/businessDocumentDeliveryService.js",
     "server/finance/invoicePaymentService.js",
     "server/finance/preWorkDepositService.js",
     "server/relationships/professionalResponseService.js",
@@ -107,6 +108,7 @@ test("B1 permits only the bounded canonical Alert producer and resolver set", ()
     "server/team/fieldOperationsService.js",
     "server/team/fieldCustomerCommunicationService.js",
     "server/workflow/visitService.js",
+    "server/workflow/jobCompletionService.js",
   ]);
   for (const relativePath of listJsFilesRecursively("server")
     .filter((item) => !item.startsWith("server/alerts/"))) {

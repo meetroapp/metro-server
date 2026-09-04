@@ -607,6 +607,7 @@ async function sendQuoteInMeetro(input = {}) {
       messageKey: "alerts.commercial.quoteDelivered.message",
       safePayload: {
         shortPreview: "Quote ready for review",
+        workCenterStage: "quote",
         issuedQuoteVersion: Number(loaded.quote.currentVersion),
       },
       destination: {

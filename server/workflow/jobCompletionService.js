@@ -4,6 +4,9 @@ const { createHash, randomUUID } = require("node:crypto");
 const {
   commercialAuthorityInternals,
 } = require("../authorization/commercialAuthorityService");
+const {
+  createCanonicalLifecycleAlertWithClient,
+} = require("../alerts/lifecycleAlertService");
 
 const {
   databaseClient,
@@ -133,6 +136,7 @@ async function loadProfessionalContext(client, jobId, actorUserId, { lock = fals
       jobs.source_request_relationship_id AS relationship_id,
       relationships.status AS relationship_status,
       relationships.professional_user_id,
+      relationships.homeowner_id,
       professional.id AS professional_participant_id,
       EXISTS (
         SELECT 1 FROM participant_role_assignments roles
@@ -476,6 +480,43 @@ async function completeJob(input = {}) {
         completion.summary.customerUpdateCount, JSON.stringify(evidenceSnapshot),
         integrityHash, completedAt]
     );
+    const homeownerUserId =
+      positiveInteger(context.homeowner_id);
+
+    if (!homeownerUserId) {
+      throw new Error(
+        "Canonical Job completion customer identity is required."
+      );
+    }
+
+    await createCanonicalLifecycleAlertWithClient({
+      client,
+      recipientUserId: homeownerUserId,
+      sourceDomain: "workflow",
+      sourceEventType: "work.completed",
+      sourceEntityType: "job",
+      sourceEntityId: validated.jobId,
+      sourceEventId: completionId,
+      category: "completion",
+      priority: "high",
+      titleKey:
+        "alerts.completion.workCompleted.title",
+      messageKey:
+        "alerts.completion.workCompleted.message",
+      safePayload: {
+        shortPreview:
+          "Work completed — Invoice is next",
+        workCenterStage: "completion",
+      },
+      destination: {
+        type: "job",
+        payload: {
+          jobId: validated.jobId,
+        },
+      },
+      availableAt: completedAt,
+    });
+
     const result = {
       ok: true, success: true, status: 200, code: "JOB_COMPLETED", completion,
     };

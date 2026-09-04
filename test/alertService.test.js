@@ -993,6 +993,24 @@ test("alert count service normalizes one recipient-scoped aggregate", async () =
   const pool = {
     async query(text, values) {
       params.push(values);
+      if (text.includes("alerts:work_center_attention_counts")) {
+        return {
+          rows: [
+            {
+              job_id: "072c8736-5d97-4253-ba3e-dd1bce281a20",
+              request_id: 41,
+              stage: "evaluation",
+              unread_count: "1",
+            },
+            {
+              job_id: "072c8736-5d97-4253-ba3e-dd1bce281a20",
+              request_id: 41,
+              stage: "quote",
+              unread_count: "2",
+            },
+          ],
+        };
+      }
       if (text.includes("alerts:communication_attention_counts")) {
         return {
           rows: [
@@ -1018,7 +1036,7 @@ test("alert count service normalizes one recipient-scoped aggregate", async () =
     logger: () => {},
   });
 
-  assert.deepEqual(params, [[7], [7]]);
+  assert.deepEqual(params, [[7], [7], [7]]);
   assert.deepEqual(result.counts, {
     active: 5,
     unread: 3,
@@ -1037,6 +1055,18 @@ test("alert count service normalizes one recipient-scoped aggregate", async () =
         teamUnread: 1,
       }],
       byConversation: [{ conversationId: 342, customerUnread: 2 }],
+    },
+    workCenter: {
+      unread: 3,
+      byJob: [{
+        jobId: "072c8736-5d97-4253-ba3e-dd1bce281a20",
+        requestId: 41,
+        unread: 3,
+        stages: [
+          { stage: "evaluation", unread: 1 },
+          { stage: "quote", unread: 2 },
+        ],
+      }],
     },
   });
 });

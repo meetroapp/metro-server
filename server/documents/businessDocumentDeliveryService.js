@@ -6,6 +6,10 @@ const {
   createPaymentLifecycleMessageWithClient,
 } = require("../conversations/conversationMessageService");
 const {
+  createCanonicalLifecycleAlertWithClient,
+  resolveCanonicalLifecycleAlertsWithClient,
+} = require("../alerts/lifecycleAlertService");
+const {
   buildBusinessDocumentCustomerPackage,
   buildCustomerPackageEmail,
   customerPackageHash,
@@ -478,6 +482,74 @@ async function deliverMessageSql(values) {
           messageText,
           workflowPayload: values.customerPackage,
         });
+    if (values.documentType === "DEPOSIT_REQUEST") {
+      const deposit =
+        values.customerPackage.depositRequest;
+      const recipientUserId =
+        Number(context.recipient_user_id);
+
+      await resolveCanonicalLifecycleAlertsWithClient({
+        client,
+        sourceDomain: "commercial",
+        sourceEntityType: "quote",
+        sourceEntityId: deposit.quoteId,
+        sourceEventTypes: [
+          "quote.customer_approved",
+        ],
+        recipientUserId: values.actorUserId,
+        resolvedAt:
+          message.created_at || null,
+      });
+
+      await resolveCanonicalLifecycleAlertsWithClient({
+        client,
+        sourceDomain: "commercial",
+        sourceEntityType: "deposit_obligation",
+        sourceEntityId:
+          deposit.paymentRequirementId,
+        sourceEventTypes: [
+          "deposit.required",
+          "deposit.request_sent",
+        ],
+        recipientUserId,
+        resolvedAt:
+          message.created_at || null,
+      });
+
+      await createCanonicalLifecycleAlertWithClient({
+        client,
+        recipientUserId,
+        sourceDomain: "commercial",
+        sourceEventType:
+          "deposit.request_sent",
+        sourceEntityType:
+          "deposit_obligation",
+        sourceEntityId:
+          deposit.paymentRequirementId,
+        sourceEventId: String(event.id),
+        category: "payment",
+        priority: "high",
+        titleKey:
+          "alerts.payment.depositRequestSent.title",
+        messageKey:
+          "alerts.payment.depositRequestSent.message",
+        safePayload: {
+          shortPreview:
+            "Deposit request ready for payment",
+          workCenterStage: "deposit",
+        },
+        destination: {
+          type: "quote",
+          payload: {
+            jobId: deposit.jobId,
+            quoteId: deposit.quoteId,
+          },
+        },
+        availableAt:
+          message.created_at || null,
+      });
+    }
+
     const completed = await client.query(
       `/* business_document_delivery:complete_message */
        UPDATE business_document_delivery_events
