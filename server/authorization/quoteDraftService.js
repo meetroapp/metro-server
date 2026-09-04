@@ -492,12 +492,161 @@ function convertWorkingRow(row, classification) {
   return validated.error ? { error: "INVALID_WORKING_QUOTE_ROW" } : { item: validated.item };
 }
 
+function workingQuoteTextDepositRequirements(paymentTerms) {
+  const text = String(paymentTerms || "");
+  const percentValues = [];
+  const fixedMinorValues = [];
+
+  const percentPattern =
+    /(\d{1,3}(?:\.\d+)?)\s*(?:%|percent)\s*(?:deposit|down\s+payment)\b/gi;
+
+  for (const match of text.matchAll(percentPattern)) {
+    const percent = Number(match[1]);
+    if (
+      Number.isFinite(percent) &&
+      percent > 0 &&
+      percent <= 100 &&
+      !percentValues.includes(percent)
+    ) {
+      percentValues.push(percent);
+    }
+  }
+
+  const fixedPatterns = [
+    /\b(?:deposit|down payment)(?:\s+(?:required|due(?:\s+on\s+approval)?))?\s*(?:[-—:]\s*)?\$([0-9][0-9,]*(?:\.[0-9]{1,2})?)\b/gi,
+    /\$([0-9][0-9,]*(?:\.[0-9]{1,2})?)\s+(?:deposit|down payment)\b/gi,
+  ];
+
+  for (const pattern of fixedPatterns) {
+    for (const match of text.matchAll(pattern)) {
+      const parsed = parseWorkingMoney(match[1]);
+      if (
+        !parsed.error &&
+        !parsed.empty &&
+        parsed.minor > 0 &&
+        !fixedMinorValues.includes(parsed.minor)
+      ) {
+        fixedMinorValues.push(parsed.minor);
+      }
+    }
+  }
+
+  return { percentValues, fixedMinorValues };
+}
+
+function structuredWorkingQuoteDeposit(content, independentPaymentTerms = "") {
+  const mode = String(content.depositMode || "").trim().toUpperCase();
+
+  if (!mode || mode === "NONE") {
+    return {
+      mode: "NONE",
+      term: "",
+      percent: null,
+      fixedMinor: null,
+    };
+  }
+
+  const existing =
+    workingQuoteTextDepositRequirements(independentPaymentTerms);
+
+  if (mode === "PERCENT") {
+    const raw = String(content.depositPercent || "").trim();
+    const percent = Number(raw);
+
+    if (
+      !raw ||
+      !Number.isFinite(percent) ||
+      percent <= 0 ||
+      percent > 100
+    ) {
+      return { error: "INVALID_WORKING_QUOTE_DEPOSIT" };
+    }
+
+    if (
+      existing.fixedMinorValues.length > 0 ||
+      existing.percentValues.length > 1 ||
+      (
+        existing.percentValues.length === 1 &&
+        existing.percentValues[0] !== percent
+      )
+    ) {
+      return { error: "AMBIGUOUS_WORKING_QUOTE_DEPOSIT_TERMS" };
+    }
+
+    return {
+      mode,
+      percent,
+      fixedMinor: null,
+      term:
+        existing.percentValues.length === 1
+          ? ""
+          : `${percent}% deposit due on approval`,
+    };
+  }
+
+  if (mode === "FIXED") {
+    const fixed = parseWorkingMoney(content.depositFixedAmount);
+
+    if (
+      fixed.error ||
+      fixed.empty ||
+      !Number.isSafeInteger(fixed.minor) ||
+      fixed.minor <= 0
+    ) {
+      return { error: "INVALID_WORKING_QUOTE_DEPOSIT" };
+    }
+
+    if (
+      existing.percentValues.length > 0 ||
+      existing.fixedMinorValues.length > 1 ||
+      (
+        existing.fixedMinorValues.length === 1 &&
+        existing.fixedMinorValues[0] !== fixed.minor
+      )
+    ) {
+      return { error: "AMBIGUOUS_WORKING_QUOTE_DEPOSIT_TERMS" };
+    }
+
+    return {
+      mode,
+      percent: null,
+      fixedMinor: fixed.minor,
+      term:
+        existing.fixedMinorValues.length === 1
+          ? ""
+          : `Deposit due on approval: $${(fixed.minor / 100).toFixed(2)}`,
+    };
+  }
+
+  return { error: "INVALID_WORKING_QUOTE_DEPOSIT" };
+}
+
 function buildWorkingQuoteTerms(content) {
   const agreement = isPlainObject(content.agreement) ? content.agreement : {};
-  const paymentTerms = content.paymentTerms || content.terms || "";
-  if (content.paymentTerms && content.terms && content.paymentTerms !== content.terms) {
+  const independentPaymentTerms =
+    content.paymentTerms || content.terms || "";
+
+  if (
+    content.paymentTerms &&
+    content.terms &&
+    content.paymentTerms !== content.terms
+  ) {
     return { error: "AMBIGUOUS_WORKING_QUOTE_TERMS" };
   }
+
+  const structuredDeposit = structuredWorkingQuoteDeposit(
+    content,
+    independentPaymentTerms
+  );
+
+  if (structuredDeposit.error) {
+    return { error: structuredDeposit.error };
+  }
+
+  const paymentTerms = [
+    independentPaymentTerms,
+    structuredDeposit.term,
+  ].filter(Boolean).join(" · ");
   const warrantyTerms = agreement.warrantyTerms || content.warrantyNotes || "";
   if (
     agreement.warrantyTerms &&
@@ -654,6 +803,37 @@ function workingQuoteConversion(rawContent) {
 
   const totals = calculateTotals(items);
   if (totals.error) return { error: "INVALID_WORKING_QUOTE_TOTAL" };
+
+  const structuredDeposit = structuredWorkingQuoteDeposit(
+    content,
+    content.paymentTerms || content.terms || ""
+  );
+
+  if (structuredDeposit.error) {
+    return { error: structuredDeposit.error };
+  }
+
+  if (structuredDeposit.mode === "PERCENT") {
+    const dueMinor = Math.round(
+      (totals.totalMinor * structuredDeposit.percent) / 100
+    );
+
+    if (
+      !Number.isSafeInteger(dueMinor) ||
+      dueMinor <= 0 ||
+      dueMinor > totals.totalMinor
+    ) {
+      return { error: "INVALID_WORKING_QUOTE_DEPOSIT" };
+    }
+  }
+
+  if (
+    structuredDeposit.mode === "FIXED" &&
+    structuredDeposit.fixedMinor > totals.totalMinor
+  ) {
+    return { error: "INVALID_WORKING_QUOTE_DEPOSIT" };
+  }
+
   const subtotal = parseWorkingMoney(content.subtotal);
   if (
     subtotal.error ||
