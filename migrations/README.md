@@ -99,12 +99,19 @@ Current inventory:
 79. `202609020004_generalize_approved_work_visit_approval_authority.sql`
 80. `202609020005_create_external_visit_schedule_confirmation.sql`
 81. `202609020006_generalize_work_preparation_execution_approval.sql`
+82. `202609020007_create_payment_reminder_evidence.sql`
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
 
 This inventory records migration source files, not applied database state.
 Migration creation and governed migration execution remain separate operations.
+
+`202609020007_create_payment_reminder_evidence.sql` adds append-only,
+retry-safe Payment Reminder communication evidence for governed Invoice and
+pre-work Deposit reminders. A Reminder is not Payment evidence and does not
+change Invoice or Deposit balances, scheduling, approval, work, or customer
+identity.
 
 `202608310001_create_business_job_customer_message_authority.sql` adds
 assignment-scoped delegated Field Employee customer-message commands and

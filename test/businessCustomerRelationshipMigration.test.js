@@ -18,7 +18,7 @@ test("Customer Relationship foundation is the 54th additive migration", () => {
     .filter((name) => /^\d+.*\.sql$/.test(name))
     .sort();
   assert.equal((migrations[74]?.filename || migrations[74]), "202608310001_create_business_job_customer_message_authority.sql");
-  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202609020006_generalize_work_preparation_execution_approval.sql");
+  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202609020007_create_payment_reminder_evidence.sql");
   assert.equal(migrations[52], "202608230004_create_business_contact_foundation.sql");
   assert.equal(migrations[53], migrationName);
 });

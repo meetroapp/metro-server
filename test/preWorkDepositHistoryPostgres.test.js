@@ -552,7 +552,7 @@ test("migration 78 preserves historical deposits and payments through ledger 81"
   const appended = await snapshot(pool);
   for (const table of tables) for (const row of before[table]) assert(appended[table].some(r=>JSON.stringify(r)===JSON.stringify(row)),`${table} historical row changed`);
   const replay = await runMigrationCollection(pool,migrations,target);
-  assert.equal(replay.applied.length,0); assert.equal(replay.skipped.length,81); assert.deepEqual(replay.failed,[]);
+  assert.equal(replay.applied.length,0); assert.equal(replay.skipped.length,82); assert.deepEqual(replay.failed,[]);
   t.diagnostic(JSON.stringify({originalFailure:"55000",applied:upgraded.applied,ledger:81,replay:{applied:0,skipped:81,failed:[]},
     historicalCounts:Object.fromEntries(tables.map(table=>[table,before[table].length])),historicalSha256:hash(JSON.stringify(before)),historicalUnchanged:true,legacyRuntimeReadPaymentReversal:true}));
 });
@@ -561,8 +561,8 @@ test("corrected migration 78 supports a fresh install through ledger 81", { skip
   const database=assertSafeTestDatabaseUrl(freshUrl,{nodeEnv:process.env.NODE_ENV});
   const pool=new Pool({connectionString:freshUrl});t.after(()=>pool.end());
   const migrations=getMigrationFiles(),target={target:"local-test",database};
-  const result=await runMigrationCollection(pool,migrations,target);assert.equal(result.success,true,JSON.stringify(result));assert.equal(result.applied.length,81);
+  const result=await runMigrationCollection(pool,migrations,target);assert.equal(result.success,true,JSON.stringify(result));assert.equal(result.applied.length,82);
   await certifyLedger(pool,migrations);const replay=await runMigrationCollection(pool,migrations,target);
-  assert.equal(replay.applied.length,0);assert.equal(replay.skipped.length,81);assert.deepEqual(replay.failed,[]);
+  assert.equal(replay.applied.length,0);assert.equal(replay.skipped.length,82);assert.deepEqual(replay.failed,[]);
   t.diagnostic(JSON.stringify({freshApplied:81,ledger:81,replay:{applied:0,skipped:81,failed:[]}}));
 });
