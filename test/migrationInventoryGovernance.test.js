@@ -36,13 +36,13 @@ function checksum(filename) {
     .digest("hex");
 }
 
-test("the governed repository migration inventory is the exact certified 82-file generation", () => {
+test("the governed repository migration inventory is the exact certified 83-file generation", () => {
   const actual = getMigrationFiles().map(({ filename }) => filename);
   const expected = expectedInventory.map(({ filename }) => filename);
 
-  assert.equal(expectedInventory.length, 82);
+  assert.equal(expectedInventory.length, 83);
   assert.deepEqual(actual, expected);
-  assert.equal(actual.at(-1), "202609020007_create_payment_reminder_evidence.sql");
+  assert.equal(actual.at(-1), "202609040001_add_evaluation_revision_authority.sql");
   assert.equal(new Set(actual).size, actual.length);
   assert.ok(actual.every((filename) => filenamePattern.test(filename)));
 });

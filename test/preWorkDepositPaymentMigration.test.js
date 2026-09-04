@@ -19,7 +19,7 @@ const sql = readFileSync(join(migrationsDirectory, migration59Name), "utf8");
 test("migration 59 remains frozen between Visit Start and Materials authority", () => {
   const migrations = getMigrationFiles();
   assert.equal((migrations[74]?.filename || migrations[74]), "202608310001_create_business_job_customer_message_authority.sql");
-  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202609020007_create_payment_reminder_evidence.sql");
+  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202609040001_add_evaluation_revision_authority.sql");
   assert.deepEqual(
     migrations.slice(57, 60).map(({ filename }) => filename),
     [migration58Name, migration59Name, migration60Name]

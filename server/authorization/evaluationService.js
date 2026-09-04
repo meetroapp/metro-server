@@ -36,12 +36,14 @@ const EVALUATION_COMMANDS = Object.freeze({
   CREATE: "evaluation.create",
   UPDATE_DRAFT: "evaluation.draft.update",
   COMPLETE: "evaluation.complete",
+  REVISE: "evaluation.revise",
 });
 
 const EVALUATION_EVIDENCE_TYPES = Object.freeze({
   CREATED: "evaluation_created",
   DRAFT_UPDATED: "evaluation_draft_updated",
   COMPLETED: "evaluation_completed",
+  REVISED: "evaluation_revised",
 });
 
 const EVALUATION_COMPLETION_MODES = Object.freeze({
@@ -1136,7 +1138,7 @@ function evaluationProjection(row) {
         canComplete:
           status === EVALUATION_STATUS.DRAFT &&
           (!ordinaryEvaluation || physicalProvenanceAvailable),
-        canRevise: false,
+        canRevise: status === EVALUATION_STATUS.COMPLETED,
         canShareWithCustomer: false,
         quoteReady: false,
         authorizationAvailable: false,
@@ -1894,7 +1896,16 @@ async function createOrdinaryJobEvaluation(input = {}) {
   }
 }
 
-async function mutateEvaluation(input, { completion = false } = {}) {
+async function mutateEvaluation(
+  input,
+  { completion = false, revision = false } = {}
+) {
+  if (completion && revision) {
+    throw new TypeError(
+      "Evaluation completion and revision cannot run in one command."
+    );
+  }
+
   const validated = validateExistingInput(input, {
     requireContent: !completion,
     completion,
@@ -1903,10 +1914,14 @@ async function mutateEvaluation(input, { completion = false } = {}) {
   const logger = safeLogger(input.logger);
   const commandName = completion
     ? EVALUATION_COMMANDS.COMPLETE
-    : EVALUATION_COMMANDS.UPDATE_DRAFT;
+    : revision
+      ? EVALUATION_COMMANDS.REVISE
+      : EVALUATION_COMMANDS.UPDATE_DRAFT;
   const evidenceType = completion
     ? EVALUATION_EVIDENCE_TYPES.COMPLETED
-    : EVALUATION_EVIDENCE_TYPES.DRAFT_UPDATED;
+    : revision
+      ? EVALUATION_EVIDENCE_TYPES.REVISED
+      : EVALUATION_EVIDENCE_TYPES.DRAFT_UPDATED;
   const client = await databaseClient(input.pool);
   let transactionStarted = false;
   let effectiveCompletionMode = validated.completionMode;
@@ -2077,15 +2092,46 @@ async function mutateEvaluation(input, { completion = false } = {}) {
         );
       }
     }
-    if (current.evaluation_status !== EVALUATION_STATUS.DRAFT) {
+    if (
+      completion &&
+      current.evaluation_status !== EVALUATION_STATUS.DRAFT
+    ) {
       await rollback(client);
       transactionStarted = false;
       return failure(
         409,
         "EVALUATION_COMPLETED",
-        "A completed Evaluation cannot be edited or reopened."
+        "The Evaluation is already completed."
       );
     }
+
+    if (
+      !completion &&
+      !revision &&
+      current.evaluation_status !== EVALUATION_STATUS.DRAFT
+    ) {
+      await rollback(client);
+      transactionStarted = false;
+      return failure(
+        409,
+        "EVALUATION_COMPLETED",
+        "A completed Evaluation must use Evaluation revision authority."
+      );
+    }
+
+    if (
+      revision &&
+      current.evaluation_status !== EVALUATION_STATUS.COMPLETED
+    ) {
+      await rollback(client);
+      transactionStarted = false;
+      return failure(
+        409,
+        "EVALUATION_REVISION_REQUIRES_COMPLETED",
+        "Only a completed Evaluation can be revised."
+      );
+    }
+
     if (Number(current.current_version) !== validated.expectedVersion) {
       await rollback(client);
       transactionStarted = false;
@@ -2152,20 +2198,30 @@ async function mutateEvaluation(input, { completion = false } = {}) {
             AND status = 'draft'
           RETURNING *
           `
-        : `
-          UPDATE canonical_evaluations
-          SET updated_at = CURRENT_TIMESTAMP
-          WHERE id = $1
-            AND professional_user_id = $2
-            AND status = 'draft'
-          RETURNING *
-          `,
+        : revision
+          ? `
+            UPDATE canonical_evaluations
+            SET updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+              AND professional_user_id = $2
+              AND status = 'completed'
+            RETURNING *
+            `
+          : `
+            UPDATE canonical_evaluations
+            SET updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+              AND professional_user_id = $2
+              AND status = 'draft'
+            RETURNING *
+            `,
       [validated.evaluationId, validated.actorId]
     );
     const evaluation = evaluationResult.rows[0];
-    const nextStatus = completion
-      ? EVALUATION_STATUS.COMPLETED
-      : EVALUATION_STATUS.DRAFT;
+    const nextStatus =
+      completion || revision
+        ? EVALUATION_STATUS.COMPLETED
+        : EVALUATION_STATUS.DRAFT;
     const version = await insertVersion({
       client,
       evaluationId: validated.evaluationId,
@@ -2200,16 +2256,26 @@ async function mutateEvaluation(input, { completion = false } = {}) {
       context,
       visitId: current.evaluation_visit_id || null,
       remoteProvenance:
-        completion && effectiveCompletionMode === EVALUATION_COMPLETION_MODES.REMOTE
+        completion &&
+        effectiveCompletionMode === EVALUATION_COMPLETION_MODES.REMOTE
           ? {
               assessment_method: validated.assessmentMethod,
               assessment_basis: validated.assessmentBasis,
             }
-          : null,
+          : revision && current.remote_assessment_method
+            ? {
+                assessment_method: current.remote_assessment_method,
+                assessment_basis: current.remote_assessment_basis,
+              }
+            : null,
     });
     const result = successResult({
       status: 200,
-      code: completion ? "EVALUATION_COMPLETED" : "EVALUATION_DRAFT_UPDATED",
+      code: completion
+        ? "EVALUATION_COMPLETED"
+        : revision
+          ? "EVALUATION_REVISED"
+          : "EVALUATION_DRAFT_UPDATED",
       row,
       evidenceType,
     });
@@ -2250,11 +2316,15 @@ async function mutateEvaluation(input, { completion = false } = {}) {
       logger.info(
         completion
           ? "Ordinary Evaluation confirmed"
-          : "Ordinary Evaluation version created",
+          : revision
+            ? "Ordinary Evaluation revised"
+            : "Ordinary Evaluation version created",
         {
           code: completion
             ? "ORDINARY_EVALUATION_CONFIRMED"
-            : "ORDINARY_EVALUATION_VERSION_CREATED",
+            : revision
+              ? "ORDINARY_EVALUATION_REVISED"
+              : "ORDINARY_EVALUATION_VERSION_CREATED",
           actorUserId: validated.actorId,
           jobId: sourceContext.jobId,
           relationshipId: sourceContext.relationshipId,
@@ -2282,6 +2352,10 @@ async function mutateEvaluation(input, { completion = false } = {}) {
 
 async function updateEvaluationDraft(input = {}) {
   return mutateEvaluation(input, { completion: false });
+}
+
+async function reviseEvaluation(input = {}) {
+  return mutateEvaluation(input, { revision: true });
 }
 
 async function completeEvaluation(input = {}) {
@@ -2472,6 +2546,7 @@ module.exports = {
   getEvaluation,
   listEvaluationsForEmergencyRequest,
   listEvaluationsForJob,
+  reviseEvaluation,
   updateEvaluationDraft,
   validateCompletionContract,
   validateCompletionContent,

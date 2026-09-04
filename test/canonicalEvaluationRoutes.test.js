@@ -25,7 +25,7 @@ function route(method, path) {
   return app.router.stack.find((layer) => layer.route?.path === path && layer.route.methods[method]);
 }
 
-test("only the thirteen bounded authenticated Evaluation and Finding routes are registered", () => {
+test("only the fourteen bounded authenticated Evaluation and Finding route projections are registered", () => {
   const expected = [
     ["post", "/jobs/:jobId/evaluations"],
     ["get", "/jobs/:jobId/evaluations"],
@@ -38,6 +38,7 @@ test("only the thirteen bounded authenticated Evaluation and Finding routes are 
     ["post", "/evaluations"],
     ["get", "/evaluations/:evaluationId"],
     ["patch", "/evaluations/:evaluationId"],
+    ["post", "/evaluations/:evaluationId/revisions"],
     ["post", "/evaluations/:evaluationId/complete"],
     ["get", "/emergency-requests/:emergencyRequestId/evaluations"],
   ];
@@ -88,6 +89,50 @@ test("route handlers derive actor and idempotency from authenticated request bou
   assert.equal(res.body.confirmed, true);
 });
 
+test("revision route derives actor and bounded revision input from authenticated boundaries", async () => {
+  let received = null;
+  const handlers = createEvaluationHandlers({
+    getPool: () => ({ query() {} }),
+    sendPublicDatabaseError() { throw new Error("not expected"); },
+    service: {
+      async reviseEvaluation(input) {
+        received = input;
+        return {
+          ok: true,
+          success: true,
+          status: 200,
+          code: "EVALUATION_REVISED",
+        };
+      },
+    },
+  });
+  const res = response();
+  await handlers.reviseEvaluation({
+    user: { id: 22 },
+    params: { evaluationId: "evaluation-from-path" },
+    headers: { "idempotency-key": "evaluation-revision-key" },
+    body: {
+      expectedVersion: 4,
+      content: { observations: "Updated assessment." },
+      actorUserId: 999,
+      status: "draft",
+      completedAt: null,
+    },
+  }, res);
+
+  assert.deepEqual(received, {
+    pool: { query: received.pool.query },
+    authenticatedActor: { id: 22 },
+    evaluationId: "evaluation-from-path",
+    expectedVersion: 4,
+    content: { observations: "Updated assessment." },
+    idempotencyKey: "evaluation-revision-key",
+  });
+  assert.equal(Object.hasOwn(received, "status"), false);
+  assert.equal(Object.hasOwn(received, "completedAt"), false);
+  assert.equal(res.statusCode, 200);
+});
+
 test("route errors are stable, nondisclosing, and database failures use public normalization", async () => {
   const handlers = createEvaluationHandlers({
     getPool: () => ({ query() {} }),
@@ -125,6 +170,6 @@ test("registration requires authentication middleware and does not create public
     sendPublicDatabaseError: () => {},
     service: {},
   });
-  assert.equal(routes.length, 14);
+  assert.equal(routes.length, 15);
   assert.ok(routes.every((item) => item.handlers[0] === auth));
 });

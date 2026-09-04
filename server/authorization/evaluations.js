@@ -109,6 +109,17 @@ function createEvaluationHandlers({
       })
     ),
 
+    reviseEvaluation: handle("revise_evaluation", (req) =>
+      service.reviseEvaluation({
+        pool: getPool(req),
+        authenticatedActor: req.user,
+        evaluationId: req.params.evaluationId,
+        expectedVersion: req.body?.expectedVersion,
+        content: req.body?.content,
+        idempotencyKey: req.headers?.["idempotency-key"],
+      })
+    ),
+
     completeEvaluation: handle("complete_evaluation", (req) =>
       service.completeEvaluation({
         pool: getPool(req),
@@ -289,6 +300,11 @@ function registerEvaluationRoutes({
     "/evaluations/:evaluationId",
     authMiddleware,
     handlers.updateEvaluationDraft
+  );
+  app.post(
+    "/evaluations/:evaluationId/revisions",
+    authMiddleware,
+    handlers.reviseEvaluation
   );
   app.post(
     "/evaluations/:evaluationId/complete",

@@ -25,7 +25,7 @@ test("Slice 002 migration remains the unique additive migration after Slice 001"
     .sort();
 
   assert.equal((migrations[74]?.filename || migrations[74]), "202608310001_create_business_job_customer_message_authority.sql");
-  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202609020007_create_payment_reminder_evidence.sql");
+  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202609040001_add_evaluation_revision_authority.sql");
   const index = migrations.indexOf(migrationName);
   assert.equal(
     migrations[index + 1],

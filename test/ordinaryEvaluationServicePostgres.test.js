@@ -17,6 +17,7 @@ const {
   createOrdinaryJobEvaluation,
   getEvaluation,
   listEvaluationsForJob,
+  reviseEvaluation,
   updateEvaluationDraft,
 } = require("../server/authorization/evaluationService");
 const {
@@ -655,6 +656,88 @@ test(
         logger,
       });
       assert.equal(completedEdit.code, "EVALUATION_COMPLETED");
+
+      const originalCompletedAt = completed.evaluation.completedAt;
+      const revised = await reviseEvaluation({
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+        evaluationId: created.evaluation.id,
+        expectedVersion: 3,
+        content: evaluationContent(
+          "Customer added an additional appliance concern before Quote preparation."
+        ),
+        idempotencyKey: `ordinary-evaluation-revise-${suffix}`,
+        logger,
+      });
+      assert.equal(revised.ok, true);
+      assert.equal(revised.code, "EVALUATION_REVISED");
+      assert.equal(revised.aggregate.version, 4);
+      assert.equal(revised.evaluation.status, "completed");
+      assert.equal(revised.evaluation.completedAt, originalCompletedAt);
+      assert.equal(revised.evaluation.capabilities.canEditDraft, false);
+      assert.equal(revised.evaluation.capabilities.canRevise, true);
+      assert.equal(revised.evaluation.completionMode, "REMOTE");
+      assert.equal(revised.evaluation.assessmentMethod, "PHONE");
+
+      const revisionReplay = await reviseEvaluation({
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+        evaluationId: created.evaluation.id,
+        expectedVersion: 3,
+        content: evaluationContent(
+          "Customer added an additional appliance concern before Quote preparation."
+        ),
+        idempotencyKey: `ordinary-evaluation-revise-${suffix}`,
+        logger,
+      });
+      assert.equal(revisionReplay.replayed, true);
+      assert.equal(revisionReplay.aggregate.version, 4);
+
+      const revisionEvidence = await pool.query(
+        `SELECT evidence_type, source_command,
+          previous_version, resulting_version
+         FROM commercial_authority_evidence
+         WHERE aggregate_id = $1
+           AND source_command = 'evaluation.revise'
+         ORDER BY resulting_version DESC
+         LIMIT 1`,
+        [created.evaluation.id]
+      );
+      assert.deepEqual(revisionEvidence.rows[0], {
+        evidence_type: "evaluation_revised",
+        source_command: "evaluation.revise",
+        previous_version: 3,
+        resulting_version: 4,
+      });
+
+      const versionHistory = await pool.query(
+        `SELECT version, status, observations
+         FROM canonical_evaluation_versions
+         WHERE evaluation_id = $1
+           AND version IN (3, 4)
+         ORDER BY version ASC`,
+        [created.evaluation.id]
+      );
+      assert.equal(versionHistory.rows.length, 2);
+      assert.equal(Number(versionHistory.rows[0].version), 3);
+      assert.equal(versionHistory.rows[0].status, "completed");
+      assert.notEqual(
+        versionHistory.rows[0].observations,
+        versionHistory.rows[1].observations
+      );
+      assert.equal(Number(versionHistory.rows[1].version), 4);
+      assert.equal(versionHistory.rows[1].status, "completed");
+
+      const staleRevision = await reviseEvaluation({
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+        evaluationId: created.evaluation.id,
+        expectedVersion: 3,
+        content: evaluationContent("Stale Evaluation revision."),
+        idempotencyKey: `ordinary-evaluation-revise-stale-${suffix}`,
+        logger,
+      });
+      assert.equal(staleRevision.code, "STALE_EVALUATION_VERSION");
 
       for (const actorId of [
         identities.homeownerId,

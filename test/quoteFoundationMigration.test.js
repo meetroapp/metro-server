@@ -15,7 +15,7 @@ test("Slice 005 is one additive migration after Recommendation foundation", () =
     .filter((name) => /^\d+.*\.sql$/.test(name))
     .sort();
   assert.equal((migrations[74]?.filename || migrations[74]), "202608310001_create_business_job_customer_message_authority.sql");
-  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202609020007_create_payment_reminder_evidence.sql");
+  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202609040001_add_evaluation_revision_authority.sql");
   const index = migrations.indexOf(migrationName);
   assert.equal(migrations[index - 1], "202608100002_create_recommendation_hierarchy_foundation.sql");
   assert.equal(migrations[index + 1], "202608100004_create_quote_composition_feedback.sql");

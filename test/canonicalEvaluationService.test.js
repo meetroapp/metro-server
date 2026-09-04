@@ -8,6 +8,7 @@ const {
   createEvaluation,
   getEvaluation,
   listEvaluationsForEmergencyRequest,
+  reviseEvaluation,
   updateEvaluationDraft,
   validateEvaluationContent,
 } = require("../server/authorization/evaluationService");
@@ -274,7 +275,14 @@ function createPool({
       }
       if (sql.startsWith("UPDATE canonical_evaluations")) {
         const evaluation = state.evaluations[params[0]];
-        if (!evaluation || evaluation.professional_user_id !== params[1] || evaluation.status !== "draft") {
+        const requiredStatus = sql.includes("AND status = 'completed'")
+          ? "completed"
+          : "draft";
+        if (
+          !evaluation ||
+          evaluation.professional_user_id !== params[1] ||
+          evaluation.status !== requiredStatus
+        ) {
           return { rows: [] };
         }
         if (sql.includes("status = 'completed'")) {
@@ -495,7 +503,10 @@ test("completion validates required content and preserves an immutable completed
   assert.equal(completionReplay.replayed, true);
   assert.equal(completionReplay.aggregate.version, 2);
 
-  const edit = await updateEvaluationDraft({
+  assert.equal(completed.evaluation.capabilities.canEditDraft, false);
+  assert.equal(completed.evaluation.capabilities.canRevise, true);
+
+  const draftEdit = await updateEvaluationDraft({
     pool: fixture.pool,
     authenticatedActor: { id: PROFESSIONAL_ID },
     evaluationId: created.evaluation.id,
@@ -503,7 +514,79 @@ test("completion validates required content and preserves an immutable completed
     idempotencyKey: "edit-completed",
     content: baseContent(),
   });
-  assert.equal(edit.code, "EVALUATION_COMPLETED");
+  assert.equal(draftEdit.code, "EVALUATION_COMPLETED");
+
+  const completedAt = completed.evaluation.completedAt;
+  const revised = await reviseEvaluation({
+    pool: fixture.pool,
+    authenticatedActor: { id: PROFESSIONAL_ID },
+    evaluationId: created.evaluation.id,
+    expectedVersion: 2,
+    idempotencyKey: "revise-completed-version-2",
+    content: baseContent({
+      observations:
+        "Customer added another condition before the Quote was prepared.",
+    }),
+  });
+
+  assert.equal(revised.ok, true);
+  assert.equal(revised.code, "EVALUATION_REVISED");
+  assert.equal(revised.aggregate.version, 3);
+  assert.equal(revised.evaluation.status, "completed");
+  assert.equal(revised.evaluation.completedAt, completedAt);
+  assert.equal(revised.evaluation.capabilities.canEditDraft, false);
+  assert.equal(revised.evaluation.capabilities.canRevise, true);
+  assert.equal(revised.evidence.type, "evaluation_revised");
+  assert.equal(
+    fixture.state.evidence.at(-1).source_command,
+    "evaluation.revise"
+  );
+  assert.equal(
+    fixture.state.versions[`${created.evaluation.id}:2`].status,
+    "completed"
+  );
+  assert.equal(
+    fixture.state.versions[`${created.evaluation.id}:2`].observations,
+    baseContent().observations
+  );
+  assert.equal(
+    fixture.state.versions[`${created.evaluation.id}:3`].status,
+    "completed"
+  );
+  assert.equal(
+    fixture.state.versions[`${created.evaluation.id}:3`].observations,
+    "Customer added another condition before the Quote was prepared."
+  );
+
+  const revisionReplay = await reviseEvaluation({
+    pool: fixture.pool,
+    authenticatedActor: { id: PROFESSIONAL_ID },
+    evaluationId: created.evaluation.id,
+    expectedVersion: 2,
+    idempotencyKey: "revise-completed-version-2",
+    content: baseContent({
+      observations:
+        "Customer added another condition before the Quote was prepared.",
+    }),
+  });
+  assert.equal(revisionReplay.replayed, true);
+  assert.equal(revisionReplay.aggregate.version, 3);
+
+  const staleRevision = await reviseEvaluation({
+    pool: fixture.pool,
+    authenticatedActor: { id: PROFESSIONAL_ID },
+    evaluationId: created.evaluation.id,
+    expectedVersion: 2,
+    idempotencyKey: "stale-revision-version-2",
+    content: baseContent({
+      observations: "Stale revision should not overwrite version 3.",
+    }),
+  });
+  assert.equal(staleRevision.code, "STALE_EVALUATION_VERSION");
+  assert.equal(
+    fixture.state.aggregates[created.evaluation.id].current_version,
+    3
+  );
 });
 
 test("failed evidence and idempotency completion roll back the aggregate, version, and command together", async () => {
@@ -565,6 +648,16 @@ test("service SQL never mutates Workflow, Emergency, relationships, Quote, or Au
     evaluationId: created.evaluation.id,
     expectedVersion: 1,
     idempotencyKey: "complete-boundary-check",
+  });
+  await reviseEvaluation({
+    pool: fixture.pool,
+    authenticatedActor: { id: PROFESSIONAL_ID },
+    evaluationId: created.evaluation.id,
+    expectedVersion: 2,
+    idempotencyKey: "revise-boundary-check",
+    content: baseContent({
+      observations: "Revised documentation only.",
+    }),
   });
   const sql = fixture.calls.map((call) => call.sql).join("\n");
   assert.doesNotMatch(sql, /(?:INSERT INTO|UPDATE|DELETE FROM) (?:emergency_requests|request_relationships|workflow_events|quote|authorization)/i);

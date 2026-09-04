@@ -1,8 +1,9 @@
 "use strict";
 
 // Certified lifecycle sequence; migration 78 revised after its staging rollback.
-// Migrations 76–77 and 79–81, and the production convergence manifest, remain unchanged.
+// Migrations 76–77 and 79–82, and the production convergence manifest, remain unchanged.
 // Migration 82 appends bounded Payment Reminder communication evidence.
+// Migration 83 appends bounded completed-Evaluation revision authority.
 module.exports = [
   {
     "filename": "202609020001_add_business_origin_commercial_job_foundation.sql",
@@ -31,6 +32,10 @@ module.exports = [
   {
     "filename": "202609020007_create_payment_reminder_evidence.sql",
     "checksum": "c381e497a79f058bcf7356068d8563b5b7ba8cc1d05b05318055c00b69e624a2"
+  },
+  {
+    "filename": "202609040001_add_evaluation_revision_authority.sql",
+    "checksum": "f091be088798dfdc916ef8a4b7aca0ec8f084b1f2c782231cc9ca43dbd54830b"
   }
 
 ];

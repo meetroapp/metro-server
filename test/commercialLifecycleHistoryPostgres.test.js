@@ -93,7 +93,7 @@ test("migrations 80–81 preserve historical marketplace rows and extend legacy 
   assert.deepEqual(await snapshot(),before);
   const replay = await runMigrationCollection(pool,migrations,{target:"local-test",database});
   assert.equal(replay.applied.length,0);
-  assert.equal(replay.skipped.length,82);
+  assert.equal(replay.skipped.length,83);
   assert.deepEqual(replay.failed,[]);
   const base = { pool, authenticatedActor:{id:Number(legacy.user_id)}, jobId:legacy.job_id, logger:quiet };
   assert.equal((await getVisit({...base,visitId:legacy.visit_id})).visit.id,legacy.visit_id);

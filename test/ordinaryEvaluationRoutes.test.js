@@ -62,6 +62,52 @@ test("ordinary create derives actor, Job, and idempotency from authenticated bou
   assert.equal(res.statusCode, 201);
 });
 
+test("revision route passes only completed Evaluation revision inputs", async () => {
+  let received;
+  const handlers = createEvaluationHandlers({
+    getPool: () => ({ query() {} }),
+    sendPublicDatabaseError() { throw new Error("not expected"); },
+    service: {
+      async reviseEvaluation(input) {
+        received = input;
+        return {
+          ok: true,
+          status: 200,
+          code: "EVALUATION_REVISED",
+        };
+      },
+    },
+  });
+  const res = response();
+  await handlers.reviseEvaluation({
+    user: { id: 41 },
+    params: { evaluationId: "evaluation-from-path" },
+    headers: { "idempotency-key": "revision-key" },
+    body: {
+      expectedVersion: 7,
+      content: { observations: "Customer added more requested work." },
+      relationshipId: 999,
+      jobId: "browser-job",
+      status: "draft",
+    },
+  }, res);
+
+  assert.deepEqual(received, {
+    pool: { query: received.pool.query },
+    authenticatedActor: { id: 41 },
+    evaluationId: "evaluation-from-path",
+    expectedVersion: 7,
+    content: {
+      observations: "Customer added more requested work.",
+    },
+    idempotencyKey: "revision-key",
+  });
+  assert.equal(Object.hasOwn(received, "relationshipId"), false);
+  assert.equal(Object.hasOwn(received, "jobId"), false);
+  assert.equal(Object.hasOwn(received, "status"), false);
+  assert.equal(res.statusCode, 200);
+});
+
 test("completion route passes one explicit bounded completion contract", async () => {
   let received;
   const handlers = createEvaluationHandlers({
