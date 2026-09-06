@@ -201,6 +201,9 @@ const {
   registerProfessionalJobPickerRoutes,
 } = require("./server/workflow/professionalJobPicker");
 const {
+  registerProfessionalQuoteCustomerOptionsRoutes,
+} = require("./server/workflow/professionalQuoteCustomerOptions");
+const {
   registerProfessionalQuotesRoutes,
 } = require("./server/authorization/professionalQuotes");
 const {
@@ -1058,6 +1061,12 @@ registerProfessionalScheduleRoutes({
 });
 
 registerProfessionalJobPickerRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+registerProfessionalQuoteCustomerOptionsRoutes({
   app,
   authMiddleware,
   getPool,
