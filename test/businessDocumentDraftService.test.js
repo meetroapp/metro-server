@@ -356,7 +356,7 @@ function createMemoryStore({ initializeSequences = true } = {}) {
     },
     async get({ actorUserId, draftId }) {
       const current = documents.get(draftId);
-      return current?.actorUserId === actorUserId ? current.document : null;
+      return current?.actorUserId === actorUserId && current.document.status === "WORKING_DRAFT" ? current.document : null;
     },
     async delete({ actorUserId, draftId, expectedVersion }) {
       const current = documents.get(draftId);
@@ -366,13 +366,18 @@ function createMemoryStore({ initializeSequences = true } = {}) {
       if (current.document.version !== expectedVersion) {
         return { kind: "version_conflict", currentVersion: current.document.version };
       }
-      documents.delete(draftId);
+      if (current.document.documentNumber) {
+        current.document = { ...current.document, status: "ARCHIVED", version: current.document.version + 1 };
+      } else {
+        documents.delete(draftId);
+      }
       return { kind: "deleted", deletedDraftId: draftId };
     },
     async list({ actorUserId, query }) {
       return [...documents.values()]
         .filter((item) => item.actorUserId === actorUserId)
         .map((item) => item.document)
+        .filter((document) => document.status === "WORKING_DRAFT")
         .filter((document) => !query.type || document.documentType === query.type)
         .filter((document) => !query.search || JSON.stringify(document).toLowerCase().includes(query.search.toLowerCase()));
     },
@@ -724,7 +729,8 @@ test("update and delete use saved draft owner while cross-business Job reassocia
     expectedVersion: 2, store,
   });
   assert.equal(deleted.status, 200);
-  assert.equal(store.documents.has(created.document.id), false);
+  assert.equal(store.documents.get(created.document.id).document.status, "ARCHIVED");
+  assert.equal(store.documents.get(created.document.id).document.documentNumber, created.document.documentNumber);
 });
 
 test("deleting a numbered draft does not rewind or reuse the consumed number", async () => {
@@ -1147,7 +1153,7 @@ test("photo role and visibility remain independent", async () => {
   }
 });
 
-test("owner deletes only the private working draft and association while governed authority remains untouched", async () => {
+test("owner archives numbered draft and retains number, media and governed authority", async () => {
   const store = createMemoryStore();
   const created = await createBusinessDocumentDraft({
     pool: {}, authenticatedActor: { id: 1 }, payload: payload(), idempotencyKey: KEY_ONE,
@@ -1160,7 +1166,8 @@ test("owner deletes only the private working draft and association while governe
   });
   assert.equal(result.status, 200);
   assert.equal(result.deletedDraftId, created.document.id);
-  assert.equal(store.documents.has(created.document.id), false);
+  assert.equal(store.documents.get(created.document.id).document.status, "ARCHIVED");
+  assert.equal(store.documents.get(created.document.id).document.documentNumber, created.document.documentNumber);
   assert.equal(store.physicalMedia.has(media().public_id), true);
   assert.deepEqual(store.authorityRecords, authorityBefore);
 });
@@ -1226,5 +1233,6 @@ test("delete requires the current version and a repeated delete remains safely a
   });
   assert.equal(deleted.status, 200);
   assert.equal(retry.status, 404);
-  assert.equal(store.documents.size, 0);
+  assert.equal(store.documents.size, 1);
+  assert.equal(store.documents.get(created.document.id).document.status, "ARCHIVED");
 });

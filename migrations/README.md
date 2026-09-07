@@ -101,6 +101,9 @@ Current inventory:
 81. `202609020006_generalize_work_preparation_execution_approval.sql`
 82. `202609020007_create_payment_reminder_evidence.sql`
 83. `202609040001_add_evaluation_revision_authority.sql`
+84. `202609070001_archive_numbered_business_document_drafts.sql`
+
+Migration 84 adds private numbered-draft archive. Application is environment-specific and is recorded by each database migration ledger.
 
 Migration 83 adds bounded completed-Evaluation revision authority. `evaluation.revise` appends a new canonical completed Evaluation version with `evaluation_revised` evidence while preserving the existing completion state and original completion timestamp. It does not mutate Quote, approval, deposit, payment, scheduling, work, relationship, or customer authority.
 

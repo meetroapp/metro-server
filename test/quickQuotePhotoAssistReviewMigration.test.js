@@ -28,7 +28,7 @@ test(
     const migrations = getMigrationFiles();
 
   assert.equal((migrations[74]?.filename || migrations[74]), "202608310001_create_business_job_customer_message_authority.sql");
-  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202609040001_add_evaluation_revision_authority.sql");
+  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202609070001_archive_numbered_business_document_drafts.sql");
 
     const migrationIndex =
       migrations.findIndex(

@@ -803,7 +803,10 @@ const sqlStore = Object.freeze({
       const reserved = await reserveCommand(client, command);
       if (reserved.conflict) return { kind: "idempotency_conflict" };
       if (reserved.pending) return { kind: "in_progress" };
-      if (reserved.replay) return { kind: "replay", document: reserved.replay };
+      if (reserved.replay) {
+        const active = await loadOwnedBusinessContext(client, actorUserId, reserved.replay.id, { lock: true });
+        return active ? { kind: "replay", document: reserved.replay } : { kind: "not_found" };
+      }
       const owner = await resolveBusinessDocumentOwner(
         client,
         actorUserId,
@@ -920,7 +923,10 @@ const sqlStore = Object.freeze({
       const reserved = await reserveCommand(client, command);
       if (reserved.conflict) return { kind: "idempotency_conflict" };
       if (reserved.pending) return { kind: "in_progress" };
-      if (reserved.replay) return { kind: "replay", document: reserved.replay };
+      if (reserved.replay) {
+        const active = await loadOwnedBusinessContext(client, actorUserId, reserved.replay.id, { lock: true });
+        return active ? { kind: "replay", document: reserved.replay } : { kind: "not_found" };
+      }
       const current = await loadOwnedBusinessContext(
         client,
         actorUserId,
@@ -1046,6 +1052,22 @@ const sqlStore = Object.freeze({
       if (Number(current.version) !== expectedVersion) {
         return { kind: "version_conflict", currentVersion: Number(current.version) };
       }
+      if (current.document_number) {
+        const archived = await client.query(
+          `/* business_document:archive_working_draft */
+           UPDATE business_document_working_drafts
+           SET draft_status = 'ARCHIVED', version = version + 1,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = $1 AND contractor_profile_id = $2
+             AND draft_status = 'WORKING_DRAFT' AND version = $3
+           RETURNING id`,
+          [draftId, contractorProfileId, expectedVersion]
+        );
+        // Retain content, media, customer links and command history with the number.
+        return archived.rows[0]
+          ? { kind: "deleted", deletedDraftId: String(archived.rows[0].id) }
+          : { kind: "not_found" };
+      }
       await client.query(
         `/* business_document:delete_photo_associations */
          DELETE FROM business_document_draft_media
@@ -1081,6 +1103,7 @@ const sqlStore = Object.freeze({
          AND contacts.contractor_profile_id = drafts.contractor_profile_id
        ${DEPOSIT_AUTHORITY_JOINS}
        WHERE profiles.user_id = $1
+         AND drafts.draft_status = 'WORKING_DRAFT'
          AND ($2::text IS NULL OR drafts.document_type = $2)
          AND ($3::text IS NULL OR drafts.updated_at >= CURRENT_TIMESTAMP - $3::interval)
          AND ($4::text IS NULL OR
