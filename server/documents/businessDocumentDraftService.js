@@ -143,7 +143,9 @@ const CONTENT_KEYS = new Set([
 ]);
 const DEPOSIT_REQUEST_CONTENT_KEYS = new Set([
   "customerName", "companyName", "customerEmail", "customerPhone", "customerAddress",
-  "customerLocation", "serviceLocation", "projectTitle", "notes", "dueDate",
+  "customerLocation", "serviceLocation", "projectTitle",
+  "projectDescription", "recommendedSolution",
+  "notes", "dueDate",
   "terms", "paymentTerms", "paymentInstructions", "customerMessage",
   "quoteReference",
 ]);

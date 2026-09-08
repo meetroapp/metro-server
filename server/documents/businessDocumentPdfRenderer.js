@@ -396,9 +396,21 @@ function renderPreparedCustomerPdf(customerPackage, photos, logo = null, options
     customerPackage.document.type === "INVOICE" && customerPackage.paidMinor != null ? ["Amount paid", customerPackage.paidMinor] : null,
   ].filter(Boolean);
   const savedStatus = "Ready for Customer Review";
+  const depositRule = customerPackage.depositRequest?.depositRule || null;
+  const depositRuleText = !isDepositRequest
+    ? ""
+    : depositRule?.type === "PERCENT" &&
+        Number.isFinite(Number(depositRule.percentBasisPoints))
+      ? `${Number(depositRule.percentBasisPoints) / 100}% of approved Quote`
+      : depositRule?.type === "FIXED"
+        ? "Fixed deposit amount"
+        : "Deposit required";
+
   const summaryEntries = isDepositRequest
     ? [
         ["Approved Quote", customerPackage.depositRequest.approvedQuoteReference || "Verified approved Quote"],
+        ["Quote Version", `Version ${customerPackage.depositRequest.issuedQuoteVersion}`],
+        ["Deposit Terms", depositRuleText],
         ["Payment Instructions", customerPackage.paymentTerms || "Contact the professional for payment instructions."],
         ["Due Date", customerPackage.document.dueDate || "Not confirmed."],
         ["Amount Still Needed", money(customerPackage.depositRequest.amountStillNeededMinor, customerPackage.currency)],

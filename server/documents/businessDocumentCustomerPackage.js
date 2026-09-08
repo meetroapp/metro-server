@@ -253,7 +253,10 @@ function buildBusinessDocumentCustomerPackage(document, business = {}) {
       }),
       project: Object.freeze({
         title: cleanText(content.projectTitle, 500) || null,
-        scope: null,
+        scope: cleanText(
+          content.recommendedSolution || content.projectDescription,
+          12000
+        ) || null,
         observation: null,
       }),
       lineItems: Object.freeze([]),
@@ -289,6 +292,9 @@ function buildBusinessDocumentCustomerPackage(document, business = {}) {
         remainingAfterDepositMinor: authority.quoteTotalMinor - authority.requiredMinor,
         paymentsReceivedMinor: authority.appliedMinor,
         amountStillNeededMinor: authority.remainingMinor,
+        depositRule: authority.depositRule
+          ? Object.freeze({ ...authority.depositRule })
+          : null,
       }),
     });
   }
@@ -410,7 +416,18 @@ function customerPackageLines(customerPackage, customerMessage = "") {
       `Ready for customer review · Version ${customerPackage.document.version}`,
       customerPackage.customer.name ? `Customer: ${customerPackage.customer.name}` : null,
       customerPackage.project.title ? `Project: ${customerPackage.project.title}` : null,
-      request.approvedQuoteReference ? `Approved Quote: ${request.approvedQuoteReference}` : null,
+      customerPackage.project.scope
+        ? `Approved scope\n${customerPackage.project.scope}`
+        : null,
+      request.approvedQuoteReference
+        ? `Approved Quote: ${request.approvedQuoteReference} · Version ${request.issuedQuoteVersion}`
+        : null,
+      request.depositRule?.type === "PERCENT" &&
+      Number.isFinite(Number(request.depositRule.percentBasisPoints))
+        ? `Deposit terms: ${Number(request.depositRule.percentBasisPoints) / 100}% of approved Quote`
+        : request.depositRule?.type === "FIXED"
+          ? "Deposit terms: Fixed deposit amount"
+          : null,
       `Project total: ${formatMoney(request.projectTotalMinor, customerPackage.currency)}`,
       `Deposit requested: ${formatMoney(request.requestedMinor, customerPackage.currency)}`,
       `Amount remaining after deposit: ${formatMoney(request.remainingAfterDepositMinor, customerPackage.currency)}`,
