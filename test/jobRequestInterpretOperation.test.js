@@ -142,6 +142,7 @@ test("canonical registration retains the bounded homeowner operation and fixed e
   assert.deepEqual(
     operations.map(({ operation }) => operation).sort(),
     [
+      "companion.converse",
       "estimate.compose",
       "evaluation.assist",
       "invoice.assist",

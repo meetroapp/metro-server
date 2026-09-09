@@ -110,6 +110,8 @@ function createIntelligenceOperationRegistry(definitions = []) {
   });
 }
 
+const { companionConverseOperationDefinition } = require("./operations/companionConverse");
+
 const canonicalIntelligenceOperationRegistry =
   createIntelligenceOperationRegistry([
     jobRequestInterpretOperationDefinition,
@@ -118,6 +120,7 @@ const canonicalIntelligenceOperationRegistry =
     evaluationAssistOperationDefinition,
     estimateComposeOperationDefinition,
     invoiceAssistOperationDefinition,
+    companionConverseOperationDefinition,
   ]);
 
 module.exports = {

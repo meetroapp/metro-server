@@ -90,8 +90,8 @@ function createFixture({ providerComplete, parseResult, buildContext } = {}) {
   };
 }
 
-test("production registry ships only the governed core workflow advisory operations", () => {
-  assert.deepEqual(canonicalIntelligenceOperationRegistry.list(), [
+test("production registry preserves governed workflow operations and adds text-only conversation", () => {
+  assert.deepEqual(canonicalIntelligenceOperationRegistry.list().filter(({ operation }) => operation !== "companion.converse"), [
     {
       operation: "job_request.interpret",
       capability: "job_request.interpret",
