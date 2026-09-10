@@ -64,6 +64,8 @@ async function executeIntelligenceGateway({
   retailerReferenceAdapter,
   logger = null,
   onDiagnostics,
+  retrievalServices,
+  retrievalClock,
 } = {}) {
   let actor = normalizeActor(authenticatedActor);
   if (!actor) {
@@ -155,10 +157,12 @@ async function executeIntelligenceGateway({
     semanticInput = await prepareOperationSemanticInput({
       definition,
       request,
-      runtimeContext: { pool, authenticatedActor: actor, retailerReferenceAdapter },
+      runtimeContext: { pool, authenticatedActor: actor, retailerReferenceAdapter, retrievalServices, retrievalClock },
     });
   } catch (error) {
     const governedFailure = {
+      intelligence_retrieval_unavailable: [503, "INTELLIGENCE_RETRIEVAL_UNAVAILABLE", "Authorized retrieval is temporarily unavailable. Please retry."],
+      intelligence_continuation_invalid: [400, "INTELLIGENCE_CONTINUATION_INVALID", "This conversation context is unavailable. Reopen the record or search again."],
       intelligence_job_unavailable: [404, "INTELLIGENCE_JOB_UNAVAILABLE", "The Job is unavailable."],
       intelligence_lifecycle_v2_required: [409, "INTELLIGENCE_LIFECYCLE_V2_REQUIRED", "A lifecycle-v2 Job is required."],
       intelligence_quote_authority_required: [403, "INTELLIGENCE_QUOTE_AUTHORITY_REQUIRED", "Professional Quote authority is required."],
@@ -218,7 +222,7 @@ async function executeIntelligenceGateway({
         logger,
         onDiagnostics,
       }),
-    finalizeUsage: usageFinalizer
+    finalizeUsage: usageFinalizer && !(semanticInput.context.retrieval && semanticInput.context.retrieval.deterministicText !== null)
       ? (identity) => usageFinalizer({ ...identity, capability: definition.capability })
       : undefined,
   });

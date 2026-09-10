@@ -63,6 +63,15 @@ async function orchestrateIntelligenceOperation({
   onDiagnostics,
 }) {
   const startedAt = Date.now();
+  const deterministic = definition.resolveWithoutProvider?.({ semanticInput, operationId });
+  if (deterministic) {
+    onDiagnostics?.({ providerExecutionCount: 0, selectedEngines: [] });
+    logMetadata(logger, "info", "intelligence.orchestration.completed", {
+      operation: definition.operation, operationId, correlationId, selectedEngines: [],
+      providerInvoked: false, answerSource: "DETERMINISTIC_RETRIEVAL", elapsedMs: Date.now() - startedAt,
+    });
+    return cloneBoundedJson(deterministic);
+  }
   const engineContext = await collectOperationEngineContext({
     definition,
     semanticInput,

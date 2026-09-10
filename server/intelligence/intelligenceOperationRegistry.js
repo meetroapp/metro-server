@@ -74,6 +74,7 @@ function validateOperationDefinition(definition) {
           buildContext: definition.buildContext,
           buildProviderRequest: definition.buildProviderRequest,
           parseResult: definition.parseResult,
+          ...(typeof definition.resolveWithoutProvider === "function" ? { resolveWithoutProvider: definition.resolveWithoutProvider } : {}),
         }),
   };
 }
@@ -102,6 +103,7 @@ function createIntelligenceOperationRegistry(definitions = []) {
         buildContext,
         buildProviderRequest,
         parseResult,
+        resolveWithoutProvider,
         roleAuthorization,
         providerRequestMaxDepth,
         ...metadata

@@ -2668,6 +2668,7 @@ module.exports = {
     completeCommand, insertVisitVersion, insertVisitEvent, currentSchedule, currentInstant,
     externalScheduleConfirmationProjection,
     canonicalTimeZone,
+    localDateKey,
     classifyVisitStart,
     linkDraftEvaluationOnVisitCompletion,
     normalizedSchedule,
