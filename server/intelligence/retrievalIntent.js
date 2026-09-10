@@ -14,6 +14,15 @@ function parseRetrievalIntent(message) {
   const reasoning = /\b(?:explain|why|summari[sz]e|compare|should|prepare for|bring|missing|help|troubleshoot)\b/.test(lower);
   const number = text.match(/\b(?:INV\s*-?\s*[0-9A-F]{12}|(?:Q|I)\s*-?\s*\d{1,12})\b/i)?.[0] || "";
   const id = text.match(UUID)?.[0]?.toLowerCase() || text.match(/\b(?:job request|conversation)\s+(?:number\s+|#)?([1-9]\d{0,14})\b/i)?.[1] || "";
+
+  // Creating an Invoice FROM an explicitly identified Quote is an Invoice
+  // operation whose retrieval authority must first resolve the source Quote.
+  // Keep source-record type separate from requested operation kind.
+  const quoteToInvoiceSource =
+    operational &&
+    /^(?:(?:please|can you|could you)\s+)?(?:create|prepare|build|draft|make|start)\s+(?:(?:a|an)\s+)?(?:new\s+)?invoice\b/.test(lower) &&
+    (/\bquotes?\b/.test(lower) || /^Q/i.test(number));
+
   let type = /\binvoices?\b/.test(lower) || /^I/i.test(number) ? "INVOICE"
     : /\bquotes?\b/.test(lower) || /^Q/i.test(number) ? "QUOTE"
       : /\b(?:job|service) requests?\b/.test(lower) ? "JOB_REQUEST"
@@ -25,7 +34,9 @@ function parseRetrievalIntent(message) {
       : /\b(?:quote|quotes|approved|approval)\b/.test(lower) || /^Q/i.test(number) ? "QUOTE"
         : /\b(?:when|time|scheduled?|tomorrow|today|morning|afternoon|evening|monday|tuesday|wednesday|thursday|friday|saturday|sunday|next job)\b/.test(lower) ? "SCHEDULE"
           : /\b(?:status|progress|completed?|happening|active)\b/.test(lower) ? "STATUS" : "REASONING";
-  if (kind === "INVOICE") type = "INVOICE";
+  if (kind === "INVOICE") {
+    type = quoteToInvoiceSource ? "QUOTE" : "INVOICE";
+  }
   const deictic = /\b(?:here|that|it|current|this(?! (?:morning|afternoon|evening)))\b/.test(lower);
   // These grammatical slots are bounded entity references, not free-text SQL.
   let name = lower.match(/\b(?:is|was|for|about|with|of)\s+(.{1,100}?)'s\s+(?:job|quote|invoice|deposit|evaluation|visit|request|conversation)/)?.[1]
