@@ -45,3 +45,29 @@ test("ordinary Invoice lookup remains Invoice authority", () => {
   assert.equal(intent.operational, false);
   assert.equal(intent.requiresRecord, true);
 });
+
+test("source-first Quote arrow command resolves the Quote before Invoice creation", () => {
+  const intent = parseRetrievalIntent(
+    "Quote Q0000049 → Create Invoice"
+  );
+
+  assert.equal(intent.type, "QUOTE");
+  assert.equal(intent.kind, "INVOICE");
+  assert.equal(intent.number, "Q0000049");
+  assert.equal(intent.operational, true);
+  assert.equal(intent.mixed, false);
+  assert.equal(intent.requiresRecord, true);
+});
+
+test("source-first ASCII Quote arrow also resolves the Quote first", () => {
+  const intent = parseRetrievalIntent(
+    "Quote Q0000049 -> Create Invoice"
+  );
+
+  assert.equal(intent.type, "QUOTE");
+  assert.equal(intent.kind, "INVOICE");
+  assert.equal(intent.number, "Q0000049");
+  assert.equal(intent.operational, true);
+  assert.equal(intent.mixed, false);
+  assert.equal(intent.requiresRecord, true);
+});

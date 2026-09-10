@@ -9,7 +9,16 @@ function parseRetrievalIntent(message) {
   const text = String(message || "").trim();
   const lower = text.toLowerCase().replace(/’/g, "'");
   const clauses = lower.split(/[;!?\n]|\.(?!\d)|\b(?:and|then|but|also)\b/).map((s) => s.trim()).filter(Boolean);
-  const operational = clauses.some((s) => /^(?:(?:please|can you|could you)\s+)?(?:move|schedule|reschedule|update|record|create|prepare|revise|edit|mark|complete|cancel|approve|pay|send|issue|delete|add)\b/.test(s));
+
+  // Explicit source-first transformation syntax is operational even though
+  // the clause begins with the source record rather than the command verb.
+  // Keep this narrow to Quote -> Invoice creation.
+  const sourceFirstQuoteToInvoice =
+    /\bquote\s+q\s*-?\s*\d{1,12}\b\s*(?:→|->)\s*(?:(?:please)\s+)?(?:create|prepare|build|draft|make|start)\s+(?:(?:a|an)\s+)?(?:new\s+)?invoice\b/.test(lower);
+
+  const operational =
+    sourceFirstQuoteToInvoice ||
+    clauses.some((s) => /^(?:(?:please|can you|could you)\s+)?(?:move|schedule|reschedule|update|record|create|prepare|revise|edit|mark|complete|cancel|approve|pay|send|issue|delete|add)\b/.test(s));
   const mixed = operational && clauses.some((s) => /^(?:explain|why|how|what|summarize|compare|help|tell me)\b/.test(s));
   const reasoning = /\b(?:explain|why|summari[sz]e|compare|should|prepare for|bring|missing|help|troubleshoot)\b/.test(lower);
   const number = text.match(/\b(?:INV\s*-?\s*[0-9A-F]{12}|(?:Q|I)\s*-?\s*\d{1,12})\b/i)?.[0] || "";
@@ -20,8 +29,13 @@ function parseRetrievalIntent(message) {
   // Keep source-record type separate from requested operation kind.
   const quoteToInvoiceSource =
     operational &&
-    /^(?:(?:please|can you|could you)\s+)?(?:create|prepare|build|draft|make|start)\s+(?:(?:a|an)\s+)?(?:new\s+)?invoice\b/.test(lower) &&
-    (/\bquotes?\b/.test(lower) || /^Q/i.test(number));
+    (
+      sourceFirstQuoteToInvoice ||
+      (
+        /^(?:(?:please|can you|could you)\s+)?(?:create|prepare|build|draft|make|start)\s+(?:(?:a|an)\s+)?(?:new\s+)?invoice\b/.test(lower) &&
+        (/\bquotes?\b/.test(lower) || /^Q/i.test(number))
+      )
+    );
 
   let type = /\binvoices?\b/.test(lower) || /^I/i.test(number) ? "INVOICE"
     : /\bquotes?\b/.test(lower) || /^Q/i.test(number) ? "QUOTE"
