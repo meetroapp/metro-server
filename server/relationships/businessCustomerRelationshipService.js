@@ -568,7 +568,7 @@ const sqlStore = Object.freeze({
       const work = await client.query(
         `/* business_customer_relationship:activity_work */
          SELECT jobs.id AS job_id,
-           posts.title AS service_title,
+           COALESCE(posts.title,'Job') AS service_title,
            posts.category AS service_category,
            jobs.created_at AS job_created_at,
            completions.status AS completion_status,
@@ -576,7 +576,7 @@ const sqlStore = Object.freeze({
            parties.created_at AS linked_at
          FROM job_customer_parties parties
          INNER JOIN jobs ON jobs.id = parties.job_id
-         INNER JOIN posts ON posts.id = jobs.job_request_id
+         LEFT JOIN posts ON posts.id = jobs.job_request_id
          LEFT JOIN canonical_job_completion_records completions
            ON completions.job_id = jobs.id
          WHERE parties.contractor_profile_id = $1
@@ -590,7 +590,7 @@ const sqlStore = Object.freeze({
         `/* business_customer_relationship:activity_quotes */
          SELECT quotes.id AS quote_id,
            quotes.job_id,
-           posts.title AS job_title,
+           COALESCE(posts.title,'Job') AS job_title,
            sources.document_number,
            quotes.status,
            current.currency,
@@ -599,26 +599,26 @@ const sqlStore = Object.freeze({
            quotes.updated_at,
            quotes.issued_at,
            CASE
-             WHEN decisions.issued_quote_version = aggregates.current_version
-               THEN decisions.decision
+             WHEN COALESCE(decisions.issued_quote_version,external_approval.issued_quote_version) = aggregates.current_version
+               THEN COALESCE(decisions.decision,external_approval.decision)
              ELSE NULL
            END AS customer_decision,
            CASE
-             WHEN decisions.issued_quote_version = aggregates.current_version
-               THEN decisions.decided_at
+             WHEN COALESCE(decisions.issued_quote_version,external_approval.issued_quote_version) = aggregates.current_version
+               THEN COALESCE(decisions.decided_at,external_approval.approved_at)
              ELSE NULL
            END AS decided_at,
            CASE
-             WHEN quotes.status = 'DRAFT' AND decisions.id IS NULL THEN 'DRAFT'
-             WHEN quotes.status = 'ISSUED' AND decisions.id IS NULL
+             WHEN quotes.status = 'DRAFT' AND decisions.id IS NULL AND external_approval.id IS NULL THEN 'DRAFT'
+             WHEN quotes.status = 'ISSUED' AND decisions.id IS NULL AND external_approval.id IS NULL
                THEN 'WAITING_ON_CUSTOMER'
              WHEN quotes.status = 'ISSUED'
-               AND decisions.decision = 'APPROVED'
-               AND decisions.issued_quote_version = aggregates.current_version
+               AND COALESCE(decisions.decision,external_approval.decision) = 'APPROVED'
+               AND COALESCE(decisions.issued_quote_version,external_approval.issued_quote_version) = aggregates.current_version
                THEN 'APPROVED'
              WHEN quotes.status = 'ISSUED'
-               AND decisions.decision = 'DECLINED'
-               AND decisions.issued_quote_version = aggregates.current_version
+               AND COALESCE(decisions.decision,external_approval.decision) = 'DECLINED'
+               AND COALESCE(decisions.issued_quote_version,external_approval.issued_quote_version) = aggregates.current_version
                THEN 'DECLINED'
              ELSE NULL
            END AS classification,
@@ -626,8 +626,8 @@ const sqlStore = Object.freeze({
              quotes.updated_at,
              quotes.issued_at,
              CASE
-               WHEN decisions.issued_quote_version = aggregates.current_version
-                 THEN decisions.decided_at
+               WHEN COALESCE(decisions.issued_quote_version,external_approval.issued_quote_version) = aggregates.current_version
+                 THEN COALESCE(decisions.decided_at,external_approval.approved_at)
                ELSE NULL
              END
            ) AS last_activity_at,
@@ -638,7 +638,7 @@ const sqlStore = Object.freeze({
           AND quotes.job_id = parties.job_id
          INNER JOIN jobs
            ON jobs.id = quotes.job_id
-         INNER JOIN posts
+         LEFT JOIN posts
            ON posts.id = jobs.job_request_id
          INNER JOIN commercial_authority_aggregates aggregates
            ON aggregates.id = quotes.id
@@ -650,6 +650,8 @@ const sqlStore = Object.freeze({
           AND current.job_id = quotes.job_id
          LEFT JOIN canonical_quote_customer_decisions decisions
            ON decisions.quote_id = quotes.id
+         LEFT JOIN canonical_quote_approvals external_approval ON external_approval.quote_id=quotes.id
+           AND external_approval.job_id=quotes.job_id AND external_approval.approval_source='EXTERNAL_EVIDENCE'
          LEFT JOIN canonical_quote_business_document_sources sources
            ON sources.quote_id = quotes.id
           AND sources.job_id = quotes.job_id
@@ -665,7 +667,7 @@ const sqlStore = Object.freeze({
          SELECT invoices.id AS invoice_id,
            invoices.invoice_number,
            invoices.job_id,
-           posts.title AS job_title,
+           COALESCE(posts.title,'Job') AS job_title,
            current.status,
            current.currency,
            current.total_minor,
@@ -687,7 +689,7 @@ const sqlStore = Object.freeze({
           AND invoices.job_id = parties.job_id
          INNER JOIN jobs
            ON jobs.id = invoices.job_id
-         INNER JOIN posts
+         LEFT JOIN posts
            ON posts.id = jobs.job_request_id
          INNER JOIN LATERAL (
            SELECT versions.*
@@ -709,7 +711,7 @@ const sqlStore = Object.freeze({
       const media = await client.query(
         `/* business_customer_relationship:activity_media */
          SELECT jobs.id AS job_id,
-           posts.title AS job_title,
+           COALESCE(posts.title,'Job') AS job_title,
            photo.item->>'public_id' AS media_id,
            photo.item->>'secure_url' AS secure_url,
            photo.item->>'format' AS format,
@@ -735,8 +737,23 @@ const sqlStore = Object.freeze({
            photo.item->>'public_id' ASC`,
         scope
       );
+      const deposits = await client.query(`/* business_customer_relationship:activity_deposits */ SELECT obligations.id,obligations.job_id,obligations.quote_id,
+        obligations.currency,obligations.required_minor,current.applied_minor,current.state,current.created_at
+        FROM job_customer_parties parties JOIN canonical_pre_work_deposit_obligations obligations ON obligations.job_id=parties.job_id
+        JOIN LATERAL(SELECT * FROM canonical_pre_work_deposit_versions v WHERE v.obligation_id=obligations.id ORDER BY version DESC LIMIT 1) current ON TRUE
+        WHERE parties.contractor_profile_id = $1 AND parties.business_contact_id = $2 AND parties.business_customer_relationship_id = $3`,scope);
+      const payments = await client.query(`/* business_customer_relationship:activity_payments */ SELECT receipt.id,receipt.job_id,'DEPOSIT_RECEIPT'::text AS kind,receipt.gross_amount_minor AS amount_minor,receipt.currency,receipt.received_at AS received_at
+        FROM job_customer_parties parties JOIN canonical_pre_work_payment_receipts receipt ON receipt.job_id=parties.job_id
+        WHERE parties.contractor_profile_id = $1 AND parties.business_contact_id = $2 AND parties.business_customer_relationship_id = $3
+        UNION ALL SELECT receipt.id,receipt.job_id,'INVOICE_PAYMENT'::text,receipt.amount_minor,receipt.currency,receipt.received_date::timestamptz
+        FROM job_customer_parties parties JOIN canonical_invoice_payments receipt ON receipt.job_id=parties.job_id
+        WHERE parties.contractor_profile_id = $1 AND parties.business_contact_id = $2 AND parties.business_customer_relationship_id = $3
+        ORDER BY received_at,id`,scope);
       return Object.freeze({
         contractVersion: 1,
+        deposits: Object.freeze(deposits.rows.map(row=>({id:row.id,jobId:row.job_id,quoteId:row.quote_id,currency:row.currency,
+          requiredMinor:Number(row.required_minor),appliedMinor:Number(row.applied_minor),state:row.state,updatedAt:isoTimestamp(row.created_at)}))),
+        payments: Object.freeze(payments.rows.map(row=>({id:row.id,jobId:row.job_id,kind:row.kind,amountMinor:Number(row.amount_minor),currency:row.currency,receivedAt:isoTimestamp(row.received_at)}))),
         relationship: Object.freeze({
           id: relationship.id,
           contractorProfileId: relationship.contractorProfileId,

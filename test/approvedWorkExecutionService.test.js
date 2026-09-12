@@ -156,7 +156,8 @@ test("Complete Work uses existing durable execution evidence and has no financia
   assert.match(completeSource, /INSERT INTO canonical_approved_work_execution_versions/);
   assert.match(completeSource, /code: "APPROVED_WORK_COMPLETED"/);
   assert.match(completeSource, /state: "WORK_COMPLETED"/);
-  assert.match(completeSource, /code: "READY_TO_INVOICE"/);
+  assert.match(completeSource, /code: "REVIEW_WORKSTREAM_COMPLETION"/);
+  assert.match(completeSource, /label: "Ready for completion review"/);
   assert.doesNotMatch(completeSource, /canonical_job_completion_records/);
   assert.doesNotMatch(completeSource, /canonical_invoices/);
   assert.doesNotMatch(completeSource, /canonical_invoice_payments/);

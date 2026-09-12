@@ -1,4 +1,5 @@
 "use strict";
+const {loadBusinessJobContext,authorityFields}=require("../relationships/businessJobAuthority");
 
 const { commercialAuthorityInternals } = require("../authorization/commercialAuthorityService");
 
@@ -114,7 +115,15 @@ async function loadProfessionalContext(client, actorId, jobId) {
     LIMIT 1`,
     [jobId, actorId, [...PROFESSIONAL_CAPABILITIES]]
   );
-  return result.rows[0] || null;
+  if(result.rows[0]) return result.rows[0];
+  const business=await loadBusinessJobContext(client,jobId,actorId);
+  if(!business)return null;
+  const grants=await client.query(`SELECT grants.capability FROM lifecycle_authority_grants grants
+    LEFT JOIN lifecycle_authority_grant_revocations revoked ON revoked.authority_grant_id=grants.id
+    WHERE grants.grantee_participant_id=$1 AND grants.job_id=$2 AND grants.scope_type='job'
+    AND grants.valid_from<=CURRENT_TIMESTAMP AND (grants.valid_until IS NULL OR grants.valid_until>CURRENT_TIMESTAMP)
+    AND revoked.id IS NULL`,[business.professional_participant_id,jobId]);
+  return {...business,account_type:'professional',is_primary_professional:true,active_capabilities:grants.rows.map(row=>row.capability)};
 }
 
 function professionalContextUnavailable(context, actorId) {
@@ -194,7 +203,7 @@ async function loadApprovedWork(client, jobId) {
   const quotes = await client.query(
     `SELECT quotes.id, quotes.lineage_type, decisions.issued_quote_version
     FROM canonical_quotes quotes
-    INNER JOIN canonical_quote_customer_decisions decisions
+    INNER JOIN canonical_quote_approvals decisions
       ON decisions.quote_id = quotes.id
       AND decisions.job_id = quotes.job_id
       AND decisions.decision = 'APPROVED'
@@ -207,7 +216,7 @@ async function loadApprovedWork(client, jobId) {
     `SELECT DISTINCT snapshots.source_workstream_id AS workstream_id,
       snapshots.quote_id
     FROM canonical_quote_scope_item_snapshots snapshots
-    INNER JOIN canonical_quote_customer_decisions decisions
+    INNER JOIN canonical_quote_approvals decisions
       ON decisions.quote_id = snapshots.quote_id
       AND decisions.job_id = snapshots.job_id
       AND decisions.issued_quote_version = snapshots.quote_version
@@ -219,7 +228,13 @@ async function loadApprovedWork(client, jobId) {
     WHERE snapshots.job_id = $1
       AND snapshots.source_workstream_id IS NOT NULL
       AND snapshots.included_in_total = TRUE
-    ORDER BY snapshots.source_workstream_id, snapshots.quote_id`,
+    UNION
+    SELECT bindings.workstream_id,executions.quote_id FROM canonical_approved_work_execution_workstreams bindings
+    JOIN canonical_approved_work_executions executions ON executions.id=bindings.execution_id AND executions.job_id=bindings.job_id
+    JOIN canonical_quote_approvals approvals ON approvals.id=executions.quote_approval_id AND approvals.job_id=executions.job_id
+      AND approvals.quote_id=executions.quote_id AND approvals.issued_quote_version=executions.issued_quote_version
+    WHERE bindings.job_id=$1 AND approvals.approval_source='EXTERNAL_EVIDENCE'
+    ORDER BY workstream_id, quote_id`,
     [jobId]
   );
   return { quotes: quotes.rows, workstreamLinks: links.rows };
@@ -422,8 +437,9 @@ function buildProfessionalProjection({ context, approvedWork, rows }) {
   return {
     contractVersion: 1,
     jobId: context.job_id,
-    requestId: Number(context.job_request_id),
-    relationshipId: Number(context.relationship_id),
+    ...authorityFields(context),
+    requestId: context.job_request_id == null ? null : Number(context.job_request_id),
+    relationshipId: context.relationship_id == null ? null : Number(context.relationship_id),
     approvedQuotes: approvedWork.quotes.map((quote) => ({
       id: quote.id,
       lineageType: quote.lineage_type || "ORIGINAL_QUOTE",

@@ -102,6 +102,7 @@ Current inventory:
 82. `202609020007_create_payment_reminder_evidence.sql`
 83. `202609040001_add_evaluation_revision_authority.sql`
 84. `202609070001_archive_numbered_business_document_drafts.sql`
+85. `202609120001_generalize_business_job_invoice_completion.sql`
 
 Migration 84 adds private numbered-draft archive. Application is environment-specific and is recorded by each database migration ledger.
 
@@ -644,3 +645,5 @@ The workflow-event migration has a dedicated, fail-closed production runner in
 `scripts/apply-production-workflow-events.js`. It requires explicit production
 environment evidence, the exact migration filename, and two CLI confirmations;
 normal application startup and `npm test` never invoke it.
+
+Migration 85 adds explicit business-customer Invoice identity, external issuance and email evidence, exact approval references, and professional work capabilities for business Jobs. Marketplace foreign keys and all historical evidence remain intact. It is validated only in disposable local databases by this change.

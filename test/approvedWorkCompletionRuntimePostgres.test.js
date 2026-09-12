@@ -29,6 +29,9 @@ const {
   getProfessionalInvoiceWorkspace,
 } = require("../server/finance/invoicePaymentService");
 const {
+  getJobCompletionReview,
+} = require("../server/workflow/jobCompletionService");
+const {
   bindWorkstreamToExecution,
   classifyWorkActivity,
   completeApprovedWork,
@@ -90,7 +93,7 @@ function customerTermsSnapshot() {
   };
 }
 
-async function createApprovedQuote(pool, identities, fixture, suffix) {
+async function createApprovedQuote(pool, identities, fixture, approvedWorkstreams, suffix) {
   const evaluation = await ensureVisitEvaluation(pool, identities, fixture, suffix);
   const completed = await command(completeEvaluation, pool, identities.professionalId, {
     evaluationId: evaluation.id,
@@ -106,23 +109,31 @@ async function createApprovedQuote(pool, identities, fixture, suffix) {
     customerTermsSnapshot: customerTermsSnapshot(),
   }, `complete-work-quote-${suffix}`);
   assert.equal(created.ok, true, created.code);
-  const scoped = await command(addDraftScopeItem, pool, identities.professionalId, {
-    quoteId: created.quote.id,
-    expectedVersion: created.quote.currentVersion,
-    item: {
-      classification: "LABOR_SERVICE",
-      scopeSemantic: "FUTURE_WORK",
-      materialResponsibility: "NOT_APPLICABLE",
-      description: `Atomic Complete Work scope ${suffix}`,
-      quantity: 1,
-      unitAmountMinor: 68000,
-      source: { type: "MANUAL_PROFESSIONAL" },
-    },
-  }, `complete-work-scope-${suffix}`);
-  assert.equal(scoped.ok, true, scoped.code);
+  let scopedQuote = created.quote;
+  for (const [workstream, name] of approvedWorkstreams) {
+    const scoped = await command(addDraftScopeItem, pool, identities.professionalId, {
+      quoteId: created.quote.id,
+      expectedVersion: scopedQuote.currentVersion,
+      item: {
+        classification: "LABOR_SERVICE",
+        scopeSemantic: "FUTURE_WORK",
+        materialResponsibility: "NOT_APPLICABLE",
+        description: `Atomic Complete Work scope ${name} ${suffix}`,
+        quantity: 1,
+        unitAmountMinor: 34000,
+        source: {
+          type: "WORKSTREAM",
+          workstreamId: workstream.id,
+          version: workstream.currentVersion,
+        },
+      },
+    }, `complete-work-scope-${name}-${suffix}`);
+    assert.equal(scoped.ok, true, scoped.code);
+    scopedQuote = scoped.quote;
+  }
   const issued = await command(issueQuote, pool, identities.professionalId, {
     quoteId: created.quote.id,
-    expectedVersion: scoped.quote.currentVersion,
+    expectedVersion: scopedQuote.currentVersion,
   }, `complete-work-issue-${suffix}`);
   assert.equal(issued.ok, true, issued.code);
   const delivered = await command(sendQuoteInMeetro, pool, identities.professionalId, {
@@ -215,7 +226,8 @@ async function latestTruth(pool, fixture, execution, activityIds, workstreamIds)
       `SELECT
          (SELECT count(*)::integer FROM canonical_invoices WHERE job_id = $1) AS invoices,
          (SELECT count(*)::integer FROM canonical_invoice_payments WHERE job_id = $1) AS invoice_payments,
-         (SELECT count(*)::integer FROM canonical_job_completion_records WHERE job_id = $1) AS job_completions`,
+         (SELECT count(*)::integer FROM canonical_job_completion_records WHERE job_id = $1) AS job_completions,
+         (SELECT count(*)::integer FROM canonical_pre_work_payment_receipts WHERE job_id = $1) AS pre_work_payments`,
       [fixture.jobId]
     ),
   ]);
@@ -243,7 +255,15 @@ test(
 
       const identities = await createVisitTestIdentities(pool, suffix);
       const fixture = await createVisitLifecycleFixture(pool, identities, suffix);
-      const quote = await createApprovedQuote(pool, identities, fixture, suffix);
+      const workstreamA = await createVisitWorkstream(pool, identities, fixture, `${suffix}-a`, 1);
+      const workstreamB = await createVisitWorkstream(pool, identities, fixture, `${suffix}-b`, 2);
+      const unrelatedWorkstream = await createVisitWorkstream(
+        pool, identities, fixture, `${suffix}-unrelated`, 3
+      );
+      const quote = await createApprovedQuote(pool, identities, fixture, [
+        [workstreamA, "a"],
+        [workstreamB, "b"],
+      ], suffix);
       const materialized = await command(
         materializeApprovedWorkExecution,
         pool,
@@ -254,11 +274,6 @@ test(
       assert.equal(materialized.ok, true, materialized.code);
       const execution = materialized.execution;
 
-      const workstreamA = await createVisitWorkstream(pool, identities, fixture, `${suffix}-a`, 1);
-      const workstreamB = await createVisitWorkstream(pool, identities, fixture, `${suffix}-b`, 2);
-      const unrelatedWorkstream = await createVisitWorkstream(
-        pool, identities, fixture, `${suffix}-unrelated`, 3
-      );
       for (const [workstream, name] of [[workstreamA, "a"], [workstreamB, "b"]]) {
         const bound = await command(bindWorkstreamToExecution, pool, identities.professionalId, {
           jobId: fixture.jobId,
@@ -419,6 +434,7 @@ test(
         invoices: 0,
         invoice_payments: 0,
         job_completions: 0,
+        pre_work_payments: 1,
       });
 
       const wrongProfessional = await command(
@@ -528,7 +544,7 @@ test(
       assert.equal(completed.code, "APPROVED_WORK_COMPLETED");
       assert.equal(completed.completion.state, "WORK_COMPLETED");
       assert.equal(completed.completion.executionVersion, 2);
-      assert.equal(completed.completion.nextAction.code, "READY_TO_INVOICE");
+      assert.equal(completed.completion.nextAction.code, "REVIEW_WORKSTREAM_COMPLETION");
       assert.equal(completed.completion.startEvidence.count, 1);
       const reconciliationByActivity = new Map(
         completed.completion.activities.map((activity) => [activity.activityId, activity])
@@ -629,6 +645,7 @@ test(
         invoices: 0,
         invoice_payments: 0,
         job_completions: 0,
+        pre_work_payments: 1,
       });
 
       const live = await getCanonicalLiveJob({
@@ -638,12 +655,45 @@ test(
         logger: quiet,
       });
       assert.equal(live.ok, true, live.code);
-      assert.equal(live.liveJob.stage.code, "WORK_COMPLETED");
-      assert.equal(live.liveJob.nextAction.code, "READY_TO_INVOICE");
+      assert.equal(
+        live.liveJob.stage.code,
+        "WORKSTREAMS_COMPLETE_PENDING_JOB_COMPLETION"
+      );
+      assert.equal(live.liveJob.nextAction.code, "REVIEW_WORKSTREAM_COMPLETION");
       assert.equal(
         live.liveJob.availableActions.some((action) => action.code === "VIEW_JOB_HISTORY"),
         false
       );
+      const completionReview = await getJobCompletionReview({
+        pool,
+        authenticatedActor: { id: identities.professionalId },
+        jobId: fixture.jobId,
+        logger: quiet,
+      });
+      assert.equal(completionReview.ok, true, completionReview.code);
+      assert.equal(completionReview.completionReview.state, "ACTIVE");
+      assert.equal(completionReview.completionReview.eligible, false);
+      assert.equal(completionReview.completionReview.canComplete, false);
+      assert.equal(
+        completionReview.completionReview.reasons.includes("INCOMPLETE_WORK_ITEM"),
+        true
+      );
+      assert.equal(
+        completionReview.completionReview.reasons.includes("NO_APPROVED_WORK"),
+        false
+      );
+      assert.equal(
+        completionReview.completionReview.reasons.includes("INCOMPLETE_WORKSTREAM"),
+        false
+      );
+      assert.deepEqual(completionReview.completionReview.work, {
+        workstreamCount: 2,
+        completedWorkstreamCount: 2,
+        workItemCount: 4,
+        completedWorkItemCount: 3,
+      });
+      assert.equal(completionReview.completionReview.outstanding.workItems, 1);
+      assert.equal(completionReview.completionReview.currentVersion, 0);
       const invoiceWorkspace = await getProfessionalInvoiceWorkspace({
         pool,
         authenticatedActor: { id: identities.professionalId },

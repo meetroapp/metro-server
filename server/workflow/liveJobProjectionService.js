@@ -415,19 +415,13 @@ function deriveCanonicalLiveJob(state = {}, { derivedAt = new Date().toISOString
   }
 
   if (state.approvedWorkCompletion?.state === "CLOSED") {
-    const invoiceAction = {
-      DRAFT: "REVIEW_DRAFT_INVOICE",
-      SENT: "WAIT_FOR_PAYMENT",
-      PARTIALLY_PAID: "REVIEW_BALANCE_DUE",
-      PAID: "REVIEW_PAID_INVOICE",
-    }[state.invoice?.status] || "READY_TO_INVOICE";
     return result({
-      stage: "WORK_COMPLETED",
+      stage: "WORKSTREAMS_COMPLETE_PENDING_JOB_COMPLETION",
       responsibility: "PROFESSIONAL",
-      action: invoiceAction,
+      action: "REVIEW_WORKSTREAM_COMPLETION",
       reasons: [
         "APPROVED_WORK_EXECUTION_COMPLETED",
-        state.invoice ? `INVOICE_${state.invoice.status}` : "INVOICE_NOT_CREATED",
+        "JOB_COMPLETION_REVIEW_AVAILABLE",
         "FINANCIAL_SETTLEMENT_REMAINS_SEPARATE",
         "JOB_CLOSURE_REMAINS_SEPARATE",
       ],

@@ -1,4 +1,5 @@
 "use strict";
+const { BUSINESS_JOB_CONTEXT_SQL, loadBusinessJobContext, authorityFields } = require("../relationships/businessJobAuthority");
 
 const { createHash, randomUUID } = require("node:crypto");
 const {
@@ -172,7 +173,7 @@ async function loadProfessionalContext(client, jobId, actorUserId, { lock = fals
     ${lock ? "FOR UPDATE OF jobs, relationships" : ""}`,
     [jobId, actorUserId]
   );
-  return result.rows[0] || null;
+  return result.rows[0] || await loadBusinessJobContext(client, jobId, actorUserId, {lock});
 }
 
 function professionalUnavailable(context, actorUserId) {
@@ -184,12 +185,12 @@ function professionalUnavailable(context, actorUserId) {
   );
 }
 
-async function loadCompletionReadiness(client, jobId) {
+async function loadCompletionReadiness(client, jobId, context) {
   const result = await client.query(
     `WITH approved_workstreams AS (
       SELECT DISTINCT snapshots.source_workstream_id AS workstream_id
       FROM canonical_quote_scope_item_snapshots snapshots
-      INNER JOIN canonical_quote_customer_decisions decisions
+      INNER JOIN canonical_quote_approvals decisions
         ON decisions.quote_id = snapshots.quote_id
         AND decisions.job_id = snapshots.job_id
         AND decisions.issued_quote_version = snapshots.quote_version
@@ -201,6 +202,19 @@ async function loadCompletionReadiness(client, jobId) {
       WHERE snapshots.job_id = $1
         AND snapshots.source_workstream_id IS NOT NULL
         AND snapshots.included_in_total = TRUE
+        AND (decisions.approval_source='MEETRO_CUSTOMER' OR NOT EXISTS (
+          SELECT 1 FROM canonical_quotes revision JOIN canonical_quote_approvals revised ON revised.quote_id=revision.id AND revised.job_id=revision.job_id
+          WHERE revision.parent_quote_id=quotes.id AND revision.lineage_type='REVISED_QUOTE'))
+      UNION
+      SELECT bindings.workstream_id
+      FROM canonical_approved_work_execution_workstreams bindings
+      JOIN canonical_approved_work_executions executions ON executions.id=bindings.execution_id AND executions.job_id=bindings.job_id
+      JOIN canonical_quote_approvals approvals ON approvals.id=executions.quote_approval_id
+        AND approvals.job_id=executions.job_id AND approvals.quote_id=executions.quote_id
+        AND approvals.issued_quote_version=executions.issued_quote_version AND approvals.approval_source='EXTERNAL_EVIDENCE'
+      WHERE bindings.job_id=$1
+        AND NOT EXISTS (SELECT 1 FROM canonical_quotes revision JOIN canonical_quote_approvals revised ON revised.quote_id=revision.id AND revised.job_id=revision.job_id
+          WHERE revision.parent_quote_id=approvals.quote_id AND revision.lineage_type='REVISED_QUOTE')
     ), current_workstreams AS (
       SELECT workstreams.id, current.version, current.state
       FROM canonical_workstreams workstreams
@@ -289,7 +303,31 @@ async function loadCompletionReadiness(client, jobId) {
       ) AS evidence_snapshot`,
     [jobId]
   );
-  return result.rows[0];
+  const readiness = result.rows[0];
+  if (context?.source_type === 'business_document') {
+    const evidence = await client.query(`SELECT approvals.id AS approval_id, approvals.quote_id, approvals.issued_quote_version,
+      completed.execution_id, completed.version, completed.command_id
+      FROM canonical_quote_approvals approvals
+      JOIN canonical_quotes quotes ON quotes.id=approvals.quote_id AND quotes.job_id=approvals.job_id
+      LEFT JOIN LATERAL (
+        SELECT executions.id AS execution_id, current.version, commands.id AS command_id
+        FROM canonical_approved_work_executions executions
+        JOIN LATERAL (SELECT * FROM canonical_approved_work_execution_versions v WHERE v.execution_id=executions.id AND v.job_id=executions.job_id ORDER BY version DESC LIMIT 1) current ON TRUE
+        JOIN canonical_approved_work_execution_command_idempotency commands ON commands.id=current.command_idempotency_id AND commands.job_id=executions.job_id
+          AND commands.command_scope='execution:'||executions.id::text||':complete-work'
+          AND commands.completed_at IS NOT NULL AND commands.result_reference->>'code'='APPROVED_WORK_COMPLETED'
+        WHERE executions.quote_approval_id=approvals.id AND executions.job_id=approvals.job_id
+          AND executions.quote_id=approvals.quote_id AND executions.issued_quote_version=approvals.issued_quote_version
+          AND current.state='CLOSED' LIMIT 1
+      ) completed ON TRUE
+      WHERE approvals.job_id=$1 AND approvals.approval_source='EXTERNAL_EVIDENCE'
+        AND NOT EXISTS(SELECT 1 FROM canonical_quotes revision JOIN canonical_quote_approvals revised ON revised.quote_id=revision.id AND revised.job_id=revision.job_id
+          WHERE revision.parent_quote_id=quotes.id AND revision.lineage_type='REVISED_QUOTE')`, [jobId]);
+    readiness.incomplete_approved_work = !evidence.rows.length || evidence.rows.some(row=>!row.command_id);
+    readiness.evidence_snapshot.approvedExecutions = evidence.rows;
+    readiness.evidence_snapshot.authority = authorityFields(context).authority;
+  }
+  return readiness;
 }
 
 function readinessProjection(context, row) {
@@ -304,6 +342,7 @@ function readinessProjection(context, row) {
     findings: Number(row.unresolved_finding_count),
   };
   const reasons = [];
+  if (row.incomplete_approved_work) reasons.push("INCOMPLETE_APPROVED_WORK");
   if (workstreamCount === 0) reasons.push("NO_APPROVED_WORK");
   if (outstanding.workstreams > 0) reasons.push("INCOMPLETE_WORKSTREAM");
   if (outstanding.workItems > 0) reasons.push("INCOMPLETE_WORK_ITEM");
@@ -313,8 +352,9 @@ function readinessProjection(context, row) {
   return {
     contractVersion: 1,
     jobId: context.job_id,
-    requestId: Number(context.job_request_id),
-    relationshipId: Number(context.relationship_id),
+    ...authorityFields(context),
+    requestId: context.job_request_id == null ? null : Number(context.job_request_id),
+    relationshipId: context.relationship_id == null ? null : Number(context.relationship_id),
     currentVersion: completed ? Number(context.job_version) : 0,
     state: completed ? "COMPLETED" : "ACTIVE",
     eligible: !completed && reasons.length === 0,
@@ -365,7 +405,7 @@ async function getJobCompletionReview(input = {}) {
     if (professionalUnavailable(context, validated.actorId)) {
       return failure(404, "JOB_COMPLETION_UNAVAILABLE", "Completion Review is unavailable.");
     }
-    const readiness = await loadCompletionReadiness(client, validated.jobId);
+    const readiness = await loadCompletionReadiness(client, validated.jobId, context);
     return {
       ok: true, success: true, status: 200, code: "JOB_COMPLETION_REVIEW_FOUND",
       completionReview: readinessProjection(context, readiness),
@@ -430,7 +470,7 @@ async function completeJob(input = {}) {
     if (context.completion_id) {
       return { abort: failure(409, "JOB_ALREADY_COMPLETED", "The Job is already completed.") };
     }
-    const readiness = await loadCompletionReadiness(client, validated.jobId);
+    const readiness = await loadCompletionReadiness(client, validated.jobId, context);
     const review = readinessProjection(context, readiness);
     if (!review.eligible) {
       validated.logger.warn("Job completion rejected", {
@@ -449,8 +489,9 @@ async function completeJob(input = {}) {
       contractVersion: 1,
       id: completionId,
       jobId: validated.jobId,
-      requestId: Number(context.job_request_id),
-      relationshipId: Number(context.relationship_id),
+      ...authorityFields(context),
+    requestId: context.job_request_id == null ? null : Number(context.job_request_id),
+      relationshipId: context.relationship_id == null ? null : Number(context.relationship_id),
       currentVersion: 1,
       status: "COMPLETED",
       completedAt,
@@ -483,13 +524,13 @@ async function completeJob(input = {}) {
     const homeownerUserId =
       positiveInteger(context.homeowner_id);
 
-    if (!homeownerUserId) {
+    if (!homeownerUserId && context.source_type !== "business_document") {
       throw new Error(
         "Canonical Job completion customer identity is required."
       );
     }
 
-    await createCanonicalLifecycleAlertWithClient({
+    if (homeownerUserId) await createCanonicalLifecycleAlertWithClient({
       client,
       recipientUserId: homeownerUserId,
       sourceDomain: "workflow",
@@ -543,8 +584,9 @@ function historySummary(row) {
   return {
     contractVersion: 1,
     jobId: row.job_id,
-    requestId: Number(row.job_request_id),
-    relationshipId: Number(row.relationship_id),
+    ...authorityFields(row),
+    requestId: row.job_request_id == null ? null : Number(row.job_request_id),
+    relationshipId: row.relationship_id == null ? null : Number(row.relationship_id),
     conversationId: positiveInteger(row.conversation_id),
     customerName: row.customer_name || "Customer",
     professionalName: row.professional_name || "Professional",
@@ -618,6 +660,17 @@ async function listProfessionalJobHistory(input = {}) {
     const result = await client.query(
       `WITH history AS (${HISTORY_BASE_SQL}
         WHERE relationships.professional_user_id = $1
+        UNION ALL
+        SELECT business.job_id, business.job_request_id, business.relationship_id,
+          business.conversation_id,business.customer_name,business.business_name,business.job_title,business.completed_at,
+          completion.workstream_count,completion.work_item_count,completion.customer_update_count,
+          approved.total_minor,approved.currency
+        FROM (${BUSINESS_JOB_CONTEXT_SQL} AND profiles.user_id=$1) business
+        JOIN canonical_job_completion_records completion ON completion.job_id=business.job_id
+        LEFT JOIN LATERAL (SELECT sum(v.total_minor)::bigint total_minor, max(v.currency) currency FROM canonical_quote_approvals a
+          JOIN canonical_quote_versions v ON v.quote_id=a.quote_id AND v.job_id=a.job_id AND v.version=a.issued_quote_version
+          WHERE a.job_id=business.job_id AND NOT EXISTS(SELECT 1 FROM canonical_quotes revision JOIN canonical_quote_approvals revised ON revised.quote_id=revision.id AND revised.job_id=revision.job_id
+            WHERE revision.parent_quote_id=a.quote_id AND revision.lineage_type='REVISED_QUOTE')) approved ON TRUE
       ), counted AS (
         SELECT history.*, count(*) OVER()::integer AS total_count
         FROM history
@@ -630,6 +683,9 @@ async function listProfessionalJobHistory(input = {}) {
     );
     const hasMore = result.rows.length > limit;
     const pageRows = result.rows.slice(0, limit);
+    for (const row of pageRows) if (row.job_request_id == null) {
+      Object.assign(row, await loadBusinessJobContext(client, row.job_id, actor.id));
+    }
     return {
       ok: true, success: true, status: 200, code: "PROFESSIONAL_JOB_HISTORY_FOUND",
       jobHistory: {
@@ -663,7 +719,21 @@ async function getHistoryDetail(input = {}, audience) {
        LIMIT 1`,
       [jobId, actor.id]
     );
-    const row = result.rows[0];
+    let row = result.rows[0];
+    if (!row && audience === 'professional') {
+      const business = await loadBusinessJobContext(client, jobId, actor.id);
+      if (business?.completion_id) {
+        const record = await client.query(`SELECT * FROM canonical_job_completion_records WHERE job_id=$1`,[jobId]);
+        const approved=await client.query(`SELECT sum(v.total_minor)::bigint total_minor,
+          CASE WHEN count(DISTINCT v.currency)=1 THEN max(v.currency) END currency
+          FROM canonical_quote_approvals a JOIN canonical_quote_versions v ON v.quote_id=a.quote_id AND v.job_id=a.job_id AND v.version=a.issued_quote_version
+          WHERE a.job_id=$1 AND a.approval_source='EXTERNAL_EVIDENCE' AND NOT EXISTS(
+            SELECT 1 FROM canonical_quotes revision JOIN canonical_quote_approvals revised ON revised.quote_id=revision.id AND revised.job_id=revision.job_id
+            WHERE revision.parent_quote_id=a.quote_id AND revision.lineage_type='REVISED_QUOTE')`,[jobId]);
+        row = {...record.rows[0], ...business, professional_name:business.business_name, service_title:business.job_title,
+          approved_total_minor:approved.rows[0]?.total_minor,approved_currency:approved.rows[0]?.currency};
+      }
+    }
     if (!row) return failure(404, "JOB_HISTORY_UNAVAILABLE", "Job History is unavailable.");
     const concern = await client.query(
       `SELECT original_text, reported_at

@@ -1987,7 +1987,10 @@ async function completeApprovedWork(input = {}) {
       startEvidence,
       activities: activityReconciliation,
       workstreams: workstreamReconciliation,
-      nextAction: { code: "READY_TO_INVOICE", label: "Ready to Invoice" },
+      nextAction: {
+        code: "REVIEW_WORKSTREAM_COMPLETION",
+        label: "Ready for completion review",
+      },
     };
     const result = {
       ok: true,

@@ -18,7 +18,7 @@ test("customer terms migration is the 51st additive migration", () => {
     .filter((name) => /^\d+.*\.sql$/.test(name))
     .sort();
   assert.equal((migrations[74]?.filename || migrations[74]), "202608310001_create_business_job_customer_message_authority.sql");
-  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202609070001_archive_numbered_business_document_drafts.sql");
+  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202609120001_generalize_business_job_invoice_completion.sql");
   assert.equal(
     migrations[50],
     "202608230002_add_canonical_quote_customer_terms_snapshot.sql"

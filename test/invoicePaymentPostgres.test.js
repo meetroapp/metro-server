@@ -211,13 +211,14 @@ async function insertSatisfiedPreworkDeposit(pool, fixture, quoteId, amountMinor
        decisions.job_id, decisions.relationship_id,
        decisions.decision, decisions.customer_participant_id,
        decisions.issued_integrity_hash, decisions.decided_at,
-       versions.currency, versions.total_minor, jobs.job_request_id
+       versions.currency, versions.total_minor, jobs.job_request_id, approvals.id AS quote_approval_id
      FROM canonical_quote_customer_decisions decisions
      INNER JOIN canonical_quote_versions versions
        ON versions.quote_id = decisions.quote_id
        AND versions.version = decisions.issued_quote_version
        AND versions.job_id = decisions.job_id
      INNER JOIN jobs ON jobs.id = decisions.job_id
+     INNER JOIN canonical_quote_approvals approvals ON approvals.customer_decision_id = decisions.id
      WHERE decisions.quote_id = $1`,
     [quoteId]
   );
@@ -242,15 +243,15 @@ async function insertSatisfiedPreworkDeposit(pool, fixture, quoteId, amountMinor
        quote_total_minor, deposit_rule_type,
        deposit_percent_basis_points, deposit_fixed_minor,
        required_minor, source_integrity_hash, effective_at,
-       created_by_participant_id, created_command_idempotency_id
+       created_by_participant_id, created_command_idempotency_id, quote_approval_id, approval_source
      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-       $11, 'PERCENT', 7500, NULL, $12, $13, $14, $15, $16)`,
+       $11, 'PERCENT', 7500, NULL, $12, $13, $14, $15, $16, $17, 'MEETRO_CUSTOMER')`,
     [obligationId, source.job_id, Number(source.job_request_id),
       Number(source.relationship_id), source.quote_id,
       Number(source.issued_quote_version), source.customer_decision_id,
       source.decision, source.customer_participant_id, source.currency,
       Number(source.total_minor), amountMinor, source.issued_integrity_hash,
-      source.decided_at, source.customer_participant_id, commandId]
+      source.decided_at, source.customer_participant_id, commandId, source.quote_approval_id]
   );
   await pool.query(
     `INSERT INTO canonical_pre_work_deposit_versions (
@@ -273,7 +274,7 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202608310001_create_business_job_customer_message_authority.sql");
+      assert.ok(migrations.some((migration) => (migration.filename || migration) === "202608150004_create_canonical_invoice_payment_foundation.sql"));
       const migrated = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(migrated.applied.length, migrations.length);
       const replay = await runMigrationCollection(pool, migrations, targetMetadata());
@@ -446,6 +447,25 @@ test(
         [created.invoice.invoiceId]
       );
       assert.equal(messageCount.rows[0].count, 1);
+      const resent = await command(issueInvoice, pool, identities.professionalId, {
+        invoiceId: created.invoice.invoiceId,
+        expectedVersion: issued.invoice.currentVersion,
+        messageText: "Here is the same Invoice again.",
+      }, `invoice-resend-${suffix}`);
+      assert.equal(resent.ok, true, JSON.stringify(resent));
+      assert.equal(resent.invoice.invoiceId, issued.invoice.invoiceId);
+      assert.equal(resent.invoice.currentVersion, issued.invoice.currentVersion);
+      assert.equal(resent.invoice.paidMinor, issued.invoice.paidMinor);
+      assert.equal(resent.invoice.balanceMinor, issued.invoice.balanceMinor);
+      assert.notEqual(resent.delivery.messageId, issued.delivery.messageId);
+      const counts = await pool.query(`SELECT
+        (SELECT count(*)::integer FROM canonical_invoices WHERE job_id=$1) AS invoices,
+        (SELECT count(*)::integer FROM canonical_invoice_issuances WHERE invoice_id=$2) AS issuances,
+        (SELECT count(*)::integer FROM canonical_invoice_payments WHERE invoice_id=$2) AS payments,
+        (SELECT count(*)::integer FROM canonical_job_completion_records WHERE job_id=$1) AS completions`,
+        [fixture.jobId, created.invoice.invoiceId]);
+      assert.deepEqual(counts.rows[0], {invoices:1,issuances:1,payments:0,completions:1});
+
 
       const customer = await getCustomerJobInvoice({
         pool,

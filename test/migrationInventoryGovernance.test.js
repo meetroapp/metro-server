@@ -29,6 +29,7 @@ const expectedInventory = [
   ...TARGET_MIGRATIONS.map(({ filename, checksum }) => ({ filename, checksum })),
   ...externalLifecycleMigrations,
   { filename: "202609070001_archive_numbered_business_document_drafts.sql", checksum: "6cafac5527170caeaaeb8fa0c896702fb171ac12e3c5818c68b1c8b97bef9129" },
+  { filename: "202609120001_generalize_business_job_invoice_completion.sql", checksum: "33289c8c1e0b88a4767d6dd10d1198f0d2b3d3e0b8199283ac71356b937f4cff" },
 ].sort((left, right) => left.filename.localeCompare(right.filename));
 
 function checksum(filename) {
@@ -37,13 +38,13 @@ function checksum(filename) {
     .digest("hex");
 }
 
-test("the governed repository migration inventory is the exact 84-file generation with unapplied draft archive", () => {
+test("the governed repository migration inventory is the exact 85-file generation with external Invoice authority", () => {
   const actual = getMigrationFiles().map(({ filename }) => filename);
   const expected = expectedInventory.map(({ filename }) => filename);
 
-  assert.equal(expectedInventory.length, 84);
+  assert.equal(expectedInventory.length, 85);
   assert.deepEqual(actual, expected);
-  assert.equal(actual.at(-1), "202609070001_archive_numbered_business_document_drafts.sql");
+  assert.equal(actual.at(-1), "202609120001_generalize_business_job_invoice_completion.sql");
   assert.equal(new Set(actual).size, actual.length);
   assert.ok(actual.every((filename) => filenamePattern.test(filename)));
 });

@@ -25,11 +25,15 @@ test("Invoice and Payment routes are authenticated and exact-identity scoped", (
   const auth = () => {};
   registerInvoicePaymentRoutes({ app, authMiddleware: auth, getPool() {}, sendPublicDatabaseError() {} });
   assert.deepEqual(routes.map(([method, path]) => `${method} ${path}`), [
+    "GET /professional/invoices/:invoiceId/customer-pdf",
+    "GET /customer/invoices/:invoiceId/customer-pdf",
     "GET /professional/invoices/workspace",
     "POST /professional/jobs/:jobId/invoices",
     "GET /professional/jobs/:jobId/invoice",
     "GET /professional/invoices/:invoiceId",
     "POST /professional/invoices/:invoiceId/issue",
+    "POST /professional/invoices/:invoiceId/issue-external",
+    "POST /professional/invoices/:invoiceId/external-email",
     "POST /professional/invoices/:invoiceId/payments",
     "GET /customer/invoices/:invoiceId",
     "GET /customer/jobs/:jobId/invoice",
@@ -77,4 +81,13 @@ test("Payment handler forwards only governed command fields", async () => {
   });
   assert.equal(res.headers["Cache-Control"], "private, no-store");
   assert.equal(res.body.code, "PAYMENT_RECORDED");
+});
+
+test('external email route rejects caller-owned recipient, provider and financial fields',async()=>{
+ const handlers=createInvoicePaymentHandlers({getPool(){throw Error('No database call for rejected input');},sendPublicDatabaseError(){throw Error('Unexpected route exception');}});
+ for(const field of ['recipientEmail','emailDelivery','paidMinor','status','jobId']) {
+  const res={setHeader(){},status(value){this.statusCode=value;return this;},json(value){this.body=value;return this;}};
+  await handlers.emailInvoice({body:{expectedVersion:2,purpose:'REMINDER',[field]:'injected'},params:{invoiceId:'11111111-1111-4111-8111-111111111111'},user:{id:1},headers:{}},res);
+  assert.equal(res.statusCode,400);assert.equal(res.body.code,'INVOICE_EMAIL_FIELD_REJECTED');
+ }
 });

@@ -173,13 +173,13 @@ test("public sender returns the bounded Work completion projection", () => {
     completion: {
       state: "WORK_COMPLETED",
       executionId: "execution",
-      nextAction: { code: "READY_TO_INVOICE" },
+      nextAction: { code: "REVIEW_WORKSTREAM_COMPLETION" },
     },
   });
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.payload.completion, {
     state: "WORK_COMPLETED",
     executionId: "execution",
-    nextAction: { code: "READY_TO_INVOICE" },
+    nextAction: { code: "REVIEW_WORKSTREAM_COMPLETION" },
   });
 });

@@ -104,6 +104,7 @@ function createPool({ owned = true, archived = false, empty = false } = {}) {
           uploaded_at: "2026-08-21T11:00:00.000Z",
         }] };
       }
+      if (/business_customer_relationship:activity_(deposits|payments)/.test(text)) return {rows:[]};
       throw new Error(`Unexpected SQL: ${text}`);
     },
   };
@@ -189,7 +190,7 @@ test("every history query is scoped to the exact business, Contact, and Relation
   const pool = createPool();
   await getBusinessCustomerRelationshipActivity(input(pool));
   const queries = pool.calls.filter(({ sql }) => sql.includes(":activity_"));
-  assert.equal(queries.length, 4);
+  assert.equal(queries.length, 6);
   for (const query of queries) {
     assert.deepEqual(query.values, [10, CONTACT_ID, RELATIONSHIP_ID]);
     assert.match(query.sql, /parties\.contractor_profile_id = \$1/);
@@ -213,7 +214,7 @@ test("canonical Quote and Invoice current-state authorities drive the projection
   assert.match(source, /canonical_quote_versions current/);
   assert.match(source, /current\.version = aggregates\.current_version/);
   assert.match(source, /canonical_quote_customer_decisions decisions/);
-  assert.match(source, /decisions\.issued_quote_version = aggregates\.current_version/);
+  assert.match(source, /COALESCE\(decisions\.issued_quote_version,external_approval\.issued_quote_version\) = aggregates\.current_version/);
   assert.match(source, /canonical_invoice_versions versions/);
   assert.match(source, /ORDER BY versions\.version DESC/);
   assert.match(source, /current\.paid_minor/);

@@ -1,4 +1,5 @@
 "use strict";
+const { BUSINESS_JOB_CONTEXT_SQL, loadBusinessJobContext, authorityFields } = require("../relationships/businessJobAuthority");
 
 const { createHash, randomUUID } = require("node:crypto");
 const {
@@ -259,7 +260,7 @@ async function loadProfessionalJobContext(client, jobId, actorId, { lock = false
     ${lock ? "FOR UPDATE OF jobs, relationships" : ""}`,
     [jobId, actorId]
   );
-  return result.rows[0] || null;
+  return result.rows[0] || await loadBusinessJobContext(client, jobId, actorId, {lock});
 }
 
 function professionalAuthorized(context, actorId) {
@@ -273,7 +274,7 @@ function professionalAuthorized(context, actorId) {
 
 async function loadEffectiveApprovedBillingLines(client, jobId) {
   const result = await client.query(
-    `SELECT quotes.id AS quote_id,
+    `SELECT quotes.id AS quote_id, decisions.id AS quote_approval_id,
       decisions.issued_quote_version AS quote_version,
       versions.currency,
       versions.customer_terms_snapshot,
@@ -289,7 +290,8 @@ async function loadEffectiveApprovedBillingLines(client, jobId) {
       snapshots.description, snapshots.quantity,
       snapshots.unit_amount_minor, snapshots.line_total_minor
     FROM canonical_quotes quotes
-    INNER JOIN canonical_quote_customer_decisions decisions
+    INNER JOIN jobs source_job ON source_job.id=quotes.job_id
+    INNER JOIN canonical_quote_approvals decisions
       ON decisions.quote_id = quotes.id
       AND decisions.job_id = quotes.job_id
       AND decisions.decision = 'APPROVED'
@@ -307,10 +309,15 @@ async function loadEffectiveApprovedBillingLines(client, jobId) {
       ON customer_parties.quote_id = quotes.id
       AND customer_parties.job_id = quotes.job_id
     WHERE quotes.job_id = $1
+      AND ((source_job.source_type='ordinary_request_selection' AND decisions.approval_source='MEETRO_CUSTOMER')
+        OR (source_job.source_type='business_document' AND decisions.approval_source='EXTERNAL_EVIDENCE'
+          AND customer_parties.contractor_profile_id=source_job.contractor_profile_id
+          AND customer_parties.business_contact_id=source_job.business_contact_id
+          AND customer_parties.business_customer_relationship_id=source_job.business_customer_relationship_id))
       AND NOT EXISTS (
         SELECT 1
         FROM canonical_quotes revision
-        INNER JOIN canonical_quote_customer_decisions revision_decision
+        INNER JOIN canonical_quote_approvals revision_decision
           ON revision_decision.quote_id = revision.id
           AND revision_decision.job_id = revision.job_id
           AND revision_decision.decision = 'APPROVED'
@@ -433,7 +440,17 @@ async function loadInvoiceContext(client, invoiceId, actorId, { lock = false } =
     ${lock ? "FOR UPDATE OF invoices, relationships" : ""}`,
     [invoiceId, actorId]
   );
-  return result.rows[0] || null;
+  if (result.rows[0]) return result.rows[0];
+  const identity = await client.query(`SELECT * FROM canonical_invoices WHERE id=$1 ${lock?'FOR UPDATE':''}`, [invoiceId]);
+  if (!identity.rows[0]) return null;
+  const job = await loadBusinessJobContext(client, identity.rows[0].job_id, actorId, {lock});
+  if (!job || identity.rows[0].issuer_participant_id !== job.professional_participant_id) return null;
+  const current = await client.query(`SELECT v.*, i.issued_at FROM canonical_invoice_versions v
+    LEFT JOIN canonical_invoice_issuances i ON i.invoice_id=v.invoice_id
+    WHERE v.invoice_id=$1 ORDER BY v.version DESC LIMIT 1`,[invoiceId]);
+  if (!current.rows[0]) return null;
+  return {...job, ...identity.rows[0], ...current.rows[0], invoice_id:invoiceId,
+    customer_party_contractor_profile_id:job.contractor_profile_id};
 }
 
 async function loadCustomerInvoiceContext(client, { invoiceId = null, jobId = null, actorId }) {
@@ -552,8 +569,9 @@ function invoiceProjection(row, lines, payments, audience) {
     invoiceId: row.invoice_id,
     invoiceNumber: row.invoice_number,
     jobId: row.job_id,
-    requestId: Number(row.job_request_id),
-    relationshipId: Number(row.relationship_id),
+    ...authorityFields(row),
+    requestId: row.job_request_id == null ? null : Number(row.job_request_id),
+    relationshipId: row.relationship_id == null ? null : Number(row.relationship_id),
     conversationId: positiveInteger(row.conversation_id),
     business: { displayName: row.business_name || "Professional" },
     customer: { displayName: row.customer_name || "Customer" },
@@ -576,7 +594,7 @@ function invoiceProjection(row, lines, payments, audience) {
     payments: payments.map((payment) => paymentProjection(payment, audience)),
     actions: professional
       ? {
-          canIssue: row.status === "DRAFT" && positiveInteger(row.conversation_id) !== null,
+          canIssue: row.status === "DRAFT" && (row.source_type === "business_document" || positiveInteger(row.conversation_id) !== null),
           canRecordPayment: ["SENT", "PARTIALLY_PAID"].includes(row.status),
           canShareExternal: row.status !== "DRAFT",
         }
@@ -813,14 +831,14 @@ async function createInvoice(input = {}) {
           source_type,
           source_quote_id, source_quote_version, source_scope_item_id,
           lineage_label, description, quantity, unit_amount_minor,
-          line_total_minor, created_by_participant_id
-        ) VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+          line_total_minor, created_by_participant_id, source_quote_approval_id
+        ) VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
         [randomUUID(), invoiceId, validated.jobId, index + 1,
           INVOICE_LINE_SOURCE_TYPES.APPROVED_QUOTE_SCOPE,
           line.quote_id, line.quote_version, line.scope_item_id,
           line.lineage_label, line.description, line.quantity,
           line.unit_amount_minor, line.line_total_minor,
-          context.professional_participant_id]
+          context.professional_participant_id,line.quote_approval_id]
       );
     }
     for (const [index, line] of extraWorkResult.items.entries()) {
@@ -867,7 +885,13 @@ function invoiceMessageSnapshot(invoice) {
   };
 }
 
-async function issueInvoice(input = {}) {
+function invoiceDeliveryPlan(context, job) {
+  const allowed = Boolean(job && (job.completion_id || job.work_completion_execution_id) && INVOICE_STATUSES.has(context.status));
+  const initialIssue = context.status === "DRAFT";
+  return { allowed, initialIssue, version: Number(context.version) + (initialIssue ? 1 : 0), issuedAt: initialIssue ? new Date().toISOString() : iso(context.issued_at) };
+}
+
+async function issueInvoice(input = {}, { external = false } = {}) {
   const validated = validateInput(
     input, ["invoiceId", "expectedVersion", "messageText", "idempotencyKey"], { invoice: true }
   );
@@ -887,10 +911,17 @@ async function issueInvoice(input = {}) {
     if (!professionalAuthorized(context, validated.actorId)) {
       return { abort: failure(403, "INVOICE_AUTHORITY_DENIED", "Invoice authority is unavailable.") };
     }
+    const job = await loadProfessionalJobContext(client, context.job_id, validated.actorId, { lock: true });
+    const deliveryPlan = invoiceDeliveryPlan(context, job);
+    if (!deliveryPlan.allowed) return { abort: failure(409, "INVOICE_JOB_NOT_COMPLETED", "The job must be marked complete before the final Invoice can be sent.") };
+    if (external && context.source_type !== "business_document") return {abort:failure(403,"INVOICE_AUTHORITY_DENIED","External issuance requires a business-owned Job.")};
+    if (!external && (!positiveInteger(context.conversation_id) || context.conversation_status !== "active" || !context.homeowner_id)) {
+      return { abort: failure(409, "INVOICE_CONVERSATION_UNAVAILABLE", "The Invoice cannot be sent in Meetro.") };
+    }
     const fingerprint = hash({
       command: "invoice.issue", actorId: validated.actorId,
       invoiceId: validated.invoiceId, jobId: context.job_id, expectedVersion,
-      messageText,
+      messageText, ...(external ? {transport:'EXTERNAL'} : {}),
     });
     const reserved = await reserveCommand(client, {
       actorId: validated.actorId, commandName: "invoice.issue",
@@ -902,9 +933,6 @@ async function issueInvoice(input = {}) {
     if (Number(context.version) !== expectedVersion) {
       return { abort: failure(409, "STALE_INVOICE_VERSION", "The Invoice version is stale.") };
     }
-    if (context.status !== "DRAFT") {
-      return { abort: failure(409, "INVOICE_NOT_ISSUABLE", "Only a Draft Invoice can be sent.") };
-    }
     const conversation = {
       id: positiveInteger(context.conversation_id),
       homeowner_id: Number(context.homeowner_id),
@@ -912,11 +940,11 @@ async function issueInvoice(input = {}) {
       status: context.conversation_status,
     };
     const receiverId = resolveCommunicationRecipient(conversation, validated.actorId);
-    if (!conversation.id || conversation.status !== "active" || !receiverId) {
+    if (!external && (!conversation.id || conversation.status !== "active" || !receiverId)) {
       return { abort: failure(409, "INVOICE_CONVERSATION_UNAVAILABLE", "The Invoice cannot be sent in Meetro.") };
     }
-    const nextVersion = expectedVersion + 1;
-    const issuedAt = new Date().toISOString();
+    const nextVersion = deliveryPlan.version;
+    const issuedAt = deliveryPlan.issuedAt;
     const issuedPaidMinor = Number(context.paid_minor);
     const issuedBalanceMinor = Number(context.balance_minor);
     const issuedStatus = issuedPaidMinor === Number(context.total_minor)
@@ -933,7 +961,7 @@ async function issueInvoice(input = {}) {
       due: dueProjection(context), customerNotes: context.customer_notes,
       terms: context.terms, issuedAt,
     });
-    await client.query(
+    if (deliveryPlan.initialIssue) await client.query(
       `INSERT INTO canonical_invoice_versions (
         invoice_id, version, job_id, status, currency,
         subtotal_minor, total_minor, paid_minor, balance_minor,
@@ -949,6 +977,16 @@ async function issueInvoice(input = {}) {
         context.customer_notes, context.terms,
         context.professional_participant_id, versionHash]
     );
+    if (external) {
+      if (deliveryPlan.initialIssue) await client.query(`INSERT INTO canonical_invoice_issuances
+        (invoice_id,invoice_version,job_id,conversation_id,message_id,issued_by_participant_id,issued_at,source_integrity_hash,delivery_channel)
+        VALUES($1,$2,$3,NULL,NULL,$4,$5,$6,'EXTERNAL')`,
+        [context.invoice_id,nextVersion,context.job_id,context.professional_participant_id,issuedAt,versionHash]);
+      const refreshed = await loadInvoiceContext(client,validated.invoiceId,validated.actorId);
+      const result={ok:true,success:true,status:201,code:'INVOICE_ISSUED_EXTERNALLY',invoice:await loadInvoiceProjection(client,refreshed,'professional')};
+      await completeCommand(client,reserved.row.id,context.invoice_id,result);
+      return result;
+    }
     await ensureConversationParticipantStatesWithClient({
       client, conversationId: conversation.id,
     });
@@ -984,7 +1022,7 @@ async function issueInvoice(input = {}) {
     );
     const message = inserted.rows[0];
     if (!message) throw new Error("Invoice delivery message was not created.");
-    await client.query(
+    if (deliveryPlan.initialIssue) await client.query(
       `INSERT INTO canonical_invoice_issuances (
         invoice_id, invoice_version, job_id, conversation_id, message_id,
         issued_by_participant_id, issued_at, source_integrity_hash
@@ -1151,6 +1189,7 @@ async function recordPayment(input = {}) {
         customerReference, context.professional_participant_id,
         evidenceHash, recordedAt]
     );
+    if (context.homeowner_id) {
     await resolveCanonicalLifecycleAlertsWithClient({
       client,
       sourceDomain: "commercial",
@@ -1209,6 +1248,7 @@ async function recordPayment(input = {}) {
       },
       availableAt: recordedAt,
     });
+    }
     const refreshed = await loadInvoiceContext(client, validated.invoiceId, validated.actorId);
     const invoice = await loadInvoiceProjection(client, refreshed, "professional");
     const payment = invoice.payments.find((item) => item.paymentId === paymentId);
@@ -1243,12 +1283,9 @@ async function getProfessionalJobInvoice(input = {}) {
     const result = await client.query(
       `SELECT invoices.id AS invoice_id
        FROM canonical_invoices invoices
-       INNER JOIN request_relationships relationships
-         ON relationships.id = invoices.relationship_id
-         AND relationships.professional_user_id = $2
        WHERE invoices.job_id = $1
        LIMIT 1`,
-      [validated.jobId, validated.actorId]
+      [validated.jobId]
     );
     if (!result.rows[0]) {
       return { abort: failure(404, "INVOICE_UNAVAILABLE", "The Invoice is unavailable.") };
@@ -1278,6 +1315,7 @@ async function getCustomerInvoice(input = {}) {
     }
     return {
       ok: true, success: true, status: 200, code: "CUSTOMER_INVOICE_LOADED",
+      invoiceVersion: Number(context.version),
       invoice: await loadInvoiceProjection(client, context, "customer"),
     };
   });
@@ -1295,6 +1333,7 @@ async function getCustomerJobInvoice(input = {}) {
     }
     return {
       ok: true, success: true, status: 200, code: "CUSTOMER_INVOICE_LOADED",
+      invoiceVersion: Number(context.version),
       invoice: await loadInvoiceProjection(client, context, "customer"),
     };
   });
@@ -1374,8 +1413,15 @@ async function getProfessionalInvoiceWorkspace(input = {}) {
       LIMIT $2`,
       [validated.actorId, limit]
     );
+    const businessJobs = await client.query(`${BUSINESS_JOB_CONTEXT_SQL} AND profiles.user_id=$1`, [validated.actorId]);
+    for (const job of businessJobs.rows) {
+      if (!job.completion_id) continue;
+      const existing = await client.query('SELECT id FROM canonical_invoices WHERE job_id=$1',[job.job_id]);
+      if (!existing.rows.length) ready.rows.push({...job,request_id:null,service_title:job.job_title});
+    }
+    ready.rows.sort((a,b)=>new Date(a.completed_at)-new Date(b.completed_at) || a.job_id.localeCompare(b.job_id));
     const readyJobs = [];
-    for (const row of ready.rows) {
+    for (const row of ready.rows.slice(0,limit)) {
       const approvedLines = await loadEffectiveApprovedBillingLines(client, row.job_id);
       const approvedTerms = effectiveApprovedPaymentTerms(approvedLines);
       const currencies = new Set(approvedLines.map((line) => line.currency));
@@ -1388,8 +1434,9 @@ async function getProfessionalInvoiceWorkspace(input = {}) {
       const currency = currencies.size === 1 ? [...currencies][0] : null;
       readyJobs.push({
         jobId: row.job_id,
-        requestId: Number(row.request_id),
-        relationshipId: Number(row.relationship_id),
+        ...authorityFields(row),
+        requestId: row.request_id == null ? null : Number(row.request_id),
+        relationshipId: row.relationship_id == null ? null : Number(row.relationship_id),
         customerName: row.customer_name || "Customer",
         serviceTitle: row.service_title || "Job",
         completedAt: iso(row.completed_at),
@@ -1434,12 +1481,20 @@ async function getProfessionalInvoiceWorkspace(input = {}) {
       LIMIT $2`,
       [validated.actorId, limit]
     );
-    const rows = invoices.rows.map((row) => ({
+    for (const job of businessJobs.rows) {
+      const existing = await client.query('SELECT id FROM canonical_invoices WHERE job_id=$1',[job.job_id]);
+      if (!existing.rows[0]) continue;
+      const context = await loadInvoiceContext(client,existing.rows[0].id,validated.actorId);
+      if (context) invoices.rows.push({...context,request_id:null,service_title:context.job_title,updated_at:context.created_at});
+    }
+    invoices.rows.sort((a,b)=>new Date(b.updated_at)-new Date(a.updated_at) || b.invoice_id.localeCompare(a.invoice_id));
+    const rows = invoices.rows.slice(0,limit).map((row) => ({
       invoiceId: row.invoice_id,
       invoiceNumber: row.invoice_number,
       jobId: row.job_id,
-      requestId: Number(row.request_id),
-      relationshipId: Number(row.relationship_id),
+      ...authorityFields(row),
+        requestId: row.request_id == null ? null : Number(row.request_id),
+      relationshipId: row.relationship_id == null ? null : Number(row.relationship_id),
       customerName: row.customer_name || "Customer",
       serviceTitle: row.service_title || "Job",
       currentVersion: Number(row.version),
@@ -1491,6 +1546,7 @@ module.exports = {
   getProfessionalJobInvoice,
   getProfessionalInvoiceWorkspace,
   issueInvoice,
+  issueInvoiceExternally: (input) => issueInvoice(input, {external:true}),
   recordPayment,
   invoicePaymentInternals: Object.freeze({
     canonicalJson,
@@ -1500,6 +1556,7 @@ module.exports = {
     effectiveApprovedPaymentTerms,
     hash,
     invoiceMessageSnapshot,
+    invoiceDeliveryPlan,
     invoiceProjection,
     invoiceVersionHash,
     lineProjection,
@@ -1507,6 +1564,8 @@ module.exports = {
     paymentHash,
     paymentProjection,
     professionalAuthorized,
+    loadInvoiceContext,
+    loadInvoiceProjection,
     sqlDate,
     workspaceLimit,
   }),

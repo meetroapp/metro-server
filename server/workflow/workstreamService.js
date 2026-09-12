@@ -1,4 +1,5 @@
 "use strict";
+const { BUSINESS_JOB_CONTEXT_SQL, loadBusinessJobContext, authorityFields } = require("../relationships/businessJobAuthority");
 
 const { randomUUID } = require("node:crypto");
 
@@ -272,7 +273,7 @@ async function loadJobContext(client, jobId, actorUserId, { lock = false } = {})
     `,
     [jobId, actorUserId]
   );
-  return result.rows[0] || null;
+  return result.rows[0] || await loadBusinessJobContext(client, jobId, actorUserId, {lock});
 }
 
 async function requireAuthority({

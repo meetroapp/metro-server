@@ -597,7 +597,7 @@ test("durable Job completion outranks work and hands off without financial mutat
   assert.match(projection.nextAction.description, /separate next step/i);
 });
 
-test("governed Approved Work completion projects Work Completed without Job closure or History", () => {
+test("governed Approved Work completion requires whole-Job review without billing or History", () => {
   const projection = derive({
     approvedWorkCompletion: {
       execution_id: "execution",
@@ -609,9 +609,9 @@ test("governed Approved Work completion projects Work Completed without Job clos
     activities: [{ id: "activity", version: 3, status: "DONE" }],
   });
   assertProjection(projection, {
-    stage: "WORK_COMPLETED",
+    stage: "WORKSTREAMS_COMPLETE_PENDING_JOB_COMPLETION",
     responsibility: "PROFESSIONAL",
-    nextAction: "READY_TO_INVOICE",
+    nextAction: "REVIEW_WORKSTREAM_COMPLETION",
   });
   assert.equal(projection.freshness.approvedWorkExecutionVersion, 2);
   assert.equal(
@@ -620,20 +620,20 @@ test("governed Approved Work completion projects Work Completed without Job clos
   );
   assert.deepEqual(projection.reasonCodes, [
     "APPROVED_WORK_EXECUTION_COMPLETED",
-    "INVOICE_NOT_CREATED",
+    "JOB_COMPLETION_REVIEW_AVAILABLE",
     "FINANCIAL_SETTLEMENT_REMAINS_SEPARATE",
     "JOB_CLOSURE_REMAINS_SEPARATE",
   ]);
 });
 
-test("governed completion and later lifecycle truth outrank historical start evidence", () => {
+test("only canonical Job completion lets Invoice truth outrank historical start evidence", () => {
   const approvedWorkExecution = {
     execution_id: "execution",
     execution_version: 1,
     state: "ACTIVE",
     start_event_count: 1,
   };
-  const workCompleted = derive({
+  const pendingJobCompletion = derive({
     approvedWorkExecution,
     approvedWorkCompletion: {
       execution_id: "execution",
@@ -643,8 +643,12 @@ test("governed completion and later lifecycle truth outrank historical start evi
     invoice: { id: "invoice", version: 1, status: "DRAFT" },
     workstreams: [{ id: "workstream", version: 1, state: "OPEN" }],
   });
-  assert.equal(workCompleted.stage.code, "WORK_COMPLETED");
-  assert.equal(workCompleted.nextAction.code, "REVIEW_DRAFT_INVOICE");
+  assert.equal(pendingJobCompletion.stage.code, "WORKSTREAMS_COMPLETE_PENDING_JOB_COMPLETION");
+  assert.equal(pendingJobCompletion.nextAction.code, "REVIEW_WORKSTREAM_COMPLETION");
+  assert.equal(
+    pendingJobCompletion.availableActions.some((action) => action.code === "VIEW_INVOICE"),
+    false
+  );
 
   const jobCompleted = derive({
     approvedWorkExecution,

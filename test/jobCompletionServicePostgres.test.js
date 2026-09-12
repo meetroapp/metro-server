@@ -9,7 +9,7 @@ const {
   createVisitLifecycleFixture,
   createVisitTestIdentities,
   createVisitWorkstream,
-  ensureVisitEvaluation,
+  ensureCompletedVisitEvaluation,
   quiet,
 } = require("./helpers/visitLifecycleFixture");
 const {
@@ -74,11 +74,16 @@ async function createApprovedWork(pool, identities, fixture, workstream, suffix)
       },
     },
   }, `completion-quote-scope-${suffix}`);
-  await ensureVisitEvaluation(pool, identities, fixture, suffix);
+  await ensureCompletedVisitEvaluation(pool, identities, fixture, suffix);
   const issued = await command(issueQuote, pool, identities.professionalId, {
     quoteId: scoped.quote.id,
     expectedVersion: scoped.quote.currentVersion,
   }, `completion-quote-issue-${suffix}`);
+  assert.equal(issued.ok,true,issued.code);
+  const delivered = await command(require('../server/authorization/quoteDeliveryService').sendQuoteInMeetro, pool, identities.professionalId, {
+    quoteId:issued.quote.id, expectedIssuedVersion:issued.quote.currentVersion,
+  }, `completion-quote-delivery-${suffix}`);
+  assert.equal(delivered.ok,true,delivered.code);
   await command(approveIssuedQuote, pool, identities.homeownerId, {
     quoteId: issued.quote.id,
     expectedIssuedVersion: issued.quote.currentVersion,
@@ -94,14 +99,14 @@ test(
     const suffix = randomUUID();
     try {
       const migrations = getMigrationFiles();
-      assert.equal(migrations.length, 47);
+      assert.equal(migrations.length, 85);
       const migrated = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(migrated.success, true);
-      assert.equal(migrated.applied.length, 45);
+      assert.equal(migrated.applied.length, migrations.length);
       const replay = await runMigrationCollection(pool, migrations, targetMetadata());
       assert.equal(replay.success, true);
       assert.equal(replay.applied.length, 0);
-      assert.equal(replay.skipped.length, 45);
+      assert.equal(replay.skipped.length, migrations.length);
 
       const identities = await createVisitTestIdentities(pool, suffix);
       const fixture = await createVisitLifecycleFixture(pool, identities, suffix);

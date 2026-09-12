@@ -1,6 +1,8 @@
 "use strict";
 
 const service = require("./invoicePaymentService");
+const {sendExternalInvoiceEmail} = require("./externalInvoiceCommunicationService");
+const { getCanonicalInvoicePdf } = require("./canonicalInvoicePdf");
 
 function sendInvoiceResult(res, result, fields = []) {
   res.setHeader?.("Cache-Control", "private, no-store");
@@ -78,6 +80,16 @@ function createInvoicePaymentHandlers({
         messageText: req.body?.messageText,
         idempotencyKey: req.headers?.["idempotency-key"],
       })),
+    issueInvoiceExternally: handle("issue_external_invoice", ["invoice"], (req) =>
+      invoicePaymentService.issueInvoiceExternally({pool:getPool(req),authenticatedActor:req.user,
+        invoiceId:req.params.invoiceId,expectedVersion:req.body?.expectedVersion,idempotencyKey:req.headers?.["idempotency-key"]})),
+    emailInvoice: handle("email_external_invoice", ["delivery"], (req) => {
+      if (!req.body || Object.keys(req.body).some(key=>!["expectedVersion","purpose","messageText"].includes(key))) {
+        return {ok:false,status:400,code:"INVOICE_EMAIL_FIELD_REJECTED",message:"The email request is invalid."};
+      }
+      return sendExternalInvoiceEmail({...req.body,pool:getPool(req),authenticatedActor:req.user,
+        invoiceId:req.params.invoiceId,idempotencyKey:req.headers?.["idempotency-key"]});
+    }),
     recordPayment: handle("record_invoice_payment", ["invoice", "payment"], (req) =>
       invoicePaymentService.recordPayment({
         pool: getPool(req),
@@ -117,11 +129,27 @@ function registerInvoicePaymentRoutes({
     sendPublicDatabaseError,
     invoicePaymentService,
   });
+  for (const audience of ["professional", "customer"]) {
+    app.get(`/${audience}/invoices/:invoiceId/customer-pdf`, authMiddleware, async (req, res) => {
+      try {
+        const result = await getCanonicalInvoicePdf({ pool: getPool(req), authenticatedActor: req.user, invoiceId: req.params.invoiceId, audience, expectedVersion: req.query?.version });
+        if (!result.ok) return sendInvoiceResult(res, result);
+        res.setHeader("Cache-Control", "private, no-store");
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader("Content-Disposition", `attachment; filename="${result.pdf.filename}"`);
+        return res.status(200).send(Buffer.from(result.pdf.base64, "base64"));
+      } catch (error) {
+        return sendPublicDatabaseError({ res, error, operation: "invoice_pdf", code: "INVOICE_PDF_FAILED", message: "The Invoice PDF is unavailable." });
+      }
+    });
+  }
   app.get("/professional/invoices/workspace", authMiddleware, handlers.getWorkspace);
   app.post("/professional/jobs/:jobId/invoices", authMiddleware, handlers.createInvoice);
   app.get("/professional/jobs/:jobId/invoice", authMiddleware, handlers.getProfessionalJobInvoice);
   app.get("/professional/invoices/:invoiceId", authMiddleware, handlers.getProfessionalInvoice);
   app.post("/professional/invoices/:invoiceId/issue", authMiddleware, handlers.issueInvoice);
+  app.post("/professional/invoices/:invoiceId/issue-external", authMiddleware, handlers.issueInvoiceExternally);
+  app.post("/professional/invoices/:invoiceId/external-email", authMiddleware, handlers.emailInvoice);
   app.post("/professional/invoices/:invoiceId/payments", authMiddleware, handlers.recordPayment);
   app.get("/customer/invoices/:invoiceId", authMiddleware, handlers.getCustomerInvoice);
   app.get("/customer/jobs/:jobId/invoice", authMiddleware, handlers.getCustomerJobInvoice);

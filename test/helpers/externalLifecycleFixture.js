@@ -12,6 +12,7 @@ async function createWorkingQuote({
   businessContactId = null,
   customerRelationshipId = null,
   documentNumber,
+  contentOverrides = {},
 }) {
   const draftId = randomUUID();
 
@@ -67,6 +68,7 @@ async function createWorkingQuote({
     },
   };
 
+  Object.assign(content, contentOverrides);
   await pool.query(
     `INSERT INTO business_document_working_drafts (
        id,
@@ -113,7 +115,7 @@ async function createWorkingQuote({
 }
 
 
-async function createExternalLifecycleFixture(pool, mode) {
+async function createExternalLifecycleFixture(pool, mode, contentOverrides = {}) {
   const suffix = randomUUID();
   const user = await pool.query(`INSERT INTO users (username,email,password_hash,business_name,business_category,role,account_type)
     VALUES ('Lifecycle Professional',$1,'test-only','Lifecycle Business','Testing','handyman','professional') RETURNING id`,
@@ -135,7 +137,7 @@ async function createExternalLifecycleFixture(pool, mode) {
     customerRelationshipId = relationship.rows[0].id;
   }
   const { draftId } = await createWorkingQuote({ pool,userId,contractorProfileId,mode,
-    businessContactId,customerRelationshipId,documentNumber:'Q-1' });
+    businessContactId,customerRelationshipId,documentNumber:'Q-1',contentOverrides });
   const base = { pool, authenticatedActor:{id:userId},logger:quiet };
   const imported = await service.importBusinessDocumentDraftQuote({ ...base,draftId,expectedDocumentVersion:1,
     idempotencyKey:`external-import-${suffix}` });
@@ -184,4 +186,4 @@ async function assertNoExternalCustomerAuthority(fixture) {
   ]) assert.equal((await pool.query(sql,[jobId])).rows[0].count,0);
   assert.equal((await pool.query(`SELECT count(*)::int AS count FROM conversations WHERE professional_user_id=$1`,[fixture.userId])).rows[0].count,0);
 }
-module.exports={createExternalLifecycleFixture,payExternalDeposit,assertNoExternalCustomerAuthority,quiet};
+module.exports={createWorkingQuote,createExternalLifecycleFixture,payExternalDeposit,assertNoExternalCustomerAuthority,quiet};
