@@ -1,4 +1,5 @@
 "use strict";
+const { jobEvaluationVisitAuthoritySql } = require("./jobEvaluationVisitAuthority");
 
 const {
   commercialAuthorityInternals,
@@ -105,6 +106,8 @@ const PROFESSIONAL_JOBS_CTE = `
   professional_jobs AS (
     SELECT DISTINCT
       jobs.id AS job_id,
+      evaluation_authority.evaluation_job_authorized,
+      evaluation_authority.job_closed,
       jobs.source_type,
       jobs.job_request_id,
       jobs.source_request_relationship_id AS relationship_id,
@@ -173,6 +176,8 @@ const PROFESSIONAL_JOBS_CTE = `
       WHERE approvals.job_id = jobs.id AND approvals.approval_source = 'EXTERNAL_EVIDENCE'
       ORDER BY approvals.approved_at DESC, approvals.id DESC LIMIT 1
     ) customer_snapshot ON TRUE
+    LEFT JOIN LATERAL (${jobEvaluationVisitAuthoritySql("jobs.id", "professional.id")})
+      evaluation_authority ON TRUE
     WHERE jobs.lifecycle_contract_version = 2
       AND professional_role_revocations.id IS NULL
       AND customer_role_revocations.id IS NULL
@@ -206,7 +211,7 @@ async function loadOpportunities(client, actorId, limit) {
         jobs.*,
         jobs.job_created_at AS subject_updated_at
       FROM professional_jobs jobs
-      WHERE (
+      WHERE ((
         SELECT count(DISTINCT grants.capability)
         FROM lifecycle_authority_grants grants
         LEFT JOIN lifecycle_authority_grant_revocations revocations
@@ -242,7 +247,8 @@ async function loadOpportunities(client, actorId, limit) {
             'visit.read','visit.confirm','visit.change_request'
           ])
           AND ${ACTIVE_GRANT}
-      ) = 3
+      ) = 3 OR jobs.evaluation_job_authorized)
+      AND NOT jobs.job_closed
       AND NOT EXISTS (
         SELECT 1
         FROM canonical_evaluation_job_subjects subjects
@@ -493,7 +499,9 @@ async function loadVisits(client, actorId, view, limit) {
           )
           AND ${ACTIVE_GRANT}
         ORDER BY grants.capability
-      ) AS active_capabilities,
+      ) || CASE WHEN visits.purpose = 'EVALUATION' AND jobs.evaluation_job_authorized
+        THEN ARRAY['visit.read','visit.confirm','visit.reschedule','visit.cancel','visit.start','visit.complete']::text[]
+        ELSE ARRAY[]::text[] END AS active_capabilities,
       count(*) FILTER (
         WHERE versions.state = 'PROPOSED'
           AND versions.recorded_by_participant_id IS DISTINCT FROM jobs.customer_participant_id
@@ -531,7 +539,7 @@ async function loadVisits(client, actorId, view, limit) {
     ) change_request ON TRUE
     WHERE visits.purpose IN ('EVALUATION','APPROVED_WORK')
       AND versions.state = ANY($2::text[])
-      AND EXISTS (
+      AND (EXISTS (
         SELECT 1 FROM lifecycle_authority_grants grants
         LEFT JOIN lifecycle_authority_grant_revocations revocations
           ON revocations.authority_grant_id = grants.id
@@ -561,6 +569,7 @@ async function loadVisits(client, actorId, view, limit) {
           )
           AND ${ACTIVE_GRANT}
       )
+        OR (visits.purpose = 'EVALUATION' AND jobs.evaluation_job_authorized))
     ORDER BY
       CASE WHEN $3 = 'active' THEN versions.scheduled_start_at END ASC,
       CASE WHEN $3 = 'history' THEN COALESCE(versions.completed_at, versions.cancelled_at, versions.created_at) END DESC,

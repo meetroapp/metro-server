@@ -1,6 +1,7 @@
 "use strict";
 
 const { createHash, randomUUID } = require("node:crypto");
+const { resolveJobEvaluationVisitAuthority } = require("./jobEvaluationVisitAuthority");
 
 const {
   commercialAuthorityInternals,
@@ -722,6 +723,9 @@ async function requireActorRole({
       error: failure(403, "VISIT_AUTHORITY_REQUIRED", "Visit authority is required."),
     };
   }
+  const evaluationAuthority = await resolveJobEvaluationVisitAuthority(client, context);
+  context.job_closed = evaluationAuthority.closed;
+  context.resolved_evaluation_visit_capabilities = evaluationAuthority.capabilities;
   return { context, role };
 }
 
@@ -760,7 +764,10 @@ async function requireAuthority({
     allowEvaluationVisitScope,
     logger,
   });
-  if (!granted) {
+  const evaluationGranted = allowEvaluationVisitScope &&
+    !quoteApprovalId && !approvedQuoteDecisionId &&
+    authorized.context.resolved_evaluation_visit_capabilities.includes(capability);
+  if (!granted && !evaluationGranted) {
     logger.warn("Visit capability authority denied", {
       code: "VISIT_CAPABILITY_AUTHORITY_DENIED",
       actorUserId,
@@ -796,7 +803,9 @@ async function hasPurposeVisitGrant({
     allowEvaluationVisitScope: row.purpose === "EVALUATION",
     logger,
   };
-  return hasActiveLifecycleGrant(grantInput);
+  return (row.purpose === "EVALUATION" &&
+    context.resolved_evaluation_visit_capabilities?.includes(capability)) ||
+    hasActiveLifecycleGrant(grantInput);
 }
 
 function activeCapabilities(context, row = null) {
@@ -807,7 +816,8 @@ function activeCapabilities(context, row = null) {
   );
   if (!row || row.purpose === "EVALUATION") {
     for (const capability of
-      context?.active_job_evaluation_visit_capabilities || []) {
+      [...(context?.active_job_evaluation_visit_capabilities || []),
+        ...(context?.resolved_evaluation_visit_capabilities || [])]) {
       capabilities.add(capability);
     }
   }
@@ -1392,6 +1402,8 @@ async function listVisits(input = {}) {
       actions: {
         canPropose:
           authorized.role === "PROFESSIONAL" &&
+          authorized.context.job_closed !== true &&
+          authorized.context.canonical_evaluation_status !== "completed" &&
           activeCapabilities(authorized.context).has(VISIT_CAPABILITIES.PROPOSE),
       },
     };
@@ -1562,6 +1574,11 @@ async function proposeVisit(input = {}) {
       allowEvaluationVisitScope: purpose === "EVALUATION",
     });
     if (authorized.error) return { abort: authorized.error };
+    if (purpose === "EVALUATION" && (authorized.context.job_closed === true ||
+        authorized.context.canonical_evaluation_status === "completed")) {
+      return { abort: failure(409, "EVALUATION_VISIT_SCHEDULING_CLOSED",
+        "New Evaluation Visits are not available for this Job.") };
+    }
     if (purpose === "APPROVED_WORK") {
       const depositGate = await evaluateApprovedWorkDepositGateWithClient({
         client,
