@@ -62,7 +62,7 @@ test("authenticated Job customer-party handlers forward only governed identity i
   assert.equal(linked.headers["Cache-Control"], "private, no-store");
 });
 
-test("registers only authenticated explicit link and owner-scoped read routes", () => {
+test("registers authenticated explicit link, bounded reconciliation and owner-scoped read routes", () => {
   const routes = [];
   const app = {
     post(path, ...handlers) { routes.push(["POST", path, handlers.length]); },
@@ -79,6 +79,7 @@ test("registers only authenticated explicit link and owner-scoped read routes", 
   });
   assert.deepEqual(routes, [
     ["POST", "/jobs/:jobId/customer-party", 2],
+    ["POST", "/jobs/:jobId/customer-party/reconcile", 2],
     ["GET", "/jobs/:jobId/customer-party", 2],
   ]);
 });

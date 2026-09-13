@@ -72,7 +72,9 @@ test("fixture 9: similar customer names are never reconciliation input", () => {
 });
 
 test("fixture 10: Quote history is exact Job and customer-party scoped", () => {
-  assert.match(source, /FROM canonical_quote_customer_parties parties[\s\S]*quotes\.job_id = parties\.job_id/);
+  assert.match(source, /FROM canonical_quote_customer_parties[\s\S]*quotes\.job_id = parties\.job_id/);
+  assert.match(source, /INNER JOIN canonical_quotes q ON q\.job_id = p\.job_id/);
+  assert.match(source, /WHERE explicit_party\.quote_id = q\.id/);
 });
 
 test("fixture 11: Deposit and payment history start from the exact linked Job", () => {
@@ -95,7 +97,9 @@ test("fixture 13: completed work keeps canonical activity and workstream identit
 });
 
 test("fixture 14: final Invoice remains exact Job and customer-party scoped", () => {
-  assert.match(source, /FROM canonical_invoice_customer_parties parties[\s\S]*invoices\.job_id = parties\.job_id/);
+  assert.match(source, /FROM canonical_invoice_customer_parties[\s\S]*invoices\.job_id = parties\.job_id/);
+  assert.match(source, /INNER JOIN canonical_invoices i ON i\.job_id = p\.job_id/);
+  assert.match(source, /WHERE explicit_party\.invoice_id = i\.id/);
   assert.match(source, /current\.paid_minor/);
   assert.match(source, /current\.balance_minor/);
 });

@@ -235,8 +235,10 @@ test("every history query is scoped to the exact business, Contact, and Relation
 test("history identity comes only from canonical customer-party linkage tables", () => {
   const source = String(businessCustomerRelationshipInternals.sqlStore.getActivity);
   assert.match(source, /FROM job_customer_parties parties/);
-  assert.match(source, /FROM canonical_quote_customer_parties parties/);
-  assert.match(source, /FROM canonical_invoice_customer_parties parties/);
+  assert.match(source, /FROM canonical_quote_customer_parties/);
+  assert.match(source, /FROM canonical_invoice_customer_parties/);
+  assert.match(source, /NOT EXISTS \(SELECT 1 FROM canonical_quote_customer_parties explicit_party/);
+  assert.match(source, /NOT EXISTS \(SELECT 1 FROM canonical_invoice_customer_parties explicit_party/);
   assert.doesNotMatch(source, /request_relationships/);
   assert.doesNotMatch(source, /contacts\.(?:display_name|email|phone)/);
   assert.doesNotMatch(source, /(?:customer|contact).*(?:name|email|phone).*=/i);

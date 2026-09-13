@@ -1,6 +1,7 @@
 "use strict";
 
 const { createHash, randomUUID } = require("node:crypto");
+const { ensureJobCustomerParty } = require("../relationships/jobCustomerPartyReconciliationService");
 const {
   normalizeQuoteDraftPhotoCollection,
 } = require("../media/quoteDraftPhoto");
@@ -891,6 +892,15 @@ const sqlStore = Object.freeze({
             : "numbering_exhausted",
         };
       }
+      if (draft.jobId && customerParty) {
+        const link = await ensureJobCustomerParty(client, {
+          jobId: draft.jobId, actorUserId, proposedParty: customerParty,
+        });
+        if (!["linked", "existing"].includes(link.kind)) {
+          await cancelCommand(client, reserved.id);
+          return { kind: "customer_party_conflict" };
+        }
+      }
       await client.query(
         `/* business_document:create */
          INSERT INTO business_document_working_drafts (
@@ -1015,6 +1025,15 @@ const sqlStore = Object.freeze({
         }
         documentNumber = allocation.documentNumber;
       }
+      if (draft.jobId && customerParty) {
+        const link = await ensureJobCustomerParty(client, {
+          jobId: draft.jobId, actorUserId, proposedParty: customerParty,
+        });
+        if (!["linked", "existing"].includes(link.kind)) {
+          await cancelCommand(client, reserved.id);
+          return { kind: "customer_party_conflict" };
+        }
+      }
       await client.query(
         `/* business_document:update */
          UPDATE business_document_working_drafts
@@ -1127,6 +1146,7 @@ const sqlStore = Object.freeze({
 });
 
 function outcome(result, successCode, successStatus) {
+  if (result.kind === "customer_party_conflict") return failure(409, "BUSINESS_DOCUMENT_CUSTOMER_PARTY_CONFLICT", "This Job's saved customer could not be verified. Review its existing customer relationship.");
   if (result.kind === "idempotency_conflict") return failure(409, "BUSINESS_DOCUMENT_IDEMPOTENCY_CONFLICT", "The save identity was already used for different content.");
   if (result.kind === "in_progress") return failure(409, "BUSINESS_DOCUMENT_SAVE_IN_PROGRESS", "This working document save is already in progress.");
   if (result.kind === "version_conflict") return failure(409, "BUSINESS_DOCUMENT_VERSION_CONFLICT", "A newer saved version exists.", { currentVersion: result.currentVersion });

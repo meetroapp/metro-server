@@ -666,7 +666,18 @@ const sqlStore = Object.freeze({
              END
            ) AS last_activity_at,
            parties.created_at AS linked_at
-         FROM canonical_quote_customer_parties parties
+         FROM (
+           SELECT quote_id, job_id, contractor_profile_id, business_contact_id,
+             business_customer_relationship_id, created_at
+           FROM canonical_quote_customer_parties
+           UNION ALL
+           SELECT q.id, p.job_id, p.contractor_profile_id, p.business_contact_id,
+             p.business_customer_relationship_id, p.created_at
+           FROM job_customer_parties p
+           INNER JOIN canonical_quotes q ON q.job_id = p.job_id
+           WHERE NOT EXISTS (SELECT 1 FROM canonical_quote_customer_parties explicit_party
+             WHERE explicit_party.quote_id = q.id)
+         ) parties
          INNER JOIN canonical_quotes quotes
            ON quotes.id = parties.quote_id
           AND quotes.job_id = parties.job_id
@@ -717,7 +728,18 @@ const sqlStore = Object.freeze({
              issuances.issued_at
            ) AS last_activity_at,
            parties.created_at AS linked_at
-         FROM canonical_invoice_customer_parties parties
+         FROM (
+           SELECT invoice_id, job_id, contractor_profile_id, business_contact_id,
+             business_customer_relationship_id, created_at
+           FROM canonical_invoice_customer_parties
+           UNION ALL
+           SELECT i.id, p.job_id, p.contractor_profile_id, p.business_contact_id,
+             p.business_customer_relationship_id, p.created_at
+           FROM job_customer_parties p
+           INNER JOIN canonical_invoices i ON i.job_id = p.job_id
+           WHERE NOT EXISTS (SELECT 1 FROM canonical_invoice_customer_parties explicit_party
+             WHERE explicit_party.invoice_id = i.id)
+         ) parties
          INNER JOIN canonical_invoices invoices
            ON invoices.id = parties.invoice_id
           AND invoices.job_id = parties.job_id

@@ -1,6 +1,7 @@
 "use strict";
 
 const service = require("./customerPartyService");
+const { reconcileJobCustomerParty } = require("./jobCustomerPartyReconciliationService");
 
 function sendResult(res, result) {
   res.setHeader?.("Cache-Control", "private, no-store");
@@ -36,6 +37,11 @@ function createCustomerPartyHandlers({
     }
   };
   return {
+    reconcileJob: handle("reconcile_job_customer_party", (req) =>
+      reconcileJobCustomerParty({
+        pool: getPool(req), authenticatedActor: req.user,
+        jobId: req.params.jobId, payload: req.body,
+      })),
     linkJob: handle("link_job_customer_party", (req) =>
       customerPartyService.linkJobCustomerParty({
         pool: getPool(req),
@@ -70,6 +76,7 @@ function registerCustomerPartyRoutes({
     customerPartyService,
   });
   app.post("/jobs/:jobId/customer-party", authMiddleware, handlers.linkJob);
+  app.post("/jobs/:jobId/customer-party/reconcile", authMiddleware, handlers.reconcileJob);
   app.get("/jobs/:jobId/customer-party", authMiddleware, handlers.getJob);
   return handlers;
 }
@@ -79,4 +86,3 @@ module.exports = {
   registerCustomerPartyRoutes,
   sendCustomerPartyResult: sendResult,
 };
-
