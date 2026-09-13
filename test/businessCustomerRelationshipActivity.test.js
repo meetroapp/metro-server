@@ -45,11 +45,12 @@ function createPool({ owned = true, archived = false, empty = false } = {}) {
           contact_version: 3,
         }] };
       }
-      if (text.includes("business_customer_relationship:activity_work")) {
+      if (text.includes("business_customer_relationship:activity_work */")) {
         return { rows: empty ? [] : [{
           job_id: JOB_ID,
           service_title: "Kitchen repair",
           service_category: "Handyman",
+          source_type: "ordinary_request_selection",
           job_created_at: "2026-08-21T12:00:00.000Z",
           completion_status: "COMPLETED",
           completed_at: "2026-08-23T12:00:00.000Z",
@@ -105,6 +106,32 @@ function createPool({ owned = true, archived = false, empty = false } = {}) {
         }] };
       }
       if (/business_customer_relationship:activity_(deposits|payments)/.test(text)) return {rows:[]};
+      if (text.includes("business_customer_relationship:activity_visits")) {
+        return { rows: empty ? [] : [{
+          visit_id: "66666666-6666-4666-8666-666666666666",
+          job_id: JOB_ID,
+          purpose: "APPROVED_WORK",
+          state: "COMPLETED",
+          scheduled_start_at: "2026-08-22T13:00:00.000Z",
+          scheduled_end_at: "2026-08-22T15:00:00.000Z",
+          time_zone: "America/New_York",
+          location_mode: "JOB_SERVICE_LOCATION",
+          completed_at: "2026-08-22T15:00:00.000Z",
+          created_at: "2026-08-21T16:00:00.000Z",
+        }] };
+      }
+      if (text.includes("business_customer_relationship:activity_work_performed")) {
+        return { rows: empty ? [] : [{
+          activity_id: "77777777-7777-4777-8777-777777777777",
+          job_id: JOB_ID,
+          workstream_id: "88888888-8888-4888-8888-888888888888",
+          workstream_title: "Repair cabinet",
+          statement: "Aligned and refinished the cabinet door.",
+          status: "DONE",
+          performed_at: "2026-08-23T11:00:00.000Z",
+          created_at: "2026-08-22T10:00:00.000Z",
+        }] };
+      }
       throw new Error(`Unexpected SQL: ${text}`);
     },
   };
@@ -135,7 +162,9 @@ test("owned Customer Relationship returns canonical work, Quote, and Invoice act
     jobId: JOB_ID,
     title: "Kitchen repair",
     service: "Handyman",
+    sourceType: "ordinary_request_selection",
     status: "COMPLETED",
+    completionState: "COMPLETED",
     createdAt: "2026-08-21T12:00:00.000Z",
     completedAt: "2026-08-23T12:00:00.000Z",
     linkedAt: "2026-08-21T12:01:00.000Z",
@@ -152,6 +181,8 @@ test("owned Customer Relationship returns canonical work, Quote, and Invoice act
     "QUOTE",
   ]);
   assert.equal(result.activity.media[0].parentId, JOB_ID);
+  assert.equal(result.activity.visits[0].jobId, JOB_ID);
+  assert.equal(result.activity.workPerformed[0].status, "DONE");
 });
 
 test("cross-business activity read fails closed before any history query", async () => {
@@ -171,6 +202,8 @@ test("relationship with no canonical customer-party links returns truthful empty
   assert.deepEqual(result.activity.invoices, []);
   assert.deepEqual(result.activity.documents, []);
   assert.deepEqual(result.activity.media, []);
+  assert.deepEqual(result.activity.visits, []);
+  assert.deepEqual(result.activity.workPerformed, []);
 });
 
 test("archived external Contact retains historical activity without Meetro account identity", async () => {
@@ -190,7 +223,7 @@ test("every history query is scoped to the exact business, Contact, and Relation
   const pool = createPool();
   await getBusinessCustomerRelationshipActivity(input(pool));
   const queries = pool.calls.filter(({ sql }) => sql.includes(":activity_"));
-  assert.equal(queries.length, 6);
+  assert.equal(queries.length, 8);
   for (const query of queries) {
     assert.deepEqual(query.values, [10, CONTACT_ID, RELATIONSHIP_ID]);
     assert.match(query.sql, /parties\.contractor_profile_id = \$1/);
@@ -262,8 +295,7 @@ test("relationship activity implementation adds no schema, AI, or downstream mut
     "utf8"
   );
   assert.doesNotMatch(source, /openai|provider|ask meetro/i);
-  assert.doesNotMatch(
-    String(businessCustomerRelationshipInternals.sqlStore.getActivity),
-    /business_document_working_drafts|business_document_draft_media|moments|conversations/i
-  );
+  const activitySource = String(businessCustomerRelationshipInternals.sqlStore.getActivity);
+  assert.match(activitySource, /business_document_working_drafts documents/);
+  assert.doesNotMatch(activitySource, /business_document_draft_media|moments|conversations/i);
 });

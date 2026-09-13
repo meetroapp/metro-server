@@ -134,9 +134,13 @@ test("only governed attached request-photo images with secure URLs are projected
 
 test("working-draft, analysis, and opaque evidence media are deliberately excluded", () => {
   const source = String(businessCustomerRelationshipInternals.sqlStore.getActivity);
-  assert.doesNotMatch(source, /business_document_draft_media/);
-  assert.doesNotMatch(source, /business_document_working_drafts/);
-  assert.doesNotMatch(source, /quick_quote|analysis_session|finding_evidence/i);
+  const mediaQuery = source.slice(
+    source.indexOf("business_customer_relationship:activity_media"),
+    source.indexOf("business_customer_relationship:activity_deposits")
+  );
+  assert.doesNotMatch(mediaQuery, /business_document_draft_media/);
+  assert.doesNotMatch(mediaQuery, /business_document_working_drafts/);
+  assert.doesNotMatch(mediaQuery, /quick_quote|analysis_session|finding_evidence/i);
 });
 
 test("projection preserves request provenance without inventing before, progress, or completion labels", () => {

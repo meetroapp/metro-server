@@ -62,10 +62,40 @@ function workActivityProjection(row) {
     jobId: String(row.job_id),
     title: String(row.service_title || "").trim() || null,
     service: String(row.service_category || "").trim() || null,
-    status: row.completion_status || null,
+    sourceType: row.source_type || null,
+    status: row.completion_status || "ACTIVE",
+    completionState: row.completion_status ? "COMPLETED" : "ACTIVE",
     createdAt: isoTimestamp(row.job_created_at),
     completedAt: isoTimestamp(row.completed_at),
     linkedAt: isoTimestamp(row.linked_at),
+  });
+}
+
+function visitActivityProjection(row) {
+  return Object.freeze({
+    visitId: String(row.visit_id),
+    jobId: String(row.job_id),
+    purpose: row.purpose,
+    state: row.state,
+    scheduledStartAt: isoTimestamp(row.scheduled_start_at),
+    scheduledEndAt: isoTimestamp(row.scheduled_end_at),
+    timeZone: row.time_zone,
+    locationMode: row.location_mode,
+    completedAt: isoTimestamp(row.completed_at),
+    createdAt: isoTimestamp(row.created_at),
+  });
+}
+
+function workPerformedActivityProjection(row) {
+  return Object.freeze({
+    activityId: String(row.activity_id),
+    jobId: String(row.job_id),
+    workstreamId: String(row.workstream_id),
+    workstreamTitle: String(row.workstream_title || "").trim() || null,
+    statement: String(row.statement || "").trim() || null,
+    status: row.status,
+    performedAt: isoTimestamp(row.performed_at),
+    createdAt: isoTimestamp(row.created_at),
   });
 }
 
@@ -568,8 +598,9 @@ const sqlStore = Object.freeze({
       const work = await client.query(
         `/* business_customer_relationship:activity_work */
          SELECT jobs.id AS job_id,
-           COALESCE(posts.title,'Job') AS service_title,
+           COALESCE(NULLIF(documents.content->>'projectTitle',''),posts.title,'Job') AS service_title,
            posts.category AS service_category,
+           jobs.source_type,
            jobs.created_at AS job_created_at,
            completions.status AS completion_status,
            completions.completed_at,
@@ -577,6 +608,9 @@ const sqlStore = Object.freeze({
          FROM job_customer_parties parties
          INNER JOIN jobs ON jobs.id = parties.job_id
          LEFT JOIN posts ON posts.id = jobs.job_request_id
+         LEFT JOIN business_document_working_drafts documents
+           ON documents.id = jobs.originating_business_document_id
+          AND documents.contractor_profile_id = parties.contractor_profile_id
          LEFT JOIN canonical_job_completion_records completions
            ON completions.job_id = jobs.id
          WHERE parties.contractor_profile_id = $1
@@ -749,11 +783,26 @@ const sqlStore = Object.freeze({
         FROM job_customer_parties parties JOIN canonical_invoice_payments receipt ON receipt.job_id=parties.job_id
         WHERE parties.contractor_profile_id = $1 AND parties.business_contact_id = $2 AND parties.business_customer_relationship_id = $3
         ORDER BY received_at,id`,scope);
+      const visits = await client.query(`/* business_customer_relationship:activity_visits */ SELECT visits.id AS visit_id,visits.job_id,visits.purpose,
+        current.state,current.scheduled_start_at,current.scheduled_end_at,current.time_zone,current.location_mode,current.completed_at,visits.created_at
+        FROM job_customer_parties parties JOIN canonical_visits visits ON visits.job_id=parties.job_id
+        JOIN LATERAL(SELECT versions.* FROM canonical_visit_versions versions WHERE versions.visit_id=visits.id AND versions.job_id=visits.job_id ORDER BY versions.version DESC LIMIT 1) current ON TRUE
+        WHERE parties.contractor_profile_id = $1 AND parties.business_contact_id = $2 AND parties.business_customer_relationship_id = $3
+        ORDER BY current.scheduled_start_at DESC,visits.id`,scope);
+      const workPerformed = await client.query(`/* business_customer_relationship:activity_work_performed */ SELECT activities.id AS activity_id,activities.job_id,activities.workstream_id,
+        workstream.title AS workstream_title,current.statement,current.status,current.performed_at,activities.created_at
+        FROM job_customer_parties parties JOIN canonical_work_activities activities ON activities.job_id=parties.job_id
+        JOIN LATERAL(SELECT versions.* FROM canonical_work_activity_versions versions WHERE versions.activity_id=activities.id AND versions.workstream_id=activities.workstream_id AND versions.job_id=activities.job_id ORDER BY versions.version DESC LIMIT 1) current ON TRUE
+        LEFT JOIN LATERAL(SELECT versions.title FROM canonical_workstream_versions versions WHERE versions.workstream_id=activities.workstream_id AND versions.job_id=activities.job_id ORDER BY versions.version DESC LIMIT 1) workstream ON TRUE
+        WHERE parties.contractor_profile_id = $1 AND parties.business_contact_id = $2 AND parties.business_customer_relationship_id = $3
+        ORDER BY COALESCE(current.performed_at,activities.created_at) DESC,activities.id`,scope);
       return Object.freeze({
         contractVersion: 1,
         deposits: Object.freeze(deposits.rows.map(row=>({id:row.id,jobId:row.job_id,quoteId:row.quote_id,currency:row.currency,
           requiredMinor:Number(row.required_minor),appliedMinor:Number(row.applied_minor),state:row.state,updatedAt:isoTimestamp(row.created_at)}))),
         payments: Object.freeze(payments.rows.map(row=>({id:row.id,jobId:row.job_id,kind:row.kind,amountMinor:Number(row.amount_minor),currency:row.currency,receivedAt:isoTimestamp(row.received_at)}))),
+        visits: Object.freeze(visits.rows.map(visitActivityProjection)),
+        workPerformed: Object.freeze(workPerformed.rows.map(workPerformedActivityProjection)),
         relationship: Object.freeze({
           id: relationship.id,
           contractorProfileId: relationship.contractorProfileId,
@@ -797,6 +846,8 @@ module.exports = {
     requestHash,
     sqlStore,
     workActivityProjection,
+    visitActivityProjection,
+    workPerformedActivityProjection,
   }),
   establishBusinessCustomerRelationship,
   getBusinessCustomerRelationship,
