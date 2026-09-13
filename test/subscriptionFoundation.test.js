@@ -314,8 +314,8 @@ test("verified Apple introductory trials are rejected because the initial trial 
 });
 
 test("a reserved professional signup trial activates once for exactly 14 days", async () => {
-  const startsAt = "2026-08-30T12:00:00.000Z";
-  const endsAt = "2026-09-13T12:00:00.000Z";
+  const startsAt = new Date(Date.now() - 1000).toISOString();
+  const endsAt = new Date(new Date(startsAt).getTime() + 14 * 86400000).toISOString();
   let updateCalls = 0;
   const pool = { query: async (sql) => {
     if (sql.includes("UPDATE meetro_business_trials")) {
