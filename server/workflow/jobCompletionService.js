@@ -643,6 +643,17 @@ const HISTORY_BASE_SQL = `
       LIMIT 1
     ) current ON TRUE
     WHERE quotes.job_id = jobs.id AND quotes.status = 'ISSUED'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM canonical_quotes revision
+        INNER JOIN canonical_quote_customer_decisions revised_decisions
+          ON revised_decisions.quote_id = revision.id
+          AND revised_decisions.job_id = revision.job_id
+          AND revised_decisions.decision = 'APPROVED'
+        WHERE revision.parent_quote_id = quotes.id
+          AND revision.job_id = quotes.job_id
+          AND revision.lineage_type = 'REVISED_QUOTE'
+      )
   ) approved ON TRUE`;
 
 async function listProfessionalJobHistory(input = {}) {

@@ -798,13 +798,25 @@ const sqlStore = Object.freeze({
         FROM job_customer_parties parties JOIN canonical_pre_work_deposit_obligations obligations ON obligations.job_id=parties.job_id
         JOIN LATERAL(SELECT * FROM canonical_pre_work_deposit_versions v WHERE v.obligation_id=obligations.id ORDER BY version DESC LIMIT 1) current ON TRUE
         WHERE parties.contractor_profile_id = $1 AND parties.business_contact_id = $2 AND parties.business_customer_relationship_id = $3`,scope);
-      const payments = await client.query(`/* business_customer_relationship:activity_payments */ SELECT receipt.id,receipt.job_id,'DEPOSIT_RECEIPT'::text AS kind,receipt.gross_amount_minor AS amount_minor,receipt.currency,receipt.received_at AS received_at
+      const payments = await client.query(`/* business_customer_relationship:activity_payments */
+        SELECT receipt.id,receipt.job_id,'DEPOSIT_RECEIPT'::text AS kind,
+          receipt.gross_amount_minor AS amount_minor,receipt.currency,
+          receipt.received_at AS received_at,NULL::date AS received_date,
+          receipt.received_at AS sort_at
         FROM job_customer_parties parties JOIN canonical_pre_work_payment_receipts receipt ON receipt.job_id=parties.job_id
-        WHERE parties.contractor_profile_id = $1 AND parties.business_contact_id = $2 AND parties.business_customer_relationship_id = $3
-        UNION ALL SELECT receipt.id,receipt.job_id,'INVOICE_PAYMENT'::text,receipt.amount_minor,receipt.currency,receipt.received_date::timestamptz
+        WHERE parties.contractor_profile_id = $1
+          AND parties.business_contact_id = $2
+          AND parties.business_customer_relationship_id = $3
+        UNION ALL
+        SELECT receipt.id,receipt.job_id,'INVOICE_PAYMENT'::text,
+          receipt.amount_minor,receipt.currency,
+          NULL::timestamptz AS received_at,receipt.received_date AS received_date,
+          receipt.received_date::timestamptz AS sort_at
         FROM job_customer_parties parties JOIN canonical_invoice_payments receipt ON receipt.job_id=parties.job_id
-        WHERE parties.contractor_profile_id = $1 AND parties.business_contact_id = $2 AND parties.business_customer_relationship_id = $3
-        ORDER BY received_at,id`,scope);
+        WHERE parties.contractor_profile_id = $1
+          AND parties.business_contact_id = $2
+          AND parties.business_customer_relationship_id = $3
+        ORDER BY sort_at,id`,scope);
       const visits = await client.query(`/* business_customer_relationship:activity_visits */ SELECT visits.id AS visit_id,visits.job_id,visits.purpose,
         current.state,current.scheduled_start_at,current.scheduled_end_at,current.time_zone,current.location_mode,current.completed_at,visits.created_at
         FROM job_customer_parties parties JOIN canonical_visits visits ON visits.job_id=parties.job_id
@@ -822,7 +834,15 @@ const sqlStore = Object.freeze({
         contractVersion: 1,
         deposits: Object.freeze(deposits.rows.map(row=>({id:row.id,jobId:row.job_id,quoteId:row.quote_id,currency:row.currency,
           requiredMinor:Number(row.required_minor),appliedMinor:Number(row.applied_minor),state:row.state,updatedAt:isoTimestamp(row.created_at)}))),
-        payments: Object.freeze(payments.rows.map(row=>({id:row.id,jobId:row.job_id,kind:row.kind,amountMinor:Number(row.amount_minor),currency:row.currency,receivedAt:isoTimestamp(row.received_at)}))),
+        payments: Object.freeze(payments.rows.map(row=>({
+          id:row.id,
+          jobId:row.job_id,
+          kind:row.kind,
+          amountMinor:Number(row.amount_minor),
+          currency:row.currency,
+          receivedAt:isoTimestamp(row.received_at),
+          receivedDate:dateOnly(row.received_date),
+        }))),
         visits: Object.freeze(visits.rows.map(visitActivityProjection)),
         workPerformed: Object.freeze(workPerformed.rows.map(workPerformedActivityProjection)),
         relationship: Object.freeze({
