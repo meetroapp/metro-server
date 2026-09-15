@@ -46,6 +46,7 @@ function createInvoicePaymentHandlers({
         pool: getPool(req),
         authenticatedActor: req.user,
         limit: req.query?.limit,
+        period: req.query?.period,
       })),
     createInvoice: handle("create_invoice", ["invoice"], (req) =>
       invoicePaymentService.createInvoice({

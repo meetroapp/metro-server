@@ -91,3 +91,92 @@ test('external email route rejects caller-owned recipient, provider and financia
   assert.equal(res.statusCode,400);assert.equal(res.body.code,'INVOICE_EMAIL_FIELD_REJECTED');
  }
 });
+
+test("Workspace handler forwards governed Revenue period independently of list limit", async () => {
+  let input = null;
+
+  const handlers =
+    createInvoicePaymentHandlers({
+      getPool: () => "pool",
+      sendPublicDatabaseError() {
+        throw new Error(
+          "Unexpected workspace route error."
+        );
+      },
+      invoicePaymentService: {
+        async getProfessionalInvoiceWorkspace(
+          value
+        ) {
+          input = value;
+
+          return {
+            ok: true,
+            status: 200,
+            code:
+              "PROFESSIONAL_INVOICE_WORKSPACE_LOADED",
+            workspace: {
+              contractVersion: 1,
+              revenue: {
+                state: "READY",
+              },
+              summary: {},
+              readyJobs: [],
+              invoices: [],
+              limit: 50,
+            },
+          };
+        },
+      },
+    });
+
+  const res = response();
+
+  await handlers.getWorkspace(
+    {
+      user: { id: 65 },
+
+      query: {
+        limit: "50",
+        period: "LAST_30_DAYS",
+      },
+    },
+    res
+  );
+
+  assert.deepEqual(
+    input,
+    {
+      pool: "pool",
+      authenticatedActor: {
+        id: 65,
+      },
+      limit: "50",
+      period: "LAST_30_DAYS",
+    }
+  );
+
+  assert.equal(
+    res.statusCode,
+    200
+  );
+
+  assert.equal(
+    res.headers["Cache-Control"],
+    "private, no-store"
+  );
+
+  assert.equal(
+    res.body.code,
+    "PROFESSIONAL_INVOICE_WORKSPACE_LOADED"
+  );
+
+  assert.equal(
+    res.body.workspace.limit,
+    50
+  );
+
+  assert.equal(
+    res.body.workspace.revenue.state,
+    "READY"
+  );
+});

@@ -1,6 +1,14 @@
 "use strict";
 const { BUSINESS_JOB_CONTEXT_SQL, loadBusinessJobContext, authorityFields } = require("../relationships/businessJobAuthority");
 
+const {
+  loadProfessionalRevenueProjection,
+} = require("./revenueFinancialProjectionService");
+
+const {
+  normalizeRevenuePeriod,
+} = require("./revenuePeriod");
+
 const { createHash, randomUUID } = require("node:crypto");
 const {
   commercialAuthorityInternals,
@@ -1346,11 +1354,46 @@ function workspaceLimit(value) {
 }
 
 async function getProfessionalInvoiceWorkspace(input = {}) {
-  const validated = validateInput(input, ["limit"]);
+  const validated = validateInput(input, ["limit", "period"]);
   if (validated.error) return validated.error;
+
   const limit = workspaceLimit(input.limit);
-  if (!limit) return failure(400, "INVALID_INVOICE_WORKSPACE_LIMIT", "The Invoice workspace limit is invalid.");
+  if (!limit) {
+    return failure(
+      400,
+      "INVALID_INVOICE_WORKSPACE_LIMIT",
+      "The Invoice workspace limit is invalid."
+    );
+  }
+
+  const revenueRequested =
+    input.period != null &&
+    String(input.period).trim() !== "";
+
+  const period =
+    revenueRequested
+      ? normalizeRevenuePeriod(input.period)
+      : null;
+
+  if (revenueRequested && !period) {
+    return failure(
+      400,
+      "INVALID_REVENUE_PERIOD",
+      "The Revenue period is invalid."
+    );
+  }
+
   return runTransaction(input.pool, "REPEATABLE READ READ ONLY", async (client) => {
+    let revenue = null;
+
+    if (revenueRequested) {
+      revenue = await loadProfessionalRevenueProjection({
+        client,
+        actorId: validated.actorId,
+        period,
+      });
+    }
+
     const ready = await client.query(
       `WITH completion_evidence AS (
          SELECT completions.job_id, completions.version AS completion_version,
@@ -1513,6 +1556,7 @@ async function getProfessionalInvoiceWorkspace(input = {}) {
       ok: true, success: true, status: 200, code: "PROFESSIONAL_INVOICE_WORKSPACE_LOADED",
       workspace: {
         contractVersion: CONTRACT_VERSION,
+        ...(revenueRequested ? { revenue } : {}),
         summary: {
           readyToInvoice: readyJobs.length,
           drafts: rows.filter((row) => row.status === "DRAFT").length,
