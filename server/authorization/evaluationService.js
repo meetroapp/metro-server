@@ -682,7 +682,8 @@ function safeLogger(value) {
     : console;
 }
 
-async function resolveOrdinaryJobContext(
+
+async function resolveJobEvaluationContext(
   client,
   jobId,
   actorUserId,
@@ -690,62 +691,234 @@ async function resolveOrdinaryJobContext(
 ) {
   const result = await client.query(
     `
-    /* ordinary_evaluation:job_context */
+    /* job_evaluation:job_context */
     SELECT
       jobs.id AS job_id,
+      jobs.source_type AS job_source_type,
+
+      CASE
+        WHEN jobs.source_type = 'business_customer'
+          THEN 'business_customer'
+        ELSE 'ordinary_request'
+      END AS source_context_type,
+
       jobs.job_request_id,
       jobs.source_request_selection_id,
       jobs.source_request_relationship_id AS relationship_id,
+      jobs.source_business_customer_job_id
+        AS business_customer_job_source_id,
+
       posts.user_id AS homeowner_id,
-      posts.lifecycle_contract_version AS request_contract_version,
+      posts.lifecycle_contract_version
+        AS request_contract_version,
+
       request_relationships.professional_user_id,
-      request_relationships.status AS relationship_status,
-      relationship_participants.id AS actor_participant_id
+      request_relationships.status
+        AS relationship_status,
+
+      jobs.contractor_profile_id,
+      jobs.business_contact_id,
+      jobs.business_customer_relationship_id,
+
+      CASE
+        WHEN jobs.source_type = 'business_customer'
+          THEN profiles.user_id
+        ELSE posts.user_id
+      END AS source_owner_user_id,
+
+      relationship_participants.id
+        AS actor_participant_id
+
     FROM jobs
-    INNER JOIN posts
+
+    LEFT JOIN posts
       ON posts.id = jobs.job_request_id
-      AND posts.lifecycle_contract_version = 2
-    INNER JOIN request_relationships
-      ON request_relationships.id = jobs.source_request_relationship_id
-      AND request_relationships.post_id = jobs.job_request_id
-      AND request_relationships.emergency_request_id IS NULL
-      AND request_relationships.homeowner_id = posts.user_id
-      AND request_relationships.professional_user_id = $2
-      AND request_relationships.status = 'active'
-    INNER JOIN request_selections
-      ON request_selections.id = jobs.source_request_selection_id
-      AND request_selections.request_relationship_id =
-        jobs.source_request_relationship_id
-      AND request_selections.post_id = jobs.job_request_id
-      AND request_selections.selected_by_user_id = posts.user_id
+     AND posts.lifecycle_contract_version = 2
+
+    LEFT JOIN request_relationships
+      ON request_relationships.id =
+           jobs.source_request_relationship_id
+     AND request_relationships.post_id =
+           jobs.job_request_id
+     AND request_relationships.emergency_request_id
+           IS NULL
+     AND request_relationships.homeowner_id =
+           posts.user_id
+     AND request_relationships.professional_user_id =
+           $2
+     AND request_relationships.status = 'active'
+
+    LEFT JOIN request_selections
+      ON request_selections.id =
+           jobs.source_request_selection_id
+     AND request_selections.request_relationship_id =
+           jobs.source_request_relationship_id
+     AND request_selections.post_id =
+           jobs.job_request_id
+     AND request_selections.selected_by_user_id =
+           posts.user_id
+
+    LEFT JOIN contractor_profiles profiles
+      ON jobs.source_type = 'business_customer'
+     AND profiles.id = jobs.contractor_profile_id
+     AND profiles.user_id = $2
+
+    LEFT JOIN business_customer_job_sources
+      ON jobs.source_type = 'business_customer'
+     AND business_customer_job_sources.id =
+           jobs.source_business_customer_job_id
+     AND business_customer_job_sources.contractor_profile_id =
+           jobs.contractor_profile_id
+     AND business_customer_job_sources.business_contact_id =
+           jobs.business_contact_id
+     AND business_customer_job_sources.business_customer_relationship_id =
+           jobs.business_customer_relationship_id
+     AND business_customer_job_sources.created_by_user_id =
+           profiles.user_id
+
+    LEFT JOIN business_customer_relationships
+      ON jobs.source_type = 'business_customer'
+     AND business_customer_relationships.id =
+           jobs.business_customer_relationship_id
+     AND business_customer_relationships.contractor_profile_id =
+           jobs.contractor_profile_id
+     AND business_customer_relationships.business_contact_id =
+           jobs.business_contact_id
+
+    LEFT JOIN business_contacts
+      ON jobs.source_type = 'business_customer'
+     AND business_contacts.id =
+           jobs.business_contact_id
+     AND business_contacts.contractor_profile_id =
+           jobs.contractor_profile_id
+
     INNER JOIN relationship_participants
       ON relationship_participants.job_id = jobs.id
-      AND relationship_participants.request_relationship_id =
-        jobs.source_request_relationship_id
-      AND relationship_participants.user_id = $2
+     AND relationship_participants.user_id = $2
+     AND (
+       (
+         jobs.source_type =
+           'ordinary_request_selection'
+         AND relationship_participants.request_relationship_id =
+             request_relationships.id
+         AND relationship_participants.source_evidence_type =
+             'request_selection'
+       )
+       OR
+       (
+         jobs.source_type =
+           'existing_customer_request'
+         AND relationship_participants.request_relationship_id =
+             request_relationships.id
+         AND relationship_participants.source_evidence_type =
+             'existing_customer_request'
+       )
+       OR
+       (
+         jobs.source_type =
+           'business_customer'
+         AND relationship_participants.request_relationship_id
+             IS NULL
+         AND relationship_participants.source_evidence_type =
+             'business_customer'
+       )
+     )
+
     WHERE jobs.id = $1
       AND jobs.lifecycle_contract_version = 2
+      AND (
+        (
+          jobs.source_type =
+            'ordinary_request_selection'
+          AND posts.id IS NOT NULL
+          AND request_relationships.id IS NOT NULL
+          AND request_selections.id IS NOT NULL
+          AND jobs.source_request_selection_id IS NOT NULL
+          AND jobs.source_business_customer_job_id IS NULL
+        )
+
+        OR
+
+        (
+          jobs.source_type =
+            'existing_customer_request'
+          AND posts.id IS NOT NULL
+          AND posts.request_origin =
+              'existing_customer_request'
+          AND request_relationships.id IS NOT NULL
+          AND request_relationships.ordinary_authority_source =
+              'existing_customer_request'
+          AND request_relationships.professional_response_id
+              IS NULL
+          AND request_relationships.source_meetro_relationship_id
+              IS NOT NULL
+          AND request_relationships.source_meetro_relationship_id =
+              posts.source_meetro_relationship_id
+          AND posts.target_contractor_profile_id =
+              request_relationships.contractor_id
+          AND posts.target_professional_user_id =
+              request_relationships.professional_user_id
+          AND jobs.source_request_selection_id IS NULL
+          AND request_selections.id IS NULL
+          AND jobs.source_business_customer_job_id IS NULL
+        )
+
+        OR
+
+        (
+          jobs.source_type =
+            'business_customer'
+          AND jobs.job_request_id IS NULL
+          AND jobs.source_request_selection_id IS NULL
+          AND jobs.source_request_relationship_id IS NULL
+          AND jobs.originating_business_document_id IS NULL
+          AND jobs.source_business_customer_job_id IS NOT NULL
+          AND profiles.id IS NOT NULL
+          AND business_customer_job_sources.id IS NOT NULL
+          AND business_customer_relationships.id IS NOT NULL
+          AND business_contacts.id IS NOT NULL
+          AND business_contacts.status = 'ACTIVE'
+          AND EXISTS (
+            SELECT 1
+            FROM business_contact_roles
+            WHERE business_contact_roles.business_contact_id =
+                  business_contacts.id
+              AND business_contact_roles.contractor_profile_id =
+                  business_contacts.contractor_profile_id
+              AND business_contact_roles.role = 'CUSTOMER'
+              AND business_contact_roles.ended_at IS NULL
+          )
+        )
+      )
+
     LIMIT 1
-    ${lock ? "FOR UPDATE OF jobs, request_relationships" : ""}
+    ${lock ? "FOR UPDATE OF jobs" : ""}
     `,
     [jobId, actorUserId]
   );
+
   return result.rows[0] || null;
 }
 
-async function requireOrdinaryEvaluationAuthority({
+async function requireJobEvaluationAuthority({
   client,
   context,
   actorUserId,
   logger,
 }) {
   if (!context) {
-    logger.warn("Ordinary Evaluation authorization denied", {
-      code: "ORDINARY_EVALUATION_CONTEXT_DENIED",
+    logger.warn("Job Evaluation authorization denied", {
+      code: "JOB_EVALUATION_CONTEXT_DENIED",
       actorUserId,
     });
-    return failure(404, "EVALUATION_UNAVAILABLE", "The Evaluation is unavailable.");
+
+    return failure(
+      404,
+      "EVALUATION_UNAVAILABLE",
+      "The Evaluation is unavailable."
+    );
   }
+
   const granted = await hasActiveLifecycleGrant({
     client,
     participantId: context.actor_participant_id,
@@ -753,20 +926,27 @@ async function requireOrdinaryEvaluationAuthority({
     jobId: context.job_id,
     logger,
   });
+
   if (!granted) {
-    logger.warn("Ordinary Evaluation authorization denied", {
-      code: "ORDINARY_EVALUATION_AUTHORITY_DENIED",
+    logger.warn("Job Evaluation authorization denied", {
+      code: "JOB_EVALUATION_AUTHORITY_DENIED",
       actorUserId,
       jobId: context.job_id,
-      relationshipId: Number(context.relationship_id),
+      relationshipId:
+        context.relationship_id == null
+          ? null
+          : Number(context.relationship_id),
+      jobSourceType: context.job_source_type,
       capability: ORDINARY_EVALUATION_CAPABILITY,
     });
+
     return failure(
       403,
       "EVALUATION_AUTHORITY_REQUIRED",
       "Evaluation authority is required."
     );
   }
+
   return null;
 }
 
@@ -978,7 +1158,7 @@ async function requireCompletedEvaluationVisitEvidence({
   return result.rows[0] || null;
 }
 
-async function loadOrdinaryEvaluationProvenance({
+async function loadJobEvaluationProvenance({
   client,
   evaluationId,
   jobId,
@@ -1086,35 +1266,80 @@ function contentFromRow(row) {
   };
 }
 
+
 function sourceContextFromRow(row) {
-  if (row.source_context_type === "ordinary_request" || row.job_id) {
+  if (row.job_id) {
+    if (row.job_source_type === "business_customer") {
+      return {
+        type: "business_customer_job",
+        jobId: row.job_id,
+        jobSourceType: row.job_source_type,
+        businessCustomerJobSourceId:
+          row.business_customer_job_source_id || null,
+        evaluationVisitId:
+          row.evaluation_visit_id || null,
+      };
+    }
+
     return {
       type: "ordinary_job",
       jobId: row.job_id,
-      requestId: Number(row.ordinary_request_id || row.job_request_id),
-      relationshipId: Number(row.relationship_id),
-      evaluationVisitId: row.evaluation_visit_id || null,
+      jobSourceType: row.job_source_type,
+      requestId:
+        Number(
+          row.ordinary_request_id ||
+          row.job_request_id
+        ),
+      relationshipId:
+        Number(row.relationship_id),
+      evaluationVisitId:
+        row.evaluation_visit_id || null,
     };
   }
+
   return {
     type: "emergency_request",
-    emergencyRequestId: Number(row.emergency_request_id),
-    relationshipId: Number(row.relationship_id),
+    emergencyRequestId:
+      Number(row.emergency_request_id),
+    relationshipId:
+      Number(row.relationship_id),
   };
 }
 
+function isJobSourceContext(sourceContext) {
+  return Boolean(
+    sourceContext &&
+    (
+      sourceContext.type === "ordinary_job" ||
+      sourceContext.type ===
+        "business_customer_job"
+    )
+  );
+}
+
 function evaluationProjection(row) {
-  const status = row.evaluation_status || row.status;
-  const ordinaryEvaluation =
-    row.source_context_type === "ordinary_request" || Boolean(row.job_id);
-  const physicalProvenanceAvailable = Boolean(row.evaluation_visit_id);
-  const completionMode = status === EVALUATION_STATUS.COMPLETED
-    ? row.remote_assessment_method
-      ? EVALUATION_COMPLETION_MODES.REMOTE
-      : physicalProvenanceAvailable
-        ? EVALUATION_COMPLETION_MODES.PHYSICAL
-        : null
-    : null;
+  const status =
+    row.evaluation_status || row.status;
+
+  const jobEvaluation =
+    Boolean(row.job_id);
+
+  const businessCustomerEvaluation =
+    row.job_source_type ===
+      "business_customer";
+
+  const physicalProvenanceAvailable =
+    Boolean(row.evaluation_visit_id);
+
+  const completionMode =
+    status === EVALUATION_STATUS.COMPLETED
+      ? row.remote_assessment_method
+        ? EVALUATION_COMPLETION_MODES.REMOTE
+        : physicalProvenanceAvailable
+          ? EVALUATION_COMPLETION_MODES.PHYSICAL
+          : null
+      : null;
+
   const projection = {
     authoritySource: AUTHORITY_SOURCE,
     confirmed: true,
@@ -1122,51 +1347,98 @@ function evaluationProjection(row) {
       id: row.evaluation_id || row.id,
       type: "evaluation",
       owningEngine: OWNING_ENGINE,
-      version: Number(row.current_version || row.version),
-      sourceContext: sourceContextFromRow(row),
+      version:
+        Number(
+          row.current_version ||
+          row.version
+        ),
+      sourceContext:
+        sourceContextFromRow(row),
     },
+
     evaluation: {
       id: row.evaluation_id || row.id,
       status,
-      createdAt: row.evaluation_created_at || row.created_at,
-      updatedAt: row.evaluation_updated_at || row.updated_at,
-      completedAt: row.completed_at || null,
+      createdAt:
+        row.evaluation_created_at ||
+        row.created_at,
+      updatedAt:
+        row.evaluation_updated_at ||
+        row.updated_at,
+      completedAt:
+        row.completed_at || null,
       completionMode,
       content: contentFromRow(row),
+
       capabilities: {
-        canEditDraft: status === EVALUATION_STATUS.DRAFT,
+        canEditDraft:
+          status ===
+          EVALUATION_STATUS.DRAFT,
+
         canComplete:
-          status === EVALUATION_STATUS.DRAFT &&
-          (!ordinaryEvaluation || physicalProvenanceAvailable),
-        canRevise: status === EVALUATION_STATUS.COMPLETED,
+          status ===
+            EVALUATION_STATUS.DRAFT &&
+          (
+            !jobEvaluation ||
+            businessCustomerEvaluation ||
+            physicalProvenanceAvailable
+          ),
+
+        canRevise:
+          status ===
+          EVALUATION_STATUS.COMPLETED,
+
         canShareWithCustomer: false,
         quoteReady: false,
         authorizationAvailable: false,
         startWorkAvailable: false,
       },
+
       traceability: {
-        governingCharterId: TRACEABILITY.governingCharterId,
-        governingProgramId: TRACEABILITY.governingProgramId,
-        foundationMilestoneId: TRACEABILITY.implementationMilestoneId,
-        capabilityMilestoneId: CAPABILITY_MILESTONE_ID,
-        certificationTarget: TRACEABILITY.certificationTarget,
+        governingCharterId:
+          TRACEABILITY.governingCharterId,
+        governingProgramId:
+          TRACEABILITY.governingProgramId,
+        foundationMilestoneId:
+          TRACEABILITY.implementationMilestoneId,
+        capabilityMilestoneId:
+          CAPABILITY_MILESTONE_ID,
+        certificationTarget:
+          TRACEABILITY.certificationTarget,
       },
     },
   };
-  if (row.source_context_type === "ordinary_request" || row.job_id) {
-    projection.evaluation.reportedConcerns = parseArray(row.reported_concerns).map(
-      (concern) => ({
+
+  if (
+    row.source_context_type ===
+      "ordinary_request"
+  ) {
+    projection.evaluation.reportedConcerns =
+      parseArray(
+        row.reported_concerns
+      ).map((concern) => ({
         id: concern.id,
-        originalText: concern.originalText,
-        reportedAt: concern.reportedAt,
-        sequence: Number(concern.sequence),
-      })
-    );
-    if (completionMode === EVALUATION_COMPLETION_MODES.REMOTE) {
-      projection.evaluation.assessmentMethod = row.remote_assessment_method;
-      projection.evaluation.assessmentBasis = row.remote_assessment_basis;
-    }
+        originalText:
+          concern.originalText,
+        reportedAt:
+          concern.reportedAt,
+        sequence:
+          Number(concern.sequence),
+      }));
   }
+
+  if (
+    jobEvaluation &&
+    completionMode ===
+      EVALUATION_COMPLETION_MODES.REMOTE
+  ) {
+    projection.evaluation.assessmentMethod =
+      row.remote_assessment_method;
+
+    projection.evaluation.assessmentBasis =
+      row.remote_assessment_basis;
+  }
+
   return projection;
 }
 
@@ -1299,7 +1571,9 @@ async function insertEvaluationEvidence({
       OWNING_ENGINE,
       evidenceType,
       actorId,
-      Number(context.relationship_id),
+      context.relationship_id == null
+        ? null
+        : Number(context.relationship_id),
       previousVersion,
       resultingVersion,
       idempotencyId,
@@ -1315,6 +1589,7 @@ async function insertEvaluationEvidence({
   return result.rows[0] || null;
 }
 
+
 function combinedRow({
   aggregate,
   evaluation,
@@ -1323,30 +1598,86 @@ function combinedRow({
   visitId = null,
   remoteProvenance = null,
 }) {
+  const sourceContextType =
+    context.job_id
+      ? context.source_context_type
+      : "emergency_request";
+
   return {
     evaluation_id: aggregate.id,
-    current_version: aggregate.current_version,
-    emergency_request_id: context.emergency_request_id,
-    ordinary_request_id: context.job_request_id || null,
+    current_version:
+      aggregate.current_version,
+
+    emergency_request_id:
+      context.emergency_request_id ||
+      null,
+
+    ordinary_request_id:
+      sourceContextType ===
+        "ordinary_request"
+        ? context.job_request_id
+        : null,
+
+    business_customer_job_source_id:
+      sourceContextType ===
+        "business_customer"
+        ? context.business_customer_job_source_id
+        : null,
+
     source_context_type:
-      context.job_id ? "ordinary_request" : "emergency_request",
-    job_id: context.job_id || null,
-    job_request_id: context.job_request_id || null,
-    relationship_id: context.relationship_id,
-    evaluation_visit_id: visitId,
-    remote_assessment_method: remoteProvenance?.assessment_method || null,
-    remote_assessment_basis: remoteProvenance?.assessment_basis || null,
-    evaluation_status: evaluation.status,
-    evaluation_created_at: evaluation.created_at,
-    evaluation_updated_at: evaluation.updated_at,
-    completed_at: evaluation.completed_at,
+      sourceContextType,
+
+    job_id:
+      context.job_id || null,
+
+    job_source_type:
+      context.job_source_type || null,
+
+    job_request_id:
+      context.job_request_id || null,
+
+    relationship_id:
+      context.relationship_id == null
+        ? null
+        : context.relationship_id,
+
+    evaluation_visit_id:
+      visitId,
+
+    remote_assessment_method:
+      remoteProvenance
+        ?.assessment_method || null,
+
+    remote_assessment_basis:
+      remoteProvenance
+        ?.assessment_basis || null,
+
+    evaluation_status:
+      evaluation.status,
+
+    evaluation_created_at:
+      evaluation.created_at,
+
+    evaluation_updated_at:
+      evaluation.updated_at,
+
+    completed_at:
+      evaluation.completed_at,
+
     ...version,
   };
 }
 
-async function loadEvaluation(client, evaluationId, actorUserId, { lock = false } = {}) {
+
+async function loadEvaluation(
+  client,
+  evaluationId,
+  actorUserId,
+  { lock = false } = {}
+) {
   const result = await client.query(
     `
+    /* job_evaluation:load */
     SELECT
       a.id AS evaluation_id,
       a.current_version,
@@ -1354,37 +1685,64 @@ async function loadEvaluation(client, evaluationId, actorUserId, { lock = false 
       a.ordinary_request_id,
       a.emergency_request_id,
       a.relationship_id,
-      ordinary_subject.job_id,
-      ordinary_subject.job_request_id,
-      ordinary_visit_link.visit_id AS evaluation_visit_id,
-      remote_provenance.assessment_method AS remote_assessment_method,
-      remote_provenance.assessment_basis AS remote_assessment_basis,
-      actor_participant.id AS actor_participant_id,
+      a.business_customer_job_source_id,
+      a.contractor_profile_id,
+
+      subjects.job_id,
+      subjects.job_request_id,
+      subjects.job_source_type,
+      subjects.business_customer_job_source_id
+        AS subject_business_customer_job_source_id,
+
+      visit_links.visit_id
+        AS evaluation_visit_id,
+
+      remote_provenance.assessment_method
+        AS remote_assessment_method,
+
+      remote_provenance.assessment_basis
+        AS remote_assessment_basis,
+
+      actor_participant.id
+        AS actor_participant_id,
+
       CASE
-        WHEN a.source_context_type = 'ordinary_request' THEN COALESCE(
+        WHEN a.source_context_type =
+          'ordinary_request'
+        THEN COALESCE(
           (
             SELECT jsonb_agg(
               jsonb_build_object(
-                'id', reported_concerns.id,
-                'originalText', reported_concerns.original_text,
-                'reportedAt', reported_concerns.reported_at,
-                'sequence', reported_concerns.sequence
+                'id',
+                reported_concerns.id,
+                'originalText',
+                reported_concerns.original_text,
+                'reportedAt',
+                reported_concerns.reported_at,
+                'sequence',
+                reported_concerns.sequence
               )
-              ORDER BY reported_concerns.sequence ASC,
+              ORDER BY
+                reported_concerns.sequence ASC,
                 reported_concerns.reported_at ASC,
                 reported_concerns.id ASC
             )
             FROM reported_concerns
-            WHERE reported_concerns.job_request_id = a.ordinary_request_id
+            WHERE reported_concerns.job_request_id =
+                  a.ordinary_request_id
           ),
           '[]'::jsonb
         )
         ELSE NULL
       END AS reported_concerns,
+
       ce.status AS evaluation_status,
-      ce.created_at AS evaluation_created_at,
-      ce.updated_at AS evaluation_updated_at,
+      ce.created_at
+        AS evaluation_created_at,
+      ce.updated_at
+        AS evaluation_updated_at,
       ce.completed_at,
+
       cev.service_type,
       cev.evaluation_context,
       cev.template_key,
@@ -1397,70 +1755,191 @@ async function loadEvaluation(client, evaluationId, actorUserId, { lock = false 
       cev.relevant_conditions,
       cev.supporting_media_references,
       cev.internal_notes
-    FROM commercial_authority_aggregates AS a
-    INNER JOIN canonical_evaluations AS ce
+
+    FROM commercial_authority_aggregates a
+
+    INNER JOIN canonical_evaluations ce
       ON ce.id = a.id
-      AND ce.professional_user_id = $2
-    INNER JOIN canonical_evaluation_versions AS cev
+     AND ce.professional_user_id = $2
+
+    INNER JOIN canonical_evaluation_versions cev
       ON cev.evaluation_id = ce.id
-      AND cev.version = a.current_version
-    INNER JOIN request_relationships AS rr
+     AND cev.version =
+           a.current_version
+
+    LEFT JOIN request_relationships rr
       ON rr.id = ce.relationship_id
-      AND rr.id = a.relationship_id
-      AND rr.professional_user_id = ce.professional_user_id
-    LEFT JOIN emergency_requests AS er
+     AND rr.id = a.relationship_id
+     AND rr.professional_user_id =
+           ce.professional_user_id
+
+    LEFT JOIN emergency_requests er
       ON er.id = a.emergency_request_id
-      AND er.homeowner_id = rr.homeowner_id
-      AND er.homeowner_id = a.source_owner_user_id
-    LEFT JOIN canonical_evaluation_job_subjects AS ordinary_subject
-      ON ordinary_subject.evaluation_id = a.id
-      AND ordinary_subject.relationship_id = a.relationship_id
-      AND ordinary_subject.job_request_id = a.ordinary_request_id
-    LEFT JOIN canonical_visit_evaluation_links AS ordinary_visit_link
-      ON ordinary_visit_link.evaluation_id = ordinary_subject.evaluation_id
-      AND ordinary_visit_link.job_id = ordinary_subject.job_id
-    LEFT JOIN canonical_evaluation_remote_provenance AS remote_provenance
-      ON remote_provenance.evaluation_id = ordinary_subject.evaluation_id
-      AND remote_provenance.job_id = ordinary_subject.job_id
-    LEFT JOIN jobs AS ordinary_job
-      ON ordinary_job.id = ordinary_subject.job_id
-      AND ordinary_job.job_request_id = ordinary_subject.job_request_id
-      AND ordinary_job.source_request_relationship_id =
-        ordinary_subject.relationship_id
-      AND ordinary_job.lifecycle_contract_version = 2
-    LEFT JOIN posts AS ordinary_post
-      ON ordinary_post.id = ordinary_job.job_request_id
-      AND ordinary_post.lifecycle_contract_version = 2
-      AND ordinary_post.user_id = a.source_owner_user_id
-    LEFT JOIN relationship_participants AS actor_participant
-      ON actor_participant.job_id = ordinary_job.id
-      AND actor_participant.request_relationship_id = rr.id
-      AND actor_participant.user_id = $2
+     AND er.homeowner_id =
+           rr.homeowner_id
+     AND er.homeowner_id =
+           a.source_owner_user_id
+
+    LEFT JOIN canonical_evaluation_job_subjects
+      subjects
+      ON subjects.evaluation_id = a.id
+     AND subjects.source_context_type =
+           a.source_context_type
+     AND subjects.relationship_id
+           IS NOT DISTINCT FROM
+           a.relationship_id
+
+    LEFT JOIN canonical_visit_evaluation_links
+      visit_links
+      ON visit_links.evaluation_id =
+           subjects.evaluation_id
+     AND visit_links.job_id =
+           subjects.job_id
+
+    LEFT JOIN canonical_evaluation_remote_provenance
+      remote_provenance
+      ON remote_provenance.evaluation_id =
+           subjects.evaluation_id
+     AND remote_provenance.job_id =
+           subjects.job_id
+
+    LEFT JOIN jobs
+      ON jobs.id = subjects.job_id
+     AND jobs.source_type =
+           subjects.job_source_type
+     AND jobs.lifecycle_contract_version = 2
+
+    LEFT JOIN posts
+      ON posts.id = jobs.job_request_id
+     AND posts.lifecycle_contract_version = 2
+     AND posts.user_id =
+           a.source_owner_user_id
+
+    LEFT JOIN relationship_participants
+      actor_participant
+      ON actor_participant.job_id =
+           jobs.id
+     AND actor_participant.user_id = $2
+     AND (
+       (
+         subjects.job_source_type =
+           'ordinary_request_selection'
+         AND actor_participant.request_relationship_id =
+             subjects.relationship_id
+         AND actor_participant.source_evidence_type =
+             'request_selection'
+       )
+       OR
+       (
+         subjects.job_source_type =
+           'existing_customer_request'
+         AND actor_participant.request_relationship_id =
+             subjects.relationship_id
+         AND actor_participant.source_evidence_type =
+             'existing_customer_request'
+       )
+       OR
+       (
+         subjects.job_source_type =
+           'business_customer'
+         AND actor_participant.request_relationship_id
+             IS NULL
+         AND actor_participant.source_evidence_type =
+             'business_customer'
+       )
+     )
+
+    LEFT JOIN contractor_profiles
+      business_profile
+      ON jobs.source_type =
+           'business_customer'
+     AND business_profile.id =
+           jobs.contractor_profile_id
+     AND business_profile.user_id = $2
+
+    LEFT JOIN business_customer_job_sources
+      business_source
+      ON jobs.source_type =
+           'business_customer'
+     AND business_source.id =
+           subjects.business_customer_job_source_id
+     AND business_source.id =
+           a.business_customer_job_source_id
+     AND business_source.contractor_profile_id =
+           jobs.contractor_profile_id
+     AND business_source.created_by_user_id =
+           business_profile.user_id
+
     WHERE a.id = $1
-      AND a.aggregate_type = 'evaluation'
+      AND a.aggregate_type =
+          'evaluation'
       AND a.owning_engine = $3
+
       AND (
         (
-          a.source_context_type = 'emergency_request'
-          AND rr.emergency_request_id = a.emergency_request_id
+          a.source_context_type =
+            'emergency_request'
+          AND rr.emergency_request_id =
+              a.emergency_request_id
           AND rr.post_id IS NULL
           AND er.id IS NOT NULL
         )
+
         OR
+
         (
-          a.source_context_type = 'ordinary_request'
-          AND rr.post_id = a.ordinary_request_id
-          AND rr.emergency_request_id IS NULL
-          AND ordinary_job.id IS NOT NULL
-          AND ordinary_post.id IS NOT NULL
-          AND actor_participant.id IS NOT NULL
+          a.source_context_type =
+            'ordinary_request'
+          AND subjects.source_context_type =
+              'ordinary_request'
+          AND subjects.job_source_type IN (
+            'ordinary_request_selection',
+            'existing_customer_request'
+          )
+          AND rr.post_id =
+              a.ordinary_request_id
+          AND rr.emergency_request_id
+              IS NULL
+          AND jobs.id IS NOT NULL
+          AND posts.id IS NOT NULL
+          AND actor_participant.id
+              IS NOT NULL
+        )
+
+        OR
+
+        (
+          a.source_context_type =
+            'business_customer'
+          AND a.relationship_id IS NULL
+          AND ce.relationship_id IS NULL
+          AND a.ordinary_request_id IS NULL
+          AND a.emergency_request_id IS NULL
+          AND a.business_document_id IS NULL
+          AND subjects.source_context_type =
+              'business_customer'
+          AND subjects.job_source_type =
+              'business_customer'
+          AND subjects.business_customer_job_source_id =
+              a.business_customer_job_source_id
+          AND jobs.id IS NOT NULL
+          AND business_profile.id IS NOT NULL
+          AND business_source.id IS NOT NULL
+          AND actor_participant.id
+              IS NOT NULL
         )
       )
+
     LIMIT 1
-    ${lock ? "FOR UPDATE OF a, ce, rr" : ""}
+    ${lock ? "FOR UPDATE OF a, ce" : ""}
     `,
-    [evaluationId, actorUserId, OWNING_ENGINE]
+    [
+      evaluationId,
+      actorUserId,
+      OWNING_ENGINE,
+    ]
   );
+
   return result.rows[0] || null;
 }
 
@@ -1631,241 +2110,462 @@ async function createEvaluation(input = {}) {
   }
 }
 
+
 async function createOrdinaryJobEvaluation(input = {}) {
-  const validated = validateOrdinaryCreateInput(input);
-  if (validated.error) return validated.error;
-  const logger = safeLogger(input.logger);
-  const client = await databaseClient(input.pool);
+  const validated =
+    validateOrdinaryCreateInput(input);
+
+  if (validated.error) {
+    return validated.error;
+  }
+
+  const logger =
+    safeLogger(input.logger);
+
+  const client =
+    await databaseClient(input.pool);
+
   let transactionStarted = false;
 
   try {
     await client.query("BEGIN");
     transactionStarted = true;
-    const context = await resolveOrdinaryJobContext(
-      client,
-      validated.jobId,
-      validated.actorId,
-      { lock: true }
-    );
-    const authorityError = await requireOrdinaryEvaluationAuthority({
-      client,
-      context,
-      actorUserId: validated.actorId,
-      logger,
-    });
+
+    const context =
+      await resolveJobEvaluationContext(
+        client,
+        validated.jobId,
+        validated.actorId,
+        { lock: true }
+      );
+
+    const authorityError =
+      await requireJobEvaluationAuthority({
+        client,
+        context,
+        actorUserId:
+          validated.actorId,
+        logger,
+      });
+
     if (authorityError) {
       await rollback(client);
       transactionStarted = false;
       return authorityError;
     }
 
-    const requestFingerprint = fingerprint({
-      command: EVALUATION_COMMANDS.CREATE,
-      expectedVersion: 0,
-      jobId: validated.jobId,
-      visitId: validated.visitId,
-      content: validated.content,
-    });
-    const idempotency = await reserveIdempotency({
-      client,
-      actorUserId: validated.actorId,
-      commandName: EVALUATION_COMMANDS.CREATE,
-      commandScope: `evaluation:create:job:${validated.jobId}`,
-      idempotencyKey: validated.idempotencyKey,
-      requestFingerprint,
-    });
+    const requestFingerprint =
+      fingerprint({
+        command:
+          EVALUATION_COMMANDS.CREATE,
+        expectedVersion: 0,
+        jobId: validated.jobId,
+        visitId:
+          validated.visitId,
+        content:
+          validated.content,
+      });
+
+    const idempotency =
+      await reserveIdempotency({
+        client,
+        actorUserId:
+          validated.actorId,
+        commandName:
+          EVALUATION_COMMANDS.CREATE,
+        commandScope:
+          `evaluation:create:job:${validated.jobId}`,
+        idempotencyKey:
+          validated.idempotencyKey,
+        requestFingerprint,
+      });
+
     if (idempotency.error) {
       await rollback(client);
       transactionStarted = false;
       return idempotency.error;
     }
+
     if (idempotency.replay) {
       await client.query("COMMIT");
       transactionStarted = false;
-      logger.info("Ordinary Evaluation idempotency replayed", {
-        code: "ORDINARY_EVALUATION_IDEMPOTENCY_REPLAYED",
-        actorUserId: validated.actorId,
-        jobId: validated.jobId,
-        evaluationId: idempotency.replay.evaluation?.id || null,
-      });
-      return { ...idempotency.replay, replayed: true };
+
+      logger.info(
+        "Job Evaluation idempotency replayed",
+        {
+          code:
+            "JOB_EVALUATION_IDEMPOTENCY_REPLAYED",
+          actorUserId:
+            validated.actorId,
+          jobId:
+            validated.jobId,
+          jobSourceType:
+            context.job_source_type,
+          evaluationId:
+            idempotency.replay
+              .evaluation?.id ||
+            null,
+        }
+      );
+
+      return {
+        ...idempotency.replay,
+        replayed: true,
+      };
     }
 
-    const evaluationVisit = validated.visitId
-      ? await loadEvaluationVisitForDraft(client, {
-          jobId: validated.jobId,
-          visitId: validated.visitId,
-          lock: true,
-        })
-      : null;
-    if (validated.visitId && !evaluationVisit) {
+    const evaluationVisit =
+      validated.visitId
+        ? await loadEvaluationVisitForDraft(
+            client,
+            {
+              jobId:
+                validated.jobId,
+              visitId:
+                validated.visitId,
+              lock: true,
+            }
+          )
+        : null;
+
+    if (
+      validated.visitId &&
+      !evaluationVisit
+    ) {
       await rollback(client);
       transactionStarted = false;
+
       return failure(
         409,
         "STARTED_EVALUATION_VISIT_REQUIRED",
         "Start the Evaluation Visit before documenting the onsite assessment."
       );
     }
-    const completedVisit = evaluationVisit?.visit_state === "COMPLETED"
-      ? evaluationVisit
-      : null;
 
-    const existing = await client.query(
-      `
-      SELECT id
-      FROM canonical_evaluations
-      WHERE relationship_id = $1
-        AND professional_user_id = $2
-      LIMIT 1
-      FOR UPDATE
-      `,
-      [Number(context.relationship_id), validated.actorId]
-    );
+    const completedVisit =
+      evaluationVisit?.visit_state ===
+        "COMPLETED"
+        ? evaluationVisit
+        : null;
+
+    const existing =
+      await client.query(
+        `
+        SELECT
+          canonical_evaluation_job_subjects.evaluation_id
+        FROM canonical_evaluation_job_subjects
+        INNER JOIN canonical_evaluations
+          ON canonical_evaluations.id =
+               canonical_evaluation_job_subjects.evaluation_id
+         AND canonical_evaluations.professional_user_id =
+               $2
+        WHERE canonical_evaluation_job_subjects.job_id =
+              $1
+        LIMIT 1
+        FOR UPDATE OF canonical_evaluations
+        `,
+        [
+          context.job_id,
+          validated.actorId,
+        ]
+      );
+
     if (existing.rows[0]) {
       await rollback(client);
       transactionStarted = false;
+
       return failure(
         409,
         "EVALUATION_ALREADY_EXISTS",
-        "A canonical Evaluation already exists for this relationship."
+        "A canonical Evaluation already exists for this Job."
       );
     }
 
-    const evaluationId = randomUUID();
-    const aggregateResult = await client.query(
-      `
-      INSERT INTO commercial_authority_aggregates
-      (
-        id,
-        aggregate_type,
-        owning_engine,
-        source_context_type,
-        ordinary_request_id,
-        emergency_request_id,
-        relationship_id,
-        source_owner_user_id,
-        created_by_user_id,
-        current_version
-      )
-      VALUES ($1, 'evaluation', $2, 'ordinary_request', $3, NULL, $4, $5, $6, 1)
-      RETURNING *
-      `,
-      [
-        evaluationId,
-        OWNING_ENGINE,
-        Number(context.job_request_id),
-        Number(context.relationship_id),
-        Number(context.homeowner_id),
-        validated.actorId,
-      ]
-    );
-    const aggregate = aggregateResult.rows[0];
-    if (!aggregate) throw new Error("Canonical Evaluation aggregate creation failed.");
+    const evaluationId =
+      randomUUID();
 
-    const evaluationResult = await client.query(
-      `
-      INSERT INTO canonical_evaluations
-      (id, relationship_id, professional_user_id, status)
-      VALUES ($1, $2, $3, 'draft')
-      RETURNING *
-      `,
-      [evaluationId, Number(context.relationship_id), validated.actorId]
-    );
-    const evaluation = evaluationResult.rows[0];
-    const version = await insertVersion({
-      client,
-      evaluationId,
-      version: 1,
-      status: EVALUATION_STATUS.DRAFT,
-      content: validated.content,
-      actorId: validated.actorId,
-    });
-    const subjectResult = await client.query(
-      `
-      INSERT INTO canonical_evaluation_job_subjects
-      (evaluation_id, job_id, job_request_id, relationship_id)
-      VALUES ($1, $2, $3, $4)
-      RETURNING evaluation_id
-      `,
-      [
+    const aggregateResult =
+      await client.query(
+        `
+        INSERT INTO commercial_authority_aggregates
+        (
+          id,
+          aggregate_type,
+          owning_engine,
+          source_context_type,
+          ordinary_request_id,
+          emergency_request_id,
+          relationship_id,
+          source_owner_user_id,
+          created_by_user_id,
+          business_document_id,
+          contractor_profile_id,
+          business_customer_job_source_id,
+          current_version
+        )
+        VALUES (
+          $1,
+          'evaluation',
+          $2,
+          $3,
+          $4,
+          NULL,
+          $5,
+          $6,
+          $7,
+          NULL,
+          $8,
+          $9,
+          1
+        )
+        RETURNING *
+        `,
+        [
+          evaluationId,
+          OWNING_ENGINE,
+          context.source_context_type,
+          context.job_request_id ||
+            null,
+          context.relationship_id == null
+            ? null
+            : Number(
+                context.relationship_id
+              ),
+          Number(
+            context.source_owner_user_id
+          ),
+          validated.actorId,
+          context.contractor_profile_id ||
+            null,
+          context.business_customer_job_source_id ||
+            null,
+        ]
+      );
+
+    const aggregate =
+      aggregateResult.rows[0];
+
+    if (!aggregate) {
+      throw new Error(
+        "Canonical Evaluation aggregate creation failed."
+      );
+    }
+
+    const evaluationResult =
+      await client.query(
+        `
+        INSERT INTO canonical_evaluations
+        (
+          id,
+          relationship_id,
+          professional_user_id,
+          status
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          'draft'
+        )
+        RETURNING *
+        `,
+        [
+          evaluationId,
+          context.relationship_id == null
+            ? null
+            : Number(
+                context.relationship_id
+              ),
+          validated.actorId,
+        ]
+      );
+
+    const evaluation =
+      evaluationResult.rows[0];
+
+    const version =
+      await insertVersion({
+        client,
         evaluationId,
-        context.job_id,
-        Number(context.job_request_id),
-        Number(context.relationship_id),
-      ]
-    );
-    if (!evaluation || !version || !subjectResult.rows[0]) {
-      throw new Error("Canonical ordinary Evaluation creation failed.");
+        version: 1,
+        status:
+          EVALUATION_STATUS.DRAFT,
+        content:
+          validated.content,
+        actorId:
+          validated.actorId,
+      });
+
+    const subjectResult =
+      await client.query(
+        `
+        INSERT INTO canonical_evaluation_job_subjects
+        (
+          evaluation_id,
+          subject_type,
+          source_context_type,
+          job_id,
+          job_source_type,
+          job_request_id,
+          relationship_id,
+          business_customer_job_source_id
+        )
+        VALUES (
+          $1,
+          'job',
+          $2,
+          $3,
+          $4,
+          $5,
+          $6,
+          $7
+        )
+        RETURNING evaluation_id
+        `,
+        [
+          evaluationId,
+          context.source_context_type,
+          context.job_id,
+          context.job_source_type,
+          context.job_request_id ||
+            null,
+          context.relationship_id == null
+            ? null
+            : Number(
+                context.relationship_id
+              ),
+          context.business_customer_job_source_id ||
+            null,
+        ]
+      );
+
+    if (
+      !evaluation ||
+      !version ||
+      !subjectResult.rows[0]
+    ) {
+      throw new Error(
+        "Canonical Job Evaluation creation failed."
+      );
     }
 
     if (completedVisit) {
-      const linkCommand = await reserveVisitEvaluationLinkCommand({
-        client,
-        context,
-        visitId: completedVisit.visit_id,
-        evaluationId,
-        idempotencyKey: validated.idempotencyKey,
-      });
-      if (linkCommand.error || linkCommand.replay) {
-        throw new Error("Canonical Evaluation Visit linkage reservation failed.");
-      }
-      const linkResult = await client.query(
-        `INSERT INTO canonical_visit_evaluation_links (
-           visit_id, job_id, evaluation_id,
-           linked_by_participant_id, command_idempotency_id
-         ) VALUES ($1, $2, $3, $4, $5)
-         RETURNING visit_id`,
-        [
-          completedVisit.visit_id,
-          context.job_id,
+      const linkCommand =
+        await reserveVisitEvaluationLinkCommand({
+          client,
+          context,
+          visitId:
+            completedVisit.visit_id,
           evaluationId,
-          context.actor_participant_id,
-          linkCommand.reservation.id,
-        ]
-      );
-      if (!linkResult.rows[0]) {
-        throw new Error("Canonical Evaluation Visit linkage failed.");
+          idempotencyKey:
+            validated.idempotencyKey,
+        });
+
+      if (
+        linkCommand.error ||
+        linkCommand.replay
+      ) {
+        throw new Error(
+          "Canonical Evaluation Visit linkage reservation failed."
+        );
       }
+
+      const linkResult =
+        await client.query(
+          `
+          INSERT INTO canonical_visit_evaluation_links
+          (
+            visit_id,
+            job_id,
+            evaluation_id,
+            linked_by_participant_id,
+            command_idempotency_id
+          )
+          VALUES (
+            $1,
+            $2,
+            $3,
+            $4,
+            $5
+          )
+          RETURNING visit_id
+          `,
+          [
+            completedVisit.visit_id,
+            context.job_id,
+            evaluationId,
+            context.actor_participant_id,
+            linkCommand.reservation.id,
+          ]
+        );
+
+      if (!linkResult.rows[0]) {
+        throw new Error(
+          "Canonical Evaluation Visit linkage failed."
+        );
+      }
+
       await completeVisitEvaluationLinkCommand(
         client,
         linkCommand.reservation.id,
         {
-          visitId: completedVisit.visit_id,
+          visitId:
+            completedVisit.visit_id,
           evaluationId,
-          jobId: context.job_id,
+          jobId:
+            context.job_id,
         }
       );
     }
 
-    const evidence = await insertEvaluationEvidence({
-      client,
-      aggregate,
-      context,
-      actorId: validated.actorId,
-      idempotencyId: idempotency.reservation.id,
-      evidenceType: EVALUATION_EVIDENCE_TYPES.CREATED,
-      commandName: EVALUATION_COMMANDS.CREATE,
-      previousVersion: 0,
-      resultingVersion: 1,
-      content: validated.content,
-      status: EVALUATION_STATUS.DRAFT,
-    });
-    if (!evidence) throw new Error("Canonical Evaluation evidence creation failed.");
+    const evidence =
+      await insertEvaluationEvidence({
+        client,
+        aggregate,
+        context,
+        actorId:
+          validated.actorId,
+        idempotencyId:
+          idempotency.reservation.id,
+        evidenceType:
+          EVALUATION_EVIDENCE_TYPES.CREATED,
+        commandName:
+          EVALUATION_COMMANDS.CREATE,
+        previousVersion: 0,
+        resultingVersion: 1,
+        content:
+          validated.content,
+        status:
+          EVALUATION_STATUS.DRAFT,
+      });
 
-    const row = combinedRow({
-      aggregate,
-      evaluation,
-      version,
-      context,
-      visitId: completedVisit?.visit_id || null,
-    });
-    const result = successResult({
-      status: 201,
-      code: "EVALUATION_CREATED",
-      row,
-      evidenceType: EVALUATION_EVIDENCE_TYPES.CREATED,
-    });
+    if (!evidence) {
+      throw new Error(
+        "Canonical Evaluation evidence creation failed."
+      );
+    }
+
+    const row =
+      combinedRow({
+        aggregate,
+        evaluation,
+        version,
+        context,
+        visitId:
+          completedVisit?.visit_id ||
+          null,
+      });
+
+    const result =
+      successResult({
+        status: 201,
+        code:
+          "EVALUATION_CREATED",
+        row,
+        evidenceType:
+          EVALUATION_EVIDENCE_TYPES.CREATED,
+      });
+
     if (
       !(await completeIdempotency(
         client,
@@ -1874,25 +2574,51 @@ async function createOrdinaryJobEvaluation(input = {}) {
         result
       ))
     ) {
-      throw new Error("Canonical Evaluation idempotency completion failed.");
+      throw new Error(
+        "Canonical Evaluation idempotency completion failed."
+      );
     }
 
     await client.query("COMMIT");
     transactionStarted = false;
-    logger.info("Ordinary Evaluation created", {
-      code: "ORDINARY_EVALUATION_CREATED",
-      actorUserId: validated.actorId,
-      jobId: validated.jobId,
-      relationshipId: Number(context.relationship_id),
-      evaluationId,
-      version: 1,
-    });
+
+    logger.info(
+      "Job Evaluation created",
+      {
+        code:
+          "JOB_EVALUATION_CREATED",
+        actorUserId:
+          validated.actorId,
+        jobId:
+          validated.jobId,
+        jobSourceType:
+          context.job_source_type,
+        relationshipId:
+          context.relationship_id == null
+            ? null
+            : Number(
+                context.relationship_id
+              ),
+        evaluationId,
+        version: 1,
+      }
+    );
+
     return result;
   } catch (error) {
-    if (transactionStarted) await rollback(client);
+    if (transactionStarted) {
+      await rollback(client);
+    }
+
     throw error;
   } finally {
-    if (client !== input.pool && typeof client.release === "function") client.release();
+    if (
+      client !== input.pool &&
+      typeof client.release ===
+        "function"
+    ) {
+      client.release();
+    }
   }
 }
 
@@ -1957,14 +2683,14 @@ async function mutateEvaluation(
     }
     if (idempotency.replay) {
       const replaySource = idempotency.replay.aggregate?.sourceContext;
-      if (replaySource?.type === "ordinary_job") {
-        const replayContext = await resolveOrdinaryJobContext(
+      if (isJobSourceContext(replaySource)) {
+        const replayContext = await resolveJobEvaluationContext(
           client,
           replaySource.jobId,
           validated.actorId,
           { lock: true }
         );
-        const replayAuthorityError = await requireOrdinaryEvaluationAuthority({
+        const replayAuthorityError = await requireJobEvaluationAuthority({
           client,
           context: replayContext,
           actorUserId: validated.actorId,
@@ -1978,7 +2704,7 @@ async function mutateEvaluation(
       }
       await client.query("COMMIT");
       transactionStarted = false;
-      if (replaySource?.type === "ordinary_job") {
+      if (isJobSourceContext(replaySource)) {
         logger.info("Ordinary Evaluation idempotency replayed", {
           code: "ORDINARY_EVALUATION_IDEMPOTENCY_REPLAYED",
           actorUserId: validated.actorId,
@@ -2002,14 +2728,14 @@ async function mutateEvaluation(
     }
     const sourceContext = sourceContextFromRow(current);
     let context;
-    if (sourceContext.type === "ordinary_job") {
-      context = await resolveOrdinaryJobContext(
+    if (isJobSourceContext(sourceContext)) {
+      context = await resolveJobEvaluationContext(
         client,
         sourceContext.jobId,
         validated.actorId,
         { lock: true }
       );
-      const authorityError = await requireOrdinaryEvaluationAuthority({
+      const authorityError = await requireJobEvaluationAuthority({
         client,
         context,
         actorUserId: validated.actorId,
@@ -2023,7 +2749,8 @@ async function mutateEvaluation(
       if (completion) {
         effectiveCompletionMode =
           validated.completionMode || EVALUATION_COMPLETION_MODES.PHYSICAL;
-        const provenance = await loadOrdinaryEvaluationProvenance({
+
+        const provenance = await loadJobEvaluationProvenance({
           client,
           evaluationId: validated.evaluationId,
           jobId: context.job_id,
@@ -2143,7 +2870,7 @@ async function mutateEvaluation(
     }
 
     const content = completion ? contentFromRow(current) : validated.content;
-    if (sourceContext.type === "ordinary_job") {
+    if (isJobSourceContext(sourceContext)) {
       const boundaryError = validateOrdinaryEvaluationContent(content);
       if (boundaryError) {
         await rollback(client);
@@ -2152,7 +2879,7 @@ async function mutateEvaluation(
       }
     }
     if (completion) {
-      const completionError = sourceContext.type === "ordinary_job"
+      const completionError = isJobSourceContext(sourceContext)
         ? validateOrdinaryCompletionContent(content)
         : validateCompletionContent(content);
       if (completionError) {
@@ -2292,7 +3019,7 @@ async function mutateEvaluation(
 
     if (
       completion &&
-      sourceContext.type === "ordinary_job" &&
+      isJobSourceContext(sourceContext) &&
       effectiveCompletionMode === EVALUATION_COMPLETION_MODES.REMOTE
     ) {
       const remoteProvenance = await insertRemoteEvaluationProvenance({
@@ -2312,7 +3039,7 @@ async function mutateEvaluation(
 
     await client.query("COMMIT");
     transactionStarted = false;
-    if (sourceContext.type === "ordinary_job") {
+    if (isJobSourceContext(sourceContext)) {
       logger.info(
         completion
           ? "Ordinary Evaluation confirmed"
@@ -2377,13 +3104,13 @@ async function getEvaluation(input = {}) {
   if (!row) {
     return failure(404, "EVALUATION_UNAVAILABLE", "The Evaluation is unavailable.");
   }
-  if (row.source_context_type === "ordinary_request") {
-    const context = await resolveOrdinaryJobContext(
+  if (row.job_id) {
+    const context = await resolveJobEvaluationContext(
       input.pool,
       row.job_id,
       actor.id
     );
-    const authorityError = await requireOrdinaryEvaluationAuthority({
+    const authorityError = await requireJobEvaluationAuthority({
       client: input.pool,
       context,
       actorUserId: actor.id,
@@ -2411,8 +3138,8 @@ async function listEvaluationsForJob(input = {}) {
     throw new TypeError("A database pool or client is required.");
   }
   const logger = safeLogger(input.logger);
-  const context = await resolveOrdinaryJobContext(input.pool, jobId, actor.id);
-  const authorityError = await requireOrdinaryEvaluationAuthority({
+  const context = await resolveJobEvaluationContext(input.pool, jobId, actor.id);
+  const authorityError = await requireJobEvaluationAuthority({
     client: input.pool,
     context,
     actorUserId: actor.id,
@@ -2422,23 +3149,23 @@ async function listEvaluationsForJob(input = {}) {
 
   const result = await input.pool.query(
     `
-    SELECT canonical_evaluation_job_subjects.evaluation_id
+    SELECT
+      canonical_evaluation_job_subjects.evaluation_id
     FROM canonical_evaluation_job_subjects
     INNER JOIN canonical_evaluations
       ON canonical_evaluations.id =
-        canonical_evaluation_job_subjects.evaluation_id
-      AND canonical_evaluations.professional_user_id = $2
-    WHERE canonical_evaluation_job_subjects.job_id = $1
-      AND canonical_evaluation_job_subjects.job_request_id = $3
-      AND canonical_evaluation_job_subjects.relationship_id = $4
-    ORDER BY canonical_evaluations.updated_at DESC,
+           canonical_evaluation_job_subjects.evaluation_id
+     AND canonical_evaluations.professional_user_id =
+           $2
+    WHERE canonical_evaluation_job_subjects.job_id =
+          $1
+    ORDER BY
+      canonical_evaluations.updated_at DESC,
       canonical_evaluations.id ASC
     `,
     [
       jobId,
       actor.id,
-      Number(context.job_request_id),
-      Number(context.relationship_id),
     ]
   );
   const evaluations = [];
@@ -2553,4 +3280,11 @@ module.exports = {
   validateEvaluationContent,
   validateOrdinaryCompletionContent,
   validateOrdinaryEvaluationContent,
+
+  evaluationJobRuntimeInternals:
+    Object.freeze({
+      isJobSourceContext,
+      requireJobEvaluationAuthority,
+      resolveJobEvaluationContext,
+    }),
 };

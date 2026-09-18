@@ -10,6 +10,15 @@ const {
 const { hasActiveLifecycleGrant } = require("./lifecycleAuthorityService");
 
 const {
+  evaluationJobRuntimeInternals,
+} = require("./evaluationService");
+
+const {
+  resolveJobEvaluationContext,
+} = evaluationJobRuntimeInternals;
+
+
+const {
   completeIdempotency,
   databaseClient,
   failure,
@@ -126,69 +135,170 @@ async function loadEvaluationContext(
   actorUserId,
   { lock = false } = {}
 ) {
-  const result = await client.query(
-    `
-    /* finding:evaluation_context */
-    SELECT
-      canonical_evaluations.id AS evaluation_id,
-      canonical_evaluations.status AS evaluation_status,
-      commercial_authority_aggregates.current_version AS evaluation_version,
-      canonical_evaluation_job_subjects.job_id,
-      canonical_evaluation_job_subjects.job_request_id,
-      canonical_evaluation_job_subjects.relationship_id,
-      relationship_participants.id AS actor_participant_id,
-      relationship_participants.user_id AS actor_user_id
-    FROM canonical_evaluations
-    INNER JOIN commercial_authority_aggregates
-      ON commercial_authority_aggregates.id = canonical_evaluations.id
-      AND commercial_authority_aggregates.aggregate_type = 'evaluation'
-      AND commercial_authority_aggregates.owning_engine = $3
-      AND commercial_authority_aggregates.source_context_type = 'ordinary_request'
-    INNER JOIN canonical_evaluation_job_subjects
-      ON canonical_evaluation_job_subjects.evaluation_id = canonical_evaluations.id
-      AND canonical_evaluation_job_subjects.job_request_id =
-        commercial_authority_aggregates.ordinary_request_id
-      AND canonical_evaluation_job_subjects.relationship_id =
-        commercial_authority_aggregates.relationship_id
-    INNER JOIN jobs
-      ON jobs.id = canonical_evaluation_job_subjects.job_id
-      AND jobs.job_request_id = canonical_evaluation_job_subjects.job_request_id
-      AND jobs.source_request_relationship_id =
-        canonical_evaluation_job_subjects.relationship_id
-      AND jobs.lifecycle_contract_version = 2
-    INNER JOIN posts
-      ON posts.id = jobs.job_request_id
-      AND posts.lifecycle_contract_version = 2
-      AND posts.user_id = commercial_authority_aggregates.source_owner_user_id
-    INNER JOIN request_relationships
-      ON request_relationships.id = jobs.source_request_relationship_id
-      AND request_relationships.post_id = jobs.job_request_id
-      AND request_relationships.emergency_request_id IS NULL
-      AND request_relationships.homeowner_id = posts.user_id
-      AND request_relationships.professional_user_id = $2
-      AND request_relationships.professional_user_id =
-        canonical_evaluations.professional_user_id
-      AND request_relationships.status = 'active'
-    INNER JOIN request_selections
-      ON request_selections.id = jobs.source_request_selection_id
-      AND request_selections.request_relationship_id = request_relationships.id
-      AND request_selections.post_id = posts.id
-      AND request_selections.selected_by_user_id = posts.user_id
-    INNER JOIN relationship_participants
-      ON relationship_participants.job_id = jobs.id
-      AND relationship_participants.request_relationship_id =
-        request_relationships.id
-      AND relationship_participants.user_id = $2
-    WHERE canonical_evaluations.id = $1
-      AND canonical_evaluations.professional_user_id = $2
-    LIMIT 1
-    ${lock
-      ? "FOR UPDATE OF canonical_evaluations, commercial_authority_aggregates, jobs, request_relationships"
-      : ""}
-    `,
-    [evaluationId, actorUserId, OWNING_ENGINE]
-  );
-  return result.rows[0] || null;
+  const result =
+    await client.query(
+      `
+      /* finding:evaluation_job_subject */
+      SELECT
+        canonical_evaluations.id
+          AS evaluation_id,
+
+        canonical_evaluations.status
+          AS evaluation_status,
+
+        canonical_evaluations.professional_user_id,
+
+        commercial_authority_aggregates.current_version
+          AS evaluation_version,
+
+        commercial_authority_aggregates.source_context_type,
+
+        canonical_evaluation_job_subjects.job_id,
+
+        canonical_evaluation_job_subjects.job_request_id,
+
+        canonical_evaluation_job_subjects.relationship_id,
+
+        canonical_evaluation_job_subjects.job_source_type,
+
+        canonical_evaluation_job_subjects.business_customer_job_source_id
+
+      FROM canonical_evaluations
+
+      INNER JOIN commercial_authority_aggregates
+        ON commercial_authority_aggregates.id =
+             canonical_evaluations.id
+
+       AND commercial_authority_aggregates.aggregate_type =
+             'evaluation'
+
+       AND commercial_authority_aggregates.owning_engine =
+             $3
+
+       AND commercial_authority_aggregates.source_context_type IN (
+             'ordinary_request',
+             'business_customer'
+           )
+
+      INNER JOIN canonical_evaluation_job_subjects
+        ON canonical_evaluation_job_subjects.evaluation_id =
+             canonical_evaluations.id
+
+       AND canonical_evaluation_job_subjects.source_context_type =
+             commercial_authority_aggregates.source_context_type
+
+       AND canonical_evaluation_job_subjects.relationship_id
+             IS NOT DISTINCT FROM
+             commercial_authority_aggregates.relationship_id
+
+      WHERE canonical_evaluations.id =
+            $1
+
+        AND canonical_evaluations.professional_user_id =
+            $2
+
+      LIMIT 1
+
+      ${
+        lock
+          ? "FOR UPDATE OF canonical_evaluations, commercial_authority_aggregates"
+          : ""
+      }
+      `,
+      [
+        evaluationId,
+        actorUserId,
+        OWNING_ENGINE,
+      ]
+    );
+
+  const subject =
+    result.rows[0] || null;
+
+  if (!subject) {
+    return null;
+  }
+
+  const jobContext =
+    await resolveJobEvaluationContext(
+      client,
+      subject.job_id,
+      actorUserId,
+      { lock }
+    );
+
+  if (!jobContext) {
+    return null;
+  }
+
+  if (
+    jobContext.job_source_type !==
+      subject.job_source_type
+  ) {
+    return null;
+  }
+
+  if (
+    jobContext.source_context_type !==
+      subject.source_context_type
+  ) {
+    return null;
+  }
+
+  if (
+    String(
+      jobContext.relationship_id ?? ""
+    ) !==
+    String(
+      subject.relationship_id ?? ""
+    )
+  ) {
+    return null;
+  }
+
+  if (
+    String(
+      jobContext.business_customer_job_source_id ??
+      ""
+    ).toLowerCase() !==
+    String(
+      subject.business_customer_job_source_id ??
+      ""
+    ).toLowerCase()
+  ) {
+    return null;
+  }
+
+  return {
+    ...subject,
+
+    actor_participant_id:
+      jobContext.actor_participant_id,
+
+    actor_user_id:
+      actorUserId,
+
+    job_request_id:
+      jobContext.job_request_id ??
+      subject.job_request_id ??
+      null,
+
+    relationship_id:
+      jobContext.relationship_id ??
+      subject.relationship_id ??
+      null,
+
+    job_source_type:
+      jobContext.job_source_type,
+
+    source_context_type:
+      jobContext.source_context_type,
+
+    business_customer_job_source_id:
+      jobContext.business_customer_job_source_id ??
+      subject.business_customer_job_source_id ??
+      null,
+  };
 }
 
 async function requireCapability({ client, context, actorUserId, capability, logger }) {
@@ -336,9 +446,24 @@ async function findingProjection(client, identity, context) {
     id: identity.id,
     evaluationId: identity.evaluation_id,
     jobId: identity.job_id,
-    requestId: Number(context.job_request_id),
-    relationshipId: Number(context.relationship_id),
-    authorParticipantId: identity.author_participant_id,
+    requestId:
+      context.job_request_id == null
+        ? null
+        : Number(context.job_request_id),
+
+    relationshipId:
+      context.relationship_id == null
+        ? null
+        : Number(context.relationship_id),
+
+    jobSourceType:
+      context.job_source_type,
+
+    sourceContextType:
+      context.source_context_type,
+
+    authorParticipantId:
+      identity.author_participant_id,
     currentVersion: current.version,
     statement: current.statement,
     confirmationState: current.confirmationState,
@@ -707,10 +832,33 @@ async function linkFindingConcern(input = {}) {
       logger,
       lock: true,
     });
-    if (authorized.error) return { abort: authorized.error };
-    const { identity, context } = authorized;
+    if (authorized.error) {
+      return {
+        abort: authorized.error,
+      };
+    }
 
-    const idempotency = await reserveIdempotency({
+    const {
+      identity,
+      context,
+    } = authorized;
+
+    if (
+      context.source_context_type !==
+        "ordinary_request" ||
+      context.job_request_id == null
+    ) {
+      return {
+        abort: failure(
+          409,
+          "FINDING_CONCERN_LINK_UNAVAILABLE",
+          "Reported Concern links are available only for request-backed Jobs."
+        ),
+      };
+    }
+
+    const idempotency =
+      await reserveIdempotency({
       client,
       actorUserId: validated.actorId,
       commandName: FINDING_COMMANDS.LINK_CONCERN,

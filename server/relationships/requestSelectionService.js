@@ -92,6 +92,85 @@ function sameId(left, right) {
   return String(left ?? "") === String(right ?? "");
 }
 
+async function ensureDurableHomeownerProfessionalRelationship({
+  client,
+  homeownerUserId,
+  contractorProfileId,
+  professionalUserId,
+  requestSelectionId,
+} = {}) {
+  const result = await client.query(
+    `
+    /* request_selection:relationship_projection */
+    WITH inserted AS (
+      INSERT INTO meetro_customer_business_relationships
+      (
+        homeowner_user_id,
+        contractor_profile_id,
+        professional_user_id,
+        established_from_request_selection_id
+      )
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT ON CONSTRAINT
+        meetro_customer_business_relationships_homeowner_business_key
+      DO NOTHING
+      RETURNING
+        id,
+        homeowner_user_id,
+        contractor_profile_id,
+        professional_user_id,
+        established_from_request_selection_id,
+        created_at
+    )
+    SELECT
+      id,
+      homeowner_user_id,
+      contractor_profile_id,
+      professional_user_id,
+      established_from_request_selection_id,
+      created_at
+    FROM inserted
+
+    UNION ALL
+
+    SELECT
+      relationships.id,
+      relationships.homeowner_user_id,
+      relationships.contractor_profile_id,
+      relationships.professional_user_id,
+      relationships.established_from_request_selection_id,
+      relationships.created_at
+    FROM meetro_customer_business_relationships relationships
+    WHERE relationships.homeowner_user_id = $1
+      AND relationships.contractor_profile_id = $2
+      AND NOT EXISTS (SELECT 1 FROM inserted)
+
+    LIMIT 1
+    `,
+    [
+      homeownerUserId,
+      contractorProfileId,
+      professionalUserId,
+      requestSelectionId,
+    ]
+  );
+
+  const relationship = result.rows[0] || null;
+
+  if (
+    !relationship ||
+    !sameId(relationship.homeowner_user_id, homeownerUserId) ||
+    !sameId(relationship.contractor_profile_id, contractorProfileId) ||
+    !sameId(relationship.professional_user_id, professionalUserId)
+  ) {
+    throw new Error(
+      "Durable Meetro homeowner-professional relationship identity conflict."
+    );
+  }
+
+  return relationship;
+}
+
 function canonicalPairIsValid(response, relationship) {
   if (!response || !relationship) return false;
 
@@ -1172,6 +1251,15 @@ async function selectProfessionalResponse({
       professionalUserId: response.professional_user_id,
     });
     await invokeFailure(failureInjector, "lifecycle_job_bootstrap");
+
+    await ensureDurableHomeownerProfessionalRelationship({
+      client,
+      homeownerUserId: actorUserId,
+      contractorProfileId: response.contractor_id,
+      professionalUserId: response.professional_user_id,
+      requestSelectionId: identities.request_selection_id,
+    });
+    await invokeFailure(failureInjector, "relationship_projection");
 
     const correlationId = randomUUID();
     await client.query(

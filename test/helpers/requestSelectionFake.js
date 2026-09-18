@@ -16,6 +16,7 @@ function createRequestSelectionFake({
   selections = [],
   conversations = [],
   idempotency = [],
+  durableRelationships = [],
 } = {}) {
   const state = {
     requests: clone([request || {
@@ -109,6 +110,7 @@ function createRequestSelectionFake({
     selections: clone(selections),
     conversations: clone(conversations),
     idempotency: clone(idempotency),
+    durableRelationships: clone(durableRelationships),
     versions: [],
     responseEvidence: [],
     selectionEvidence: [],
@@ -370,6 +372,52 @@ function createRequestSelectionFake({
             ended_at: null,
           };
           current.selections.push(row);
+          return { rows: [clone(row)] };
+        }
+
+        if (tag === "relationship_projection") {
+          const [
+            homeownerUserId,
+            contractorProfileId,
+            professionalUserId,
+            requestSelectionId,
+          ] = values;
+
+          const existing = current.durableRelationships.find(
+            (row) =>
+              Number(row.homeowner_user_id) === Number(homeownerUserId) &&
+              Number(row.contractor_profile_id) === Number(contractorProfileId)
+          );
+
+          if (existing) {
+            return { rows: [clone(existing)] };
+          }
+
+          const selection = current.selections.find(
+            (row) =>
+              String(row.id) === String(requestSelectionId) &&
+              Number(row.selected_by_user_id) === Number(homeownerUserId) &&
+              Number(row.contractor_id) === Number(contractorProfileId) &&
+              Number(row.professional_user_id) === Number(professionalUserId)
+          );
+
+          if (!selection) {
+            throw new Error(
+              "Fake durable relationship provenance is unavailable."
+            );
+          }
+
+          const row = {
+            id:
+              `durable-relationship-${current.durableRelationships.length + 1}`,
+            homeowner_user_id: homeownerUserId,
+            contractor_profile_id: contractorProfileId,
+            professional_user_id: professionalUserId,
+            established_from_request_selection_id: String(requestSelectionId),
+            created_at: "2026-08-06T13:00:00.000Z",
+          };
+
+          current.durableRelationships.push(row);
           return { rows: [clone(row)] };
         }
 

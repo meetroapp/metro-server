@@ -738,6 +738,7 @@ test("authorized lifecycle-v2 professional receives the read-only canonical proj
         return {
           rows: [{
             job_id: "11111111-1111-4111-8111-111111111111",
+            source_type: "ordinary_request_selection",
             job_request_id: 41,
             relationship_id: 72,
             lifecycle_contract_version: 2,
@@ -871,6 +872,7 @@ test("missing lifecycle read grants produce 403 without loading child records", 
         return {
           rows: [{
             job_id: "11111111-1111-4111-8111-111111111111",
+            source_type: "ordinary_request_selection",
             job_request_id: 41,
             relationship_id: 72,
             lifecycle_contract_version: 2,
@@ -910,6 +912,7 @@ test("production pool reads use one repeatable-read snapshot and release the cli
         return {
           rows: [{
             job_id: "11111111-1111-4111-8111-111111111111",
+            source_type: "ordinary_request_selection",
             job_request_id: 41,
             relationship_id: 72,
             lifecycle_contract_version: 2,

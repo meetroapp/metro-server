@@ -812,82 +812,284 @@ async function loadAuthorizedJob(pool, jobId, actorUserId) {
       jobs.id AS job_id,
       jobs.source_type,
       jobs.job_request_id,
+      jobs.source_request_selection_id,
       jobs.source_request_relationship_id AS relationship_id,
+      jobs.originating_business_document_id,
+      jobs.contractor_profile_id,
+      jobs.business_contact_id,
+      jobs.business_customer_relationship_id,
+      jobs.source_business_customer_job_id,
       jobs.lifecycle_contract_version,
       jobs.created_at AS job_created_at,
+
+      posts.request_origin,
       request_relationships.status AS relationship_status,
-      COALESCE(request_relationships.professional_user_id, profiles.user_id) AS selected_professional_user_id,
+      request_relationships.ordinary_authority_source,
+
+      COALESCE(
+        request_relationships.professional_user_id,
+        profiles.user_id
+      ) AS selected_professional_user_id,
+
       request_relationships.homeowner_id AS customer_user_id,
+
       users.account_type AS actor_account_type,
+
       relationship_participants.id AS actor_participant_id,
+
       EXISTS (
         SELECT 1
         FROM participant_role_assignments
         LEFT JOIN participant_role_revocations
-          ON participant_role_revocations.role_assignment_id = participant_role_assignments.id
-        WHERE participant_role_assignments.participant_id = relationship_participants.id
-          AND participant_role_assignments.job_id = jobs.id
-          AND participant_role_assignments.role = 'PRIMARY_PROFESSIONAL'
-          AND participant_role_assignments.valid_from <= CURRENT_TIMESTAMP
+          ON participant_role_revocations.role_assignment_id =
+             participant_role_assignments.id
+        WHERE participant_role_assignments.participant_id =
+              relationship_participants.id
+          AND participant_role_assignments.job_id =
+              jobs.id
+          AND participant_role_assignments.role =
+              'PRIMARY_PROFESSIONAL'
+          AND participant_role_assignments.valid_from <=
+              CURRENT_TIMESTAMP
           AND (
             participant_role_assignments.valid_until IS NULL
-            OR participant_role_assignments.valid_until > CURRENT_TIMESTAMP
+            OR participant_role_assignments.valid_until >
+               CURRENT_TIMESTAMP
           )
           AND participant_role_revocations.id IS NULL
       ) AS is_primary_professional,
-      request_selections.conversation_id,
+
+      COALESCE(
+        request_selections.conversation_id,
+        relationship_conversations.id
+      ) AS conversation_id,
+
       ARRAY(
         SELECT lifecycle_authority_grants.capability
         FROM lifecycle_authority_grants
+
         LEFT JOIN lifecycle_authority_grant_revocations
           ON lifecycle_authority_grant_revocations.authority_grant_id =
-            lifecycle_authority_grants.id
+             lifecycle_authority_grants.id
+
         WHERE lifecycle_authority_grants.grantee_participant_id =
-            relationship_participants.id
-          AND lifecycle_authority_grants.job_id = jobs.id
-          AND lifecycle_authority_grants.scope_type = 'job'
-          AND lifecycle_authority_grants.scope_job_id = jobs.id
+              relationship_participants.id
+          AND lifecycle_authority_grants.job_id =
+              jobs.id
+          AND lifecycle_authority_grants.scope_type =
+              'job'
+          AND lifecycle_authority_grants.scope_job_id =
+              jobs.id
           AND lifecycle_authority_grants.scope_concern_id IS NULL
-          AND lifecycle_authority_grants.capability = ANY($3::text[])
-          AND lifecycle_authority_grants.valid_from <= CURRENT_TIMESTAMP
+          AND lifecycle_authority_grants.capability =
+              ANY($3::text[])
+          AND lifecycle_authority_grants.valid_from <=
+              CURRENT_TIMESTAMP
           AND (
             lifecycle_authority_grants.valid_until IS NULL
-            OR lifecycle_authority_grants.valid_until > CURRENT_TIMESTAMP
+            OR lifecycle_authority_grants.valid_until >
+               CURRENT_TIMESTAMP
           )
           AND lifecycle_authority_grant_revocations.id IS NULL
+
         ORDER BY lifecycle_authority_grants.capability
       ) AS active_capabilities
+
     FROM jobs
+
     LEFT JOIN posts
       ON posts.id = jobs.job_request_id
       AND posts.lifecycle_contract_version = 2
       AND posts.cancelled_at IS NULL
+
     LEFT JOIN request_relationships
-      ON request_relationships.id = jobs.source_request_relationship_id
-      AND request_relationships.post_id = jobs.job_request_id
+      ON request_relationships.id =
+          jobs.source_request_relationship_id
+      AND request_relationships.post_id =
+          jobs.job_request_id
       AND request_relationships.emergency_request_id IS NULL
+
     LEFT JOIN request_selections
-      ON request_selections.id = jobs.source_request_selection_id
-      AND request_selections.request_relationship_id = request_relationships.id
-      AND request_selections.post_id = jobs.job_request_id
-    LEFT JOIN contractor_profiles profiles ON jobs.source_type='business_document'
-      AND profiles.id=jobs.contractor_profile_id AND profiles.user_id=$2
+      ON request_selections.id =
+          jobs.source_request_selection_id
+      AND request_selections.request_relationship_id =
+          request_relationships.id
+      AND request_selections.post_id =
+          jobs.job_request_id
+
+    LEFT JOIN conversations relationship_conversations
+      ON relationship_conversations.relationship_id =
+          request_relationships.id
+
+    LEFT JOIN contractor_profiles profiles
+      ON jobs.source_type IN (
+        'business_document',
+        'business_customer'
+      )
+      AND profiles.id =
+          jobs.contractor_profile_id
+      AND profiles.user_id =
+          $2
+
+    LEFT JOIN business_contacts business_contacts
+      ON jobs.source_type =
+          'business_customer'
+      AND business_contacts.id =
+          jobs.business_contact_id
+      AND business_contacts.contractor_profile_id =
+          jobs.contractor_profile_id
+
+    LEFT JOIN job_customer_parties customer_parties
+      ON jobs.source_type =
+          'business_customer'
+      AND customer_parties.job_id =
+          jobs.id
+      AND customer_parties.contractor_profile_id =
+          jobs.contractor_profile_id
+      AND customer_parties.business_contact_id =
+          jobs.business_contact_id
+      AND customer_parties.business_customer_relationship_id =
+          jobs.business_customer_relationship_id
+
+    LEFT JOIN business_customer_job_sources business_sources
+      ON jobs.source_type =
+          'business_customer'
+      AND business_sources.id =
+          jobs.source_business_customer_job_id
+      AND business_sources.contractor_profile_id =
+          jobs.contractor_profile_id
+      AND business_sources.business_contact_id =
+          jobs.business_contact_id
+      AND business_sources.business_customer_relationship_id =
+          jobs.business_customer_relationship_id
+
     INNER JOIN relationship_participants
-      ON relationship_participants.job_id = jobs.id
-      AND ((jobs.source_type='ordinary_request_selection' AND relationship_participants.request_relationship_id=request_relationships.id)
-        OR (jobs.source_type='business_document' AND relationship_participants.request_relationship_id IS NULL))
-      AND relationship_participants.user_id = $2
-    INNER JOIN users ON users.id = $2
+      ON relationship_participants.job_id =
+          jobs.id
+
+      AND (
+        (
+          jobs.source_type =
+            'ordinary_request_selection'
+          AND relationship_participants.request_relationship_id =
+              request_relationships.id
+        )
+
+        OR
+
+        (
+          jobs.source_type =
+            'existing_customer_request'
+          AND relationship_participants.request_relationship_id =
+              request_relationships.id
+          AND relationship_participants.source_evidence_type =
+              'existing_customer_request'
+        )
+
+        OR
+
+        (
+          jobs.source_type =
+            'business_document'
+          AND relationship_participants.request_relationship_id
+              IS NULL
+        )
+
+        OR
+
+        (
+          jobs.source_type =
+            'business_customer'
+          AND relationship_participants.request_relationship_id
+              IS NULL
+          AND relationship_participants.source_evidence_type =
+              'business_customer'
+        )
+      )
+
+      AND relationship_participants.user_id =
+          $2
+
+    INNER JOIN users
+      ON users.id = $2
+
     WHERE jobs.id = $1
       AND jobs.lifecycle_contract_version = 2
-      AND ((jobs.source_type='ordinary_request_selection' AND posts.id IS NOT NULL
-            AND request_relationships.id IS NOT NULL AND request_selections.id IS NOT NULL)
-        OR (jobs.source_type='business_document' AND profiles.id IS NOT NULL AND jobs.job_request_id IS NULL
-            AND jobs.source_request_relationship_id IS NULL AND jobs.originating_business_document_id IS NOT NULL))
+
+      AND (
+        (
+          jobs.source_type =
+            'ordinary_request_selection'
+
+          AND posts.id IS NOT NULL
+          AND request_relationships.id IS NOT NULL
+          AND request_selections.id IS NOT NULL
+        )
+
+        OR
+
+        (
+          jobs.source_type =
+            'existing_customer_request'
+
+          AND posts.id IS NOT NULL
+          AND posts.request_origin =
+              'existing_customer_request'
+
+          AND request_relationships.id IS NOT NULL
+          AND request_relationships.ordinary_authority_source =
+              'existing_customer_request'
+
+          AND jobs.source_request_selection_id IS NULL
+          AND jobs.originating_business_document_id IS NULL
+        )
+
+        OR
+
+        (
+          jobs.source_type =
+            'business_document'
+
+          AND profiles.id IS NOT NULL
+
+          AND jobs.job_request_id IS NULL
+          AND jobs.source_request_relationship_id IS NULL
+          AND jobs.originating_business_document_id IS NOT NULL
+        )
+
+        OR
+
+        (
+          jobs.source_type =
+            'business_customer'
+
+          AND profiles.id IS NOT NULL
+
+          AND jobs.job_request_id IS NULL
+          AND jobs.source_request_selection_id IS NULL
+          AND jobs.source_request_relationship_id IS NULL
+          AND jobs.originating_business_document_id IS NULL
+
+          AND jobs.contractor_profile_id IS NOT NULL
+          AND jobs.business_contact_id IS NOT NULL
+          AND jobs.business_customer_relationship_id IS NOT NULL
+          AND jobs.source_business_customer_job_id IS NOT NULL
+
+          AND business_contacts.id IS NOT NULL
+          AND customer_parties.job_id IS NOT NULL
+          AND business_sources.id IS NOT NULL
+        )
+      )
+
     LIMIT 1
     `,
-    [jobId, actorUserId, [...LIVE_JOB_CAPABILITIES]]
+    [
+      jobId,
+      actorUserId,
+      [...LIVE_JOB_CAPABILITIES],
+    ]
   );
+
   return result.rows[0] || null;
 }
 
@@ -1449,9 +1651,21 @@ async function getCanonicalLiveJob(input = {}) {
       transactionStarted = false;
       return failure(404, "LIVE_JOB_UNAVAILABLE", "The current Job is unavailable.");
     }
+    const businessOwnedJob = [
+      "business_document",
+      "business_customer",
+    ].includes(context.source_type);
+
+    const meetroRelationshipJob = [
+      "ordinary_request_selection",
+      "existing_customer_request",
+    ].includes(context.source_type);
+
     if (
       Number(context.lifecycle_contract_version) !== 2 ||
-      (context.source_type !== "business_document" && context.relationship_status !== "active") ||
+      (!businessOwnedJob &&
+        (!meetroRelationshipJob ||
+          context.relationship_status !== "active")) ||
       context.actor_account_type !== "professional" ||
       Number(context.selected_professional_user_id) !== actorUserId ||
       context.is_primary_professional !== true
@@ -1461,9 +1675,15 @@ async function getCanonicalLiveJob(input = {}) {
       return failure(404, "LIVE_JOB_UNAVAILABLE", "The current Job is unavailable.");
     }
 
-    const capabilities = normalizedCapabilities(context.active_capabilities);
-    for (const requiredCapability of (context.source_type === "business_document"
-      ? ["participant.read", "quote.read"] : ["participant.read", "reported_concern.read"])) {
+    const capabilities = normalizedCapabilities(
+      context.active_capabilities
+    );
+
+    const requiredCapabilities = businessOwnedJob
+      ? ["participant.read", "quote.read"]
+      : ["participant.read", "reported_concern.read"];
+
+    for (const requiredCapability of requiredCapabilities) {
       if (!capabilities.has(requiredCapability)) {
         const granted = await hasActiveLifecycleGrant({
           client,

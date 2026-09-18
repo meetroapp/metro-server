@@ -8,35 +8,91 @@ const test = require("node:test");
 const read = (...parts) =>
   readFileSync(join(__dirname, "..", ...parts), "utf8");
 
-test("Job History excludes an approved Quote superseded by an approved revision", () => {
-  const source = read("server", "workflow", "jobCompletionService.js");
+test("Job History excludes an approved Quote superseded by an approved revision through common approval authority", () => {
+  const runtime = require("node:fs").readFileSync(
+    require("node:path").join(
+      __dirname,
+      "..",
+      "server",
+      "workflow",
+      "jobCompletionService.js"
+    ),
+    "utf8"
+  );
 
-  const start = source.indexOf("const HISTORY_BASE_SQL");
-  const end = source.indexOf(
-    "async function listProfessionalJobHistory",
+  const start = runtime.indexOf(
+    "const HISTORY_BASE_SQL = `"
+  );
+
+  const end = runtime.indexOf(
+    "const BUSINESS_DOCUMENT_HISTORY_SQL = `",
     start
   );
 
-  assert.ok(start >= 0);
-  assert.ok(end > start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
 
-  const historySql = source.slice(start, end);
+  const historySql =
+    runtime.slice(start, end);
 
   assert.match(
     historySql,
-    /canonical_quote_customer_decisions revised_decisions/
+    /canonical_quote_approvals approvals/
   );
+
   assert.match(
     historySql,
-    /revised_decisions\.decision = 'APPROVED'/
+    /approvals\.decision[\s\S]*'APPROVED'/
   );
+
   assert.match(
     historySql,
-    /revision\.parent_quote_id = quotes\.id/
+    /approvals\.approval_source[\s\S]*'MEETRO_CUSTOMER'/
   );
+
   assert.match(
     historySql,
-    /revision\.lineage_type = 'REVISED_QUOTE'/
+    /approvals\.issued_quote_version/
+  );
+
+  assert.match(
+    historySql,
+    /NOT EXISTS/
+  );
+
+  assert.match(
+    historySql,
+    /FROM canonical_quotes revision/
+  );
+
+  assert.match(
+    historySql,
+    /canonical_quote_approvals revised/
+  );
+
+  assert.match(
+    historySql,
+    /revised\.decision[\s\S]*'APPROVED'/
+  );
+
+  assert.match(
+    historySql,
+    /revised\.approval_source[\s\S]*'MEETRO_CUSTOMER'/
+  );
+
+  assert.match(
+    historySql,
+    /revision\.parent_quote_id[\s\S]*approvals\.quote_id/
+  );
+
+  assert.match(
+    historySql,
+    /revision\.lineage_type[\s\S]*'REVISED_QUOTE'/
+  );
+
+  assert.doesNotMatch(
+    historySql,
+    /canonical_quote_customer_decisions/
   );
 });
 

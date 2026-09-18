@@ -501,14 +501,47 @@ async function loadJobContext(client, jobId, actorUserId, { lock = false } = {})
       AND relationships.emergency_request_id IS NULL
       AND relationships.status = 'active'
     LEFT JOIN contractor_profiles profiles
-      ON jobs.source_type = 'business_document'
-      AND profiles.id = jobs.contractor_profile_id AND profiles.user_id = $2
+      ON jobs.source_type IN (
+        'business_document',
+        'business_customer'
+      )
+      AND profiles.id = jobs.contractor_profile_id
+      AND profiles.user_id = $2
     INNER JOIN relationship_participants participants
       ON participants.job_id = jobs.id
-      AND ((jobs.source_type = 'ordinary_request_selection'
-            AND participants.request_relationship_id = relationships.id)
-        OR (jobs.source_type = 'business_document'
-            AND participants.request_relationship_id IS NULL))
+      AND (
+        (
+          jobs.source_type =
+            'ordinary_request_selection'
+          AND participants.request_relationship_id =
+              relationships.id
+        )
+        OR
+        (
+          jobs.source_type =
+            'existing_customer_request'
+          AND participants.request_relationship_id =
+              relationships.id
+          AND participants.source_evidence_type =
+              'existing_customer_request'
+        )
+        OR
+        (
+          jobs.source_type =
+            'business_document'
+          AND participants.request_relationship_id
+              IS NULL
+        )
+        OR
+        (
+          jobs.source_type =
+            'business_customer'
+          AND participants.request_relationship_id
+              IS NULL
+          AND participants.source_evidence_type =
+              'business_customer'
+        )
+      )
       AND participants.user_id = $2
     LEFT JOIN canonical_evaluation_job_subjects evaluation_subjects
       ON evaluation_subjects.job_id = jobs.id
@@ -516,11 +549,61 @@ async function loadJobContext(client, jobId, actorUserId, { lock = false } = {})
       ON evaluation_subject_status.id = evaluation_subjects.evaluation_id
     WHERE jobs.id = $1
       AND jobs.lifecycle_contract_version = 2
-      AND ((jobs.source_type = 'ordinary_request_selection'
-            AND posts.id IS NOT NULL AND relationships.id IS NOT NULL)
-        OR (jobs.source_type = 'business_document' AND profiles.id IS NOT NULL
-            AND jobs.job_request_id IS NULL AND jobs.source_request_relationship_id IS NULL
-            AND jobs.originating_business_document_id IS NOT NULL))
+      AND (
+        (
+          jobs.source_type =
+            'ordinary_request_selection'
+          AND posts.id IS NOT NULL
+          AND relationships.id IS NOT NULL
+        )
+        OR
+        (
+          jobs.source_type =
+            'existing_customer_request'
+          AND posts.id IS NOT NULL
+          AND posts.request_origin =
+              'existing_customer_request'
+          AND relationships.id IS NOT NULL
+          AND relationships.ordinary_authority_source =
+              'existing_customer_request'
+          AND jobs.source_request_selection_id
+              IS NULL
+          AND jobs.originating_business_document_id
+              IS NULL
+        )
+        OR
+        (
+          jobs.source_type =
+            'business_document'
+          AND profiles.id IS NOT NULL
+          AND jobs.job_request_id IS NULL
+          AND jobs.source_request_relationship_id
+              IS NULL
+          AND jobs.originating_business_document_id
+              IS NOT NULL
+        )
+        OR
+        (
+          jobs.source_type =
+            'business_customer'
+          AND profiles.id IS NOT NULL
+          AND jobs.job_request_id IS NULL
+          AND jobs.source_request_selection_id
+              IS NULL
+          AND jobs.source_request_relationship_id
+              IS NULL
+          AND jobs.originating_business_document_id
+              IS NULL
+          AND jobs.contractor_profile_id
+              IS NOT NULL
+          AND jobs.business_contact_id
+              IS NOT NULL
+          AND jobs.business_customer_relationship_id
+              IS NOT NULL
+          AND jobs.source_business_customer_job_id
+              IS NOT NULL
+        )
+      )
     LIMIT 1
     ${lock ? "FOR UPDATE OF jobs" : ""}
     `,
@@ -576,7 +659,14 @@ async function projectVisitLifecycleAlertWithClient({
   eventRow,
 }) {
   // Business-origin Jobs have no Meetro customer or conversation to notify.
-  if (context?.source_type === "business_document") return null;
+  if (
+    [
+      "business_document",
+      "business_customer",
+    ].includes(context?.source_type)
+  ) {
+    return null;
+  }
   const customerUserId = Number(context?.homeowner_user_id);
   const professionalUserId = Number(context?.selected_professional_user_id);
   const actorId = Number(actorUserId);
@@ -852,8 +942,24 @@ function visitActions(context, row, now = new Date()) {
       row.recorded_by_participant_id !== context?.actor_participant_id &&
       capabilities.has(VISIT_CAPABILITIES.CONFIRM),
     canRecordExternalConfirmation:
-      role === "PROFESSIONAL" && row.quote_approval_source === "EXTERNAL_EVIDENCE" &&
-      state === "PROPOSED" && capabilities.has(VISIT_CAPABILITIES.EXTERNAL_CONFIRMATION),
+      role === "PROFESSIONAL" &&
+      state === "PROPOSED" &&
+      (
+        (
+          row.purpose === "APPROVED_WORK" &&
+          row.quote_approval_source ===
+            "EXTERNAL_EVIDENCE"
+        )
+        ||
+        (
+          row.purpose === "EVALUATION" &&
+          context?.source_type ===
+            "business_customer"
+        )
+      ) &&
+      capabilities.has(
+        VISIT_CAPABILITIES.EXTERNAL_CONFIRMATION
+      ),
     canRequestChange:
       role === "CUSTOMER" &&
       ACTIVE_VISIT_STATES.has(state) &&
@@ -972,13 +1078,49 @@ async function loadVisit(client, jobId, visitId, { lock = false } = {}) {
       versions.completed_at, versions.recorded_by_participant_id,
       versions.created_at AS version_created_at,
       versions.integrity_hash AS version_integrity_hash,
-      (SELECT to_jsonb(evidence) FROM canonical_visit_external_confirmation_evidence evidence
-        WHERE evidence.visit_id=visits.id AND evidence.job_id=visits.job_id
-          AND evidence.scheduled_visit_version<=versions.version
-          AND NOT EXISTS (SELECT 1 FROM canonical_visit_versions intervening
-            WHERE intervening.visit_id=visits.id AND intervening.version>evidence.scheduled_visit_version
-              AND intervening.version<=versions.version AND intervening.state='PROPOSED')
-        ORDER BY evidence.scheduled_visit_version DESC LIMIT 1) AS external_confirmation,
+      COALESCE(
+        (
+          SELECT to_jsonb(evidence)
+          FROM canonical_visit_external_confirmation_evidence evidence
+          WHERE evidence.visit_id = visits.id
+            AND evidence.job_id = visits.job_id
+            AND evidence.scheduled_visit_version <= versions.version
+            AND NOT EXISTS (
+              SELECT 1
+              FROM canonical_visit_versions intervening
+              WHERE intervening.visit_id = visits.id
+                AND intervening.version >
+                    evidence.scheduled_visit_version
+                AND intervening.version <=
+                    versions.version
+                AND intervening.state = 'PROPOSED'
+            )
+          ORDER BY
+            evidence.scheduled_visit_version DESC
+          LIMIT 1
+        ),
+        (
+          SELECT to_jsonb(evidence)
+          FROM
+            canonical_evaluation_visit_external_confirmation_evidence evidence
+          WHERE evidence.visit_id = visits.id
+            AND evidence.job_id = visits.job_id
+            AND evidence.scheduled_visit_version <= versions.version
+            AND NOT EXISTS (
+              SELECT 1
+              FROM canonical_visit_versions intervening
+              WHERE intervening.visit_id = visits.id
+                AND intervening.version >
+                    evidence.scheduled_visit_version
+                AND intervening.version <=
+                    versions.version
+                AND intervening.state = 'PROPOSED'
+            )
+          ORDER BY
+            evidence.scheduled_visit_version DESC
+          LIMIT 1
+        )
+      ) AS external_confirmation,
       evaluation_links.evaluation_id,
       COALESCE(workstream_links.workstream_ids, ARRAY[]::uuid[]) AS workstream_ids
     FROM canonical_visits visits
@@ -1354,13 +1496,49 @@ async function listVisits(input = {}) {
         versions.completed_at, versions.recorded_by_participant_id,
         versions.created_at AS version_created_at,
       versions.integrity_hash AS version_integrity_hash,
-      (SELECT to_jsonb(evidence) FROM canonical_visit_external_confirmation_evidence evidence
-        WHERE evidence.visit_id=visits.id AND evidence.job_id=visits.job_id
-          AND evidence.scheduled_visit_version<=versions.version
-          AND NOT EXISTS (SELECT 1 FROM canonical_visit_versions intervening
-            WHERE intervening.visit_id=visits.id AND intervening.version>evidence.scheduled_visit_version
-              AND intervening.version<=versions.version AND intervening.state='PROPOSED')
-        ORDER BY evidence.scheduled_visit_version DESC LIMIT 1) AS external_confirmation,
+      COALESCE(
+        (
+          SELECT to_jsonb(evidence)
+          FROM canonical_visit_external_confirmation_evidence evidence
+          WHERE evidence.visit_id = visits.id
+            AND evidence.job_id = visits.job_id
+            AND evidence.scheduled_visit_version <= versions.version
+            AND NOT EXISTS (
+              SELECT 1
+              FROM canonical_visit_versions intervening
+              WHERE intervening.visit_id = visits.id
+                AND intervening.version >
+                    evidence.scheduled_visit_version
+                AND intervening.version <=
+                    versions.version
+                AND intervening.state = 'PROPOSED'
+            )
+          ORDER BY
+            evidence.scheduled_visit_version DESC
+          LIMIT 1
+        ),
+        (
+          SELECT to_jsonb(evidence)
+          FROM
+            canonical_evaluation_visit_external_confirmation_evidence evidence
+          WHERE evidence.visit_id = visits.id
+            AND evidence.job_id = visits.job_id
+            AND evidence.scheduled_visit_version <= versions.version
+            AND NOT EXISTS (
+              SELECT 1
+              FROM canonical_visit_versions intervening
+              WHERE intervening.visit_id = visits.id
+                AND intervening.version >
+                    evidence.scheduled_visit_version
+                AND intervening.version <=
+                    versions.version
+                AND intervening.state = 'PROPOSED'
+            )
+          ORDER BY
+            evidence.scheduled_visit_version DESC
+          LIMIT 1
+        )
+      ) AS external_confirmation,
         evaluation_links.evaluation_id,
         COALESCE(workstream_links.workstream_ids, ARRAY[]::uuid[]) AS workstream_ids
       FROM canonical_visits visits

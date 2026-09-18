@@ -140,6 +140,7 @@ test("registers only authenticated establish and owner-scoped read routes", () =
     ["POST", "/business-customer-relationships", 2],
     ["GET", "/business-customer-relationships", 2],
     ["GET", "/business-customer-relationships/by-contact/:businessContactId", 2],
+    ["POST", "/business-customer-relationships/:relationshipId/jobs", 2],
     ["GET", "/business-customer-relationships/:relationshipId/activity", 2],
     ["GET", "/business-customer-relationships/:relationshipId", 2],
   ]);

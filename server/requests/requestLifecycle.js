@@ -37,6 +37,16 @@ function normalizeIdentifier(value = "") {
     .replace(/^_+|_+$/g, "");
 }
 
+function normalizeUuid(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+    normalized
+  )
+    ? normalized
+    : null;
+}
+
 function validateRequestPayload(body, { partial = false } = {}) {
   if (!isRecord(body)) {
     return { ok: false, status: 400, code: "INVALID_REQUEST", message: "Request details must be an object." };
@@ -55,6 +65,7 @@ function validateRequestPayload(body, { partial = false } = {}) {
         "service_specialty", "location", ...SERVICE_LOCATION_INPUT_FIELDS, "request_photos",
         "post_type", "status", "direct_request", "direct_request_source",
         "direct_professional_name", "direct_conversation_id",
+        "request_origin", "source_meetro_relationship_id",
       ]);
   if (Object.keys(body).some((key) => !allowed.has(key))) {
     return { ok: false, status: 400, code: "UNSUPPORTED_REQUEST_FIELDS", message: "One or more request fields are not supported." };
@@ -74,6 +85,57 @@ function validateRequestPayload(body, { partial = false } = {}) {
 
   if (body.direct_request === true || body.post_type === "direct_request") {
     return { ok: false, status: 400, code: "DIRECT_REQUEST_UNAVAILABLE", message: "Direct requests are not available in this workflow." };
+  }
+
+  const requestOrigin = normalizeIdentifier(
+    body.request_origin || "marketplace"
+  );
+
+  if (
+    !partial &&
+    !["marketplace", "existing_customer_request"].includes(requestOrigin)
+  ) {
+    return {
+      ok: false,
+      status: 400,
+      code: "REQUEST_ORIGIN_INVALID",
+      message: "The Job Request origin is invalid.",
+    };
+  }
+
+  const sourceMeetroRelationshipId =
+    body.source_meetro_relationship_id == null ||
+    String(body.source_meetro_relationship_id).trim() === ""
+      ? null
+      : normalizeUuid(body.source_meetro_relationship_id);
+
+  if (
+    !partial &&
+    requestOrigin === "existing_customer_request" &&
+    !sourceMeetroRelationshipId
+  ) {
+    return {
+      ok: false,
+      status: 400,
+      code: "EXISTING_CUSTOMER_RELATIONSHIP_REQUIRED",
+      message:
+        "A valid existing Meetro customer relationship is required.",
+    };
+  }
+
+  if (
+    !partial &&
+    requestOrigin === "marketplace" &&
+    body.source_meetro_relationship_id != null &&
+    String(body.source_meetro_relationship_id).trim() !== ""
+  ) {
+    return {
+      ok: false,
+      status: 400,
+      code: "MARKETPLACE_REQUEST_SOURCE_INVALID",
+      message:
+        "Marketplace Job Requests cannot claim an existing customer relationship.",
+    };
   }
 
   const title = cleanString(body.title, 160, {
@@ -123,6 +185,11 @@ function validateRequestPayload(body, { partial = false } = {}) {
     request: {
       title,
       description,
+      request_origin: requestOrigin,
+      source_meetro_relationship_id:
+        requestOrigin === "existing_customer_request"
+          ? sourceMeetroRelationshipId
+          : null,
       category: normalizeIdentifier(category),
       request_category: normalizeIdentifier(requestCategory),
       service_domain: serviceDomain,
@@ -164,6 +231,14 @@ function parseDetails(value) {
 }
 
 function professionalCanSeeRequest(profile = {}, request = {}) {
+  const requestOrigin = normalizeIdentifier(
+    request.request_origin || "marketplace"
+  );
+
+  if (requestOrigin !== "marketplace") {
+    return false;
+  }
+
   const details = parseDetails(profile.profile_details);
   const specialties = Array.isArray(details.service_specialties)
     ? details.service_specialties.map(normalizeProfessionalServiceId).filter(Boolean)
@@ -247,6 +322,14 @@ function serializeOwnedRequest(row = {}, requestPhotos = []) {
     unit_number: row.unit_number,
     access_notes: row.access_notes,
     status: REQUEST_STATUSES.includes(row.status) ? row.status : "open",
+    request_origin:
+      row.request_origin === "existing_customer_request"
+        ? "existing_customer_request"
+        : "marketplace",
+    source_meetro_relationship_id:
+      row.request_origin === "existing_customer_request"
+        ? row.source_meetro_relationship_id || null
+        : null,
     created_at: row.created_at,
     updated_at: row.updated_at,
     cancelled_at: row.cancelled_at,

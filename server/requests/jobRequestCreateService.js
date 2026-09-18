@@ -16,6 +16,12 @@ const { createReportedConcern } = require("./reportedConcernService");
 const {
   resolveRequestServiceAuthority,
 } = require("./requestServiceAuthority");
+const {
+  establishExistingCustomerRequestConversation,
+} = require("../relationships/existingCustomerRequestConversationService");
+const {
+  bootstrapExistingCustomerRequestJob,
+} = require("../workflow/jobFoundationService");
 
 const COMMAND_NAME = "job_request.create";
 const COMMAND_SCOPE = "ordinary";
@@ -63,6 +69,58 @@ function normalizeString(value) {
   return String(value || "").trim();
 }
 
+async function resolveExistingCustomerRequestTarget({
+  client,
+  actorUserId,
+  sourceMeetroRelationshipId,
+} = {}) {
+  const result = await client.query(
+    `
+    /* job_request_create:existing_customer_authority */
+    SELECT
+      relationships.id,
+      relationships.homeowner_user_id,
+      relationships.contractor_profile_id,
+      relationships.professional_user_id
+    FROM meetro_customer_business_relationships relationships
+    INNER JOIN contractor_profiles profiles
+      ON profiles.id = relationships.contractor_profile_id
+     AND profiles.user_id = relationships.professional_user_id
+    WHERE relationships.id = $1
+      AND relationships.homeowner_user_id = $2
+    LIMIT 1
+    FOR SHARE OF relationships, profiles
+    `,
+    [
+      sourceMeetroRelationshipId,
+      actorUserId,
+    ]
+  );
+
+  const relationship = result.rows[0] || null;
+
+  if (
+    !relationship ||
+    Number(relationship.homeowner_user_id) !== Number(actorUserId) ||
+    !Number.isSafeInteger(Number(relationship.contractor_profile_id)) ||
+    Number(relationship.contractor_profile_id) <= 0 ||
+    !Number.isSafeInteger(Number(relationship.professional_user_id)) ||
+    Number(relationship.professional_user_id) <= 0 ||
+    Number(relationship.professional_user_id) === Number(actorUserId)
+  ) {
+    return null;
+  }
+
+  return {
+    meetroRelationshipId:
+      String(relationship.id || "").trim().toLowerCase(),
+    contractorProfileId:
+      Number(relationship.contractor_profile_id),
+    professionalUserId:
+      Number(relationship.professional_user_id),
+  };
+}
+
 function canonicalPhotoFingerprint(photo = {}) {
   return {
     public_id: normalizeString(photo.public_id),
@@ -83,6 +141,10 @@ function createJobRequestFingerprint({
 } = {}) {
   const canonical = {
     lifecycle_contract_version: Number(lifecycleContractVersion),
+    request_origin:
+      normalizeString(request?.request_origin) || "marketplace",
+    source_meetro_relationship_id:
+      normalizeString(request?.source_meetro_relationship_id),
     title: normalizeString(request?.title),
     description: normalizeString(request?.description),
     category: normalizeString(request?.category),
@@ -279,6 +341,7 @@ async function insertPost({
   request,
   requestPhotos,
   lifecycleContractVersion,
+  existingCustomerTarget = null,
 }) {
   const imageUrl = requestPhotos[0]?.secure_url || null;
   const result = await client.query(
@@ -290,10 +353,13 @@ async function insertPost({
      request_photos, location_intake_mode, location_normalization_status,
      service_address_line1, service_city, service_region, service_postal_code,
      service_country_code, discovery_area_label, lifecycle_contract_version,
+     request_origin, target_contractor_profile_id,
+     target_professional_user_id, source_meetro_relationship_id,
      updated_at)
     VALUES (
       $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'open', $11, $12::jsonb,
-      $13, $14, $15, $16, $17, $18, $19, $20, $21, CURRENT_TIMESTAMP
+      $13, $14, $15, $16, $17, $18, $19, $20, $21,
+      $22, $23, $24, $25, CURRENT_TIMESTAMP
     )
     RETURNING *
     `,
@@ -319,6 +385,10 @@ async function insertPost({
       request.service_country_code,
       request.discovery_area_label,
       lifecycleContractVersion,
+      request.request_origin || "marketplace",
+      existingCustomerTarget?.contractorProfileId || null,
+      existingCustomerTarget?.professionalUserId || null,
+      existingCustomerTarget?.meetroRelationshipId || null,
     ]
   );
 
@@ -422,6 +492,43 @@ async function createJobRequest({
       );
     }
 
+    let existingCustomerTarget = null;
+
+    if (request.request_origin === "existing_customer_request") {
+      existingCustomerTarget =
+        await resolveExistingCustomerRequestTarget({
+          client,
+          actorUserId,
+          sourceMeetroRelationshipId:
+            request.source_meetro_relationship_id,
+        });
+
+      if (!existingCustomerTarget) {
+        await client.query("ROLLBACK");
+        transactionStarted = false;
+
+        return failure(
+          404,
+          "EXISTING_CUSTOMER_RELATIONSHIP_NOT_FOUND",
+          "The existing Meetro customer relationship was not found."
+        );
+      }
+
+      if (
+        existingCustomerTarget.meetroRelationshipId !==
+        request.source_meetro_relationship_id
+      ) {
+        await client.query("ROLLBACK");
+        transactionStarted = false;
+
+        return failure(
+          409,
+          "EXISTING_CUSTOMER_RELATIONSHIP_IDENTITY_MISMATCH",
+          "The existing Meetro customer relationship could not be verified."
+        );
+      }
+    }
+
     const idempotency = await reserveIdempotency({
       client,
       actorUserId,
@@ -468,6 +575,7 @@ async function createJobRequest({
       request,
       requestPhotos: normalizedRequestPhotos,
       lifecycleContractVersion: lifecycleActivation.version,
+      existingCustomerTarget,
     });
 
     let reportedConcern = null;
@@ -480,18 +588,43 @@ async function createJobRequest({
       });
     }
 
+    let existingCustomerCommunication = null;
+
+    let existingCustomerLifecycleJob = null;
+
+    if (
+      request.request_origin ===
+      "existing_customer_request"
+    ) {
+      existingCustomerCommunication =
+        await establishExistingCustomerRequestConversation({
+          client,
+          post,
+        });
+
+      existingCustomerLifecycleJob =
+        await bootstrapExistingCustomerRequestJob({
+          client,
+          request: post,
+          relationship:
+            existingCustomerCommunication.relationship,
+        });
+    }
+
     await completeIdempotency({
       client,
       reservationId: idempotency.reservation.id,
       post,
     });
 
-    await projectNewLeadAlertsWithClient({
-      client,
-      request: post,
-      sourceEventId: idempotency.reservation.id,
-      professionalCanSeeRequest,
-    });
+    if (request.request_origin === "marketplace") {
+      await projectNewLeadAlertsWithClient({
+        client,
+        request: post,
+        sourceEventId: idempotency.reservation.id,
+        professionalCanSeeRequest,
+      });
+    }
 
     await client.query("COMMIT");
     transactionStarted = false;
@@ -502,6 +635,39 @@ async function createJobRequest({
       code: "JOB_REQUEST_CREATED",
       post: serializePost(post),
       reportedConcern,
+      ...(existingCustomerCommunication
+        ? {
+            relationship: {
+              id:
+                existingCustomerCommunication
+                  .relationship.id,
+              requestId: post.id,
+              status: "active",
+              authoritySource:
+                "existing_customer_request",
+            },
+            conversation: {
+              id:
+                existingCustomerCommunication
+                  .conversation.id,
+              relationshipId:
+                existingCustomerCommunication
+                  .relationship.id,
+              status: "active",
+            },
+            ...(existingCustomerLifecycleJob?.job
+              ? {
+                  job: {
+                    id:
+                      existingCustomerLifecycleJob
+                        .job.id,
+                    sourceType:
+                      "existing_customer_request",
+                  },
+                }
+              : {}),
+          }
+        : {}),
     };
   } catch (error) {
     if (transactionStarted) {

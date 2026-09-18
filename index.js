@@ -231,6 +231,9 @@ const {
   registerBusinessCustomerRelationshipRoutes,
 } = require("./server/relationships/businessCustomerRelationships");
 const {
+  registerHomeownerProfessionalsRoutes,
+} = require("./server/relationships/homeownerProfessionals");
+const {
   registerCustomerPartyRoutes,
 } = require("./server/relationships/customerParties");
 
@@ -667,6 +670,7 @@ function buildUserPostsQuery(userId) {
              location_normalization_status, service_address_line1, service_city,
              service_region, service_postal_code, service_country_code,
              discovery_area_label, unit_number, access_notes, status,
+             request_origin, source_meetro_relationship_id,
              lifecycle_contract_version, modification_version,
              created_at, updated_at, cancelled_at,
              mage_url, image_url, request_photos
@@ -686,6 +690,7 @@ function buildUserPostByIdQuery(postId, userId) {
              location_normalization_status, service_address_line1, service_city,
              service_region, service_postal_code, service_country_code,
              discovery_area_label, unit_number, access_notes, status,
+             request_origin, source_meetro_relationship_id,
              lifecycle_contract_version, modification_version,
              created_at, updated_at, cancelled_at,
              mage_url, image_url, request_photos
@@ -1134,6 +1139,13 @@ registerBusinessContactRoutes({
   app,
   authMiddleware,
   getPool,
+  sendPublicDatabaseError,
+});
+
+registerHomeownerProfessionalsRoutes({
+  app,
+  authMiddleware,
+  getPool: () => pool,
   sendPublicDatabaseError,
 });
 
@@ -1876,6 +1888,15 @@ app.post("/posts", authMiddleware, async (req, res) => {
       code: result.code,
       post: result.post,
       reportedConcern: result.reportedConcern || null,
+      ...(result.relationship
+        ? { relationship: result.relationship }
+        : {}),
+      ...(result.conversation
+        ? { conversation: result.conversation }
+        : {}),
+      ...(result.job
+        ? { job: result.job }
+        : {}),
     });
   } catch (err) {
     if (err instanceof MediaValidationError) {

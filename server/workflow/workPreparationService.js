@@ -207,63 +207,238 @@ async function runTransaction(pool, mode, action) {
 
 async function loadProfessionalContext(client, jobId, actorId, { lock = false } = {}) {
   const result = await client.query(
-    `SELECT jobs.id AS job_id, jobs.source_type, jobs.job_request_id,
+    `SELECT
+      jobs.id AS job_id,
+      jobs.source_type,
+      jobs.job_request_id,
+      jobs.source_request_selection_id,
       jobs.source_request_relationship_id AS relationship_id,
-      professional.user_id AS professional_user_id, relationships.homeowner_id,
+      jobs.originating_business_document_id,
+      jobs.contractor_profile_id,
+      jobs.business_contact_id,
+      jobs.business_customer_relationship_id,
+      jobs.source_business_customer_job_id,
+
+      posts.request_origin,
+      relationships.ordinary_authority_source,
+
+      professional.user_id AS professional_user_id,
+      relationships.homeowner_id,
       professional.id AS professional_participant_id,
       customer.id AS customer_participant_id,
       roles.id AS professional_role_assignment_id,
+
       ARRAY(
         SELECT DISTINCT grants.capability
         FROM lifecycle_authority_grants grants
+
         LEFT JOIN lifecycle_authority_grant_revocations revocations
           ON revocations.authority_grant_id = grants.id
-        WHERE grants.grantee_participant_id = professional.id
+
+        WHERE grants.grantee_participant_id =
+              professional.id
           AND grants.job_id = jobs.id
           AND grants.scope_job_id = jobs.id
-          AND grants.capability = ANY($3::text[])
+          AND grants.capability =
+              ANY($3::text[])
           AND grants.valid_from <= CURRENT_TIMESTAMP
-          AND (grants.valid_until IS NULL OR grants.valid_until > CURRENT_TIMESTAMP)
+          AND (
+            grants.valid_until IS NULL
+            OR grants.valid_until > CURRENT_TIMESTAMP
+          )
           AND revocations.id IS NULL
       ) AS active_capabilities
+
      FROM jobs
-     LEFT JOIN posts ON posts.id = jobs.job_request_id
-       AND posts.lifecycle_contract_version = 2 AND posts.cancelled_at IS NULL
+
+     LEFT JOIN posts
+       ON posts.id = jobs.job_request_id
+       AND posts.lifecycle_contract_version = 2
+       AND posts.cancelled_at IS NULL
+
      LEFT JOIN request_relationships relationships
-       ON relationships.id = jobs.source_request_relationship_id
-       AND relationships.post_id = jobs.job_request_id
+       ON relationships.id =
+          jobs.source_request_relationship_id
+       AND relationships.post_id =
+          jobs.job_request_id
        AND relationships.status = 'active'
        AND relationships.emergency_request_id IS NULL
        AND relationships.professional_user_id = $2
+
      LEFT JOIN contractor_profiles profiles
-       ON jobs.source_type='business_document' AND profiles.id=jobs.contractor_profile_id AND profiles.user_id=$2
+       ON jobs.source_type IN (
+         'business_document',
+         'business_customer'
+       )
+       AND profiles.id = jobs.contractor_profile_id
+       AND profiles.user_id = $2
+
+     LEFT JOIN job_customer_parties customer_parties
+       ON jobs.source_type = 'business_customer'
+       AND customer_parties.job_id = jobs.id
+       AND customer_parties.contractor_profile_id =
+           jobs.contractor_profile_id
+       AND customer_parties.business_contact_id =
+           jobs.business_contact_id
+       AND customer_parties.business_customer_relationship_id =
+           jobs.business_customer_relationship_id
+
+     LEFT JOIN business_customer_job_sources business_sources
+       ON jobs.source_type = 'business_customer'
+       AND business_sources.id =
+           jobs.source_business_customer_job_id
+       AND business_sources.contractor_profile_id =
+           jobs.contractor_profile_id
+       AND business_sources.business_contact_id =
+           jobs.business_contact_id
+       AND business_sources.business_customer_relationship_id =
+           jobs.business_customer_relationship_id
+
      INNER JOIN relationship_participants professional
        ON professional.job_id = jobs.id
-       AND professional.user_id=$2
-       AND ((jobs.source_type='ordinary_request_selection' AND professional.request_relationship_id=relationships.id)
-         OR (jobs.source_type='business_document' AND professional.request_relationship_id IS NULL))
+       AND professional.user_id = $2
+       AND (
+         (
+           jobs.source_type =
+             'ordinary_request_selection'
+           AND professional.request_relationship_id =
+               relationships.id
+         )
+
+         OR
+
+         (
+           jobs.source_type =
+             'existing_customer_request'
+           AND professional.request_relationship_id =
+               relationships.id
+           AND professional.source_evidence_type =
+               'existing_customer_request'
+         )
+
+         OR
+
+         (
+           jobs.source_type =
+             'business_document'
+           AND professional.request_relationship_id IS NULL
+         )
+
+         OR
+
+         (
+           jobs.source_type =
+             'business_customer'
+           AND professional.request_relationship_id IS NULL
+           AND professional.source_evidence_type =
+               'business_customer'
+         )
+       )
+
      LEFT JOIN relationship_participants customer
-       ON customer.job_id = jobs.id
-       AND customer.request_relationship_id = relationships.id
-       AND customer.user_id = relationships.homeowner_id
+       ON jobs.source_type IN (
+         'ordinary_request_selection',
+         'existing_customer_request'
+       )
+       AND customer.job_id = jobs.id
+       AND customer.request_relationship_id =
+           relationships.id
+       AND customer.user_id =
+           relationships.homeowner_id
+
      INNER JOIN participant_role_assignments roles
        ON roles.participant_id = professional.id
        AND roles.job_id = jobs.id
        AND roles.role = 'PRIMARY_PROFESSIONAL'
        AND roles.valid_from <= CURRENT_TIMESTAMP
-       AND (roles.valid_until IS NULL OR roles.valid_until > CURRENT_TIMESTAMP)
+       AND (
+         roles.valid_until IS NULL
+         OR roles.valid_until > CURRENT_TIMESTAMP
+       )
+
      LEFT JOIN participant_role_revocations role_revocations
        ON role_revocations.role_assignment_id = roles.id
+
      WHERE jobs.id = $1
        AND jobs.lifecycle_contract_version = 2
        AND role_revocations.id IS NULL
-       AND ((jobs.source_type='ordinary_request_selection' AND posts.id IS NOT NULL AND relationships.id IS NOT NULL AND customer.id IS NOT NULL)
-         OR (jobs.source_type='business_document' AND profiles.id IS NOT NULL AND jobs.job_request_id IS NULL
-           AND jobs.source_request_relationship_id IS NULL AND jobs.originating_business_document_id IS NOT NULL))
+
+       AND (
+         (
+           jobs.source_type =
+             'ordinary_request_selection'
+
+           AND posts.id IS NOT NULL
+           AND relationships.id IS NOT NULL
+           AND customer.id IS NOT NULL
+         )
+
+         OR
+
+         (
+           jobs.source_type =
+             'existing_customer_request'
+
+           AND posts.id IS NOT NULL
+           AND posts.request_origin =
+               'existing_customer_request'
+
+           AND relationships.id IS NOT NULL
+           AND relationships.ordinary_authority_source =
+               'existing_customer_request'
+
+           AND jobs.source_request_selection_id IS NULL
+           AND jobs.originating_business_document_id IS NULL
+
+           AND customer.id IS NOT NULL
+         )
+
+         OR
+
+         (
+           jobs.source_type =
+             'business_document'
+
+           AND profiles.id IS NOT NULL
+
+           AND jobs.job_request_id IS NULL
+           AND jobs.source_request_relationship_id IS NULL
+           AND jobs.originating_business_document_id IS NOT NULL
+         )
+
+         OR
+
+         (
+           jobs.source_type =
+             'business_customer'
+
+           AND profiles.id IS NOT NULL
+
+           AND jobs.job_request_id IS NULL
+           AND jobs.source_request_selection_id IS NULL
+           AND jobs.source_request_relationship_id IS NULL
+           AND jobs.originating_business_document_id IS NULL
+
+           AND jobs.contractor_profile_id IS NOT NULL
+           AND jobs.business_contact_id IS NOT NULL
+           AND jobs.business_customer_relationship_id IS NOT NULL
+           AND jobs.source_business_customer_job_id IS NOT NULL
+
+           AND customer_parties.job_id IS NOT NULL
+           AND business_sources.id IS NOT NULL
+         )
+       )
+
      LIMIT 1
+
      ${lock ? "FOR UPDATE OF jobs" : ""}`,
-    [jobId, actorId, ["quote.read", ...Object.values(CAPABILITIES)]]
+    [
+      jobId,
+      actorId,
+      ["quote.read", ...Object.values(CAPABILITIES)],
+    ]
   );
+
   return result.rows[0] || null;
 }
 

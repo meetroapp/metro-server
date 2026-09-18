@@ -108,14 +108,24 @@ const PROFESSIONAL_JOBS_CTE = `
       jobs.id AS job_id,
       evaluation_authority.evaluation_job_authorized,
       evaluation_authority.job_closed,
+
       jobs.source_type,
       jobs.job_request_id,
       jobs.source_request_relationship_id AS relationship_id,
+      jobs.source_business_customer_job_id,
+
       relationships.homeowner_id,
+
       professional.id AS professional_participant_id,
       customer.id AS customer_participant_id,
-      COALESCE(posts.title, 'Approved Work') AS job_title,
+
+      COALESCE(
+        posts.title,
+        'Approved Work'
+      ) AS job_title,
+
       posts.category AS job_category,
+
       posts.location_intake_mode,
       posts.location_normalization_status,
       posts.service_address_line1,
@@ -124,69 +134,252 @@ const PROFESSIONAL_JOBS_CTE = `
       posts.service_postal_code,
       posts.service_country_code,
       posts.discovery_area_label,
-      COALESCE(homeowners.username, customer_snapshot.customer_name) AS customer_name,
+
+      COALESCE(
+        homeowners.username,
+        customer_snapshot.customer_name,
+        business_contacts.display_name
+      ) AS customer_name,
+
       jobs.created_at AS job_created_at
+
     FROM jobs
+
     LEFT JOIN posts
       ON posts.id = jobs.job_request_id
       AND posts.lifecycle_contract_version = 2
       AND posts.cancelled_at IS NULL
+
     LEFT JOIN request_relationships relationships
-      ON relationships.id = jobs.source_request_relationship_id
-      AND relationships.post_id = jobs.job_request_id
+      ON relationships.id =
+          jobs.source_request_relationship_id
+      AND relationships.post_id =
+          jobs.job_request_id
       AND relationships.emergency_request_id IS NULL
       AND relationships.status = 'active'
       AND relationships.professional_user_id = $1
+
     INNER JOIN relationship_participants professional
       ON professional.job_id = jobs.id
       AND professional.user_id = $1
-      AND ((jobs.source_type = 'ordinary_request_selection'
-            AND professional.request_relationship_id = relationships.id)
-        OR (jobs.source_type = 'business_document'
-            AND professional.request_relationship_id IS NULL))
+      AND (
+        (
+          jobs.source_type =
+            'ordinary_request_selection'
+          AND professional.request_relationship_id =
+              relationships.id
+        )
+
+        OR
+
+        (
+          jobs.source_type =
+            'existing_customer_request'
+          AND professional.request_relationship_id =
+              relationships.id
+          AND professional.source_evidence_type =
+              'existing_customer_request'
+        )
+
+        OR
+
+        (
+          jobs.source_type =
+            'business_document'
+          AND professional.request_relationship_id IS NULL
+        )
+
+        OR
+
+        (
+          jobs.source_type =
+            'business_customer'
+          AND professional.request_relationship_id IS NULL
+          AND professional.source_evidence_type =
+              'business_customer'
+        )
+      )
+
     INNER JOIN participant_role_assignments professional_roles
-      ON professional_roles.participant_id = professional.id
+      ON professional_roles.participant_id =
+          professional.id
       AND professional_roles.job_id = jobs.id
-      AND professional_roles.role = 'PRIMARY_PROFESSIONAL'
-      AND professional_roles.valid_from <= CURRENT_TIMESTAMP
-      AND (professional_roles.valid_until IS NULL OR professional_roles.valid_until > CURRENT_TIMESTAMP)
-    LEFT JOIN participant_role_revocations professional_role_revocations
-      ON professional_role_revocations.role_assignment_id = professional_roles.id
+      AND professional_roles.role =
+          'PRIMARY_PROFESSIONAL'
+      AND professional_roles.valid_from <=
+          CURRENT_TIMESTAMP
+      AND (
+        professional_roles.valid_until IS NULL
+        OR professional_roles.valid_until >
+           CURRENT_TIMESTAMP
+      )
+
+    LEFT JOIN participant_role_revocations
+      professional_role_revocations
+      ON professional_role_revocations.role_assignment_id =
+          professional_roles.id
+
     LEFT JOIN relationship_participants customer
-      ON customer.job_id = jobs.id
-      AND customer.request_relationship_id = relationships.id
-      AND customer.user_id = relationships.homeowner_id
+      ON jobs.source_type IN (
+        'ordinary_request_selection',
+        'existing_customer_request'
+      )
+      AND customer.job_id = jobs.id
+      AND customer.request_relationship_id =
+          relationships.id
+      AND customer.user_id =
+          relationships.homeowner_id
+
     LEFT JOIN participant_role_assignments customer_roles
       ON customer_roles.participant_id = customer.id
       AND customer_roles.job_id = jobs.id
-      AND customer_roles.role = 'CUSTOMER_REPRESENTATIVE'
+      AND customer_roles.role =
+          'CUSTOMER_REPRESENTATIVE'
       AND customer_roles.valid_from <= CURRENT_TIMESTAMP
-      AND (customer_roles.valid_until IS NULL OR customer_roles.valid_until > CURRENT_TIMESTAMP)
-    LEFT JOIN participant_role_revocations customer_role_revocations
-      ON customer_role_revocations.role_assignment_id = customer_roles.id
-    LEFT JOIN users homeowners ON homeowners.id = relationships.homeowner_id
+      AND (
+        customer_roles.valid_until IS NULL
+        OR customer_roles.valid_until >
+           CURRENT_TIMESTAMP
+      )
+
+    LEFT JOIN participant_role_revocations
+      customer_role_revocations
+      ON customer_role_revocations.role_assignment_id =
+          customer_roles.id
+
+    LEFT JOIN users homeowners
+      ON homeowners.id = relationships.homeowner_id
+
     LEFT JOIN contractor_profiles profiles
-      ON jobs.source_type = 'business_document'
-      AND profiles.id = jobs.contractor_profile_id AND profiles.user_id = $1
+      ON jobs.source_type IN (
+        'business_document',
+        'business_customer'
+      )
+      AND profiles.id = jobs.contractor_profile_id
+      AND profiles.user_id = $1
+
+    LEFT JOIN business_contacts
+      ON jobs.source_type = 'business_customer'
+      AND business_contacts.id =
+          jobs.business_contact_id
+      AND business_contacts.contractor_profile_id =
+          jobs.contractor_profile_id
+
+    LEFT JOIN job_customer_parties
+      ON jobs.source_type = 'business_customer'
+      AND job_customer_parties.job_id = jobs.id
+      AND job_customer_parties.contractor_profile_id =
+          jobs.contractor_profile_id
+      AND job_customer_parties.business_contact_id =
+          jobs.business_contact_id
+      AND job_customer_parties.business_customer_relationship_id =
+          jobs.business_customer_relationship_id
+
+    LEFT JOIN business_customer_job_sources
+      ON jobs.source_type = 'business_customer'
+      AND business_customer_job_sources.id =
+          jobs.source_business_customer_job_id
+      AND business_customer_job_sources.contractor_profile_id =
+          jobs.contractor_profile_id
+      AND business_customer_job_sources.business_contact_id =
+          jobs.business_contact_id
+      AND business_customer_job_sources.business_customer_relationship_id =
+          jobs.business_customer_relationship_id
+
     LEFT JOIN LATERAL (
       SELECT snapshots.customer_name
       FROM canonical_quote_customer_snapshots snapshots
       INNER JOIN canonical_quote_approvals approvals
-        ON approvals.quote_id = snapshots.quote_id AND approvals.job_id = snapshots.job_id
-      WHERE approvals.job_id = jobs.id AND approvals.approval_source = 'EXTERNAL_EVIDENCE'
-      ORDER BY approvals.approved_at DESC, approvals.id DESC LIMIT 1
+        ON approvals.quote_id = snapshots.quote_id
+        AND approvals.job_id = snapshots.job_id
+      WHERE jobs.source_type = 'business_document'
+        AND approvals.job_id = jobs.id
+        AND approvals.approval_source =
+            'EXTERNAL_EVIDENCE'
+      ORDER BY
+        approvals.approved_at DESC,
+        approvals.id DESC
+      LIMIT 1
     ) customer_snapshot ON TRUE
-    LEFT JOIN LATERAL (${jobEvaluationVisitAuthoritySql("jobs.id", "professional.id")})
-      evaluation_authority ON TRUE
+
+    LEFT JOIN LATERAL (
+      ${jobEvaluationVisitAuthoritySql(
+        "jobs.id",
+        "professional.id"
+      )}
+    ) evaluation_authority ON TRUE
+
     WHERE jobs.lifecycle_contract_version = 2
       AND professional_role_revocations.id IS NULL
       AND customer_role_revocations.id IS NULL
-      AND ((jobs.source_type = 'ordinary_request_selection'
-            AND posts.id IS NOT NULL AND relationships.id IS NOT NULL
-            AND customer.id IS NOT NULL AND customer_roles.id IS NOT NULL)
-        OR (jobs.source_type = 'business_document' AND profiles.id IS NOT NULL
-            AND jobs.job_request_id IS NULL AND jobs.source_request_relationship_id IS NULL
-            AND jobs.originating_business_document_id IS NOT NULL))
+
+      AND (
+        (
+          jobs.source_type =
+            'ordinary_request_selection'
+
+          AND posts.id IS NOT NULL
+          AND relationships.id IS NOT NULL
+          AND customer.id IS NOT NULL
+          AND customer_roles.id IS NOT NULL
+        )
+
+        OR
+
+        (
+          jobs.source_type =
+            'existing_customer_request'
+
+          AND posts.id IS NOT NULL
+          AND posts.request_origin =
+              'existing_customer_request'
+
+          AND relationships.id IS NOT NULL
+          AND relationships.ordinary_authority_source =
+              'existing_customer_request'
+
+          AND jobs.source_request_selection_id IS NULL
+          AND jobs.originating_business_document_id IS NULL
+
+          AND customer.id IS NOT NULL
+          AND customer_roles.id IS NOT NULL
+        )
+
+        OR
+
+        (
+          jobs.source_type =
+            'business_document'
+
+          AND profiles.id IS NOT NULL
+          AND jobs.job_request_id IS NULL
+          AND jobs.source_request_relationship_id IS NULL
+          AND jobs.originating_business_document_id IS NOT NULL
+        )
+
+        OR
+
+        (
+          jobs.source_type =
+            'business_customer'
+
+          AND profiles.id IS NOT NULL
+
+          AND jobs.job_request_id IS NULL
+          AND jobs.source_request_selection_id IS NULL
+          AND jobs.source_request_relationship_id IS NULL
+          AND jobs.originating_business_document_id IS NULL
+
+          AND jobs.contractor_profile_id IS NOT NULL
+          AND jobs.business_contact_id IS NOT NULL
+          AND jobs.business_customer_relationship_id IS NOT NULL
+          AND jobs.source_business_customer_job_id IS NOT NULL
+
+          AND business_contacts.id IS NOT NULL
+          AND job_customer_parties.job_id IS NOT NULL
+          AND business_customer_job_sources.id IS NOT NULL
+        )
+      )
   )`;
 
 const ACTIVE_GRANT = `
@@ -359,8 +552,64 @@ async function loadOpportunities(client, actorId, limit) {
       INNER JOIN canonical_quote_approvals approvals
         ON approvals.quote_id = quotes.id AND approvals.job_id = jobs.job_id
         AND approvals.decision = 'APPROVED'
-        AND ((jobs.source_type = 'ordinary_request_selection' AND approvals.approval_source = 'MEETRO_CUSTOMER')
-          OR (jobs.source_type = 'business_document' AND approvals.approval_source = 'EXTERNAL_EVIDENCE'))
+        AND (
+          (
+            jobs.source_type IN (
+              'ordinary_request_selection',
+              'existing_customer_request'
+            )
+            AND approvals.approval_source =
+                'MEETRO_CUSTOMER'
+            AND approvals.customer_decision_id IS NOT NULL
+            AND approvals.external_approval_evidence_id IS NULL
+            AND quotes.source_context_type =
+                'ordinary_request'
+            AND quotes.job_source_type =
+                jobs.source_type
+            AND quotes.job_request_id =
+                jobs.job_request_id
+            AND quotes.relationship_id =
+                jobs.relationship_id
+            AND quotes.business_customer_job_source_id IS NULL
+          )
+
+          OR
+
+          (
+            jobs.source_type =
+              'business_document'
+            AND approvals.approval_source =
+                'EXTERNAL_EVIDENCE'
+            AND approvals.customer_decision_id IS NULL
+            AND approvals.external_approval_evidence_id IS NOT NULL
+            AND quotes.source_context_type =
+                'business_document'
+            AND quotes.job_source_type =
+                'business_document'
+            AND quotes.job_request_id IS NULL
+            AND quotes.relationship_id IS NULL
+            AND quotes.business_customer_job_source_id IS NULL
+          )
+
+          OR
+
+          (
+            jobs.source_type =
+              'business_customer'
+            AND approvals.approval_source =
+                'EXTERNAL_EVIDENCE'
+            AND approvals.customer_decision_id IS NULL
+            AND approvals.external_approval_evidence_id IS NOT NULL
+            AND quotes.source_context_type =
+                'business_customer'
+            AND quotes.job_source_type =
+                'business_customer'
+            AND quotes.job_request_id IS NULL
+            AND quotes.relationship_id IS NULL
+            AND quotes.business_customer_job_source_id =
+                jobs.source_business_customer_job_id
+          )
+        )
       LEFT JOIN canonical_approved_work_visit_authority_activations activations
         ON activations.job_id = jobs.job_id AND (activations.quote_approval_id = approvals.id OR
           (activations.quote_approval_id IS NULL AND activations.approved_quote_decision_id = approvals.customer_decision_id))

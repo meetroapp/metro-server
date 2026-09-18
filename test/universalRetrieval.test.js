@@ -119,7 +119,7 @@ test("production discovery through real Job authorization/projector performs rea
     if (sql.includes("companion_retrieval:candidates:JOB")) { assert.equal(values[0], 41); return { rows: [{ id, name: "Anthony Guzman", title: "Window repair" }] }; }
     if (sql.includes("live_job:authorized_context")) {
       assert.equal(values[0], id); assert.equal(values[1], 41);
-      return { rows: [{ job_id: id, job_request_id: 18, relationship_id: 72, lifecycle_contract_version: 2, job_created_at: NOW,
+      return { rows: [{ job_id: id, source_type: "ordinary_request_selection", job_request_id: 18, relationship_id: 72, lifecycle_contract_version: 2, job_created_at: NOW,
         relationship_status: "active", selected_professional_user_id: 41, actor_account_type: "professional", actor_participant_id: randomUUID(),
         is_primary_professional: true, conversation_id: 340, active_capabilities: ["participant.read", "reported_concern.read", "evaluation.perform"] }] };
     }

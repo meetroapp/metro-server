@@ -44,6 +44,9 @@ async function ensureConversationWithClient({
       homeowner_id,
       contractor_id,
       professional_user_id,
+      professional_response_id,
+      ordinary_authority_source,
+      source_meetro_relationship_id,
       status
     FROM request_relationships
     WHERE id = $1

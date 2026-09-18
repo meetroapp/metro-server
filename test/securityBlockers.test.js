@@ -64,6 +64,8 @@ test("post list query is scoped to the authenticated user", () => {
   assert.match(query.text, /FROM posts/);
   assert.match(query.text, /WHERE user_id = \$1/);
   assert.doesNotMatch(query.text, /JOIN users/i);
+  assert.match(query.text, /request_origin/);
+  assert.match(query.text, /source_meetro_relationship_id/);
   assert.deepEqual(query.values, [101]);
 });
 
@@ -72,6 +74,8 @@ test("single post query rejects cross-user access by requiring owner scope", () 
 
   assert.match(query.text, /WHERE id = \$1 AND user_id = \$2/);
   assert.doesNotMatch(query.text, /JOIN users/i);
+  assert.match(query.text, /request_origin/);
+  assert.match(query.text, /source_meetro_relationship_id/);
   assert.deepEqual(query.values, ["202", 101]);
 });
 
@@ -129,6 +133,8 @@ test("safe post serialization removes owner identity fields", () => {
     unit_number: "204",
     access_notes: "Private access note",
     status: "open",
+    request_origin: "marketplace",
+    source_meetro_relationship_id: null,
     created_at: "2026-07-04T12:00:00.000Z",
     updated_at: "2026-07-04T12:05:00.000Z",
     cancelled_at: null,

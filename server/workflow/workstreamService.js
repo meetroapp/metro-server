@@ -237,6 +237,142 @@ async function completeCommand(client, reservationId, result) {
   }
 }
 
+async function loadBusinessCustomerWorkflowContext(
+  client,
+  jobId,
+  actorUserId,
+  { lock = false } = {}
+) {
+  const result = await client.query(
+    `
+    /* workstream:business_customer_job_context */
+    SELECT
+      jobs.id AS job_id,
+      jobs.job_request_id,
+      jobs.source_request_relationship_id AS relationship_id,
+      jobs.lifecycle_contract_version,
+      'active'::text AS relationship_status,
+      professional.id AS actor_participant_id,
+      professional.user_id AS actor_user_id
+
+    FROM jobs
+
+    INNER JOIN contractor_profiles profiles
+      ON profiles.id =
+          jobs.contractor_profile_id
+      AND profiles.user_id = $2
+
+    INNER JOIN business_customer_relationships customers
+      ON customers.id =
+          jobs.business_customer_relationship_id
+      AND customers.contractor_profile_id =
+          jobs.contractor_profile_id
+      AND customers.business_contact_id =
+          jobs.business_contact_id
+
+    INNER JOIN business_contacts contacts
+      ON contacts.id =
+          jobs.business_contact_id
+      AND contacts.contractor_profile_id =
+          jobs.contractor_profile_id
+      AND contacts.status = 'ACTIVE'
+
+    INNER JOIN job_customer_parties parties
+      ON parties.job_id =
+          jobs.id
+      AND parties.contractor_profile_id =
+          jobs.contractor_profile_id
+      AND parties.business_contact_id =
+          jobs.business_contact_id
+      AND parties.business_customer_relationship_id =
+          jobs.business_customer_relationship_id
+
+    INNER JOIN business_customer_job_sources sources
+      ON sources.id =
+          jobs.source_business_customer_job_id
+      AND sources.contractor_profile_id =
+          jobs.contractor_profile_id
+      AND sources.business_contact_id =
+          jobs.business_contact_id
+      AND sources.business_customer_relationship_id =
+          jobs.business_customer_relationship_id
+      AND sources.created_by_user_id =
+          profiles.user_id
+
+    INNER JOIN relationship_participants professional
+      ON professional.job_id =
+          jobs.id
+      AND professional.user_id =
+          profiles.user_id
+      AND professional.request_relationship_id IS NULL
+      AND professional.source_evidence_type =
+          'business_customer'
+
+    WHERE jobs.id = $1
+      AND jobs.source_type =
+          'business_customer'
+      AND jobs.lifecycle_contract_version = 2
+
+      AND jobs.job_request_id IS NULL
+      AND jobs.source_request_selection_id IS NULL
+      AND jobs.source_request_relationship_id IS NULL
+      AND jobs.originating_business_document_id IS NULL
+
+      AND jobs.contractor_profile_id IS NOT NULL
+      AND jobs.business_contact_id IS NOT NULL
+      AND jobs.business_customer_relationship_id IS NOT NULL
+      AND jobs.source_business_customer_job_id IS NOT NULL
+
+      AND EXISTS (
+        SELECT 1
+        FROM business_contact_roles roles
+        WHERE roles.business_contact_id =
+              contacts.id
+          AND roles.contractor_profile_id =
+              profiles.id
+          AND roles.role = 'CUSTOMER'
+          AND roles.ended_at IS NULL
+      )
+
+      AND EXISTS (
+        SELECT 1
+        FROM participant_role_assignments roles
+
+        LEFT JOIN participant_role_revocations revoked
+          ON revoked.role_assignment_id =
+             roles.id
+
+        WHERE roles.participant_id =
+              professional.id
+          AND roles.job_id =
+              jobs.id
+          AND roles.role =
+              'PRIMARY_PROFESSIONAL'
+          AND roles.valid_from <=
+              CURRENT_TIMESTAMP
+          AND (
+            roles.valid_until IS NULL
+            OR roles.valid_until >
+               CURRENT_TIMESTAMP
+          )
+          AND revoked.id IS NULL
+      )
+
+    LIMIT 1
+
+    ${lock
+      ? "FOR UPDATE OF jobs, contacts, customers, professional"
+      : ""}
+    `,
+    [
+      jobId,
+      actorUserId,
+    ]
+  );
+
+  return result.rows[0] || null;
+}
+
 async function loadJobContext(client, jobId, actorUserId, { lock = false } = {}) {
   const result = await client.query(
     `
@@ -258,7 +394,7 @@ async function loadJobContext(client, jobId, actorUserId, { lock = false } = {})
       AND request_relationships.post_id = jobs.job_request_id
       AND request_relationships.emergency_request_id IS NULL
       AND request_relationships.status = 'active'
-    INNER JOIN request_selections
+    LEFT JOIN request_selections
       ON request_selections.id = jobs.source_request_selection_id
       AND request_selections.request_relationship_id = request_relationships.id
       AND request_selections.post_id = posts.id
@@ -268,12 +404,50 @@ async function loadJobContext(client, jobId, actorUserId, { lock = false } = {})
       AND relationship_participants.user_id = $2
     WHERE jobs.id = $1
       AND jobs.lifecycle_contract_version = 2
+      AND (
+        (
+          jobs.source_type = 'ordinary_request_selection'
+          AND request_selections.id IS NOT NULL
+        )
+        OR
+        (
+          jobs.source_type = 'existing_customer_request'
+          AND jobs.source_request_selection_id IS NULL
+          AND posts.request_origin = 'existing_customer_request'
+          AND request_relationships.ordinary_authority_source =
+              'existing_customer_request'
+          AND request_relationships.professional_response_id IS NULL
+          AND relationship_participants.source_evidence_type =
+              'existing_customer_request'
+        )
+      )
     LIMIT 1
     ${lock ? "FOR UPDATE OF jobs, request_relationships" : ""}
     `,
     [jobId, actorUserId]
   );
-  return result.rows[0] || await loadBusinessJobContext(client, jobId, actorUserId, {lock});
+  if (result.rows[0]) {
+    return result.rows[0];
+  }
+
+  const businessCustomer =
+    await loadBusinessCustomerWorkflowContext(
+      client,
+      jobId,
+      actorUserId,
+      { lock }
+    );
+
+  if (businessCustomer) {
+    return businessCustomer;
+  }
+
+  return loadBusinessJobContext(
+    client,
+    jobId,
+    actorUserId,
+    { lock }
+  );
 }
 
 async function requireAuthority({

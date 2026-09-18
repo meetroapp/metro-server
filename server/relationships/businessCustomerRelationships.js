@@ -1,6 +1,7 @@
 "use strict";
 
 const service = require("./businessCustomerRelationshipService");
+const businessCustomerJobService = require("./businessCustomerJobService");
 
 function sendResult(res, result) {
   const payload = {
@@ -11,6 +12,7 @@ function sendResult(res, result) {
   if (result?.activity !== undefined) payload.activity = result.activity;
   if (result?.relationship !== undefined) payload.relationship = result.relationship;
   if (result?.relationships !== undefined) payload.relationships = result.relationships;
+  if (result?.job !== undefined) payload.job = result.job;
   if (result?.replayed) payload.replayed = true;
   res.setHeader?.("Cache-Control", "private, no-store");
   return res.status(result?.status || 500).json(payload);
@@ -20,6 +22,7 @@ function createBusinessCustomerRelationshipHandlers({
   getPool,
   sendPublicDatabaseError,
   relationshipService = service,
+  customerJobService = businessCustomerJobService,
 } = {}) {
   if (typeof getPool !== "function") throw new TypeError("getPool must be a function.");
   if (typeof sendPublicDatabaseError !== "function") {
@@ -82,6 +85,17 @@ function createBusinessCustomerRelationshipHandlers({
         relationshipId: req.params.relationshipId,
       })
     ),
+
+    createJob: handle("create_business_customer_job", (req) =>
+      customerJobService.createBusinessCustomerJob({
+        pool: getPool(req),
+        authenticatedActor: req.user,
+        relationshipId: req.params.relationshipId,
+        payload: req.body,
+        idempotencyKey:
+          req.headers?.["idempotency-key"],
+      })
+    ),
   };
 }
 
@@ -91,6 +105,7 @@ function registerBusinessCustomerRelationshipRoutes({
   getPool,
   sendPublicDatabaseError,
   relationshipService = service,
+  customerJobService = businessCustomerJobService,
 } = {}) {
   if (!app) throw new TypeError("An Express application is required.");
   if (typeof authMiddleware !== "function") {
@@ -100,6 +115,7 @@ function registerBusinessCustomerRelationshipRoutes({
     getPool,
     sendPublicDatabaseError,
     relationshipService,
+    customerJobService,
   });
   app.post("/business-customer-relationships", authMiddleware, handlers.establish);
   app.get("/business-customer-relationships", authMiddleware, handlers.list);
@@ -108,6 +124,12 @@ function registerBusinessCustomerRelationshipRoutes({
     authMiddleware,
     handlers.getByContact
   );
+  app.post(
+    "/business-customer-relationships/:relationshipId/jobs",
+    authMiddleware,
+    handlers.createJob
+  );
+
   app.get(
     "/business-customer-relationships/:relationshipId/activity",
     authMiddleware,

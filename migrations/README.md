@@ -103,6 +103,20 @@ Current inventory:
 83. `202609040001_add_evaluation_revision_authority.sql`
 84. `202609070001_archive_numbered_business_document_drafts.sql`
 85. `202609120001_generalize_business_job_invoice_completion.sql`
+86. `202609160001_create_meetro_customer_business_relationship_foundation.sql`
+87. `202609160002_create_homeowner_saved_professionals.sql`
+88. `202609160004_create_existing_customer_request_source_foundation.sql`
+89. `202609160005_create_existing_customer_request_conversation_authority.sql`
+90. `202609160006_create_existing_customer_request_job_foundation.sql`
+91. `202609160007_create_business_customer_job_source_foundation.sql`
+92. `202609160008_generalize_canonical_evaluation_job_sources.sql`
+93. `202609160009_create_business_customer_evaluation_visit_confirmation.sql`
+94. `202609160010_generalize_canonical_job_quote_sources.sql`
+95. `202609160011_generalize_external_quote_approval_sources.sql`
+96. `202609160012_generalize_pre_work_deposit_job_origins.sql`
+97. `202609160013_generalize_approved_work_root_job_origins.sql`
+98. `202609160014_generalize_external_visit_confirmation_sources.sql`
+99. `202609160015_generalize_invoice_job_origins.sql`
 
 Migration 84 adds private numbered-draft archive. Application is environment-specific and is recorded by each database migration ledger.
 

@@ -230,11 +230,11 @@ test("SQL fails closed to exact professional roles, approved decisions, grants, 
   await getProfessionalSchedule({ pool, authenticatedActor: { id: 77 } });
   const sql = pool.calls.map(({ text }) => text).join("\n");
   assert.match(sql, /relationships\.professional_user_id = \$1/);
-  assert.match(sql, /professional_roles\.role = 'PRIMARY_PROFESSIONAL'/);
-  assert.match(sql, /customer_roles\.role = 'CUSTOMER_REPRESENTATIVE'/);
+  assert.match(sql, /professional_roles\.role\s*=\s*'PRIMARY_PROFESSIONAL'/);
+  assert.match(sql, /customer_roles\.role\s*=\s*'CUSTOMER_REPRESENTATIVE'/);
   assert.match(sql, /approvals\.decision = 'APPROVED'/);
   assert.match(sql, /quotes\.status = 'ISSUED'/);
-  assert.match(sql, /approvals\.approval_source = 'EXTERNAL_EVIDENCE'/);
+  assert.match(sql, /approvals\.approval_source\s*=\s*'EXTERNAL_EVIDENCE'/);
   assert.match(sql, /grants\.scope_quote_approval_id = approvals\.id/);
   assert.match(sql, /grants\.scope_approved_quote_decision_id = approvals\.customer_decision_id/);
   assert.match(sql, /grants\.capability = 'visit\.read'/);

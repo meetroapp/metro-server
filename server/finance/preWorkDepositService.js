@@ -214,7 +214,12 @@ async function loadProfessionalJobContext(
   const job = jobResult.rows[0] || null;
   if (!job) return null;
 
-  if (job.source_type === "ordinary_request_selection") {
+  if (
+    [
+      "ordinary_request_selection",
+      "existing_customer_request",
+    ].includes(job.source_type)
+  ) {
     const result = await client.query(
       `SELECT
         jobs.id AS job_id,
@@ -264,20 +269,42 @@ async function loadProfessionalJobContext(
          ON customer.job_id = jobs.id
         AND customer.request_relationship_id =
             relationships.id
-        AND customer.user_id = relationships.homeowner_id
+        AND customer.user_id =
+            relationships.homeowner_id
        LEFT JOIN conversations
-         ON conversations.relationship_id = relationships.id
+         ON conversations.relationship_id =
+            relationships.id
         AND conversations.status = 'active'
        WHERE jobs.id = $1
          AND jobs.lifecycle_contract_version = 2
-         AND jobs.source_type =
+         AND jobs.source_type IN (
+           'ordinary_request_selection',
+           'existing_customer_request'
+         )
+         AND (
+           jobs.source_type =
              'ordinary_request_selection'
+
+           OR
+
+           (
+             jobs.source_type =
+               'existing_customer_request'
+             AND posts.request_origin =
+               'existing_customer_request'
+             AND relationships.ordinary_authority_source =
+               'existing_customer_request'
+             AND jobs.source_request_selection_id IS NULL
+             AND jobs.originating_business_document_id IS NULL
+           )
+         )
        LIMIT 1
        ${lock ? "FOR UPDATE OF relationships" : ""}`,
       [jobId, actorId]
     );
 
     const context = result.rows[0] || null;
+
     return context &&
       context.primary_professional_active === true
       ? context
@@ -331,6 +358,86 @@ async function loadProfessionalJobContext(
     );
 
     const context = result.rows[0] || null;
+
+    return context &&
+      context.primary_professional_active === true
+      ? context
+      : null;
+  }
+
+  if (job.source_type === "business_customer") {
+    const result = await client.query(
+      `SELECT
+        jobs.id AS job_id,
+        jobs.job_request_id,
+        jobs.source_request_relationship_id AS relationship_id,
+        jobs.source_type,
+        NULL::text AS relationship_status,
+        NULL::integer AS homeowner_id,
+        profiles.user_id AS professional_user_id,
+        NULL::integer AS conversation_id,
+        professional.id AS professional_participant_id,
+        NULL::uuid AS customer_participant_id,
+        EXISTS (
+          SELECT 1
+          FROM participant_role_assignments roles
+          LEFT JOIN participant_role_revocations revocations
+            ON revocations.role_assignment_id = roles.id
+          WHERE roles.participant_id = professional.id
+            AND roles.job_id = jobs.id
+            AND roles.role = 'PRIMARY_PROFESSIONAL'
+            AND roles.valid_from <= CURRENT_TIMESTAMP
+            AND (
+              roles.valid_until IS NULL
+              OR roles.valid_until > CURRENT_TIMESTAMP
+            )
+            AND revocations.id IS NULL
+        ) AS primary_professional_active
+       FROM jobs
+       INNER JOIN contractor_profiles profiles
+         ON profiles.id = jobs.contractor_profile_id
+        AND profiles.user_id = $2
+       INNER JOIN relationship_participants professional
+         ON professional.job_id = jobs.id
+        AND professional.request_relationship_id IS NULL
+        AND professional.user_id = $2
+        AND professional.source_evidence_type =
+            'business_customer'
+       INNER JOIN job_customer_parties customer_parties
+         ON customer_parties.job_id = jobs.id
+        AND customer_parties.contractor_profile_id =
+            jobs.contractor_profile_id
+        AND customer_parties.business_contact_id =
+            jobs.business_contact_id
+        AND customer_parties.business_customer_relationship_id =
+            jobs.business_customer_relationship_id
+       INNER JOIN business_customer_job_sources sources
+         ON sources.id =
+            jobs.source_business_customer_job_id
+        AND sources.contractor_profile_id =
+            jobs.contractor_profile_id
+        AND sources.business_contact_id =
+            jobs.business_contact_id
+        AND sources.business_customer_relationship_id =
+            jobs.business_customer_relationship_id
+       WHERE jobs.id = $1
+         AND jobs.lifecycle_contract_version = 2
+         AND jobs.source_type = 'business_customer'
+         AND jobs.job_request_id IS NULL
+         AND jobs.source_request_selection_id IS NULL
+         AND jobs.source_request_relationship_id IS NULL
+         AND jobs.originating_business_document_id IS NULL
+         AND jobs.contractor_profile_id IS NOT NULL
+         AND jobs.business_contact_id IS NOT NULL
+         AND jobs.business_customer_relationship_id IS NOT NULL
+         AND jobs.source_business_customer_job_id IS NOT NULL
+       LIMIT 1
+       ${lock ? "FOR UPDATE OF jobs" : ""}`,
+      [jobId, actorId]
+    );
+
+    const context = result.rows[0] || null;
+
     return context &&
       context.primary_professional_active === true
       ? context
@@ -351,7 +458,9 @@ async function loadApprovedQuoteApprovalSource(client, {
 
   if (approvalId) {
     values.push(approvalId);
-    filters.push(`AND approvals.id = $${values.length}`);
+    filters.push(
+      `AND approvals.id = $${values.length}`
+    );
   }
 
   if (customerDecisionId) {
@@ -365,16 +474,32 @@ async function loadApprovedQuoteApprovalSource(client, {
     `SELECT
       jobs.id AS job_id,
       jobs.job_request_id,
+      jobs.source_request_selection_id,
       jobs.source_request_relationship_id AS relationship_id,
       jobs.source_type AS job_source_type,
+      jobs.originating_business_document_id,
+      jobs.contractor_profile_id,
+      jobs.business_contact_id,
+      jobs.business_customer_relationship_id,
+      jobs.source_business_customer_job_id,
+
+      posts.request_origin,
 
       relationships.status AS relationship_status,
+      relationships.ordinary_authority_source,
 
       professional.id AS professional_participant_id,
       professional.user_id AS professional_user_id,
 
       customer.id AS customer_participant_id,
       customer.user_id AS customer_user_id,
+
+      job_customer_parties.contractor_profile_id
+        AS customer_party_contractor_profile_id,
+      job_customer_parties.business_contact_id
+        AS customer_party_business_contact_id,
+      job_customer_parties.business_customer_relationship_id
+        AS customer_party_relationship_id,
 
       approvals.id AS quote_approval_id,
       approvals.approval_source,
@@ -392,6 +517,12 @@ async function loadApprovedQuoteApprovalSource(client, {
 
       quotes.id AS quote_id,
       quotes.status AS quote_status,
+      quotes.source_context_type AS quote_source_context_type,
+      quotes.job_source_type AS quote_job_source_type,
+      quotes.job_request_id AS quote_job_request_id,
+      quotes.relationship_id AS quote_relationship_id,
+      quotes.business_customer_job_source_id
+        AS quote_business_customer_job_source_id,
 
       versions.status AS quote_version_status,
       versions.currency,
@@ -405,39 +536,89 @@ async function loadApprovedQuoteApprovalSource(client, {
 
      FROM jobs
 
+     LEFT JOIN posts
+       ON jobs.source_type IN (
+         'ordinary_request_selection',
+         'existing_customer_request'
+       )
+      AND posts.id = jobs.job_request_id
+      AND posts.lifecycle_contract_version = 2
+      AND posts.cancelled_at IS NULL
+
      LEFT JOIN request_relationships relationships
-       ON jobs.source_type = 'ordinary_request_selection'
+       ON jobs.source_type IN (
+         'ordinary_request_selection',
+         'existing_customer_request'
+       )
       AND relationships.id =
-        jobs.source_request_relationship_id
+          jobs.source_request_relationship_id
       AND relationships.post_id = jobs.job_request_id
       AND relationships.emergency_request_id IS NULL
       AND relationships.status = 'active'
+
+     LEFT JOIN contractor_profiles business_profiles
+       ON jobs.source_type IN (
+         'business_document',
+         'business_customer'
+       )
+      AND business_profiles.id =
+          jobs.contractor_profile_id
+
+     LEFT JOIN job_customer_parties
+       ON jobs.source_type = 'business_customer'
+      AND job_customer_parties.job_id = jobs.id
+      AND job_customer_parties.contractor_profile_id =
+          jobs.contractor_profile_id
+      AND job_customer_parties.business_contact_id =
+          jobs.business_contact_id
+      AND job_customer_parties.business_customer_relationship_id =
+          jobs.business_customer_relationship_id
 
      LEFT JOIN relationship_participants professional
        ON professional.job_id = jobs.id
       AND (
         (
-          jobs.source_type = 'ordinary_request_selection'
+          jobs.source_type IN (
+            'ordinary_request_selection',
+            'existing_customer_request'
+          )
           AND professional.request_relationship_id =
-            relationships.id
+              relationships.id
           AND professional.user_id =
-            relationships.professional_user_id
+              relationships.professional_user_id
         )
+
         OR
+
         (
           jobs.source_type = 'business_document'
           AND professional.request_relationship_id IS NULL
           AND professional.user_id =
-            jobs.created_by_user_id
+              jobs.created_by_user_id
+        )
+
+        OR
+
+        (
+          jobs.source_type = 'business_customer'
+          AND professional.request_relationship_id IS NULL
+          AND professional.user_id =
+              business_profiles.user_id
+          AND professional.source_evidence_type =
+              'business_customer'
         )
       )
 
      LEFT JOIN relationship_participants customer
-       ON jobs.source_type = 'ordinary_request_selection'
+       ON jobs.source_type IN (
+         'ordinary_request_selection',
+         'existing_customer_request'
+       )
       AND customer.job_id = jobs.id
       AND customer.request_relationship_id =
-        relationships.id
-      AND customer.user_id = relationships.homeowner_id
+          relationships.id
+      AND customer.user_id =
+          relationships.homeowner_id
 
      INNER JOIN canonical_quote_approvals approvals
        ON approvals.job_id = jobs.id
@@ -457,16 +638,16 @@ async function loadApprovedQuoteApprovalSource(client, {
        ON versions.quote_id = approvals.quote_id
       AND versions.job_id = jobs.id
       AND versions.version =
-        approvals.issued_quote_version
+          approvals.issued_quote_version
       AND versions.status = 'ISSUED'
 
      INNER JOIN canonical_quote_issuances issuances
        ON issuances.quote_id = approvals.quote_id
       AND issuances.job_id = jobs.id
       AND issuances.quote_version =
-        approvals.issued_quote_version
+          approvals.issued_quote_version
       AND issuances.source_snapshot_integrity_hash =
-        approvals.issued_integrity_hash
+          approvals.issued_integrity_hash
 
      WHERE jobs.id = $1
        AND jobs.lifecycle_contract_version = 2
@@ -477,27 +658,146 @@ async function loadApprovedQuoteApprovalSource(client, {
          (
            approvals.approval_source =
              'MEETRO_CUSTOMER'
-           AND jobs.source_type =
-             'ordinary_request_selection'
+
+           AND jobs.source_type IN (
+             'ordinary_request_selection',
+             'existing_customer_request'
+           )
+
+           AND posts.id IS NOT NULL
            AND relationships.id IS NOT NULL
            AND customer.id IS NOT NULL
+
            AND approvals.customer_decision_id IS NOT NULL
            AND approvals.external_approval_evidence_id IS NULL
+
+           AND quotes.source_context_type =
+             'ordinary_request'
+
+           AND quotes.job_source_type =
+             jobs.source_type
+
+           AND quotes.job_request_id =
+             jobs.job_request_id
+
+           AND quotes.relationship_id =
+             jobs.source_request_relationship_id
+
+           AND quotes.business_customer_job_source_id IS NULL
+
+           AND (
+             jobs.source_type =
+               'ordinary_request_selection'
+
+             OR
+
+             (
+               jobs.source_type =
+                 'existing_customer_request'
+
+               AND posts.request_origin =
+                 'existing_customer_request'
+
+               AND relationships.ordinary_authority_source =
+                 'existing_customer_request'
+
+               AND jobs.source_request_selection_id IS NULL
+
+               AND jobs.originating_business_document_id IS NULL
+             )
+           )
          )
+
          OR
+
          (
            approvals.approval_source =
              'EXTERNAL_EVIDENCE'
-           AND jobs.source_type = 'business_document'
+
+           AND jobs.source_type IN (
+             'business_document',
+             'business_customer'
+           )
+
            AND jobs.job_request_id IS NULL
            AND jobs.source_request_relationship_id IS NULL
+
            AND approvals.customer_decision_id IS NULL
-           AND approvals.external_approval_evidence_id
-             IS NOT NULL
+           AND approvals.external_approval_evidence_id IS NOT NULL
+
+           AND customer.id IS NULL
+
+           AND (
+             (
+               jobs.source_type =
+                 'business_document'
+
+               AND jobs.originating_business_document_id
+                 IS NOT NULL
+
+               AND quotes.source_context_type =
+                 'business_document'
+
+               AND quotes.job_source_type =
+                 'business_document'
+
+               AND quotes.job_request_id IS NULL
+
+               AND quotes.relationship_id IS NULL
+
+               AND quotes.business_customer_job_source_id
+                 IS NULL
+             )
+
+             OR
+
+             (
+               jobs.source_type =
+                 'business_customer'
+
+               AND jobs.originating_business_document_id
+                 IS NULL
+
+               AND jobs.contractor_profile_id IS NOT NULL
+
+               AND jobs.business_contact_id IS NOT NULL
+
+               AND jobs.business_customer_relationship_id
+                 IS NOT NULL
+
+               AND jobs.source_business_customer_job_id
+                 IS NOT NULL
+
+               AND job_customer_parties.contractor_profile_id =
+                 jobs.contractor_profile_id
+
+               AND job_customer_parties.business_contact_id =
+                 jobs.business_contact_id
+
+               AND job_customer_parties.business_customer_relationship_id =
+                 jobs.business_customer_relationship_id
+
+               AND quotes.source_context_type =
+                 'business_customer'
+
+               AND quotes.job_source_type =
+                 'business_customer'
+
+               AND quotes.job_request_id IS NULL
+
+               AND quotes.relationship_id IS NULL
+
+               AND quotes.business_customer_job_source_id =
+                 jobs.source_business_customer_job_id
+             )
+           )
          )
        )
 
-     ORDER BY approvals.approved_at DESC, approvals.id DESC
+     ORDER BY
+       approvals.approved_at DESC,
+       approvals.id DESC
+
      LIMIT 1
 
      ${lock ? "FOR UPDATE OF jobs, quotes, approvals" : ""}`,
@@ -516,31 +816,106 @@ async function loadApprovedQuoteApprovalSource(client, {
     source.issued_integrity_hash !==
       source.issuance_integrity_hash;
 
+  const meetroSource =
+    [
+      "ordinary_request_selection",
+      "existing_customer_request",
+    ].includes(source.job_source_type);
+
+  const repeatMeetroInvalid =
+    source.job_source_type ===
+      "existing_customer_request" &&
+    (
+      source.request_origin !==
+        "existing_customer_request" ||
+      source.ordinary_authority_source !==
+        "existing_customer_request" ||
+      source.source_request_selection_id !== null ||
+      source.originating_business_document_id !== null
+    );
+
   const meetroInvalid =
     source.approval_source === "MEETRO_CUSTOMER" &&
     (
-      source.job_source_type !==
-        "ordinary_request_selection" ||
+      !meetroSource ||
       source.relationship_status !== "active" ||
       !source.customer_decision_id ||
       source.customer_decision !== "APPROVED" ||
       !source.customer_participant_id ||
       source.customer_participant_id !==
-        source.decision_customer_participant_id
+        source.decision_customer_participant_id ||
+      source.quote_source_context_type !==
+        "ordinary_request" ||
+      source.quote_job_source_type !==
+        source.job_source_type ||
+      Number(source.quote_job_request_id) !==
+        Number(source.job_request_id) ||
+      Number(source.quote_relationship_id) !==
+        Number(source.relationship_id) ||
+      source.quote_business_customer_job_source_id !== null ||
+      repeatMeetroInvalid
+    );
+
+  const quickQuoteExternalInvalid =
+    source.job_source_type === "business_document" &&
+    (
+      !source.originating_business_document_id ||
+      source.quote_source_context_type !==
+        "business_document" ||
+      source.quote_job_source_type !==
+        "business_document" ||
+      source.quote_job_request_id !== null ||
+      source.quote_relationship_id !== null ||
+      source.quote_business_customer_job_source_id !== null
+    );
+
+  const businessCustomerExternalInvalid =
+    source.job_source_type === "business_customer" &&
+    (
+      source.originating_business_document_id !== null ||
+      !source.contractor_profile_id ||
+      !source.business_contact_id ||
+      !source.business_customer_relationship_id ||
+      !source.source_business_customer_job_id ||
+      Number(source.customer_party_contractor_profile_id) !==
+        Number(source.contractor_profile_id) ||
+      String(source.customer_party_business_contact_id || "") !==
+        String(source.business_contact_id || "") ||
+      String(source.customer_party_relationship_id || "") !==
+        String(source.business_customer_relationship_id || "") ||
+      source.quote_source_context_type !==
+        "business_customer" ||
+      source.quote_job_source_type !==
+        "business_customer" ||
+      source.quote_job_request_id !== null ||
+      source.quote_relationship_id !== null ||
+      String(
+        source.quote_business_customer_job_source_id || ""
+      ) !==
+        String(source.source_business_customer_job_id || "")
     );
 
   const externalInvalid =
     source.approval_source === "EXTERNAL_EVIDENCE" &&
     (
-      source.job_source_type !== "business_document" ||
+      ![
+        "business_document",
+        "business_customer",
+      ].includes(source.job_source_type) ||
       source.job_request_id !== null ||
       source.relationship_id !== null ||
       source.customer_decision_id !== null ||
       source.customer_participant_id !== null ||
-      !source.external_approval_evidence_id
+      !source.external_approval_evidence_id ||
+      quickQuoteExternalInvalid ||
+      businessCustomerExternalInvalid
     );
 
-  if (commonInvalid || meetroInvalid || externalInvalid) {
+  if (
+    commonInvalid ||
+    meetroInvalid ||
+    externalInvalid
+  ) {
     throw new Error(
       "Pre-work deposit canonical Quote approval integrity failed."
     );

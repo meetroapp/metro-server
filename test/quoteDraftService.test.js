@@ -233,8 +233,11 @@ test("issue rejects client-owned totals and timestamps before database access", 
 test("Quote issuance requires exactly one finalized physical or remote Evaluation branch", async () => {
   const context = {
     job_id: "00000000-0000-4000-8000-000000000001",
+    job_source_type: "ordinary_request_selection",
+    source_context_type: "ordinary_request",
     job_request_id: 22,
     relationship_id: 344,
+    business_customer_job_source_id: null,
     actor_user_id: 24,
     actor_participant_id: "20000000-0000-4000-8000-000000000001",
   };
@@ -257,22 +260,28 @@ test("Quote issuance requires exactly one finalized physical or remote Evaluatio
   });
   assert.equal(allowed, null);
   assert.deepEqual(calls[0].values, [
-    344,
-    24,
-    22,
-    "authorization_engine",
     context.job_id,
+    context.actor_user_id,
     context.actor_participant_id,
+    "authorization_engine",
+    context.source_context_type,
+    context.job_source_type,
+    context.job_request_id,
+    context.relationship_id,
+    context.business_customer_job_source_id,
   ]);
-  assert.match(calls[0].sql, /aggregates\.ordinary_request_id = \$3/);
-  assert.match(calls[0].sql, /aggregates\.relationship_id = \$1/);
+  assert.match(calls[0].sql, /aggregates\.ordinary_request_id = \$7/);
+  assert.match(calls[0].sql, /aggregates\.relationship_id = \$8/);
   assert.match(calls[0].sql, /evaluations\.professional_user_id = \$2/);
   assert.match(calls[0].sql, /versions\.version = aggregates\.current_version/);
   assert.match(calls[0].sql, /evaluations\.status = 'completed'/);
   assert.match(calls[0].sql, /completed_visit\.state = 'COMPLETED'/);
   assert.match(calls[0].sql, /canonical_visit_evaluation_links/);
   assert.match(calls[0].sql, /canonical_evaluation_remote_provenance/);
-  assert.match(calls[0].sql, /completion_command\.command_name = 'evaluation\.complete'/);
+  assert.match(
+    calls[0].sql,
+    /completion_command\.command_name\s*=\s*'evaluation\.complete'/
+  );
   assert.match(calls[0].sql, /remote\.id IS NULL/);
   assert.match(calls[0].sql, /visit_links\.evaluation_id IS NULL/);
 

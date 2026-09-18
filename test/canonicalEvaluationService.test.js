@@ -256,7 +256,13 @@ function createPool({
         });
         return { rows: [{ id: params[0] }] };
       }
-      if (sql.includes("FROM commercial_authority_aggregates AS a") && sql.includes("WHERE a.id = $1")) {
+      if (
+        (
+          sql.includes("FROM commercial_authority_aggregates AS a") ||
+          sql.includes("/* job_evaluation:load */")
+        ) &&
+        sql.includes("WHERE a.id = $1")
+      ) {
         const row = currentRow(params[0]);
         const evaluation = state.evaluations[params[0]];
         return {
