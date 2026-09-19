@@ -81,11 +81,11 @@ test(
 
     assert.equal(
       migrations.length,
-      100
+      102
     );
     assert.equal(
       migrations.at(-1)?.filename,
-      "202609180001_create_business_complimentary_access_authority.sql"
+      "202609190002_generalize_emergency_job_evaluation_quote.sql"
     );
 
     assert.equal(

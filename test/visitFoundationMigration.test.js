@@ -17,8 +17,8 @@ test("MC-PL-002A remains the sole Visit persistence-foundation migration", () =>
   const migrations = getMigrationFiles();
   const filenames = migrations.map(({ filename }) => filename);
 
-  assert.equal(filenames.length, 100);
-  assert.equal(filenames.at(-1), "202609180001_create_business_complimentary_access_authority.sql");
+  assert.equal(filenames.length, 102);
+  assert.equal(filenames.at(-1), "202609190002_generalize_emergency_job_evaluation_quote.sql");
   const index = filenames.indexOf(migrationName);
   assert.equal(
     filenames[index + 1],

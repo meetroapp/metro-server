@@ -17,7 +17,7 @@ const sql = readFileSync(
 test("migration 56 follows the unchanged migration 1-55 prefix", () => {
   const migrations = getMigrationFiles();
   assert.equal((migrations[74]?.filename || migrations[74]), "202608310001_create_business_job_customer_message_authority.sql");
-  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202609180001_create_business_complimentary_access_authority.sql");
+  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202609190002_generalize_emergency_job_evaluation_quote.sql");
   assert.equal(
     migrations[54].filename,
     "202608240001_create_customer_party_linkage_foundation.sql"
