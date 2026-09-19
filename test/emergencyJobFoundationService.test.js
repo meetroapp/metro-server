@@ -220,12 +220,15 @@ function fakeClient({
         return {
           rows:
             capabilityAvailable
-              ? [
-                  {
-                    capability:
-                      "participant.read",
-                  },
-                ]
+              ? (
+                  Array.isArray(values[0])
+                    ? values[0]
+                    : []
+                ).map(
+                  (capability) => ({
+                    capability,
+                  })
+                )
               : [],
         };
       }
@@ -242,10 +245,12 @@ function fakeClient({
             values[2],
           jobId:
             values[3],
-          evidence:
+          capability:
             values[4],
-          key:
+          evidence:
             values[5],
+          key:
+            values[6],
         });
 
         return {
@@ -262,7 +267,7 @@ function fakeClient({
 }
 
 test(
-  "selected Emergency creates one canonical Job with two authenticated participants and read-only bootstrap authority",
+  "selected Emergency creates one canonical Job with two authenticated participants and governed Evaluation and Quote-preparation authority",
   async () => {
     const client =
       fakeClient();
@@ -348,17 +353,33 @@ test(
 
     assert.equal(
       client.state.grants.length,
-      2
+      8
     );
 
-    assert.equal(
-      client.state.grants.every(
-        (grant) =>
-          grant.key.includes(
-            "participant.read"
-          )
-      ),
-      true
+    const professionalCapabilities =
+      client.state.grants
+        .filter(
+          (grant) =>
+            grant.grantee ===
+            client.state.participants[1].id
+        )
+        .map(
+          (grant) =>
+            grant.capability
+        )
+        .sort();
+
+    assert.deepEqual(
+      professionalCapabilities,
+      [
+        "evaluation.perform",
+        "participant.read",
+        "quote.create",
+        "quote.issue",
+        "quote.read",
+        "quote.revise",
+        "quote.scope.manage",
+      ].sort()
     );
 
     const allSql =
@@ -500,7 +521,7 @@ test(
           info() {},
         },
       }),
-      /participant authority is unavailable/
+      /lifecycle authority is unavailable/
     );
   }
 );

@@ -1099,6 +1099,8 @@ async function loadJobContext(client, jobId, actorUserId, { lock = false } = {})
           THEN 'business_document'
         WHEN jobs.source_type = 'business_customer'
           THEN 'business_customer'
+        WHEN jobs.source_type = 'emergency_request'
+          THEN 'emergency_request'
         ELSE NULL
       END AS source_context_type,
       jobs.contractor_profile_id AS job_contractor_profile_id,
@@ -1108,7 +1110,12 @@ async function loadJobContext(client, jobId, actorUserId, { lock = false } = {})
         AS job_business_customer_relationship_id,
       jobs.source_business_customer_job_id
         AS business_customer_job_source_id,
-      posts.user_id AS homeowner_user_id,
+      jobs.source_emergency_request_id
+        AS job_emergency_request_id,
+      COALESCE(
+        posts.user_id,
+        emergency_requests.homeowner_id
+      ) AS homeowner_user_id,
       relationships.status AS relationship_status,
       COALESCE(
         relationships.professional_user_id,
@@ -1116,6 +1123,7 @@ async function loadJobContext(client, jobId, actorUserId, { lock = false } = {})
       ) AS selected_professional_user_id,
       COALESCE(
         posts.user_id,
+        emergency_requests.homeowner_id,
         business_profiles.user_id
       ) AS source_owner_user_id,
       participants.id AS actor_participant_id,
@@ -1145,13 +1153,37 @@ async function loadJobContext(client, jobId, actorUserId, { lock = false } = {})
       AND posts.id = jobs.job_request_id
       AND posts.lifecycle_contract_version = 2
     LEFT JOIN request_relationships relationships
-      ON jobs.source_type IN (
-        'ordinary_request_selection',
-        'existing_customer_request'
+      ON relationships.id =
+           jobs.source_request_relationship_id
+      AND (
+        (
+          jobs.source_type IN (
+            'ordinary_request_selection',
+            'existing_customer_request'
+          )
+          AND relationships.post_id =
+              jobs.job_request_id
+          AND relationships.emergency_request_id
+              IS NULL
+        )
+        OR
+        (
+          jobs.source_type =
+            'emergency_request'
+          AND relationships.post_id
+              IS NULL
+          AND relationships.emergency_request_id =
+              jobs.source_emergency_request_id
+        )
       )
-      AND relationships.id = jobs.source_request_relationship_id
-      AND relationships.post_id = jobs.job_request_id
-      AND relationships.emergency_request_id IS NULL
+
+    LEFT JOIN emergency_requests
+      ON jobs.source_type =
+           'emergency_request'
+      AND emergency_requests.id =
+           jobs.source_emergency_request_id
+      AND emergency_requests.homeowner_id =
+           relationships.homeowner_id
     LEFT JOIN contractor_profiles business_profiles
       ON jobs.source_type IN (
         'business_document',
@@ -1187,6 +1219,14 @@ async function loadJobContext(client, jobId, actorUserId, { lock = false } = {})
           AND participants.source_evidence_type =
               'business_customer'
         )
+        OR
+        (
+          jobs.source_type = 'emergency_request'
+          AND participants.request_relationship_id =
+              relationships.id
+          AND participants.source_evidence_type =
+              'emergency_selection'
+        )
       )
     LEFT JOIN job_customer_parties customer_parties
       ON customer_parties.job_id = jobs.id
@@ -1209,6 +1249,38 @@ async function loadJobContext(client, jobId, actorUserId, { lock = false } = {})
               'existing_customer_request'
           AND jobs.source_request_selection_id IS NULL
           AND jobs.originating_business_document_id IS NULL
+        )
+        OR
+        (
+          jobs.source_type =
+            'emergency_request'
+          AND emergency_requests.id
+              IS NOT NULL
+          AND emergency_requests.arrived_at
+              IS NOT NULL
+          AND emergency_requests.status IN (
+            'professional_arrived',
+            'work_in_progress',
+            'completed'
+          )
+          AND relationships.id
+              IS NOT NULL
+          AND relationships.status =
+              'active'
+          AND relationships.professional_user_id =
+              $2
+          AND jobs.job_request_id
+              IS NULL
+          AND jobs.source_request_selection_id
+              IS NULL
+          AND jobs.source_request_relationship_id =
+              relationships.id
+          AND jobs.source_emergency_request_id =
+              emergency_requests.id
+          AND jobs.originating_business_document_id
+              IS NULL
+          AND jobs.source_business_customer_job_id
+              IS NULL
         )
         OR
         (
@@ -1258,6 +1330,8 @@ async function loadQuoteContext(client, quoteId, actorUserId, { lock = false } =
         AS job_business_customer_relationship_id,
       jobs.source_business_customer_job_id
         AS job_business_customer_job_source_id,
+      jobs.source_emergency_request_id
+        AS job_emergency_request_id,
       relationships.status AS relationship_status,
       relationships.homeowner_id AS homeowner_user_id,
       COALESCE(
@@ -1295,12 +1369,28 @@ async function loadQuoteContext(client, quoteId, actorUserId, { lock = false } =
           quotes.source_context_type
       AND (
         (
-          quotes.source_context_type <> 'business_customer'
-          AND aggregates.business_customer_job_source_id IS NULL
+          quotes.source_context_type =
+            'emergency_request'
+          AND aggregates.emergency_request_id =
+              quotes.emergency_request_id
+          AND aggregates.relationship_id =
+              quotes.relationship_id
+          AND aggregates.business_customer_job_source_id
+              IS NULL
         )
         OR
         (
-          quotes.source_context_type = 'business_customer'
+          quotes.source_context_type NOT IN (
+            'business_customer',
+            'emergency_request'
+          )
+          AND aggregates.business_customer_job_source_id
+              IS NULL
+        )
+        OR
+        (
+          quotes.source_context_type =
+            'business_customer'
           AND aggregates.business_customer_job_source_id =
               quotes.business_customer_job_source_id
         )
@@ -1309,14 +1399,43 @@ async function loadQuoteContext(client, quoteId, actorUserId, { lock = false } =
       ON jobs.id = quotes.job_id
       AND jobs.source_type = quotes.job_source_type
     LEFT JOIN request_relationships relationships
-      ON jobs.source_type IN (
-        'ordinary_request_selection',
-        'existing_customer_request'
+      ON relationships.id =
+           jobs.source_request_relationship_id
+      AND relationships.id =
+           quotes.relationship_id
+      AND (
+        (
+          jobs.source_type IN (
+            'ordinary_request_selection',
+            'existing_customer_request'
+          )
+          AND relationships.post_id =
+              quotes.job_request_id
+          AND relationships.emergency_request_id
+              IS NULL
+        )
+        OR
+        (
+          jobs.source_type =
+            'emergency_request'
+          AND relationships.post_id
+              IS NULL
+          AND relationships.emergency_request_id =
+              jobs.source_emergency_request_id
+          AND relationships.emergency_request_id =
+              quotes.emergency_request_id
+        )
       )
-      AND relationships.id = jobs.source_request_relationship_id
-      AND relationships.id = quotes.relationship_id
-      AND relationships.post_id = quotes.job_request_id
-      AND relationships.emergency_request_id IS NULL
+
+    LEFT JOIN emergency_requests
+      ON jobs.source_type =
+           'emergency_request'
+      AND emergency_requests.id =
+           jobs.source_emergency_request_id
+      AND emergency_requests.id =
+           quotes.emergency_request_id
+      AND emergency_requests.homeowner_id =
+           relationships.homeowner_id
     LEFT JOIN posts
       ON jobs.source_type IN (
         'ordinary_request_selection',
@@ -1360,6 +1479,14 @@ async function loadQuoteContext(client, quoteId, actorUserId, { lock = false } =
           AND participants.source_evidence_type =
               'business_customer'
         )
+        OR
+        (
+          jobs.source_type = 'emergency_request'
+          AND participants.request_relationship_id =
+              relationships.id
+          AND participants.source_evidence_type =
+              'emergency_selection'
+        )
       )
     LEFT JOIN canonical_quote_customer_parties customer_parties
       ON customer_parties.quote_id = quotes.id
@@ -1385,6 +1512,36 @@ async function loadQuoteContext(client, quoteId, actorUserId, { lock = false } =
           AND jobs.source_request_selection_id IS NULL
           AND jobs.originating_business_document_id IS NULL
           AND quotes.business_customer_job_source_id IS NULL
+        )
+        OR
+        (
+          jobs.source_type =
+            'emergency_request'
+          AND quotes.source_context_type =
+              'emergency_request'
+          AND quotes.job_source_type =
+              'emergency_request'
+          AND quotes.job_request_id
+              IS NULL
+          AND quotes.relationship_id =
+              relationships.id
+          AND quotes.emergency_request_id =
+              emergency_requests.id
+          AND relationships.status =
+              'active'
+          AND relationships.professional_user_id =
+              $2
+          AND emergency_requests.arrived_at
+              IS NOT NULL
+          AND emergency_requests.status IN (
+            'professional_arrived',
+            'work_in_progress',
+            'completed'
+          )
+          AND jobs.source_emergency_request_id =
+              emergency_requests.id
+          AND jobs.source_request_relationship_id =
+              relationships.id
         )
         OR
         (
@@ -1740,6 +1897,235 @@ async function requireCustomerQuoteAuthority({ client, context, capability, logg
   return null;
 }
 
+async function requireEmergencyJobEvaluation({
+  client,
+  context,
+  logger,
+}) {
+  const jobId =
+    normalizedUuid(
+      context?.job_id
+    );
+
+  const actorUserId =
+    positiveInteger(
+      context?.actor_user_id
+    );
+
+  const actorParticipantId =
+    normalizedUuid(
+      context?.actor_participant_id
+    );
+
+  const relationshipId =
+    positiveInteger(
+      context?.relationship_id
+    );
+
+  const emergencyRequestId =
+    positiveInteger(
+      context?.job_emergency_request_id ||
+        context?.emergency_request_id
+    );
+
+  const exactEmergencyContext =
+    context?.job_source_type ===
+      "emergency_request" &&
+    context?.source_context_type ===
+      "emergency_request" &&
+    Boolean(jobId) &&
+    Boolean(actorUserId) &&
+    Boolean(actorParticipantId) &&
+    Boolean(relationshipId) &&
+    Boolean(emergencyRequestId) &&
+    context?.job_request_id == null &&
+    context
+      ?.business_customer_job_source_id ==
+      null &&
+    context
+      ?.job_business_customer_job_source_id ==
+      null;
+
+  if (!exactEmergencyContext) {
+    logger.warn(
+      "Emergency Quote blocked by invalid Evaluation source context",
+      {
+        code:
+          "QUOTE_EVALUATION_REQUIRED",
+        jobId:
+          context?.job_id || null,
+        emergencyRequestId:
+          emergencyRequestId || null,
+      }
+    );
+
+    return failure(
+      409,
+      "QUOTE_EVALUATION_REQUIRED",
+      "A completed Emergency Evaluation is required before the Quote can be prepared or issued."
+    );
+  }
+
+  const result =
+    await client.query(
+      `
+      SELECT
+        evaluations.id,
+        evaluations.status,
+        aggregates.current_version
+          AS evaluation_version
+
+      FROM canonical_evaluations
+        evaluations
+
+      INNER JOIN
+        commercial_authority_aggregates
+        aggregates
+        ON aggregates.id =
+             evaluations.id
+       AND aggregates.aggregate_type =
+             'evaluation'
+       AND aggregates.owning_engine =
+             $6
+       AND aggregates.source_context_type =
+             'emergency_request'
+       AND aggregates.ordinary_request_id
+             IS NULL
+       AND aggregates.emergency_request_id =
+             $5::integer
+       AND aggregates.relationship_id =
+             $4::integer
+       AND aggregates.business_customer_job_source_id
+             IS NULL
+
+      INNER JOIN
+        canonical_evaluation_versions
+        versions
+        ON versions.evaluation_id =
+             evaluations.id
+       AND versions.version =
+             aggregates.current_version
+       AND versions.status =
+             evaluations.status
+
+      INNER JOIN
+        canonical_evaluation_job_subjects
+        subjects
+        ON subjects.evaluation_id =
+             evaluations.id
+       AND subjects.job_id =
+             $1::uuid
+       AND subjects.source_context_type =
+             'emergency_request'
+       AND subjects.job_source_type =
+             'emergency_request'
+       AND subjects.job_request_id
+             IS NULL
+       AND subjects.relationship_id =
+             $4::integer
+       AND subjects.business_customer_job_source_id
+             IS NULL
+       AND subjects.emergency_request_id =
+             $5::integer
+
+      INNER JOIN jobs
+        ON jobs.id =
+             subjects.job_id
+       AND jobs.source_type =
+             'emergency_request'
+       AND jobs.source_emergency_request_id =
+             $5::integer
+       AND jobs.source_request_relationship_id =
+             $4::integer
+       AND jobs.job_request_id
+             IS NULL
+       AND jobs.source_request_selection_id
+             IS NULL
+
+      INNER JOIN request_relationships
+        relationships
+        ON relationships.id =
+             $4::integer
+       AND relationships.emergency_request_id =
+             $5::integer
+       AND relationships.post_id
+             IS NULL
+       AND relationships.status =
+             'active'
+       AND relationships.professional_user_id =
+             $2::integer
+
+      INNER JOIN emergency_requests
+        emergency_source
+        ON emergency_source.id =
+             $5::integer
+       AND emergency_source.homeowner_id =
+             relationships.homeowner_id
+       AND emergency_source.arrived_at
+             IS NOT NULL
+       AND emergency_source.status IN (
+         'professional_arrived',
+         'work_in_progress',
+         'completed'
+       )
+
+      INNER JOIN relationship_participants
+        professional_participant
+        ON professional_participant.id =
+             $3::uuid
+       AND professional_participant.job_id =
+             jobs.id
+       AND professional_participant.user_id =
+             $2::integer
+       AND professional_participant.request_relationship_id =
+             $4::integer
+       AND professional_participant.source_evidence_type =
+             'emergency_selection'
+
+      WHERE evaluations.professional_user_id =
+            $2::integer
+
+        AND evaluations.relationship_id =
+            $4::integer
+
+        AND evaluations.status =
+            'completed'
+
+      LIMIT 1
+      `,
+      [
+        jobId,
+        actorUserId,
+        actorParticipantId,
+        relationshipId,
+        emergencyRequestId,
+        OWNING_ENGINE,
+      ]
+    );
+
+  if (result.rows[0]) {
+    return null;
+  }
+
+  logger.warn(
+    "Emergency Quote blocked until Evaluation is completed",
+    {
+      code:
+        "QUOTE_EVALUATION_REQUIRED",
+      jobId,
+      emergencyRequestId,
+      relationshipId,
+    }
+  );
+
+  return failure(
+    409,
+    "QUOTE_EVALUATION_REQUIRED",
+    "A completed Emergency Evaluation is required before the Quote can be prepared or issued."
+  );
+}
+
+
 async function loadQualifyingCustomerQuoteDelivery(
   client,
   context,
@@ -1805,8 +2191,12 @@ async function requireQuoteAuthority({ client, context, capability, logger }) {
     context.job_source_type === "business_document";
   const businessCustomerOrigin =
     context.job_source_type === "business_customer";
+  const emergencyOrigin =
+    context.job_source_type === "emergency_request";
   const requestOrigin =
-    marketplaceOrigin || repeatMeetroOrigin;
+    marketplaceOrigin ||
+    repeatMeetroOrigin ||
+    emergencyOrigin;
 
   const exactBusinessCustomerParty =
     businessCustomerOrigin &&
@@ -3676,10 +4066,30 @@ async function createDraftQuote(input = {}) {
     });
     if (authorityError) return { abort: authorityError };
 
+    if (
+      context.job_source_type ===
+        "emergency_request"
+    ) {
+      const evaluationError =
+        await requireEmergencyJobEvaluation({
+          client,
+          context,
+          logger,
+        });
+
+      if (evaluationError) {
+        return {
+          abort:
+            evaluationError,
+        };
+      }
+    }
+
     const jobQuoteSource =
       context.job_source_type === "ordinary_request_selection" ||
       context.job_source_type === "existing_customer_request" ||
-      context.job_source_type === "business_customer";
+      context.job_source_type === "business_customer" ||
+      context.job_source_type === "emergency_request";
 
     if (!jobQuoteSource) {
       return {
@@ -3694,20 +4104,39 @@ async function createDraftQuote(input = {}) {
     const businessCustomerOrigin =
       context.job_source_type === "business_customer";
 
+    const emergencyOrigin =
+      context.job_source_type === "emergency_request";
+
     const sourceContextType =
       businessCustomerOrigin
         ? "business_customer"
-        : "ordinary_request";
+        : emergencyOrigin
+          ? "emergency_request"
+          : "ordinary_request";
 
     const sourceJobRequestId =
-      businessCustomerOrigin
+      (
+        businessCustomerOrigin ||
+        emergencyOrigin
+      )
         ? null
-        : positiveInteger(context.job_request_id);
+        : positiveInteger(
+            context.job_request_id
+          );
 
     const sourceRelationshipId =
       businessCustomerOrigin
         ? null
-        : positiveInteger(context.relationship_id);
+        : positiveInteger(
+            context.relationship_id
+          );
+
+    const sourceEmergencyRequestId =
+      emergencyOrigin
+        ? positiveInteger(
+            context.job_emergency_request_id
+          )
+        : null;
 
     const sourceOwnerUserId =
       businessCustomerOrigin
@@ -3728,6 +4157,7 @@ async function createDraftQuote(input = {}) {
       !sourceOwnerUserId ||
       (
         !businessCustomerOrigin &&
+        !emergencyOrigin &&
         (!sourceJobRequestId || !sourceRelationshipId)
       ) ||
       (
@@ -3735,6 +4165,13 @@ async function createDraftQuote(input = {}) {
         (
           !sourceContractorProfileId ||
           !businessCustomerJobSourceId
+        )
+      ) ||
+      (
+        emergencyOrigin &&
+        (
+          !sourceEmergencyRequestId ||
+          !sourceRelationshipId
         )
       )
     ) {
@@ -3795,10 +4232,10 @@ async function createDraftQuote(input = {}) {
       )
       VALUES (
         $1, 'quote', $2, $3,
-        $4, NULL, $5,
-        $6, $7,
-        NULL, $8,
-        $9, 1
+        $4, $5, $6,
+        $7, $8,
+        NULL, $9,
+        $10, 1
       )
       RETURNING *
       `,
@@ -3807,6 +4244,7 @@ async function createDraftQuote(input = {}) {
         OWNING_ENGINE,
         sourceContextType,
         sourceJobRequestId,
+        sourceEmergencyRequestId,
         sourceRelationshipId,
         sourceOwnerUserId,
         validated.actorId,
@@ -3824,13 +4262,15 @@ async function createDraftQuote(input = {}) {
         id, job_id, source_context_type, job_source_type,
         job_request_id, relationship_id,
         business_customer_job_source_id,
+        emergency_request_id,
         issuer_participant_id, currency, status
       )
       VALUES (
         $1, $2, $3, $4,
         $5, $6,
         $7,
-        $8, $9, 'DRAFT'
+        $8,
+        $9, $10, 'DRAFT'
       )
       RETURNING *
       `,
@@ -3842,6 +4282,7 @@ async function createDraftQuote(input = {}) {
         sourceJobRequestId,
         sourceRelationshipId,
         businessCustomerJobSourceId,
+        sourceEmergencyRequestId,
         context.actor_participant_id,
         currency,
       ]
@@ -4257,11 +4698,19 @@ async function issueQuote(input = {}) {
       logger,
     });
     if (authorityError) return { abort: authorityError };
-    const evaluationError = await requireSavedEvaluation({
-      client,
-      context,
-      logger,
-    });
+    const evaluationError =
+      context?.job_source_type ===
+        "emergency_request"
+        ? await requireEmergencyJobEvaluation({
+            client,
+            context,
+            logger,
+          })
+        : await requireSavedEvaluation({
+            client,
+            context,
+            logger,
+          });
     if (evaluationError) return { abort: evaluationError };
     const authorityGrantId = await loadActiveQuoteGrant(
       client,
@@ -5746,6 +6195,7 @@ module.exports = {
     quoteIntegrityContract,
     requireQuoteAuthority,
     requireSavedEvaluation,
+    requireEmergencyJobEvaluation,
     isEmptyWorkingQuoteSeedRow,
     workingQuoteConversion,
   }),

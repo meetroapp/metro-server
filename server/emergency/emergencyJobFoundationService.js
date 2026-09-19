@@ -13,6 +13,22 @@ const ALLOWED_SOURCE_STATUSES =
     "completed",
   ]);
 
+const HOMEOWNER_JOB_CAPABILITIES =
+  Object.freeze([
+    "participant.read",
+  ]);
+
+const PROFESSIONAL_JOB_CAPABILITIES =
+  Object.freeze([
+    "participant.read",
+    "evaluation.perform",
+    "quote.create",
+    "quote.read",
+    "quote.scope.manage",
+    "quote.issue",
+    "quote.revise",
+  ]);
+
 function positiveInteger(value) {
   const parsed = Number(value);
 
@@ -385,70 +401,108 @@ async function ensureEmergencySelectionJob({
     ]
   );
 
+  const requiredCapabilities =
+    [
+      ...new Set([
+        ...HOMEOWNER_JOB_CAPABILITIES,
+        ...PROFESSIONAL_JOB_CAPABILITIES,
+      ]),
+    ];
+
   const capabilityResult =
     await client.query(
       `
       /* emergency_job_foundation:capability */
       SELECT capability
       FROM lifecycle_capabilities
-      WHERE capability =
-        'participant.read'
-      LIMIT 1
-      `
+      WHERE capability = ANY($1::text[])
+      ORDER BY capability ASC
+      `,
+      [
+        requiredCapabilities,
+      ]
+    );
+
+  const availableCapabilities =
+    new Set(
+      capabilityResult.rows.map(
+        (row) => row.capability
+      )
+    );
+
+  const missingCapabilities =
+    requiredCapabilities.filter(
+      (capability) =>
+        !availableCapabilities.has(
+          capability
+        )
     );
 
   if (
-    capabilityResult.rows[0]
-      ?.capability !==
-    "participant.read"
+    missingCapabilities.length > 0
   ) {
     throw new Error(
-      "Emergency Job participant authority is unavailable."
+      "Emergency Job lifecycle authority is unavailable."
     );
   }
 
-  for (const participantId of [
-    homeownerParticipantId,
-    professionalParticipantId,
+  for (const [
+    participantId,
+    capabilities,
+  ] of [
+    [
+      homeownerParticipantId,
+      HOMEOWNER_JOB_CAPABILITIES,
+    ],
+    [
+      professionalParticipantId,
+      PROFESSIONAL_JOB_CAPABILITIES,
+    ],
   ]) {
-    await client.query(
-      `
-      /* emergency_job_foundation:insert_grant */
-      INSERT INTO lifecycle_authority_grants
-      (
-        id,
-        grantee_participant_id,
-        grantor_participant_id,
-        job_id,
-        capability,
-        scope_type,
-        scope_job_id,
-        source_evidence_type,
-        source_evidence_reference,
-        idempotency_key
-      )
-      VALUES (
-        $1,
-        $2,
-        $3,
-        $4,
-        'participant.read',
-        'job',
-        $4,
-        'emergency_selection',
-        $5,
-        $6
-      )
-      `,
-      [
-        randomUUID(),
-        participantId,
-        homeownerParticipantId,
-        jobId,
-        evidenceReference,
-        `emergency:${emergencyRequestId}:grant:${participantId}:participant.read`,
-      ]
-    );
+    for (
+      const capability
+      of capabilities
+    ) {
+      await client.query(
+        `
+        /* emergency_job_foundation:insert_grant */
+        INSERT INTO lifecycle_authority_grants
+        (
+          id,
+          grantee_participant_id,
+          grantor_participant_id,
+          job_id,
+          capability,
+          scope_type,
+          scope_job_id,
+          source_evidence_type,
+          source_evidence_reference,
+          idempotency_key
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4,
+          $5,
+          'job',
+          $4,
+          'emergency_selection',
+          $6,
+          $7
+        )
+        `,
+        [
+          randomUUID(),
+          participantId,
+          homeownerParticipantId,
+          jobId,
+          capability,
+          evidenceReference,
+          `emergency:${emergencyRequestId}:grant:${participantId}:${capability}`,
+        ]
+      );
+    }
   }
 
   logger.info?.(
@@ -460,8 +514,10 @@ async function ensureEmergencySelectionJob({
       emergencyRequestId,
       relationshipId,
       participantCount: 2,
-      capability:
-        "participant.read",
+      homeownerCapabilityCount:
+        HOMEOWNER_JOB_CAPABILITIES.length,
+      professionalCapabilityCount:
+        PROFESSIONAL_JOB_CAPABILITIES.length,
     }
   );
 
