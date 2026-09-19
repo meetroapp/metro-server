@@ -5,6 +5,9 @@ const {
   entitledStatus,
 } = require("../subscriptions/subscriptionService");
 const {
+  definitionForComplimentaryGrantType,
+} = require("../subscriptions/complimentaryAccess");
+const {
   isNonBlockingAcceptance,
 } = require("../subscriptions/subscriptionEnforcementMode");
 
@@ -197,12 +200,26 @@ async function loadSeatAuthority(database, contractorProfileId, environment = pr
     `SELECT subscriptions.status AS subscription_status,
             subscriptions.seat_limit,
             subscriptions.access_ends_at,
+            complimentary.grant_type AS complimentary_grant_type,
+            complimentary.effective_plan AS complimentary_effective_plan,
+            complimentary.seat_limit AS complimentary_seat_limit,
             trials.starts_at AS trial_starts_at,
             trials.ends_at AS trial_ends_at,
             trials.converted_at AS trial_converted_at
        FROM contractor_profiles profiles
        LEFT JOIN professional_subscriptions subscriptions
          ON subscriptions.contractor_profile_id = profiles.id
+       LEFT JOIN LATERAL (
+         SELECT
+           grants.grant_type,
+           grants.effective_plan,
+           grants.seat_limit
+         FROM business_complimentary_access_grants grants
+         WHERE grants.contractor_profile_id = profiles.id
+           AND grants.revoked_at IS NULL
+         ORDER BY grants.granted_at DESC, grants.id DESC
+         LIMIT 1
+       ) complimentary ON TRUE
        LEFT JOIN meetro_business_trials trials
          ON trials.contractor_profile_id = profiles.id
       WHERE profiles.id = $1`,
@@ -210,9 +227,48 @@ async function loadSeatAuthority(database, contractorProfileId, environment = pr
   );
   const row = result.rows[0];
   if (!row) return failure(404, "TEAM_BUSINESS_NOT_FOUND", "Business Team not found.");
-  if (row.subscription_status && entitledStatus(row.subscription_status, row.access_ends_at)) {
-    return { ok: true, source: "PAID_SUBSCRIPTION", seatLimit: Number(row.seat_limit) };
+  if (
+    row.subscription_status &&
+    entitledStatus(
+      row.subscription_status,
+      row.access_ends_at
+    )
+  ) {
+    return {
+      ok: true,
+      source: "PAID_SUBSCRIPTION",
+      seatLimit: Number(row.seat_limit),
+    };
   }
+
+  if (row.complimentary_grant_type) {
+    const definition =
+      definitionForComplimentaryGrantType(
+        row.complimentary_grant_type
+      );
+
+    if (
+      !definition ||
+      definition.plan !==
+        row.complimentary_effective_plan ||
+      definition.seatLimit !==
+        Number(row.complimentary_seat_limit)
+    ) {
+      return failure(
+        503,
+        "TEAM_ENTITLEMENT_UNAVAILABLE",
+        "Business access authority is unavailable."
+      );
+    }
+
+    return {
+      ok: true,
+      source: "COMPLIMENTARY_ACCESS",
+      grantType: definition.code,
+      seatLimit: definition.seatLimit,
+    };
+  }
+
   const now = Date.now();
   const trialActive = row.trial_starts_at && row.trial_ends_at && !row.trial_converted_at &&
     new Date(row.trial_starts_at).getTime() <= now && new Date(row.trial_ends_at).getTime() > now;

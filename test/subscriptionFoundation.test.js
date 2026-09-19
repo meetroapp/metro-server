@@ -130,6 +130,7 @@ function professionalPool({
   principalPresent = true,
   subscription = null,
   trial = null,
+  complimentaryAccess = null,
 } = {}) {
   const calls = [];
   const pool = { query: async (sql) => {
@@ -139,6 +140,9 @@ function professionalPool({
     if (sql.includes("INSERT INTO professional_subscription_accounts")) return { rows: [{ contractor_profile_id: 12, app_account_token: "123e4567-e89b-12d3-a456-426614174000" }] };
     if (sql.includes("FROM professional_subscriptions")) return { rows: subscription ? [subscription] : [] };
     if (sql.includes("FROM meetro_business_trials")) return { rows: trial ? [trial] : [] };
+    if (sql.includes("FROM business_complimentary_access_grants")) {
+      return { rows: complimentaryAccess ? [complimentaryAccess] : [] };
+    }
     throw new Error("Unexpected SQL");
   } };
   return { calls, pool };
@@ -215,6 +219,7 @@ test("an active Meetro Business Trial grants professional access without a plan 
     if (sql.includes("INSERT INTO professional_subscription_accounts")) return { rows: [{ contractor_profile_id: 12, app_account_token: "123e4567-e89b-12d3-a456-426614174000" }] };
     if (sql.includes("FROM professional_subscriptions")) return { rows: [] };
     if (sql.includes("FROM meetro_business_trials")) return { rows: [{ starts_at: startsAt, ends_at: endsAt, converted_at: null }] };
+    if (sql.includes("FROM business_complimentary_access_grants")) return { rows: [] };
     throw new Error(`Unexpected SQL: ${sql}`);
   } };
   const result = await getSubscriptionState({

@@ -7,6 +7,9 @@ const {
   SUBSCRIPTION_ENFORCEMENT_MODES,
   resolveSubscriptionEnforcementMode,
 } = require("./subscriptionEnforcementMode");
+const {
+  loadActiveComplimentaryAccess,
+} = require("./complimentaryAccess");
 
 const MEETRO_BUSINESS_TRIAL_DAYS = 14;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -182,10 +185,62 @@ async function getSubscriptionState({ pool, authenticatedActor, environment = pr
     [context.id]
   );
   const trialRow = trialResult.rows[0] || null;
-  const businessTrial = serializeBusinessTrial(trialRow, { providerConverted: Boolean(subscription) });
-  const providerEntitled = Boolean(subscription && entitledStatus(subscription.status, subscription.access_ends_at));
-  const trialEntitled = !subscription && businessTrial?.entitled === true;
-  const businessAccessActive = acceptanceMode || trialEntitled || providerEntitled;
+  const businessTrial = serializeBusinessTrial(
+    trialRow,
+    { providerConverted: Boolean(subscription) }
+  );
+
+  const complimentaryAccess = await loadActiveComplimentaryAccess(
+    pool,
+    Number(context.contractor_profile_id)
+  );
+
+  const providerEntitled = Boolean(
+    subscription &&
+    entitledStatus(subscription.status, subscription.access_ends_at)
+  );
+
+  const complimentaryEntitled =
+    complimentaryAccess?.entitled === true;
+
+  const trialEntitled =
+    !subscription &&
+    businessTrial?.entitled === true;
+
+  const businessAccessActive =
+    acceptanceMode ||
+    providerEntitled ||
+    complimentaryEntitled ||
+    trialEntitled;
+
+  const effectiveBusinessAccess =
+    providerEntitled
+      ? {
+          source: "PAID_SUBSCRIPTION",
+          plan: subscription.effective_plan,
+          seatLimit: Number(subscription.seat_limit),
+        }
+      : complimentaryEntitled
+        ? {
+            source: "COMPLIMENTARY_ACCESS",
+            grantType: complimentaryAccess.grantType,
+            plan: complimentaryAccess.plan,
+            seatLimit: complimentaryAccess.seatLimit,
+          }
+        : trialEntitled
+          ? {
+              source: "MEETRO_BUSINESS_TRIAL",
+              plan: null,
+              seatLimit: 2,
+            }
+          : acceptanceMode
+            ? {
+                source: "NON_BLOCKING_ACCEPTANCE",
+                plan: null,
+                seatLimit: null,
+              }
+            : null;
+
   const purchaseAvailable = catalog.some((plan) =>
     plan.providers.APPLE_APP_STORE.configured || plan.providers.STRIPE.configured);
   return {
@@ -197,6 +252,9 @@ async function getSubscriptionState({ pool, authenticatedActor, environment = pr
     subscriptionEnforcementMode,
     entitled: businessAccessActive,
     paidEntitlementActive: providerEntitled,
+    complimentaryEntitlementActive: complimentaryEntitled,
+    complimentaryAccess,
+    effectiveBusinessAccess,
     purchaseAvailable,
     businessId: Number(context.contractor_profile_id),
     appAccountToken: account.app_account_token,

@@ -117,6 +117,7 @@ Current inventory:
 97. `202609160013_generalize_approved_work_root_job_origins.sql`
 98. `202609160014_generalize_external_visit_confirmation_sources.sql`
 99. `202609160015_generalize_invoice_job_origins.sql`
+100. `202609180001_create_business_complimentary_access_authority.sql`
 
 Migration 84 adds private numbered-draft archive. Application is environment-specific and is recorded by each database migration ledger.
 
