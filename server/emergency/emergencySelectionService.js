@@ -8,6 +8,10 @@ const {
   ensureConversationWithClient,
 } = require("../conversations/conversationService");
 
+const {
+  ensureEmergencySelectionJob,
+} = require("./emergencyJobFoundationService");
+
 function invalidEmergencyRequestId() {
   return {
     ok: false,
@@ -169,6 +173,12 @@ async function selectHomeownerEmergencyResponse({
         );
       }
 
+      await ensureEmergencySelectionJob({
+        client,
+        emergencyRequest,
+        relationship: selectedRelationship,
+      });
+
       await client.query("COMMIT");
 
       return {
@@ -319,6 +329,14 @@ async function selectHomeownerEmergencyResponse({
         "The selected Emergency conversation could not be created."
       );
     }
+
+    await ensureEmergencySelectionJob({
+      client,
+      emergencyRequest:
+        assignedResult.rows[0],
+      relationship:
+        selectedResult.rows[0],
+    });
 
     await client.query("COMMIT");
 
