@@ -17,7 +17,7 @@ const sql = readFileSync(
 test("MC-PL-002D retains the governed Approved Work Visit activation migration", () => {
   const migrations = getMigrationFiles();
   assert.equal((migrations[74]?.filename || migrations[74]), "202608310001_create_business_job_customer_message_authority.sql");
-  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202609190002_generalize_emergency_job_evaluation_quote.sql");
+  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202609190003_generalize_emergency_pre_work_authority.sql");
   assert.ok(migrations.some((migration) => migration.filename === migrationName));
   assert.doesNotMatch(sql, /^\s*(?:BEGIN|COMMIT|ROLLBACK)\s*;/im);
   assert.doesNotMatch(sql, /\b(?:DROP\s+(?:TABLE|COLUMN)|TRUNCATE|DELETE\s+FROM)\b/i);

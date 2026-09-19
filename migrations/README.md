@@ -120,6 +120,7 @@ Current inventory:
 100. `202609180001_create_business_complimentary_access_authority.sql`
 101. `202609190001_create_emergency_job_foundation.sql`
 102. `202609190002_generalize_emergency_job_evaluation_quote.sql`
+103. `202609190003_generalize_emergency_pre_work_authority.sql`
 
 Migration 84 adds private numbered-draft archive. Application is environment-specific and is recorded by each database migration ledger.
 
@@ -664,3 +665,10 @@ environment evidence, the exact migration filename, and two CLI confirmations;
 normal application startup and `npm test` never invoke it.
 
 Migration 85 adds explicit business-customer Invoice identity, external issuance and email evidence, exact approval references, and professional work capabilities for business Jobs. Marketplace foreign keys and all historical evidence remain intact. It is validated only in disposable local databases by this change.
+
+`202609190003_generalize_emergency_pre_work_authority.sql` adds the fifth
+pre-work origin: an exact Emergency Job with authenticated MEETRO_CUSTOMER
+approval. It generalizes the existing obligation shape and deposit/payment
+origin guards, preserves all foreign keys and four existing origins, and
+validates historical provenance without writing data. It creates no parallel
+tables and grants no Schedule, Invoice, or Completion authority.

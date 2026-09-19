@@ -353,7 +353,7 @@ test(
 
     assert.equal(
       client.state.grants.length,
-      8
+      11
     );
 
     const professionalCapabilities =
@@ -381,6 +381,10 @@ test(
         "quote.scope.manage",
       ].sort()
     );
+
+    assert.deepEqual(client.state.grants.filter(grant => grant.grantee === client.state.participants[0].id)
+      .map(grant => grant.capability).sort(),
+    ["participant.read", "quote.read_customer", "quote.approve", "quote.decline"].sort());
 
     const allSql =
       client.calls

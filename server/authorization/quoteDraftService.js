@@ -1,5 +1,7 @@
 "use strict";
 
+const { loadEmergencyCustomerQuoteContext } = require("../emergency/emergencyCommercialContext");
+
 const { createHash, randomUUID } = require("node:crypto");
 
 const {
@@ -1637,7 +1639,7 @@ async function loadCustomerQuoteContext(client, quoteId, actorUserId, { lock = f
     `,
     [quoteId, actorUserId, OWNING_ENGINE]
   );
-  return result.rows[0] || null;
+  return result.rows[0] || loadEmergencyCustomerQuoteContext(client, quoteId, actorUserId, { lock });
 }
 
 async function requireSavedEvaluation({ client, context, logger }) {
@@ -2144,7 +2146,10 @@ async function loadQualifyingCustomerQuoteDelivery(
        AND deliveries_relationship.homeowner_id = $4
        AND deliveries_relationship.professional_user_id = $5
        AND deliveries_relationship.status = 'active'
-       AND deliveries_relationship.emergency_request_id IS NULL
+       ${context.job_source_type === 'emergency_request'
+         ? `AND deliveries_relationship.post_id IS NULL
+            AND deliveries_relationship.emergency_request_id = $7`
+         : 'AND deliveries_relationship.emergency_request_id IS NULL'}
      INNER JOIN conversations delivery_conversations
        ON delivery_conversations.id = deliveries.conversation_id
        AND delivery_conversations.relationship_id = deliveries_relationship.id
@@ -2170,6 +2175,7 @@ async function loadQualifyingCustomerQuoteDelivery(
       Number(context.customer_user_id),
       Number(context.professional_user_id),
       requestFingerprint,
+      ...(context.job_source_type === "emergency_request" ? [context.emergency_request_id] : []),
     ]
   );
   return result.rows[0] || null;

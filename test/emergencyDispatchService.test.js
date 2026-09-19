@@ -103,6 +103,11 @@ function classifySql(sql) {
   if (/^UPDATE conversations SET/i.test(sql)) {
     return "activity";
   }
+  if (sql.includes("emergency_commercial:professional")) return "workAuthority";
+  if (sql.includes("FROM canonical_evaluations")) return "evaluation";
+  if (sql.includes("emergency_commercial:approved_quote")) return "emergencyApproval";
+  if (sql.includes("FROM jobs") && sql.includes("canonical_quote_approvals")) return "ordinaryApproval";
+  if (sql.includes("FROM canonical_pre_work_deposit_obligations")) return "deposit";
   return "unknown";
 }
 
@@ -199,6 +204,11 @@ function createDispatchPool({
   activityReturnsRow = true,
   failAt = null,
   invalidClient = false,
+  workAuthority = true,
+  completedEvaluation = true,
+  approvedQuote = true,
+  depositTerms = "Balance due on completion",
+  depositState = null,
 } = {}) {
   const calls = [];
   let connectCount = 0;
@@ -260,6 +270,23 @@ function createDispatchPool({
                 : [],
             };
           }
+
+          if (kind === "workAuthority") return { rows: workAuthority ? [{
+            job_id: "11111111-1111-4111-8111-111111111111",
+            job_source_type: "emergency_request", source_context_type: "emergency_request",
+            actor_user_id: AUTHENTICATED_USER_ID,
+            actor_participant_id: "22222222-2222-4222-8222-222222222222",
+            relationship_id: relationship.id, conversation_id: conversation.id,
+            emergency_request_id: request.id, emergency_status: request.status, arrived_at: request.arrived_at,
+          }] : [] };
+          if (kind === "evaluation") return { rows: completedEvaluation ? [{ id: "evaluation" }] : [] };
+          if (kind === "ordinaryApproval") return { rows: [] };
+          if (kind === "emergencyApproval") return { rows: approvedQuote ? [{
+            job_id: "11111111-1111-4111-8111-111111111111",
+            quote_approval_id: "33333333-3333-4333-8333-333333333333",
+            total_minor: 10000, customer_terms_snapshot: { paymentTerms: depositTerms },
+          }] : [] };
+          if (kind === "deposit") return { rows: depositState ? [{ latest_state: depositState }] : [] };
 
           if (kind === "update") {
             if (!updateReturnsRow) {
@@ -540,6 +567,7 @@ test("all valid dispatch transitions lock, authorize, update, and serialize cano
           "request",
           "relationship",
           "conversation",
+          ...(transition.name === "start" ? ["workAuthority", "evaluation", "emergencyApproval", "ordinaryApproval", "emergencyApproval"] : []),
           "update",
           "activity",
           "commit",
@@ -1249,4 +1277,33 @@ test("service source cannot create canonical records or consume caller SQL autho
     source,
     /input\.(?:targetStatus|sourceStatus|timestampColumn|relationshipId|conversationId|contractorProfileId|professionalUserId)/
   );
+});
+
+for (const [name, options, code] of [
+  ["missing exact Job", { workAuthority: false }, "EMERGENCY_WORK_AUTHORITY_REQUIRED"],
+  ["missing Evaluation", { completedEvaluation: false }, "EMERGENCY_EVALUATION_REQUIRED_BEFORE_WORK"],
+  ["missing or declined approval", { approvedQuote: false }, "EMERGENCY_APPROVED_QUOTE_REQUIRED_BEFORE_WORK"],
+  ["missing obligation", { depositTerms: "50% deposit" }, "EMERGENCY_DEPOSIT_REQUIRED_BEFORE_WORK"],
+  ["due deposit", { depositTerms: "50% deposit", depositState: "DUE" }, "EMERGENCY_DEPOSIT_REQUIRED_BEFORE_WORK"],
+  ["partial deposit", { depositTerms: "50% deposit", depositState: "PARTIALLY_SATISFIED" }, "EMERGENCY_DEPOSIT_REQUIRED_BEFORE_WORK"],
+  ["unverified terms", { depositTerms: "Deposit due on approval" }, "EMERGENCY_DEPOSIT_TERMS_UNVERIFIED"],
+]) {
+  test(`Start Work rejects ${name} before dispatch mutation`, async () => {
+    const pool = createDispatchPool({ request: emergencyRow("professional_arrived"), ...options });
+    const result = await startEmergencyWork(commandInput(pool));
+    assert.equal(result.status, 409);
+    assert.equal(result.code, code);
+    assert.equal(pool.calls.some(call => call.kind === "update"), false);
+    assert.equal(pool.calls.at(-1).kind, "rollback");
+    assert.doesNotMatch(result.message, /schedul|database|SQL/i);
+    assert.doesNotMatch(pool.calls.map(call => call.sql).join("\n"), /canonical_visits|schedule/i);
+  });
+}
+
+test("Start Work accepts a fully satisfied canonical deposit without Schedule", async () => {
+  const pool = createDispatchPool({ request: emergencyRow("professional_arrived"), depositTerms: "50% deposit", depositState: "SATISFIED" });
+  const result = await startEmergencyWork(commandInput(pool));
+  assert.equal(result.code, "EMERGENCY_WORK_STARTED");
+  assert.deepEqual(firstCall(pool, "update").params, [EMERGENCY_REQUEST_ID, "work_in_progress", "professional_arrived"]);
+  assert.doesNotMatch(pool.calls.map(call => call.sql).join("\n"), /canonical_visits|schedule/i);
 });

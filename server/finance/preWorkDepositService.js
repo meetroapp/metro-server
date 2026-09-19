@@ -1,5 +1,7 @@
 "use strict";
 
+const { loadEmergencyProfessionalContext, loadEmergencyQuoteApprovalSource } = require("../emergency/emergencyCommercialContext");
+
 const { createHash, randomUUID } = require("node:crypto");
 
 const {
@@ -213,6 +215,9 @@ async function loadProfessionalJobContext(
 
   const job = jobResult.rows[0] || null;
   if (!job) return null;
+  if (job.source_type === "emergency_request") {
+    return loadEmergencyProfessionalContext(client, { jobId, actorId, lock });
+  }
 
   if (
     [
@@ -805,7 +810,9 @@ async function loadApprovedQuoteApprovalSource(client, {
   );
 
   const source = result.rows[0] || null;
-  if (!source) return null;
+  if (!source) return loadEmergencyQuoteApprovalSource(client, {
+    jobId, approvalId, customerDecisionId, lock,
+  });
 
   const commonInvalid =
     source.decision !== "APPROVED" ||

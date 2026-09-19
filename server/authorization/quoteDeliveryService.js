@@ -1,5 +1,7 @@
 "use strict";
 
+const { loadEmergencyProfessionalContext, ensureEmergencyCustomerQuoteGrants } = require("../emergency/emergencyCommercialContext");
+
 const { isDeepStrictEqual } = require("node:util");
 
 const {
@@ -104,6 +106,14 @@ async function runTransaction(pool, mode, action) {
 }
 
 async function loadDeliveryContext(client, context) {
+  if (context.job_source_type === "emergency_request") {
+    const emergency = await loadEmergencyProfessionalContext(client, {
+      jobId: context.job_id, actorId: context.actor_user_id,
+    });
+    return emergency && Number(emergency.relationship_id) === Number(context.relationship_id)
+      && Number(emergency.emergency_request_id) === Number(context.emergency_request_id)
+      ? emergency : null;
+  }
   const result = await client.query(
     `
     SELECT
@@ -471,6 +481,10 @@ async function sendQuoteInMeetro(input = {}) {
     if (loaded.error) return { abort: loaded.error };
     if (!loaded.canSendInMeetro) {
       return { abort: failure(409, "QUOTE_DELIVERY_CONVERSATION_UNAVAILABLE", "The Quote cannot be sent in Meetro.") };
+    }
+
+    if (loaded.context.job_source_type === "emergency_request") {
+      await ensureEmergencyCustomerQuoteGrants(client, loaded.deliveryContext);
     }
 
     const existing = await findExistingDelivery(

@@ -1,5 +1,7 @@
 "use strict";
 
+const { requireEmergencyStartWork } = require("./emergencyStartWorkGate");
+
 const {
   parsePositiveInteger,
 } = require("./emergencyRequestService");
@@ -383,6 +385,13 @@ async function applyEmergencyTransition(input = {}, definition) {
         client,
         invalidTransition()
       );
+    }
+
+    if (definition === TRANSITIONS.start) {
+      const gateError = await requireEmergencyStartWork({
+        client, emergencyRequest, relationship, conversation, actorId: authenticatedUserId,
+      });
+      if (gateError) return await failTransaction(client, gateError);
     }
 
     const updateResult = await client.query(

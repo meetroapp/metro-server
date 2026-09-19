@@ -90,7 +90,7 @@ test(
       "quote.decline",
     ]) {
       assert.doesNotMatch(
-        foundation,
+        foundation.slice(foundation.indexOf("const PROFESSIONAL_JOB_CAPABILITIES"), foundation.indexOf("function positiveInteger")),
         new RegExp(
           forbidden,
           "i"
@@ -371,7 +371,7 @@ test(
 );
 
 test(
-  "Task 3B does not change Emergency Start Work service",
+  "Emergency Start Work entry point remains available after the Task 3 bridge",
   () => {
     assert.doesNotMatch(
       evaluation,

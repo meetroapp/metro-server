@@ -1,5 +1,7 @@
 "use strict";
 
+const { CUSTOMER_BOOTSTRAP_CAPABILITIES } = require("../workflow/jobFoundationService");
+
 const {
   randomUUID,
 } = require("node:crypto");
@@ -16,6 +18,7 @@ const ALLOWED_SOURCE_STATUSES =
 const HOMEOWNER_JOB_CAPABILITIES =
   Object.freeze([
     "participant.read",
+    ...CUSTOMER_BOOTSTRAP_CAPABILITIES,
   ]);
 
 const PROFESSIONAL_JOB_CAPABILITIES =
