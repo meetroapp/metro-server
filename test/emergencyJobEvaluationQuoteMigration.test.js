@@ -159,3 +159,28 @@ test(
     }
   }
 );
+
+test(
+  "Emergency Job source composite foreign keys use a non-partial referenced unique key",
+  () => {
+    const match =
+      migration.match(
+        /CREATE UNIQUE INDEX IF NOT EXISTS\s+jobs_emergency_request_source_identity_fk_uidx\s+ON jobs\s*\(\s*id,\s*source_type,\s*source_emergency_request_id\s*\)\s*;/i
+      );
+
+    assert.ok(
+      match,
+      "Emergency Job source needs a non-partial composite unique key for PostgreSQL foreign keys."
+    );
+
+    assert.doesNotMatch(
+      match[0],
+      /\bWHERE\b/i
+    );
+
+    assert.match(
+      migration,
+      /FOREIGN KEY\s*\(\s*job_id,\s*job_source_type,\s*emergency_request_id\s*\)[\s\S]*REFERENCES jobs\s*\(\s*id,\s*source_type,\s*source_emergency_request_id\s*\)/i
+    );
+  }
+);

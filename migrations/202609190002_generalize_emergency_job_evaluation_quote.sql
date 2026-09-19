@@ -37,6 +37,22 @@ ON commercial_authority_aggregates(
 );
 
 
+-- PostgreSQL foreign keys cannot target the partial Emergency-only unique
+-- index created by migration 101. Provide the exact non-partial composite
+-- uniqueness required by the canonical Evaluation and Quote source FKs.
+--
+-- `id` is already the Job primary key, so this does not broaden Job authority
+-- or create new business rows. It only exposes the immutable source tuple as
+-- a valid referenced key.
+CREATE UNIQUE INDEX IF NOT EXISTS
+  jobs_emergency_request_source_identity_fk_uidx
+ON jobs(
+  id,
+  source_type,
+  source_emergency_request_id
+);
+
+
 -- ============================================================================
 -- CANONICAL EVALUATION JOB SUBJECT — EMERGENCY SOURCE
 -- ============================================================================

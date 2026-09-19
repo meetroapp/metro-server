@@ -47,7 +47,7 @@ const expectedInventory = [
   { filename: "202609160015_generalize_invoice_job_origins.sql", checksum: "f140bf3f70c2d44c1676aa11d9bca33e6e3976df9f24f07c47c317b0ac13078e" },
   { filename: "202609180001_create_business_complimentary_access_authority.sql", checksum: "95eb5dc794b10e224e1a6b19c6f398860c84f100dffbdebb975aa4d59da0b4fb" },
   { filename: "202609190001_create_emergency_job_foundation.sql", checksum: "4f68f95499f006761445db7001b646deb9379f580cc6ff5bbc9b41b17e416f55" },
-  { filename: "202609190002_generalize_emergency_job_evaluation_quote.sql", checksum: "45e1f69cc27f692690b7245c8a2f7a13a0d3ef2ff874c0ba33cf8ea8f676cf7d" },
+  { filename: "202609190002_generalize_emergency_job_evaluation_quote.sql", checksum: "0644836aca0bc7ca34856b4cd77f8d65de4b3fd5712fa6044902aa74489a6d84" },
 ].sort((left, right) => left.filename.localeCompare(right.filename));
 
 function checksum(filename) {
