@@ -1,5 +1,7 @@
 "use strict";
 
+const { completeEmergencyJobWithClient } = require("../workflow/jobCompletionService");
+
 const { requireEmergencyStartWork } = require("./emergencyStartWorkGate");
 
 const {
@@ -32,7 +34,7 @@ function createTransitionDefinition({
         status = $2,
         ${timestampColumn} = COALESCE(
           ${timestampColumn},
-          CURRENT_TIMESTAMP
+          ${timestampColumn === "completed_at" ? "$4::timestamptz" : "CURRENT_TIMESTAMP"}
         ),
         updated_at = CURRENT_TIMESTAMP
       WHERE id = $1
@@ -361,6 +363,15 @@ async function applyEmergencyTransition(input = {}, definition) {
       );
     }
 
+    let canonicalCompletion = null;
+    if (definition === TRANSITIONS.complete
+        && [definition.sourceStatus, definition.targetStatus].includes(emergencyRequest.status)) {
+      canonicalCompletion = await completeEmergencyJobWithClient({
+        client, emergencyRequest, relationship, conversation, actorId: authenticatedUserId,
+      });
+      if (canonicalCompletion.error) return await failTransaction(client, { success: false, ...canonicalCompletion.error });
+    }
+
     if (
       emergencyRequest.status ===
       definition.targetStatus
@@ -400,6 +411,7 @@ async function applyEmergencyTransition(input = {}, definition) {
         emergencyRequestId,
         definition.targetStatus,
         definition.sourceStatus,
+        ...(definition === TRANSITIONS.complete ? [canonicalCompletion.completedAt] : []),
       ]
     );
 

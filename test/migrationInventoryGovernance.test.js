@@ -49,6 +49,7 @@ const expectedInventory = [
   { filename: "202609190001_create_emergency_job_foundation.sql", checksum: "4f68f95499f006761445db7001b646deb9379f580cc6ff5bbc9b41b17e416f55" },
   { filename: "202609190002_generalize_emergency_job_evaluation_quote.sql", checksum: "0644836aca0bc7ca34856b4cd77f8d65de4b3fd5712fa6044902aa74489a6d84" },
   { filename: "202609190003_generalize_emergency_pre_work_authority.sql", checksum: "2706a13c9fe418383b67d7e1d56cea4ab181b81c11d2e1feff9003bc2f1fbf8a" },
+  { filename: "202609190004_generalize_emergency_completion_invoice_history.sql", checksum: "d5e4df95299ae55f2b6bd46c47a91e9c1f828f11404d03d932a12f021cda29a3" },
 ].sort((left, right) => left.filename.localeCompare(right.filename));
 
 function checksum(filename) {
@@ -57,13 +58,13 @@ function checksum(filename) {
     .digest("hex");
 }
 
-test("the governed repository migration inventory is the exact 103-file generation with Emergency Job and commercial bridge authority", () => {
+test("the governed repository migration inventory is the exact 104-file generation with Emergency completion and Invoice authority", () => {
   const actual = getMigrationFiles().map(({ filename }) => filename);
   const expected = expectedInventory.map(({ filename }) => filename);
 
-  assert.equal(expectedInventory.length, 103);
+  assert.equal(expectedInventory.length, 104);
   assert.deepEqual(actual, expected);
-  assert.equal(actual.at(-1), "202609190003_generalize_emergency_pre_work_authority.sql");
+  assert.equal(actual.at(-1), "202609190004_generalize_emergency_completion_invoice_history.sql");
   assert.equal(new Set(actual).size, actual.length);
   assert.ok(actual.every((filename) => filenamePattern.test(filename)));
 });

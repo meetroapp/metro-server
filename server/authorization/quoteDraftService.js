@@ -1903,6 +1903,7 @@ async function requireEmergencyJobEvaluation({
   client,
   context,
   logger,
+  returnEvidence = false,
 }) {
   const jobId =
     normalizedUuid(
@@ -1974,6 +1975,7 @@ async function requireEmergencyJobEvaluation({
       SELECT
         evaluations.id,
         evaluations.status,
+        evaluations.completed_at,
         aggregates.current_version
           AS evaluation_version
 
@@ -2106,7 +2108,7 @@ async function requireEmergencyJobEvaluation({
     );
 
   if (result.rows[0]) {
-    return null;
+    return returnEvidence ? result.rows[0] : null;
   }
 
   logger.warn(

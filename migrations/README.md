@@ -121,6 +121,7 @@ Current inventory:
 101. `202609190001_create_emergency_job_foundation.sql`
 102. `202609190002_generalize_emergency_job_evaluation_quote.sql`
 103. `202609190003_generalize_emergency_pre_work_authority.sql`
+104. `202609190004_generalize_emergency_completion_invoice_history.sql`
 
 Migration 84 adds private numbered-draft archive. Application is environment-specific and is recorded by each database migration ledger.
 
@@ -672,3 +673,12 @@ approval. It generalizes the existing obligation shape and deposit/payment
 origin guards, preserves all foreign keys and four existing origins, and
 validates historical provenance without writing data. It creates no parallel
 tables and grants no Schedule, Invoice, or Completion authority.
+
+### Emergency completion, Invoice, and history (104)
+
+`202609190004_generalize_emergency_completion_invoice_history.sql` permits zero
+Workstreams only for exact Emergency canonical completion provenance. The four
+prior origins still require positive Workstream counts. It validates historical
+completion records without writing business rows and adds Emergency Meetro
+Invoice/approved-scope authority. External issuance stays limited to the two
+business-owned origins. No new tables or lifecycle grants are introduced.

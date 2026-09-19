@@ -79,6 +79,7 @@ async function loadEmergencyProfessionalContext(client, { jobId = null, emergenc
       jobs.source_type AS job_source_type, 'emergency_request' AS source_context_type,
       emergency.id AS emergency_request_id, emergency.id AS job_emergency_request_id,
       emergency.status AS emergency_status, emergency.arrived_at,
+      emergency.work_started_at, emergency.completed_at AS emergency_completed_at,
       emergency.title AS job_title, emergency.category AS job_service,
       relationships.id AS relationship_id, relationships.status AS relationship_status,
       relationships.homeowner_id, relationships.homeowner_id AS homeowner_user_id,
@@ -177,6 +178,65 @@ async function loadEmergencyQuoteApprovalSource(client, { jobId, approvalId = nu
   return result.rows[0] || null;
 }
 
+const EMERGENCY_LIFECYCLE_CONTEXT_SQL = `
+  SELECT jobs.id AS job_id, jobs.source_type, jobs.job_request_id,
+    jobs.source_type AS job_source_type, 'emergency_request' AS source_context_type,
+    emergency.id AS emergency_request_id, emergency.id AS job_emergency_request_id,
+    emergency.status AS emergency_status, emergency.arrived_at, emergency.work_started_at,
+    emergency.completed_at AS emergency_completed_at,
+    relationships.id AS relationship_id, relationships.status AS relationship_status,
+    relationships.homeowner_id, relationships.professional_user_id,
+    professional.id AS professional_participant_id, professional.id AS actor_participant_id,
+    professional.user_id AS actor_user_id, customer.id AS customer_participant_id,
+    conversations.id AS conversation_id, conversations.status AS conversation_status,
+    emergency.title AS job_title, emergency.category AS job_service,
+    homeowner.username AS customer_name,
+    COALESCE(NULLIF(profiles.business_name, ''), owner.username) AS business_name,
+    completions.id AS completion_id, completions.version AS completion_version,
+    completions.version AS job_version, completions.completed_at,
+    ${activeRole('professional', 'PRIMARY_PROFESSIONAL')} AS primary_role_active,
+    ${activeRole('customer', 'CUSTOMER_REPRESENTATIVE')} AS customer_role_active
+  ${EMERGENCY_JOINS}
+  JOIN users homeowner ON homeowner.id = customer.user_id
+  JOIN users owner ON owner.id = professional.user_id
+  LEFT JOIN canonical_job_completion_records completions ON completions.job_id = jobs.id
+  WHERE ${EMERGENCY_SHAPE}`;
+
+async function loadEmergencyLifecycleContext(client, jobId, actorId, { lock = false, audience = "professional" } = {}) {
+  const actor = audience === "customer" ? "customer" : "professional";
+  const result = await client.query(`${EMERGENCY_LIFECYCLE_CONTEXT_SQL}
+    AND jobs.id = $1 AND ${actor}.user_id = $2
+    AND ${activeRole(actor, audience === "customer" ? 'CUSTOMER_REPRESENTATIVE' : 'PRIMARY_PROFESSIONAL')}
+    LIMIT 1 ${lock ? 'FOR UPDATE OF jobs, relationships' : ''}`, [jobId, actorId]);
+  return result.rows[0] || null;
+}
+
+// Keep the existing effective approved scope rule (approved revisions replace
+// their parents). Every remaining issued agreement must have exact approval.
+async function loadEmergencyEffectiveApprovedQuotes(client, jobId, { lock = false } = {}) {
+  const candidates = await client.query(`/* emergency_commercial:effective_quotes */
+    SELECT quotes.id AS quote_id, approvals.id AS approval_id
+    ${EMERGENCY_JOINS} ${QUOTE_JOINS}
+    LEFT JOIN canonical_quote_approvals approvals ON approvals.quote_id = quotes.id AND approvals.job_id = jobs.id
+    WHERE ${EMERGENCY_SHAPE} AND jobs.id = $1 AND quotes.status = 'ISSUED'
+      AND NOT EXISTS (
+        SELECT 1 FROM canonical_quotes revision
+        JOIN canonical_quote_approvals approved_revision
+          ON approved_revision.quote_id = revision.id AND approved_revision.job_id = jobs.id
+         AND approved_revision.approval_source = 'MEETRO_CUSTOMER' AND approved_revision.decision = 'APPROVED'
+        WHERE revision.parent_quote_id = quotes.id AND revision.lineage_type = 'REVISED_QUOTE'
+      )
+    ORDER BY quotes.issued_at, quotes.id`, [jobId]);
+  const sources = [];
+  for (const row of candidates.rows) {
+    if (!row.approval_id) return [];
+    const source = await loadEmergencyQuoteApprovalSource(client, { jobId, approvalId: row.approval_id, lock });
+    if (!source) return [];
+    sources.push(source);
+  }
+  return sources;
+}
+
 // Bootstrap timing matches ordinary Jobs. Delivery repairs pre-Task-4 Jobs using
 // the same selection evidence and idempotency key; revoked grants stay revoked.
 async function ensureEmergencyCustomerQuoteGrants(client, context) {
@@ -201,6 +261,9 @@ async function ensureEmergencyCustomerQuoteGrants(client, context) {
 }
 
 module.exports = {
+  EMERGENCY_LIFECYCLE_CONTEXT_SQL,
+  loadEmergencyLifecycleContext,
+  loadEmergencyEffectiveApprovedQuotes,
   loadEmergencyProfessionalContext,
   loadEmergencyCustomerQuoteContext,
   loadEmergencyQuoteApprovalSource,

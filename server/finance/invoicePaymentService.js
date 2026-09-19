@@ -1,4 +1,5 @@
 "use strict";
+const { EMERGENCY_LIFECYCLE_CONTEXT_SQL, loadEmergencyLifecycleContext, loadEmergencyEffectiveApprovedQuotes } = require("../emergency/emergencyCommercialContext");
 const { BUSINESS_JOB_CONTEXT_SQL, loadBusinessJobContext, authorityFields } = require("../relationships/businessJobAuthority");
 
 const {
@@ -540,12 +541,8 @@ async function loadProfessionalJobContext(client, jobId, actorId, { lock = false
     return quickQuote;
   }
 
-  return loadBusinessCustomerInvoiceContext(
-    client,
-    jobId,
-    actorId,
-    { lock }
-  );
+  return await loadBusinessCustomerInvoiceContext(client, jobId, actorId, { lock })
+    || loadEmergencyLifecycleContext(client, jobId, actorId, { lock });
 }
 
 function professionalAuthorized(context, actorId) {
@@ -633,7 +630,27 @@ async function loadEffectiveApprovedBillingLines(client, jobId) {
       snapshots.sequence ASC, snapshots.scope_item_id ASC`,
     [jobId]
   );
-  return result.rows;
+  if (result.rows.length) return result.rows;
+  const sources = await loadEmergencyEffectiveApprovedQuotes(client, jobId);
+  if (!sources.length) return [];
+  const emergency = await client.query(`/* emergency_invoice:approved_scope */
+    SELECT quotes.id AS quote_id, approvals.id AS quote_approval_id,
+      approvals.issued_quote_version AS quote_version, versions.currency, versions.customer_terms_snapshot,
+      CASE WHEN quotes.parent_quote_id IS NULL THEN 'ORIGINAL'
+        WHEN quotes.lineage_type = 'REVISED_QUOTE' THEN 'REVISED' ELSE 'ADDITIONAL' END AS lineage_label,
+      snapshots.scope_item_id, snapshots.sequence, snapshots.description, snapshots.quantity,
+      snapshots.unit_amount_minor, snapshots.line_total_minor
+    FROM canonical_quote_approvals approvals
+    JOIN canonical_quotes quotes ON quotes.id = approvals.quote_id AND quotes.job_id = approvals.job_id
+    JOIN canonical_quote_versions versions ON versions.quote_id = quotes.id AND versions.job_id = approvals.job_id
+      AND versions.version = approvals.issued_quote_version AND versions.integrity_hash = approvals.issued_integrity_hash
+    JOIN canonical_quote_scope_item_snapshots snapshots ON snapshots.quote_id = quotes.id AND snapshots.job_id = approvals.job_id
+      AND snapshots.quote_version = approvals.issued_quote_version AND snapshots.included_in_total = TRUE
+    WHERE approvals.job_id = $1 AND approvals.id = ANY($2::uuid[])
+      AND approvals.approval_source = 'MEETRO_CUSTOMER'
+    ORDER BY quotes.created_at, quotes.id, snapshots.sequence, snapshots.scope_item_id`,
+  [jobId, sources.map(source => source.quote_approval_id)]);
+  return emergency.rows;
 }
 
 function effectiveApprovedPaymentTerms(lines = []) {
@@ -748,6 +765,8 @@ async function loadInvoiceContext(client, invoiceId, actorId, { lock = false } =
   if (result.rows[0]) return result.rows[0];
   const identity = await client.query(`SELECT * FROM canonical_invoices WHERE id=$1 ${lock?'FOR UPDATE':''}`, [invoiceId]);
   if (!identity.rows[0]) return null;
+  const emergency = await loadEmergencyInvoiceContext(client, { invoiceId, actorId, lock });
+  if (emergency) return emergency;
   const quickQuote =
     await loadBusinessJobContext(
       client,
@@ -778,6 +797,29 @@ async function loadInvoiceContext(client, invoiceId, actorId, { lock = false } =
   if (!current.rows[0]) return null;
   return {...job, ...identity.rows[0], ...current.rows[0], invoice_id:invoiceId,
     customer_party_contractor_profile_id:job.contractor_profile_id};
+}
+
+async function loadEmergencyInvoiceContext(client, { invoiceId = null, jobId = null, actorId, lock = false, audience = "professional" }) {
+  const identity = await client.query(`/* emergency_invoice:identity */
+    SELECT invoices.* FROM canonical_invoices invoices
+    JOIN jobs ON jobs.id = invoices.job_id AND jobs.source_type = 'emergency_request'
+      AND invoices.job_request_id IS NULL AND invoices.relationship_id = jobs.source_request_relationship_id
+    WHERE ($1::uuid IS NULL OR invoices.id = $1) AND ($2::uuid IS NULL OR jobs.id = $2)
+    LIMIT 1 ${lock ? 'FOR UPDATE OF invoices' : ''}`, [invoiceId, jobId]);
+  const invoice = identity.rows[0];
+  if (!invoice) return null;
+  const context = await loadEmergencyLifecycleContext(client, invoice.job_id, actorId, { lock, audience });
+  if (!context || invoice.issuer_participant_id !== context.professional_participant_id
+      || !context.completion_id || context.emergency_status !== "completed") return null;
+  const result = await client.query(`SELECT versions.*, issuances.issued_at
+    FROM canonical_invoice_versions versions
+    LEFT JOIN canonical_invoice_issuances issuances ON issuances.invoice_id = versions.invoice_id
+      AND issuances.job_id = versions.job_id AND issuances.delivery_channel = 'MEETRO'
+    WHERE versions.invoice_id = $1 AND versions.job_id = $2
+    ORDER BY versions.version DESC LIMIT 1`, [invoice.id, invoice.job_id]);
+  const version = result.rows[0];
+  if (!version || (audience === "customer" && (version.status === "DRAFT" || !version.issued_at))) return null;
+  return { ...context, ...invoice, ...version, invoice_id: invoice.id, version_created_at: version.created_at };
 }
 
 async function loadCustomerInvoiceContext(client, { invoiceId = null, jobId = null, actorId }) {
@@ -818,7 +860,7 @@ async function loadCustomerInvoiceContext(client, { invoiceId = null, jobId = nu
     LIMIT 1`,
     [invoiceId, jobId, actorId]
   );
-  return result.rows[0] || null;
+  return result.rows[0] || loadEmergencyInvoiceContext(client, { invoiceId, jobId, actorId, audience: "customer" });
 }
 
 async function loadInvoiceLines(client, invoiceId) {
@@ -1821,10 +1863,14 @@ async function getProfessionalInvoiceWorkspace(input = {}) {
         ]
       );
 
+    const emergencyJobs = await client.query(`${EMERGENCY_LIFECYCLE_CONTEXT_SQL}
+      AND professional.user_id = $1 AND emergency.status = 'completed'
+      AND completions.id IS NOT NULL`, [validated.actorId]);
     const businessJobs = {
       rows: [
         ...quickQuoteBusinessJobs.rows,
         ...businessCustomerJobs.rows,
+        ...emergencyJobs.rows.filter(row => row.primary_role_active === true),
       ],
     };
 
@@ -1899,7 +1945,7 @@ async function getProfessionalInvoiceWorkspace(input = {}) {
       const existing = await client.query('SELECT id FROM canonical_invoices WHERE job_id=$1',[job.job_id]);
       if (!existing.rows[0]) continue;
       const context = await loadInvoiceContext(client,existing.rows[0].id,validated.actorId);
-      if (context) invoices.rows.push({...context,request_id:null,service_title:context.job_title,updated_at:context.created_at});
+      if (context) invoices.rows.push({...context,request_id:null,service_title:context.job_title,updated_at:context.version_created_at || context.created_at});
     }
     invoices.rows.sort((a,b)=>new Date(b.updated_at)-new Date(a.updated_at) || b.invoice_id.localeCompare(a.invoice_id));
     const rows = invoices.rows.slice(0,limit).map((row) => ({

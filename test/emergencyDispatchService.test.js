@@ -533,7 +533,7 @@ test("invalid authenticated identity fails before pool acquisition", async () =>
 });
 
 test("all valid dispatch transitions lock, authorize, update, and serialize canonically", async (t) => {
-  for (const transition of TRANSITION_CASES) {
+  for (const transition of TRANSITION_CASES.filter(item => item.name !== "complete")) {
     await t.test(transition.name, async () => {
       const sourceRequest = emergencyRow(
         transition.sourceStatus
@@ -760,7 +760,7 @@ test("all valid dispatch transitions lock, authorize, update, and serialize cano
 });
 
 test("later transitions preserve every earlier lifecycle timestamp", async () => {
-  for (const transition of TRANSITION_CASES) {
+  for (const transition of TRANSITION_CASES.filter(item => item.name !== "complete")) {
     const sourceRequest = emergencyRow(
       transition.sourceStatus
     );
@@ -803,7 +803,7 @@ test("later transitions preserve every earlier lifecycle timestamp", async () =>
 });
 
 test("exact retries remain write-free after canonical validation", async (t) => {
-  for (const transition of TRANSITION_CASES) {
+  for (const transition of TRANSITION_CASES.filter(item => item.name !== "complete")) {
     await t.test(transition.name, async () => {
       const request = emergencyRow(
         transition.targetStatus
@@ -1306,4 +1306,18 @@ test("Start Work accepts a fully satisfied canonical deposit without Schedule", 
   assert.equal(result.code, "EMERGENCY_WORK_STARTED");
   assert.deepEqual(firstCall(pool, "update").params, [EMERGENCY_REQUEST_ID, "work_in_progress", "professional_arrived"]);
   assert.doesNotMatch(pool.calls.map(call => call.sql).join("\n"), /canonical_visits|schedule/i);
+});
+
+// Completion now requires canonical evidence; its success, timestamps, atomicity,
+// and replay are certified by emergencyTask5Postgres.test.js against real SQL.
+test("complete and complete replay fail closed without selected canonical authority", async () => {
+  for (const status of ["work_in_progress", "completed"]) {
+    const pool = createDispatchPool({ request: emergencyRow(status), workAuthority: false });
+    const result = await completeEmergencyWork(commandInput(pool));
+    assert.equal(result.success, false);
+    assert.equal(result.code, "EMERGENCY_COMPLETION_AUTHORITY_REQUIRED");
+    assert.equal(callsOf(pool, "update").length, 0);
+    assert.equal(callsOf(pool, "commit").length, 0);
+    assert.equal(callsOf(pool, "rollback").length, 1);
+  }
 });

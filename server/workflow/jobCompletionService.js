@@ -1,4 +1,6 @@
 "use strict";
+const { EMERGENCY_LIFECYCLE_CONTEXT_SQL, loadEmergencyLifecycleContext, loadEmergencyProfessionalContext, loadEmergencyEffectiveApprovedQuotes } = require("../emergency/emergencyCommercialContext");
+const { quoteDraftServiceInternals } = require("../authorization/quoteDraftService");
 const { BUSINESS_JOB_CONTEXT_SQL, loadBusinessJobContext, authorityFields } = require("../relationships/businessJobAuthority");
 
 const { createHash, randomUUID } = require("node:crypto");
@@ -461,12 +463,8 @@ async function loadProfessionalContext(client, jobId, actorUserId, { lock = fals
     return quickQuote;
   }
 
-  return loadBusinessCustomerCompletionContext(
-    client,
-    jobId,
-    actorUserId,
-    { lock }
-  );
+  return await loadBusinessCustomerCompletionContext(client, jobId, actorUserId, { lock })
+    || loadEmergencyLifecycleContext(client, jobId, actorUserId, { lock });
 }
 
 function professionalUnavailable(context, actorUserId) {
@@ -479,6 +477,7 @@ function professionalUnavailable(context, actorUserId) {
 }
 
 async function loadCompletionReadiness(client, jobId, context) {
+  if (context?.source_type === "emergency_request") return loadEmergencyCompletionReadiness(client, context);
   const result = await client.query(
     `WITH approved_workstreams AS (
       SELECT DISTINCT snapshots.source_workstream_id AS workstream_id
@@ -640,7 +639,8 @@ function readinessProjection(context, row) {
   };
   const reasons = [];
   if (row.incomplete_approved_work) reasons.push("INCOMPLETE_APPROVED_WORK");
-  if (workstreamCount === 0) reasons.push("NO_APPROVED_WORK");
+  if (context.source_type === "emergency_request") reasons.push(...(row.emergency_reasons || []));
+  else if (workstreamCount === 0) reasons.push("NO_APPROVED_WORK");
   if (outstanding.workstreams > 0) reasons.push("INCOMPLETE_WORKSTREAM");
   if (outstanding.workItems > 0) reasons.push("INCOMPLETE_WORK_ITEM");
   if (outstanding.obligations > 0) reasons.push("OPEN_OBLIGATION");
@@ -744,43 +744,84 @@ async function reserveCompletionCommand(client, validated, participantId) {
   return { replay: { ...row.result_reference, replayed: true } };
 }
 
-async function completeJob(input = {}) {
-  const validated = validateProfessionalRead(input, { command: true });
-  if (validated.error) return validated.error;
-  return runCommand(input.pool, async (client) => {
-    const context = await loadProfessionalContext(
-      client, validated.jobId, validated.actorId, { lock: true }
-    );
-    if (professionalUnavailable(context, validated.actorId) || context.relationship_status !== "active") {
-      return { abort: failure(404, "JOB_COMPLETION_UNAVAILABLE", "Completion Review is unavailable.") };
-    }
-    const reserved = await reserveCompletionCommand(
-      client, validated, context.professional_participant_id
-    );
-    if (reserved.error) return { abort: reserved.error };
-    if (reserved.replay) return { result: reserved.replay };
+async function loadEmergencyCompletionReadiness(client, context, { reconcile = false, lock = false } = {}) {
+  const reasons = [];
+  if (!(context.emergency_status === "work_in_progress" || (reconcile && context.emergency_status === "completed"))
+      || !iso(context.work_started_at) || !iso(context.arrived_at)) {
+    reasons.push("EMERGENCY_WORK_START_REQUIRED");
+  }
+  const evaluated = await quoteDraftServiceInternals.requireEmergencyJobEvaluation({
+    client, context, logger: { warn() {} }, returnEvidence: true,
+  });
+  const evaluation = evaluated?.id ? evaluated : null;
+  if (!evaluation) reasons.push("EMERGENCY_COMPLETED_EVALUATION_REQUIRED");
+  const approvals = await loadEmergencyEffectiveApprovedQuotes(client, context.job_id, { lock });
+  if (!approvals.length) reasons.push("EMERGENCY_APPROVED_QUOTE_REQUIRED");
+  const quote = approvals.at(-1);
+  return {
+    workstream_count: 0, completed_workstream_count: 0,
+    work_item_count: 0, completed_work_item_count: 0, incomplete_work_item_count: 0,
+    open_obligation_count: 0, unresolved_finding_count: 0, customer_update_count: 0,
+    emergency_reasons: reasons,
+    evidence_snapshot: {
+      sourceType: "emergency_request", emergencyRequestId: Number(context.emergency_request_id),
+      relationshipId: Number(context.relationship_id), jobId: context.job_id,
+      dispatchState: context.emergency_status, workStartedAt: iso(context.work_started_at),
+      arrivedAt: iso(context.arrived_at), professionalParticipantId: context.professional_participant_id,
+      homeownerParticipantId: context.customer_participant_id, conversationId: Number(context.conversation_id),
+      evaluation: evaluation ? { id: evaluation.id, version: Number(evaluation.evaluation_version), status: evaluation.status, completedAt: iso(evaluation.completed_at) } : null,
+      quote: quote ? { id: quote.quote_id, version: Number(quote.issued_quote_version), approvalId: quote.quote_approval_id, approvalSource: quote.approval_source, integrityHash: quote.issued_integrity_hash } : null,
+      approvedQuotes: approvals.map(source => ({ id: source.quote_id, version: Number(source.issued_quote_version), approvalId: source.quote_approval_id, approvalSource: source.approval_source, integrityHash: source.issued_integrity_hash })),
+    },
+  };
+}
 
-    const currentVersion = context.completion_id ? Number(context.job_version) : 0;
-    if (currentVersion !== validated.expectedVersion) {
-      return { abort: failure(409, "STALE_JOB_VERSION", "The Job version is no longer current.") };
+async function completeEmergencyJobWithClient({ client, emergencyRequest, relationship, conversation, actorId }) {
+  const selected = await loadEmergencyProfessionalContext(client, { emergencyRequestId: emergencyRequest.id, actorId, lock: true });
+  if (!selected || Number(selected.relationship_id) !== Number(relationship.id)
+      || Number(selected.conversation_id) !== Number(conversation.id)) {
+    return { error: failure(409, "EMERGENCY_COMPLETION_AUTHORITY_REQUIRED", "Exact selected Emergency authority is required before completion.") };
+  }
+  const context = await loadEmergencyLifecycleContext(client, selected.job_id, actorId, { lock: true });
+  if (!context || !["work_in_progress", "completed"].includes(emergencyRequest.status)
+      || !iso(emergencyRequest.work_started_at) || iso(context.work_started_at) !== iso(emergencyRequest.work_started_at)) {
+    return { error: failure(409, "EMERGENCY_WORK_START_REQUIRED", "Confirmed Emergency work start is required before completion.") };
+  }
+  if (emergencyRequest.status === "work_in_progress" && emergencyRequest.completed_at != null) {
+    return { error: failure(409, "EMERGENCY_COMPLETION_EVIDENCE_CONFLICT", "Emergency completion timestamp conflicts with its dispatch state.") };
+  }
+  if (context.completion_id) {
+    const record = (await client.query("SELECT * FROM canonical_job_completion_records WHERE job_id = $1", [context.job_id])).rows[0];
+    if (emergencyRequest.status !== "completed" || iso(emergencyRequest.completed_at) !== iso(record?.completed_at)
+        || record?.status !== "COMPLETED" || Number(record?.workstream_count) !== 0
+        || record?.evidence_snapshot?.jobId !== context.job_id
+        || record?.evidence_snapshot?.conversationId !== Number(conversation.id)
+        || record?.evidence_snapshot?.homeownerParticipantId !== context.customer_participant_id
+        || record?.evidence_snapshot?.emergencyRequestId !== Number(emergencyRequest.id)
+        || record?.evidence_snapshot?.relationshipId !== Number(relationship.id)
+        || record?.evidence_snapshot?.workStartedAt !== iso(emergencyRequest.work_started_at)
+        || record?.completed_by_participant_id !== context.professional_participant_id) {
+      return { error: failure(409, "EMERGENCY_COMPLETION_EVIDENCE_CONFLICT", "Emergency completion evidence does not match its dispatch history.") };
     }
-    if (context.completion_id) {
-      return { abort: failure(409, "JOB_ALREADY_COMPLETED", "The Job is already completed.") };
-    }
-    const readiness = await loadCompletionReadiness(client, validated.jobId, context);
-    const review = readinessProjection(context, readiness);
-    if (!review.eligible) {
-      validated.logger.warn("Job completion rejected", {
-        code: "JOB_COMPLETION_INELIGIBLE",
-        actorUserId: validated.actorId,
-        jobId: validated.jobId,
-        reasons: review.reasons,
-      });
-      return { abort: { ...failure(409, "JOB_COMPLETION_INELIGIBLE", "The Job is not ready for completion."), reasons: review.reasons } };
-    }
+    return { completedAt: iso(record.completed_at), replayed: true };
+  }
+  const readiness = await loadEmergencyCompletionReadiness(client, context, { reconcile: true, lock: true });
+  if (readiness.emergency_reasons.length) {
+    return { error: { ...failure(409, "EMERGENCY_COMPLETION_INELIGIBLE", "The Emergency is not ready for canonical completion."), reasons: readiness.emergency_reasons } };
+  }
+  const completedAt = emergencyRequest.status === "completed" ? iso(emergencyRequest.completed_at) : new Date().toISOString();
+  if (!completedAt || new Date(completedAt) < new Date(context.work_started_at)) {
+    return { error: failure(409, "EMERGENCY_COMPLETION_EVIDENCE_CONFLICT", "Emergency completion requires valid work-start and completion timestamps.") };
+  }
+  const validated = { jobId: context.job_id, expectedVersion: 0, idempotencyKey: `emergency:${emergencyRequest.id}:complete` };
+  const reserved = await reserveCompletionCommand(client, validated, context.professional_participant_id);
+  if (reserved.error || reserved.replay) return { error: reserved.error || failure(409, "EMERGENCY_COMPLETION_EVIDENCE_CONFLICT", "Canonical completion evidence is unavailable.") };
+  const result = await writeCanonicalCompletionWithClient(client, { validated, context, readiness, reserved, completedAt });
+  return { completedAt, completion: result.completion, replayed: false };
+}
 
+async function writeCanonicalCompletionWithClient(client, { validated, context, readiness, reserved, completedAt = new Date().toISOString() }) {
     const completionId = randomUUID();
-    const completedAt = new Date().toISOString();
     const evidenceSnapshot = readiness.evidence_snapshot;
     const completion = {
       contractVersion: 1,
@@ -870,6 +911,49 @@ async function completeJob(input = {}) {
        WHERE id = $1 AND completion_record_id IS NULL`,
       [reserved.id, completionId, JSON.stringify(result)]
     );
+    return result;
+}
+
+async function completeJob(input = {}) {
+  const validated = validateProfessionalRead(input, { command: true });
+  if (validated.error) return validated.error;
+  return runCommand(input.pool, async (client) => {
+    const context = await loadProfessionalContext(
+      client, validated.jobId, validated.actorId, { lock: true }
+    );
+    if (professionalUnavailable(context, validated.actorId) || context.relationship_status !== "active") {
+      return { abort: failure(404, "JOB_COMPLETION_UNAVAILABLE", "Completion Review is unavailable.") };
+    }
+    if (context.source_type === "emergency_request") {
+      return { abort: failure(409, "EMERGENCY_COMPLETION_DISPATCH_REQUIRED", "Complete this Emergency through its dispatch action.") };
+    }
+    const reserved = await reserveCompletionCommand(
+      client, validated, context.professional_participant_id
+    );
+    if (reserved.error) return { abort: reserved.error };
+    if (reserved.replay) return { result: reserved.replay };
+
+    const currentVersion = context.completion_id ? Number(context.job_version) : 0;
+    if (currentVersion !== validated.expectedVersion) {
+      return { abort: failure(409, "STALE_JOB_VERSION", "The Job version is no longer current.") };
+    }
+    if (context.completion_id) {
+      return { abort: failure(409, "JOB_ALREADY_COMPLETED", "The Job is already completed.") };
+    }
+    const readiness = await loadCompletionReadiness(client, validated.jobId, context);
+    const review = readinessProjection(context, readiness);
+    if (!review.eligible) {
+      validated.logger.warn("Job completion rejected", {
+        code: "JOB_COMPLETION_INELIGIBLE",
+        actorUserId: validated.actorId,
+        jobId: validated.jobId,
+        reasons: review.reasons,
+      });
+      return { abort: { ...failure(409, "JOB_COMPLETION_INELIGIBLE", "The Job is not ready for completion."), reasons: review.reasons } };
+    }
+
+    const result = await writeCanonicalCompletionWithClient(client, { validated, context, readiness, reserved });
+    const completionId = result.completion.id;
     return {
       result,
       afterCommit: () => validated.logger.info("Job completed", {
@@ -1355,6 +1439,26 @@ const BUSINESS_CUSTOMER_HISTORY_SQL = `
     AND jobs.business_customer_relationship_id IS NOT NULL
     AND jobs.source_business_customer_job_id IS NOT NULL`;
 
+const EMERGENCY_HISTORY_SQL = `
+  SELECT emergency_history.job_id, emergency_history.job_request_id, emergency_history.relationship_id,
+    emergency_history.conversation_id, emergency_history.customer_name,
+    emergency_history.business_name AS professional_name, emergency_history.job_title AS service_title,
+    emergency_history.completed_at, completions.workstream_count, completions.work_item_count,
+    completions.customer_update_count, NULL::bigint AS approved_total_minor, NULL::text AS approved_currency
+  FROM (${EMERGENCY_LIFECYCLE_CONTEXT_SQL}) emergency_history
+  JOIN canonical_job_completion_records completions ON completions.id = emergency_history.completion_id
+  WHERE emergency_history.emergency_status = 'completed'`;
+
+async function enrichEmergencyHistory(client, row, actorId, audience = "professional") {
+  const context = await loadEmergencyLifecycleContext(client, row.job_id, actorId, { audience });
+  if (!context || !context.completion_id || context.emergency_status !== "completed") return null;
+  const approvals = await loadEmergencyEffectiveApprovedQuotes(client, row.job_id);
+  const currencies = new Set(approvals.map(source => source.currency));
+  return { ...row, ...context, professional_name: context.business_name, service_title: context.job_title,
+    approved_total_minor: approvals.length ? approvals.reduce((sum, source) => sum + Number(source.total_minor), 0) : null,
+    approved_currency: currencies.size === 1 ? [...currencies][0] : null };
+}
+
 async function loadBusinessOwnedHistoryContext(
   client,
   jobId,
@@ -1627,6 +1731,12 @@ async function listProfessionalJobHistory(input = {}) {
 
             ${BUSINESS_CUSTOMER_HISTORY_SQL}
             AND profiles.user_id = $1
+
+            UNION ALL
+
+            ${EMERGENCY_HISTORY_SQL}
+            AND emergency_history.professional_user_id = $1
+            AND emergency_history.primary_role_active = TRUE
           ),
 
           counted AS (
@@ -1684,6 +1794,11 @@ async function listProfessionalJobHistory(input = {}) {
           continue;
         }
 
+        if (row.relationship_id != null) {
+          const emergency = await enrichEmergencyHistory(client, row, actor.id);
+          if (emergency) Object.assign(row, emergency);
+          continue;
+        }
         const business =
           await loadBusinessOwnedHistoryContext(
             client,
@@ -1815,6 +1930,14 @@ async function getHistoryDetail(input = {}, audience) {
 
       let row =
         result.rows[0];
+
+      if (!row) {
+        const emergency = await client.query(`${EMERGENCY_HISTORY_SQL}
+          AND emergency_history.job_id = $1
+          AND emergency_history.${audience === "customer" ? "homeowner_id" : "professional_user_id"} = $2
+          LIMIT 1`, [jobId, actor.id]);
+        if (emergency.rows[0]) row = await enrichEmergencyHistory(client, emergency.rows[0], actor.id, audience);
+      }
 
       if (
         !row &&
@@ -1992,8 +2115,8 @@ async function getHistoryDetail(input = {}, audience) {
             findings: true,
             recommendations: true,
             approvedQuotes: true,
-            visits: true,
-            workPlan: true,
+            visits: row.source_type !== "emergency_request",
+            workPlan: row.source_type !== "emergency_request",
           },
 
           actions:
@@ -2017,6 +2140,7 @@ const getProfessionalJobHistory = (input) => getHistoryDetail(input, "profession
 const getCustomerJobHistory = (input) => getHistoryDetail(input, "customer");
 
 module.exports = {
+  completeEmergencyJobWithClient,
   completeJob,
   decodeCursor,
   getCustomerJobHistory,
