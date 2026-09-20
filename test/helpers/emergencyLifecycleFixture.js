@@ -35,7 +35,7 @@ function transactionalFacade(client) {
   return facade;
 }
 
-async function fixture(client, pool) {
+async function fixture(client, pool, { dispatchToArrival = true } = {}) {
   const ids = {};
   for (const kind of ["homeowner", "professional", "outsider"]) {
     ids[kind] = (await client.query(`INSERT INTO users (username, email, password_hash, role, account_type)
@@ -55,8 +55,10 @@ async function fixture(client, pool) {
     VALUES ($1, $2, $3, $4) RETURNING id`, [relationship.id, ids.homeowner, ids.profile, ids.professional])).rows[0].id;
   const job = await ensureEmergencySelectionJob({ client, emergencyRequest: request, relationship, logger: quiet });
   const f = { ...ids, request: request.id, relationship: relationship.id, job: job.job.id, pool };
-  success(await dispatch.markEmergencyEnRoute({ pool, authenticatedUserId: ids.professional, emergencyRequestId: request.id }));
-  success(await dispatch.markEmergencyArrived({ pool, authenticatedUserId: ids.professional, emergencyRequestId: request.id }));
+  if (dispatchToArrival) {
+    success(await dispatch.markEmergencyEnRoute({ pool, authenticatedUserId: ids.professional, emergencyRequestId: request.id }));
+    success(await dispatch.markEmergencyArrived({ pool, authenticatedUserId: ids.professional, emergencyRequestId: request.id }));
+  }
   return f;
 }
 function start(f, actor = f.professional) {

@@ -212,3 +212,21 @@ test("Invoice Conversation serializer fails closed on identity mismatch", () => 
   };
   assert.deepEqual(normalizeInvoiceSharedPayload(row), {});
 });
+
+test("Emergency Invoice source stays explicit while canonical deposit credits and final payment remain unchanged", () => {
+  for (const [status, paid_minor, balance_minor] of [["PARTIALLY_PAID", 5000, 5000], ["PAID", 10000, 0]]) {
+    const projected = invoicePaymentInternals.invoiceProjection(invoiceRow({
+      source_type: "emergency_request", job_request_id: null, relationship_id: 123,
+      status, subtotal_minor: 10000, total_minor: 10000, paid_minor, balance_minor,
+    }), [], [], "professional");
+    assert.equal(projected.sourceType, "emergency_request");
+    assert.equal(projected.sourceLabel, "Emergency");
+    assert.equal(projected.requestId, null); assert.equal(projected.relationshipId, 123);
+    assert.equal(projected.totalMinor, 10000); assert.equal(projected.paidMinor, paid_minor);
+    assert.equal(projected.balanceMinor, balance_minor); assert.equal(projected.status, status);
+  }
+  const external = invoicePaymentInternals.invoiceProjection(invoiceRow({
+    source_type: "business_customer", job_request_id: null, relationship_id: null,
+  }), [], [], "professional");
+  assert.equal(external.sourceType, "business_customer"); assert.notEqual(external.sourceLabel, "Emergency");
+});

@@ -64,6 +64,7 @@ test("authorized professional sees an eligible active Job through a read-only pr
     city: "Orlando",
     serviceArea: "Orlando, FL",
     sourceLabel: "Job Request",
+    sourceType: "ordinary_request_selection",
   }]);
   assert.deepEqual(pool.calls.map(({ text }) => text), [
     "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
@@ -130,6 +131,7 @@ test("picker projection excludes exact address and unrelated private data", () =
     "serviceDomain",
     "serviceSpecialty",
     "sourceLabel",
+    "sourceType",
     "title",
   ]);
   const serialized = JSON.stringify(projection);

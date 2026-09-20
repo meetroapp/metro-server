@@ -1,4 +1,5 @@
 "use strict";
+const { jobSourcePresentation } = require("../workflow/jobSourcePresentation");
 const { EMERGENCY_LIFECYCLE_CONTEXT_SQL, loadEmergencyLifecycleContext, loadEmergencyEffectiveApprovedQuotes } = require("../emergency/emergencyCommercialContext");
 const { BUSINESS_JOB_CONTEXT_SQL, loadBusinessJobContext, authorityFields } = require("../relationships/businessJobAuthority");
 
@@ -447,7 +448,7 @@ function invoiceAuthorityFields(row) {
 
 async function loadProfessionalJobContext(client, jobId, actorId, { lock = false } = {}) {
   const result = await client.query(
-    `SELECT jobs.id AS job_id, jobs.job_request_id,
+    `SELECT jobs.id AS job_id, jobs.job_request_id, jobs.source_type,
       jobs.source_request_relationship_id AS relationship_id,
       relationships.homeowner_id, relationships.professional_user_id,
       relationships.status AS relationship_status,
@@ -697,7 +698,7 @@ async function loadApplicablePaymentsReceived(client, jobId, effectiveLines) {
 
 async function loadInvoiceContext(client, invoiceId, actorId, { lock = false } = {}) {
   const result = await client.query(
-    `SELECT invoices.id AS invoice_id, invoices.invoice_number, invoices.job_id,
+    `SELECT invoices.id AS invoice_id, invoices.invoice_number, invoices.job_id, jobs.source_type,
       invoices.job_request_id, invoices.relationship_id,
       invoices.issuer_participant_id,
       relationships.homeowner_id, relationships.professional_user_id,
@@ -824,7 +825,7 @@ async function loadEmergencyInvoiceContext(client, { invoiceId = null, jobId = n
 
 async function loadCustomerInvoiceContext(client, { invoiceId = null, jobId = null, actorId }) {
   const result = await client.query(
-    `SELECT invoices.id AS invoice_id, invoices.invoice_number, invoices.job_id,
+    `SELECT invoices.id AS invoice_id, invoices.invoice_number, invoices.job_id, jobs.source_type,
       invoices.job_request_id, invoices.relationship_id,
       relationships.homeowner_id, relationships.professional_user_id,
       posts.title AS job_title, posts.category AS job_service,
@@ -840,6 +841,7 @@ async function loadCustomerInvoiceContext(client, { invoiceId = null, jobId = nu
       current.integrity_hash, current.created_at AS version_created_at,
       issuances.issued_at
     FROM canonical_invoices invoices
+    INNER JOIN jobs ON jobs.id = invoices.job_id
     INNER JOIN posts ON posts.id = invoices.job_request_id
     INNER JOIN request_relationships relationships
       ON relationships.id = invoices.relationship_id
@@ -938,6 +940,7 @@ function invoiceProjection(row, lines, payments, audience) {
     invoiceId: row.invoice_id,
     invoiceNumber: row.invoice_number,
     jobId: row.job_id,
+    ...jobSourcePresentation(row),
     ...invoiceAuthorityFields(row),
     requestId: row.job_request_id == null ? null : Number(row.job_request_id),
     relationshipId: row.relationship_id == null ? null : Number(row.relationship_id),
@@ -1813,7 +1816,7 @@ async function getProfessionalInvoiceWorkspace(input = {}) {
          FROM completion_evidence
          ORDER BY job_id, precedence ASC, completed_at DESC
        )
-       SELECT jobs.id AS job_id, jobs.job_request_id AS request_id,
+       SELECT jobs.id AS job_id, jobs.job_request_id AS request_id, jobs.source_type,
         jobs.source_request_relationship_id AS relationship_id,
         completions.completion_version, completions.completed_at,
         posts.title AS service_title,
@@ -1894,6 +1897,7 @@ async function getProfessionalInvoiceWorkspace(input = {}) {
       const currency = currencies.size === 1 ? [...currencies][0] : null;
       readyJobs.push({
         jobId: row.job_id,
+        ...jobSourcePresentation(row),
         ...invoiceAuthorityFields(row),
         requestId: row.request_id == null ? null : Number(row.request_id),
         relationshipId: row.relationship_id == null ? null : Number(row.relationship_id),
@@ -1918,7 +1922,7 @@ async function getProfessionalInvoiceWorkspace(input = {}) {
       });
     }
     const invoices = await client.query(
-      `SELECT invoices.id AS invoice_id, invoices.invoice_number, invoices.job_id,
+      `SELECT invoices.id AS invoice_id, invoices.invoice_number, invoices.job_id, jobs.source_type,
         invoices.job_request_id AS request_id, invoices.relationship_id,
         current.version, current.status, current.currency,
         current.total_minor, current.paid_minor, current.balance_minor,
@@ -1926,6 +1930,7 @@ async function getProfessionalInvoiceWorkspace(input = {}) {
         current.created_at AS updated_at, issuances.issued_at,
         posts.title AS service_title, homeowner.username AS customer_name
       FROM canonical_invoices invoices
+      INNER JOIN jobs ON jobs.id = invoices.job_id
       INNER JOIN request_relationships relationships
         ON relationships.id = invoices.relationship_id
         AND relationships.professional_user_id = $1
@@ -1952,6 +1957,7 @@ async function getProfessionalInvoiceWorkspace(input = {}) {
       invoiceId: row.invoice_id,
       invoiceNumber: row.invoice_number,
       jobId: row.job_id,
+      ...jobSourcePresentation(row),
       ...invoiceAuthorityFields(row),
         requestId: row.request_id == null ? null : Number(row.request_id),
       relationshipId: row.relationship_id == null ? null : Number(row.relationship_id),
@@ -2026,6 +2032,7 @@ module.exports = {
     paymentProjection,
     professionalAuthorized,
     loadInvoiceContext,
+    loadEmergencyInvoiceContext,
     loadInvoiceProjection,
     sqlDate,
     workspaceLimit,

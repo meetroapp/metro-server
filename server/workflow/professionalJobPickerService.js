@@ -1,5 +1,8 @@
 "use strict";
 
+const { EMERGENCY_LIFECYCLE_CONTEXT_SQL } = require("../emergency/emergencyCommercialContext");
+const { jobSourcePresentation } = require("./jobSourcePresentation");
+
 const {
   commercialAuthorityInternals,
 } = require("../authorization/commercialAuthorityService");
@@ -19,7 +22,7 @@ const REQUIRED_CAPABILITIES = Object.freeze([
   "quote.scope.manage",
 ]);
 
-const AUTHORIZED_JOBS_SQL = `
+const ORDINARY_AUTHORIZED_JOBS_SQL = `
   /* professional_job_picker:list */
   SELECT DISTINCT
     jobs.id AS job_id,
@@ -30,7 +33,9 @@ const AUTHORIZED_JOBS_SQL = `
     posts.discovery_area_label,
     customers.username AS customer_name,
     jobs.source_type,
-    jobs.created_at
+    jobs.created_at,
+    relationships.id AS relationship_id,
+    NULL::integer AS emergency_request_id
   FROM jobs
   INNER JOIN posts
     ON posts.id = jobs.job_request_id
@@ -91,6 +96,46 @@ const AUTHORIZED_JOBS_SQL = `
   LIMIT 100
 `;
 
+const EMERGENCY_AUTHORIZED_JOBS_SQL = `
+  SELECT DISTINCT emergency_jobs.job_id, emergency_jobs.job_title AS title,
+    emergency_jobs.service_domain, emergency_jobs.service_specialty,
+    NULL::text AS service_city, NULL::text AS discovery_area_label,
+    emergency_jobs.customer_name, emergency_jobs.source_type,
+    emergency_jobs.job_created_at AS created_at,
+    emergency_jobs.relationship_id, emergency_jobs.emergency_request_id
+  FROM (${EMERGENCY_LIFECYCLE_CONTEXT_SQL}) emergency_jobs
+  WHERE emergency_jobs.professional_user_id = $1
+    AND emergency_jobs.primary_role_active = TRUE
+    AND emergency_jobs.customer_role_active = TRUE
+    AND emergency_jobs.completion_id IS NULL
+    AND emergency_jobs.emergency_status IN (
+      'assigned', 'professional_en_route', 'professional_arrived', 'work_in_progress'
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM unnest($2::text[]) AS required(capability)
+      WHERE NOT EXISTS (
+        SELECT 1 FROM lifecycle_authority_grants grants
+        LEFT JOIN lifecycle_authority_grant_revocations revocations
+          ON revocations.authority_grant_id = grants.id
+        WHERE grants.grantee_participant_id = emergency_jobs.professional_participant_id
+          AND grants.job_id = emergency_jobs.job_id
+          AND grants.scope_type = 'job' AND grants.scope_job_id = emergency_jobs.job_id
+          AND grants.scope_concern_id IS NULL AND grants.capability = required.capability
+          AND grants.valid_from <= CURRENT_TIMESTAMP
+          AND (grants.valid_until IS NULL OR grants.valid_until > CURRENT_TIMESTAMP)
+          AND revocations.id IS NULL
+      )
+    )`;
+
+const AUTHORIZED_JOBS_SQL = `
+  WITH ordinary_jobs AS (${ORDINARY_AUTHORIZED_JOBS_SQL}),
+    emergency_jobs AS (${EMERGENCY_AUTHORIZED_JOBS_SQL})
+  SELECT * FROM ordinary_jobs
+  UNION ALL
+  SELECT * FROM emergency_jobs
+  ORDER BY created_at DESC, job_id ASC
+  LIMIT 100`;
+
 function cleanText(value, maximum) {
   const normalized = typeof value === "string" ? value.trim() : "";
   return normalized ? normalized.slice(0, maximum) : null;
@@ -99,6 +144,11 @@ function cleanText(value, maximum) {
 function jobProjection(row = {}) {
   return Object.freeze({
     jobId: String(row.job_id || "").trim().toLowerCase(),
+    ...jobSourcePresentation(row),
+    ...(row.source_type === "emergency_request" ? {
+      relationshipId: Number(row.relationship_id),
+      emergencyRequestId: Number(row.emergency_request_id),
+    } : {}),
     title: cleanText(row.title, 500) || "Untitled Job",
     serviceDomain: cleanText(row.service_domain, 200),
     serviceSpecialty: cleanText(row.service_specialty, 200),
@@ -107,7 +157,7 @@ function jobProjection(row = {}) {
     city: cleanText(row.service_city, 120),
     serviceArea: cleanText(row.discovery_area_label, 260),
     sourceLabel:
-      row.source_type === "ordinary_request_selection"
+      row.source_type === "emergency_request" ? "Emergency" : row.source_type === "ordinary_request_selection"
         ? "Job Request"
         : "Job",
   });
@@ -180,6 +230,7 @@ module.exports = {
   listAuthorizedProfessionalJobs,
   professionalJobPickerInternals: {
     AUTHORIZED_JOBS_SQL,
+    EMERGENCY_AUTHORIZED_JOBS_SQL,
     REQUIRED_CAPABILITIES,
     jobProjection,
     runReadTransaction,

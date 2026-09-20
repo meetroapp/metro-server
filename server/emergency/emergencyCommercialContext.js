@@ -180,9 +180,12 @@ async function loadEmergencyQuoteApprovalSource(client, { jobId, approvalId = nu
 
 const EMERGENCY_LIFECYCLE_CONTEXT_SQL = `
   SELECT jobs.id AS job_id, jobs.source_type, jobs.job_request_id,
+    jobs.lifecycle_contract_version, jobs.created_at AS job_created_at,
     jobs.source_type AS job_source_type, 'emergency_request' AS source_context_type,
     emergency.id AS emergency_request_id, emergency.id AS job_emergency_request_id,
-    emergency.status AS emergency_status, emergency.arrived_at, emergency.work_started_at,
+    emergency.status AS emergency_status, emergency.assigned_at, emergency.en_route_at,
+    emergency.arrived_at, emergency.work_started_at,
+    emergency.service_domain, emergency.service_specialty,
     emergency.completed_at AS emergency_completed_at,
     relationships.id AS relationship_id, relationships.status AS relationship_status,
     relationships.homeowner_id, relationships.professional_user_id,

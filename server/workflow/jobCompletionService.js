@@ -1,4 +1,5 @@
 "use strict";
+const { jobSourcePresentation } = require("./jobSourcePresentation");
 const { EMERGENCY_LIFECYCLE_CONTEXT_SQL, loadEmergencyLifecycleContext, loadEmergencyProfessionalContext, loadEmergencyEffectiveApprovedQuotes } = require("../emergency/emergencyCommercialContext");
 const { quoteDraftServiceInternals } = require("../authorization/quoteDraftService");
 const { BUSINESS_JOB_CONTEXT_SQL, loadBusinessJobContext, authorityFields } = require("../relationships/businessJobAuthority");
@@ -649,6 +650,7 @@ function readinessProjection(context, row) {
   return {
     contractVersion: 1,
     jobId: context.job_id,
+    ...jobSourcePresentation(context),
     ...completionAuthorityFields(context),
     requestId: context.job_request_id == null ? null : Number(context.job_request_id),
     relationshipId: context.relationship_id == null ? null : Number(context.relationship_id),
@@ -970,6 +972,7 @@ function historySummary(row) {
   return {
     contractVersion: 1,
     jobId: row.job_id,
+    ...jobSourcePresentation(row),
     ...completionAuthorityFields(row),
     requestId: row.job_request_id == null ? null : Number(row.job_request_id),
     relationshipId: row.relationship_id == null ? null : Number(row.relationship_id),
@@ -995,6 +998,7 @@ function historySummary(row) {
 const HISTORY_BASE_SQL = `
   SELECT
     completions.job_id,
+    jobs.source_type,
     jobs.job_request_id,
     jobs.source_request_relationship_id AS relationship_id,
 
@@ -1150,6 +1154,7 @@ const HISTORY_BASE_SQL = `
 const BUSINESS_DOCUMENT_HISTORY_SQL = `
   SELECT
     completions.job_id,
+    jobs.source_type,
     jobs.job_request_id,
     jobs.source_request_relationship_id AS relationship_id,
 
@@ -1292,6 +1297,7 @@ const BUSINESS_DOCUMENT_HISTORY_SQL = `
 const BUSINESS_CUSTOMER_HISTORY_SQL = `
   SELECT
     completions.job_id,
+    jobs.source_type,
     jobs.job_request_id,
     jobs.source_request_relationship_id AS relationship_id,
 
@@ -1440,7 +1446,7 @@ const BUSINESS_CUSTOMER_HISTORY_SQL = `
     AND jobs.source_business_customer_job_id IS NOT NULL`;
 
 const EMERGENCY_HISTORY_SQL = `
-  SELECT emergency_history.job_id, emergency_history.job_request_id, emergency_history.relationship_id,
+  SELECT emergency_history.job_id, emergency_history.source_type, emergency_history.job_request_id, emergency_history.relationship_id,
     emergency_history.conversation_id, emergency_history.customer_name,
     emergency_history.business_name AS professional_name, emergency_history.job_title AS service_title,
     emergency_history.completed_at, completions.workstream_count, completions.work_item_count,
@@ -1794,7 +1800,7 @@ async function listProfessionalJobHistory(input = {}) {
           continue;
         }
 
-        if (row.relationship_id != null) {
+        if (row.source_type === "emergency_request") {
           const emergency = await enrichEmergencyHistory(client, row, actor.id);
           if (emergency) Object.assign(row, emergency);
           continue;

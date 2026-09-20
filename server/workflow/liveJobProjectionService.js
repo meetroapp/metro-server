@@ -1,5 +1,9 @@
 "use strict";
 
+const { loadEmergencyLifecycleContext } = require("../emergency/emergencyCommercialContext");
+const { loadEmergencyLiveState, deriveEmergencyLiveJob } = require("../emergency/emergencyLiveJobProjection");
+const { jobSourcePresentation } = require("./jobSourcePresentation");
+
 const { hasActiveLifecycleGrant } = require("../authorization/lifecycleAuthorityService");
 const {
   quoteDeliveryRequestFingerprint,
@@ -1090,7 +1094,7 @@ async function loadAuthorizedJob(pool, jobId, actorUserId) {
     ]
   );
 
-  return result.rows[0] || null;
+  return result.rows[0] || loadEmergencyLifecycleContext(pool, jobId, actorUserId);
 }
 
 async function loadCanonicalState(pool, context) {
@@ -1651,6 +1655,26 @@ async function getCanonicalLiveJob(input = {}) {
       transactionStarted = false;
       return failure(404, "LIVE_JOB_UNAVAILABLE", "The current Job is unavailable.");
     }
+    if (context.source_type === "emergency_request") {
+      if (context.job_id !== jobId || context.job_request_id !== null ||
+          Number(context.lifecycle_contract_version) !== 2 ||
+          context.relationship_status !== "active" || context.primary_role_active !== true ||
+          Number(context.professional_user_id) !== actorUserId ||
+          !positiveInteger(context.emergency_request_id) || !positiveInteger(context.relationship_id) ||
+          !positiveInteger(context.conversation_id)) {
+        if (transactionStarted) await client.query("COMMIT");
+        transactionStarted = false;
+        return failure(404, "LIVE_JOB_UNAVAILABLE", "The current Job is unavailable.");
+      }
+      const emergencyState = await loadEmergencyLiveState(client, context);
+      const result = emergencyState.error || {
+        ok: true, status: 200, code: "LIVE_JOB_STATE_LOADED",
+        liveJob: deriveEmergencyLiveJob(context, emergencyState),
+      };
+      if (transactionStarted) await client.query("COMMIT");
+      transactionStarted = false;
+      return result;
+    }
     const businessOwnedJob = [
       "business_document",
       "business_customer",
@@ -1718,6 +1742,7 @@ async function getCanonicalLiveJob(input = {}) {
       code: "LIVE_JOB_STATE_LOADED",
       liveJob: {
         jobId,
+        ...jobSourcePresentation(context),
         requestId: context.job_request_id == null ? null : Number(context.job_request_id),
         relationshipId: context.relationship_id == null ? null : Number(context.relationship_id),
         quoteApprovalId: state.quotes.find(quoteApproved)?.quote_approval_id || null,
