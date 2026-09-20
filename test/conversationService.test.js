@@ -309,6 +309,21 @@ test("homeowner conversation list is owner scoped", async () => {
 
     assert.match(
       sql,
+      /jobs\.source_request_relationship_id = request_relationships\.id AND jobs\.job_request_id = request_relationships\.post_id/
+    );
+
+    assert.match(
+      sql,
+      /request_relationships\.emergency_request_id IS NOT NULL AND jobs\.source_type = 'emergency_request' AND jobs\.source_request_relationship_id = request_relationships\.id AND jobs\.source_emergency_request_id = request_relationships\.emergency_request_id AND jobs\.job_request_id IS NULL AND jobs\.source_request_selection_id IS NULL/
+    );
+
+    assert.match(
+      sql,
+      /jobs\.lifecycle_contract_version = 2/
+    );
+
+    assert.match(
+      sql,
       /request_relationships\.homeowner_id = conversations\.homeowner_id/
     );
 

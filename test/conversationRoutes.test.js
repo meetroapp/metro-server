@@ -1035,7 +1035,7 @@ test("homeowner inbox exposes governed Emergency source identity", async () => {
   );
 });
 
-test("professional inbox recovers the next governed Emergency action", async () => {
+test("professional inbox exposes Emergency status without lifecycle mutation authority", async () => {
   const fake = createConversationRoutePool({
     professionalRows: [{
       id: 191,
@@ -1078,11 +1078,11 @@ test("professional inbox recovers the next governed Emergency action", async () 
   assert.equal(conversation.viewer.role, "professional");
   assert.deepEqual(
     conversation.workflow.allowedActions,
-    ["mark_arrived"]
+    []
   );
   assert.equal(
     conversation.permissions.canMarkArrived,
-    true
+    false
   );
   assert.equal(Object.hasOwn(conversation, "location"), false);
 });
@@ -1184,11 +1184,11 @@ test("Emergency conversation detail preserves shared participant permissions", a
   );
   assert.deepEqual(
     professionalResult.body.workflow.allowedActions,
-    ["mark_arrived"]
+    []
   );
   assert.equal(
     professionalResult.body.permissions.canMarkArrived,
-    true
+    false
   );
   assert.deepEqual(
     professionalResult.body.location,

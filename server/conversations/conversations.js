@@ -13,13 +13,6 @@ const CONVERSATION_STATUS_VALUES = Object.freeze(
   Object.values(CONVERSATION_STATUSES)
 );
 
-const EMERGENCY_ACTION_BY_STATUS = Object.freeze({
-  assigned: "mark_en_route",
-  professional_en_route: "mark_arrived",
-  professional_arrived: "start_work",
-  work_in_progress: "complete_work",
-});
-
 function isValidPositiveInteger(value) {
   const normalized = String(value ?? "").trim();
 
@@ -134,22 +127,7 @@ function getConversationSource(row = {}) {
 
 function deriveEmergencyWorkflow({
   row = {},
-  viewerRole,
 } = {}) {
-  const isAuthorizedEmergency =
-    parsePositiveInteger(row.emergency_request_id) !== null &&
-    row.source_relationship_status === "active";
-  const canManage =
-    isAuthorizedEmergency &&
-    viewerRole === "professional" &&
-    row.status === CONVERSATION_STATUSES.ACTIVE;
-  const action = canManage
-    ? EMERGENCY_ACTION_BY_STATUS[
-        row.source_workflow_status
-      ] || null
-    : null;
-  const allowedActions = action ? [action] : [];
-
   return {
     workflow: {
       status: row.source_workflow_status || null,
@@ -159,20 +137,16 @@ function deriveEmergencyWorkflow({
       workStartedAt:
         row.source_work_started_at || null,
       completedAt: row.source_completed_at || null,
-      allowedActions,
+      allowedActions: [],
     },
     permissions: {
       canSendMessages:
         row.status === CONVERSATION_STATUSES.ACTIVE,
-      canManageWorkflow: allowedActions.length > 0,
-      canMarkEnRoute:
-        action === "mark_en_route",
-      canMarkArrived:
-        action === "mark_arrived",
-      canStartWork:
-        action === "start_work",
-      canCompleteWork:
-        action === "complete_work",
+      canManageWorkflow: false,
+      canMarkEnRoute: false,
+      canMarkArrived: false,
+      canStartWork: false,
+      canCompleteWork: false,
     },
   };
 }
@@ -279,6 +253,10 @@ function serializeConversationSummaryForHomeowner(row = {}) {
       row.emergency_request_id
     );
     value.source = source;
+    value.relationship.id = row.relationship_id;
+    if (row.job_id) {
+      value.relationship.jobId = row.job_id;
+    }
     value.viewer = {
       role: "homeowner",
     };
@@ -333,6 +311,9 @@ function serializeConversationSummaryForProfessional(row = {}) {
       row.emergency_request_id
     );
     value.source = source;
+    if (row.job_id) {
+      value.relationship.jobId = row.job_id;
+    }
     value.viewer = {
       role: "professional",
     };
@@ -870,6 +851,7 @@ function serializeConversationDetail(row = {}, viewerUserId) {
       ? {
           id: row.relationship_id,
           emergencyRequestId: source.id,
+          ...(row.job_id ? { jobId: row.job_id } : {}),
           title: source.title,
           source,
         }

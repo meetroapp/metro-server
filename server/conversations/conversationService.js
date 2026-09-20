@@ -212,9 +212,22 @@ const SOURCE_JOINS = `
   LEFT JOIN posts
     ON request_relationships.post_id = posts.id
   LEFT JOIN jobs
-    ON jobs.source_request_relationship_id = request_relationships.id
-    AND jobs.job_request_id = request_relationships.post_id
-    AND jobs.lifecycle_contract_version = 2
+    ON jobs.lifecycle_contract_version = 2
+    AND (
+      (
+        jobs.source_request_relationship_id = request_relationships.id
+        AND jobs.job_request_id = request_relationships.post_id
+      )
+      OR
+      (
+        request_relationships.emergency_request_id IS NOT NULL
+        AND jobs.source_type = 'emergency_request'
+        AND jobs.source_request_relationship_id = request_relationships.id
+        AND jobs.source_emergency_request_id = request_relationships.emergency_request_id
+        AND jobs.job_request_id IS NULL
+        AND jobs.source_request_selection_id IS NULL
+      )
+    )
   LEFT JOIN emergency_requests
     ON request_relationships.emergency_request_id = emergency_requests.id
 `;
