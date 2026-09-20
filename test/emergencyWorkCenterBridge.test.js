@@ -149,6 +149,10 @@ for (const status of ["assigned", "professional_en_route", "professional_arrived
     assert.equal(result.code, "LIVE_JOB_STATE_LOADED"); assert.equal(result.liveJob.requestId, null);
     assert.equal(result.liveJob.sourceType, "emergency_request");
     assert.ok(!pool.calls.some(({ sql }) => /live_job:(evaluation|workstreams|approved_work_scheduling)/.test(sql)));
+    if (status !== "professional_arrived") {
+      assert.ok(!pool.calls.some(({ sql }) => sql.includes("emergency_requests.arrived_at")),
+        "Pre-arrival dispatch must not invoke the arrival-gated Quote loader.");
+    }
     assert.doesNotMatch(pool.calls.map(call => call.sql).join("\n"), /\b(?:INSERT|UPDATE|DELETE)\b/i);
   });
 }

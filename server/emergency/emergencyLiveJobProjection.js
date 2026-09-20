@@ -35,8 +35,12 @@ async function loadEmergencyLiveState(client, context) {
     client, context, logger: quiet, returnEvidence: true,
   });
   const completedEvaluation = evidence?.id ? evidence : null;
-  const quoteResult = await listDraftQuotesByJob({ pool: client, authenticatedActor: actor,
-    jobId: context.job_id, logger: quiet });
+  // The certified Quote reader requires confirmed arrival. Dispatch remains
+  // readable before that prerequisite without weakening Quote authority.
+  const quoteReadable = context.arrived_at &&
+    ["professional_arrived", "work_in_progress", "completed"].includes(context.emergency_status);
+  const quoteResult = quoteReadable ? await listDraftQuotesByJob({ pool: client, authenticatedActor: actor,
+    jobId: context.job_id, logger: quiet }) : { ok: true, quotes: [] };
   if (!quoteResult.ok) return { error: quoteResult };
   const quotes = quoteResult.quotes.filter(quote => quote.jobId === context.job_id &&
     quote.requestId === null && quote.relationshipId === Number(context.relationship_id) &&

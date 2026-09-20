@@ -1,5 +1,7 @@
 # Emergency Work Center read-contract bridge — implementation report
 
+This is the historical report for candidate `21583b405807907db146c3cdbf7e228d69de7da8`. Its PostgreSQL validation gap is resolved by the corrected candidate documented in [PostgreSQL certification](emergency-work-center-postgres-certification.md).
+
 **Candidate only. Not release-ready. PostgreSQL integration validation remains pending.**
 
 ## Git and scope
