@@ -213,6 +213,16 @@ test(
         {
           method: "GET",
           path:
+            "/emergency-requests/:emergencyRequestId/available-professionals",
+        },
+        {
+          method: "POST",
+          path:
+            "/emergency-requests/:emergencyRequestId/available-professionals/:contractorProfileId/select",
+        },
+        {
+          method: "GET",
+          path:
             "/emergency-requests/:emergencyRequestId/responses",
         },
         {

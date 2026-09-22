@@ -85,6 +85,34 @@ function sendOpportunityResult(res, result) {
   });
 }
 
+function sendAvailableProfessionalResult(res, result) {
+  if (!result || result.ok !== true) {
+    return res.status(result?.status || 500).json({
+      success: false,
+      code:
+        result?.code ||
+        "EMERGENCY_AVAILABLE_PROFESSIONALS_FETCH_FAILED",
+      message:
+        result?.message ||
+        "Available Emergency professionals could not be loaded.",
+    });
+  }
+
+  return res.status(result.status || 200).json({
+    success: true,
+    code:
+      result.code ||
+      "EMERGENCY_AVAILABLE_PROFESSIONALS_FOUND",
+    emergencyRequest: {
+      id: result.emergencyRequest.id,
+      status: result.emergencyRequest.status,
+    },
+    professionals: Array.isArray(result.professionals)
+      ? result.professionals
+      : [],
+  });
+}
+
 function sendDispatchResult(res, result) {
   if (!result || result.success !== true) {
     return res.status(result?.status || 500).json({
@@ -140,6 +168,7 @@ function createEmergencyRequestHandlers({
     validateEmergencyRequestListOptions,
   } = service;
   const {
+    listHomeownerAvailableEmergencyProfessionals,
     listProfessionalEmergencyOpportunities,
     professionalCanSeeEmergencyOpportunity,
   } = opportunityService;
@@ -148,6 +177,7 @@ function createEmergencyRequestHandlers({
     listHomeownerEmergencyResponses,
   } = relationshipService;
   const {
+    selectHomeownerAvailableEmergencyProfessional,
     selectHomeownerEmergencyResponse,
   } = selectionService;
   const {
@@ -306,6 +336,142 @@ function createEmergencyRequestHandlers({
         code: "EMERGENCY_REQUEST_FETCH_FAILED",
         message:
           "The Emergency request could not be loaded.",
+      });
+    }
+  }
+
+  async function listAvailableProfessionals(req, res) {
+    try {
+      const result =
+        await listHomeownerAvailableEmergencyProfessionals({
+          pool: getPool(req),
+          homeownerUserId: req.user.id,
+          emergencyRequestId:
+            req.params.emergencyRequestId,
+        });
+
+      return sendAvailableProfessionalResult(
+        res,
+        result
+      );
+    } catch (error) {
+      return sendPublicDatabaseError({
+        res,
+        error,
+        operation:
+          "fetch_available_emergency_professionals",
+        code:
+          "EMERGENCY_AVAILABLE_PROFESSIONALS_FETCH_FAILED",
+        message:
+          "Available Emergency professionals could not be loaded.",
+      });
+    }
+  }
+
+
+  async function selectAvailableProfessional(
+    req,
+    res
+  ) {
+    try {
+      const result =
+        await selectHomeownerAvailableEmergencyProfessional({
+          pool: getPool(req),
+          homeownerUserId: req.user.id,
+          emergencyRequestId:
+            req.params.emergencyRequestId,
+          contractorProfileId:
+            req.params.contractorProfileId,
+        });
+
+      if (
+        !result ||
+        result.ok !== true
+      ) {
+        return res
+          .status(result?.status || 500)
+          .json({
+            success: false,
+            code:
+              result?.code ||
+              "EMERGENCY_AVAILABLE_PROFESSIONAL_SELECT_FAILED",
+            message:
+              result?.message ||
+              "The available Emergency professional could not be selected.",
+          });
+      }
+
+      return res
+        .status(result.status || 200)
+        .json({
+          success: true,
+          code:
+            result.code ||
+            "EMERGENCY_AVAILABLE_PROFESSIONAL_SELECTED",
+          alreadySelected:
+            Boolean(
+              result.alreadySelected
+            ),
+          declinedResponseCount:
+            Number(
+              result
+                .declinedResponseCount ||
+              0
+            ),
+          emergencyRequest: {
+            id:
+              result
+                .emergencyRequest.id,
+            status:
+              result
+                .emergencyRequest.status,
+            assignedAt:
+              result
+                .emergencyRequest
+                .assigned_at ||
+              null,
+            updatedAt:
+              result
+                .emergencyRequest
+                .updated_at ||
+              null,
+          },
+          relationship: {
+            id:
+              result.relationship.id,
+            emergencyRequestId:
+              result.relationship
+                .emergency_request_id,
+            status:
+              result.relationship.status,
+            acceptedAt:
+              result.relationship
+                .accepted_at ||
+              null,
+            conversationAvailable:
+              true,
+          },
+          conversation: {
+            id:
+              result.conversation.id,
+            relationshipId:
+              result.conversation
+                .relationship_id,
+            status:
+              result.conversation
+                .status,
+          },
+        });
+    } catch (error) {
+      return sendPublicDatabaseError({
+        res,
+        error,
+        operation:
+          "select_available_emergency_professional",
+        code:
+          "EMERGENCY_AVAILABLE_PROFESSIONAL_SELECT_FAILED",
+        message:
+          "The available Emergency professional could not be selected.",
       });
     }
   }
@@ -587,6 +753,7 @@ function createEmergencyRequestHandlers({
     createDraft,
     getRequest,
     listOwnedRequests,
+    listAvailableProfessionals,
     listHomeownerResponses,
     listProfessionalOpportunities,
     markArrived,
@@ -595,6 +762,7 @@ function createEmergencyRequestHandlers({
     respondToProfessionalOpportunity,
     selectHomeownerResponse,
     saveSafetyAssessment,
+    selectAvailableProfessional,
     startWork,
     updateDraft,
   };
@@ -664,6 +832,18 @@ function registerEmergencyRequestRoutes({
   );
 
   app.get(
+    "/emergency-requests/:emergencyRequestId/available-professionals",
+    authMiddleware,
+    handlers.listAvailableProfessionals
+  );
+
+  app.post(
+    "/emergency-requests/:emergencyRequestId/available-professionals/:contractorProfileId/select",
+    authMiddleware,
+    handlers.selectAvailableProfessional
+  );
+
+  app.get(
     "/emergency-requests/:emergencyRequestId/responses",
     authMiddleware,
     handlers.listHomeownerResponses
@@ -729,6 +909,7 @@ function registerEmergencyRequestRoutes({
 module.exports = {
   createEmergencyRequestHandlers,
   registerEmergencyRequestRoutes,
+  sendAvailableProfessionalResult,
   sendDispatchResult,
   sendEmergencyRequestListResult,
   sendOpportunityResult,

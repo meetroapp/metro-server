@@ -122,6 +122,7 @@ Current inventory:
 102. `202609190002_generalize_emergency_job_evaluation_quote.sql`
 103. `202609190003_generalize_emergency_pre_work_authority.sql`
 104. `202609190004_generalize_emergency_completion_invoice_history.sql`
+105. `202609210001_add_emergency_available_now_direct_select_authority.sql`
 
 Migration 84 adds private numbered-draft archive. Application is environment-specific and is recorded by each database migration ledger.
 
@@ -682,3 +683,33 @@ prior origins still require positive Workstream counts. It validates historical
 completion records without writing business rows and adds Emergency Meetro
 Invoice/approved-scope authority. External issuance stays limited to the two
 business-owned origins. No new tables or lifecycle grants are introduced.
+
+
+### Emergency Available Now direct-selection authority (105)
+
+`202609210001_add_emergency_available_now_direct_select_authority.sql`
+adds explicit Emergency-only relationship provenance for the additive
+Available Now direct-selection path.
+
+Existing Emergency relationships are truthfully backfilled as
+`professional_response`, because direct selection did not exist when those
+records were created. New direct selections use
+`available_now_direct_select` and require `responded_at IS NULL`; they therefore
+cannot be represented as professional responses. Ordinary/non-Emergency
+relationships retain `emergency_authority_source IS NULL` and a non-null
+`responded_at`.
+
+The migration preserves compatibility with the pre-105 Emergency response
+runtime by normalizing the exact legacy Emergency response insert shape to
+`professional_response`. It does not create a second relationship, Conversation,
+Job, selection, or dispatch architecture.
+
+Because deployed `request_relationships` authority checks include DEFERRABLE
+constraint triggers, Migration 105 explicitly flushes the deferred events queued
+by its provenance backfill before later `ALTER TABLE` statements. This preserves
+those existing authority checks and avoids PostgreSQL SQLSTATE 55006 pending-
+trigger DDL rejection without disabling or bypassing the triggers.
+
+Migration 105 is discoverable by the governed generic staging migration runner.
+It is intentionally NOT added to the frozen dedicated production Emergency
+migration runner. Production execution requires separately reviewed governance.

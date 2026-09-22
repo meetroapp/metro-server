@@ -397,6 +397,39 @@ function validateSafetyAssessmentPayload(body) {
 }
 
 function serializeEmergencyRequest(row = {}, assessment = null) {
+  const hasSelectionProjection =
+    Object.hasOwn(
+      row,
+      "has_selected_professional"
+    ) ||
+    Object.hasOwn(
+      row,
+      "selected_professional_business_name"
+    ) ||
+    Object.hasOwn(
+      row,
+      "canonical_conversation_id"
+    );
+
+  const hasSelectedProfessional =
+    hasSelectionProjection &&
+    row.has_selected_professional === true;
+
+  const selectedProfessionalBusinessName =
+    hasSelectedProfessional &&
+    typeof row.selected_professional_business_name ===
+      "string"
+      ? row.selected_professional_business_name.trim() ||
+        null
+      : null;
+
+  const conversationId =
+    hasSelectedProfessional
+      ? parsePositiveInteger(
+          row.canonical_conversation_id
+        )
+      : null;
+
   return {
     id: row.id,
     category: row.category,
@@ -421,6 +454,15 @@ function serializeEmergencyRequest(row = {}, assessment = null) {
     expiredAt: row.expired_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    ...(hasSelectionProjection
+      ? {
+          hasSelectedProfessional,
+          selectedProfessionalBusinessName,
+          conversationAvailable:
+            conversationId !== null,
+          conversationId,
+        }
+      : {}),
     safetyAssessment: assessment
       ? {
           immediateDanger: assessment.immediate_danger,
@@ -702,6 +744,12 @@ async function getOwnedEmergencyRequest({
     `
     SELECT
       emergency_requests.*,
+      COALESCE(
+        selected_relationship.has_selected_professional,
+        FALSE
+      ) AS has_selected_professional,
+      selected_relationship.selected_professional_business_name,
+      selected_relationship.canonical_conversation_id,
       emergency_request_safety_assessments.id AS assessment_id,
       emergency_request_safety_assessments.immediate_danger,
       emergency_request_safety_assessments.medical_emergency,
@@ -719,6 +767,39 @@ async function getOwnedEmergencyRequest({
       emergency_request_safety_assessments.created_at AS assessment_created_at,
       emergency_request_safety_assessments.updated_at AS assessment_updated_at
     FROM emergency_requests
+    LEFT JOIN LATERAL (
+      SELECT
+        TRUE AS has_selected_professional,
+        NULLIF(
+          TRIM(contractor_profiles.business_name),
+          ''
+        ) AS selected_professional_business_name,
+        conversations.id AS canonical_conversation_id
+      FROM request_relationships
+      LEFT JOIN contractor_profiles
+        ON contractor_profiles.id =
+          request_relationships.contractor_id
+        AND contractor_profiles.user_id =
+          request_relationships.professional_user_id
+      LEFT JOIN conversations
+        ON conversations.relationship_id =
+          request_relationships.id
+        AND conversations.homeowner_id =
+          request_relationships.homeowner_id
+        AND conversations.contractor_id =
+          request_relationships.contractor_id
+        AND conversations.professional_user_id =
+          request_relationships.professional_user_id
+      WHERE request_relationships.emergency_request_id =
+        emergency_requests.id
+        AND request_relationships.post_id IS NULL
+        AND request_relationships.homeowner_id =
+          emergency_requests.homeowner_id
+        AND request_relationships.status = $3
+      ORDER BY request_relationships.id ASC
+      LIMIT 1
+    ) AS selected_relationship
+      ON TRUE
     LEFT JOIN emergency_request_safety_assessments
       ON emergency_request_safety_assessments.emergency_request_id =
         emergency_requests.id
@@ -727,7 +808,11 @@ async function getOwnedEmergencyRequest({
     LIMIT 1
     ${lock ? "FOR UPDATE OF emergency_requests" : ""}
     `,
-    [emergencyRequestId, homeownerUserId]
+    [
+      emergencyRequestId,
+      homeownerUserId,
+      RELATIONSHIP_STATUSES.ACTIVE,
+    ]
   );
 
   if (result.rows.length === 0) {

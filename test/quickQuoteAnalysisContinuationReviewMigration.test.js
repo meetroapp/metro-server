@@ -81,11 +81,11 @@ test(
 
     assert.equal(
       migrations.length,
-      104
+      105
     );
     assert.equal(
       migrations.at(-1)?.filename,
-      "202609190004_generalize_emergency_completion_invoice_history.sql"
+      "202609210001_add_emergency_available_now_direct_select_authority.sql"
     );
 
     assert.equal(

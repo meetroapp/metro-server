@@ -154,10 +154,20 @@ async function createProfessionalEmergencyResponse({
           homeowner_id,
           contractor_id,
           professional_user_id,
+          emergency_authority_source,
           status,
           introduction_text
         )
-        VALUES (NULL, $1, $2, $3, $4, 'pending', '')
+        VALUES (
+          NULL,
+          $1,
+          $2,
+          $3,
+          $4,
+          'professional_response',
+          'pending',
+          ''
+        )
         ON CONFLICT (emergency_request_id, contractor_id)
         WHERE emergency_request_id IS NOT NULL
         DO NOTHING
@@ -307,6 +317,8 @@ async function listHomeownerEmergencyResponses({
     WHERE request_relationships.emergency_request_id = $1
       AND request_relationships.post_id IS NULL
       AND request_relationships.homeowner_id = $2
+      AND request_relationships.emergency_authority_source =
+        'professional_response'
     ORDER BY
       request_relationships.responded_at ASC NULLS LAST,
       request_relationships.created_at ASC,

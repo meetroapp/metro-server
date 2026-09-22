@@ -609,7 +609,7 @@ test("owned read scopes request identity to homeowner identity", async () => {
       sql,
       /emergency_requests\.id = \$1.*emergency_requests\.homeowner_id = \$2/i
     );
-    assert.deepEqual(params, [41, 7]);
+    assert.deepEqual(params, [41, 7, "active"]);
     return { rows: [] };
   });
 
