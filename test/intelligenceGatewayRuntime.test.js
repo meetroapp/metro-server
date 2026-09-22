@@ -100,6 +100,13 @@ test("production registry preserves governed workflow operations and adds text-o
       providerName: "job_request",
     },
     {
+      operation: "emergency_request.interpret",
+      capability: "emergency_request.interpret",
+      supportedRoles: ["homeowner", "professional"],
+      engineIds: ["emergency_request_capability", "emergency_request_validation"],
+      providerName: "emergency_request",
+    },
+    {
       operation: "quote.compose",
       capability: "quote.compose",
       supportedRoles: ["professional"],
@@ -136,6 +143,8 @@ test("production registry preserves governed workflow operations and adds text-o
     },
   ]);
   assert.deepEqual(canonicalIntelligenceEngineRegistry.list(), [
+    "emergency_request_capability",
+    "emergency_request_validation",
     "estimate_advisory_boundary",
     "evaluation_advisory_boundary",
     "invoice_advisory_boundary",
@@ -147,6 +156,7 @@ test("production registry preserves governed workflow operations and adds text-o
   ]);
   assert.equal(canonicalIntelligenceOperationRegistry.get("test.echo"), null);
   assert.ok(canonicalIntelligenceOperationRegistry.get("job_request.interpret"));
+  assert.ok(canonicalIntelligenceOperationRegistry.get("emergency_request.interpret"));
   assert.ok(canonicalIntelligenceOperationRegistry.get("quote.compose"));
   assert.ok(canonicalIntelligenceOperationRegistry.get("quick_quote.photo_assist"));
   assert.ok(canonicalIntelligenceOperationRegistry.get("evaluation.assist"));

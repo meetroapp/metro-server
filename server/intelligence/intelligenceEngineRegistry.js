@@ -4,6 +4,9 @@ const {
   jobRequestInterpretEngines,
 } = require("./operations/jobRequestInterpret");
 const {
+  emergencyRequestInterpretEngines,
+} = require("./operations/emergencyRequestInterpret");
+const {
   quoteComposeEngines,
 } = require("./operations/quoteCompose");
 const {
@@ -37,6 +40,7 @@ function createIntelligenceEngineRegistry(engines = []) {
 const canonicalIntelligenceEngineRegistry = createIntelligenceEngineRegistry(
   [
     ...jobRequestInterpretEngines,
+    ...emergencyRequestInterpretEngines,
     ...quoteComposeEngines,
     ...quickQuotePhotoAssistEngines,
     ...workflowAssistEngines,

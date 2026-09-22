@@ -13,6 +13,9 @@ const {
   JOB_REQUEST_INTERPRET_PATCH_PATHS,
   parseJobRequestInterpretResult,
 } = require("../server/intelligence/operations/jobRequestInterpret");
+const {
+  EMERGENCY_REQUEST_INTERPRET_PATCH_PATHS,
+} = require("../server/intelligence/operations/emergencyRequestInterpret");
 
 const CAPE_CORAL_HOMEOWNER_TEXT =
   "I need someone to repair a cracked section of the wall by my front entry in Cape Coral. It is separating and temporarily braced. I would like someone to inspect it and repair or rebuild the damaged area. I am available this week and I can add photos.";
@@ -55,6 +58,7 @@ test("workflow provider configuration is server-owned and exposes only safe meta
   assert.deepEqual(absent.providers, {});
   assert.equal(configured.configured, true);
   assert.deepEqual(Object.keys(configured.providers).sort(), [
+    "emergency_request",
     "job_request",
     "quote_composition",
     "workflow_assistance",
@@ -356,6 +360,64 @@ test("Job Request provider instructions use the exact governed parser vocabulary
   assert.match(instructions, /Do not ask for preferred timing/);
   assert.doesNotMatch(instructions, /AI_SUGGESTED or INFERRED/);
   assert.doesNotMatch(instructions, /KNOWN or UNCERTAIN or NEEDS_CLARIFICATION/);
+});
+
+test("Emergency Request provider uses a strict proposal-only general-area schema", async () => {
+  const calls = [];
+  const provider = createOpenAiWorkflowProvider({
+    apiKey: "fixture-secret",
+    model: "fixture-model",
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return response({
+        payload: {
+          output_text: JSON.stringify({
+            schemaVersion: 1,
+            summary: "Review this Emergency suggestion.",
+            draftPatch: { fields: [] },
+            clarifications: [],
+            warnings: [],
+          }),
+        },
+      });
+    },
+  });
+
+  await provider.complete({
+    operation: "emergency_request.interpret",
+    intakeStage: "describe",
+    homeownerText: "Water is entering through my ceiling after the rain.",
+    operationContext: {
+      validation: {
+        canonicalEmergencySpecialties:
+          "emergency_plumbing,emergency_electrical_service,roof_leak_repair,emergency_lockout,handyman",
+      },
+    },
+    instructions: {
+      allowedPatchPaths: [
+        "description",
+        "service.specialty",
+      ],
+      allowedProvenance: ["assistant_suggested", "assistant_inferred"],
+      allowedUncertainty: ["assistant_suggested", "approximate", "uncertain"],
+    },
+  });
+
+  const body = JSON.parse(calls[0].options.body);
+  assert.equal(body.text.format.name, "meetro_emergency_request_interpret");
+  assert.deepEqual(
+    body.text.format.schema.properties.draftPatch.properties.fields.items.properties.path.enum,
+    [
+      "description",
+      "service.specialty",
+    ]
+  );
+  assert.match(body.instructions, /proposal-only Emergency intake/);
+  assert.match(body.instructions, /Follow request\.intakeStage exactly/);
+  assert.match(body.instructions, /city or ZIP code/);
+  assert.match(body.instructions, /Never ask for or return a full, exact, street or service address/);
+  assert.match(body.instructions, /Every proposed field requires explicit homeowner confirmation/);
+  assert.doesNotMatch(body.instructions, /create an Emergency request/i);
 });
 
 test("Cape Coral Job Request uses strict provider output and survives canonical response validation", async () => {

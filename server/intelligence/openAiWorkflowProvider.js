@@ -14,6 +14,12 @@ const OUTPUT_CONTRACTS = Object.freeze({
 {"schemaVersion":1,"summary":"string","draftPatch":{"fields":[{"path":"allowed path from request","value":"string","provenance":"assistant_suggested or assistant_inferred","confidence":0.0,"uncertainty":"assistant_suggested or approximate or uncertain","requiresConfirmation":true,"rationale":"string or null"}]},"clarifications":[{"question":"string","fieldPath":"allowed path from request or null"}],"warnings":[{"code":"lowercase_code","message":"string"}]}
 For a concrete project description, include both job.title and job.description proposals. Extract explicit city and availability facts. Normalize timing.availability to concise sentence case without changing its meaning, for example "Available this week". Do not ask for preferred timing when the supplied availability already answers when the homeowner can proceed.
 For service recommendations, use only service.specialty and only a value listed in operationContext.validation.canonicalRequestServiceIds. Recommend one when the homeowner's description reasonably identifies one canonical service. Do not treat every theoretical alternative as genuine ambiguity. Reported stability or structural-scope signals such as separation, temporary bracing, or a request to rebuild a wall or structural section reasonably support structural_repairs unless the supplied facts conflict; that is a service classification, not a diagnosis. Surface-finish-only wall or drywall damage does not by itself establish structural_repairs. If several services remain genuinely plausible after applying those distinctions, do not choose one; ask one concise clarification with fieldPath service.specialty. Never invent or return a free-text service value.`,
+  "emergency_request.interpret": `Return exactly this JSON object shape:
+{"schemaVersion":1,"summary":"string","draftPatch":{"fields":[{"path":"allowed path from request","value":"string","provenance":"assistant_suggested or assistant_inferred","confidence":0.0,"uncertainty":"assistant_suggested or approximate or uncertain","requiresConfirmation":true,"rationale":"string or null"}]},"clarifications":[{"question":"string","fieldPath":"allowed path from request or null"}],"warnings":[{"code":"lowercase_code","message":"string"}]}
+This is a proposal-only Emergency intake. Follow request.intakeStage exactly and use only request.instructions.allowedPatchPaths.
+When intakeStage is "describe", propose only the homeowner-reported description and one supported service.specialty when reasonably identifiable. Do not propose, request, or clarify location during this stage. If several Emergency specialties remain genuinely plausible, ask one concise service clarification.
+When intakeStage is "location", propose only city, region, and postalCode from the homeowner's current message. If general area is still missing, ask only for city or ZIP code. Never ask for or return a full, exact, street or service address, unit, apartment, suite, gate code, access instructions, phone, email, private contact details, Safety Check answers, professional identity, ETA, distance, or pricing.
+Every proposed field requires explicit homeowner confirmation. Never create a request, save safety state, prepare or distribute an Emergency, select a professional, or return navigation or mutation actions.`,
   "quick_quote.photo_assist": `Return exactly this JSON object shape:
 {"schemaVersion":1,"summary":"string","observed":[assistanceItem],"needsVerification":[assistanceItem],"repairSuggestions":[assistanceItem],"materialSuggestions":[assistanceItem],"photoAnalysis":{"analyzedReferenceIds":["authorized photo id"],"limitations":["string"]},"warnings":["string"]}
 where assistanceItem is exactly {"id":"lowercase_stable_id","text":"string","classification":"OBSERVED or NEEDS_VERIFICATION or AI_SUGGESTED","sourceReferences":[{"type":"QUOTE_DRAFT_PHOTO","id":"authorized photo id","version":1}]}. OBSERVED items require exact authorized photo sourceReferences. Repair and material suggestions are advisory only. Do not provide prices, markup, retailer claims, customer attachment decisions, or hidden-condition certainty. Use empty arrays when evidence is absent.`,
@@ -1378,7 +1384,7 @@ function jobRequestInterpretOutputSchema(request) {
   ) {
     throw providerError(
       "provider_request_invalid",
-      "The Job Request provider contract is incomplete."
+      "The interpretation provider contract is incomplete."
     );
   }
 
@@ -1506,10 +1512,15 @@ function workflowResponseFormat(request) {
     type: "json_schema", name: "meetro_companion_converse", strict: true,
     schema: { type: "object", additionalProperties: false, required: ["schemaVersion", "text"], properties: { schemaVersion: { type: "integer", const: 1 }, text: { type: "string", minLength: 1, maxLength: 8000 } } },
   };
-  if (request?.operation === "job_request.interpret") {
+  if (
+    request?.operation === "job_request.interpret" ||
+    request?.operation === "emergency_request.interpret"
+  ) {
     return {
       type: "json_schema",
-      name: "meetro_job_request_interpret",
+      name: request.operation === "emergency_request.interpret"
+        ? "meetro_emergency_request_interpret"
+        : "meetro_job_request_interpret",
       strict: true,
       schema: jobRequestInterpretOutputSchema(request),
     };
@@ -2105,6 +2116,7 @@ function createWorkflowProviderConfiguration(env = process.env, dependencies = {
     }),
     providers: workflowProvider ? Object.freeze({
       job_request: alias("job_request"),
+      emergency_request: alias("emergency_request"),
       quote_composition: alias("quote_composition"),
       workflow_assistance: workflowProvider,
     }) : Object.freeze({}),

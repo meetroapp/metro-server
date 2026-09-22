@@ -8,6 +8,9 @@ const {
   jobRequestInterpretOperationDefinition,
 } = require("./operations/jobRequestInterpret");
 const {
+  emergencyRequestInterpretOperationDefinition,
+} = require("./operations/emergencyRequestInterpret");
+const {
   quoteComposeOperationDefinition,
 } = require("./operations/quoteCompose");
 const {
@@ -117,6 +120,7 @@ const { companionConverseOperationDefinition } = require("./operations/companion
 const canonicalIntelligenceOperationRegistry =
   createIntelligenceOperationRegistry([
     jobRequestInterpretOperationDefinition,
+    emergencyRequestInterpretOperationDefinition,
     quoteComposeOperationDefinition,
     quickQuotePhotoAssistOperationDefinition,
     evaluationAssistOperationDefinition,

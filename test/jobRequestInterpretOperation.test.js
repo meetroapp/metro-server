@@ -143,6 +143,7 @@ test("canonical registration retains the bounded homeowner operation and fixed e
     operations.map(({ operation }) => operation).sort(),
     [
       "companion.converse",
+      "emergency_request.interpret",
       "estimate.compose",
       "evaluation.assist",
       "invoice.assist",

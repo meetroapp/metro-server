@@ -110,8 +110,8 @@ test("record projections bound long histories and strip capabilities/media/conta
   assert.equal(facts.notes.length, 1200); assert.equal(facts.jobs.length, 12); assert.ok(JSON.stringify(facts).length < 15000);
   assert.doesNotMatch(JSON.stringify(facts), /canPay|secret/);
 });
-test("production registers one conversation operation alongside six governed operations", () => {
-  assert.deepEqual(canonicalIntelligenceOperationRegistry.list().map((item) => item.operation), ["job_request.interpret", "quote.compose", "quick_quote.photo_assist", "evaluation.assist", "estimate.compose", "invoice.assist", "companion.converse"]);
+test("production registers one conversation operation alongside seven governed operations", () => {
+  assert.deepEqual(canonicalIntelligenceOperationRegistry.list().map((item) => item.operation), ["job_request.interpret", "emergency_request.interpret", "quote.compose", "quick_quote.photo_assist", "evaluation.assist", "estimate.compose", "invoice.assist", "companion.converse"]);
 });
 
 test("real canonical route handler delivers conversational text from configured provider", async () => {
