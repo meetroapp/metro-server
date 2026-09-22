@@ -423,12 +423,6 @@ function normalizeClarification(
   }
 
   if (value.fieldPath == null) {
-    if (stage === "location") {
-      throw resultError(
-        "Location clarification must target a general-area field."
-      );
-    }
-
     return { question };
   }
 

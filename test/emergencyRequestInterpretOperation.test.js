@@ -304,6 +304,33 @@ test("Emergency interpretation stages cannot skip the Find Help consent boundary
   );
 });
 
+test("location clarification accepts null fieldPath under the governed general-area schema", () => {
+  const parsed = parseEmergencyResult(
+    providerResult({
+      summary: "I need one more general-area detail.",
+      draftPatch: { fields: [] },
+      clarifications: [{
+        question: "What city or ZIP code should I use?",
+        fieldPath: null,
+      }],
+    }),
+    "location"
+  );
+
+  assert.deepEqual(
+    parsed.draftPatch.fields,
+    []
+  );
+
+  assert.deepEqual(
+    parsed.clarifications,
+    [{
+      question:
+        "What city or ZIP code should I use?",
+    }]
+  );
+});
+
 test("private pre-selection details and authority fields fail closed", async () => {
   for (const altered of [
     { summary: "Help is needed at 123 Main Street." },
