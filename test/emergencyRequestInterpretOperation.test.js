@@ -304,6 +304,88 @@ test("Emergency interpretation stages cannot skip the Find Help consent boundary
   );
 });
 
+test("location normalizes U.S. region names to postal abbreviations without changing other regions", () => {
+  const florida = parseEmergencyResult(
+    providerResult({
+      summary:
+        "I have the general service area.",
+      draftPatch: {
+        fields: [
+          patch({
+            path: "location.city",
+            value: "Cape Coral",
+          }),
+          patch({
+            path: "location.region",
+            value: "Florida",
+            provenance:
+              "assistant_inferred",
+            uncertainty:
+              "approximate",
+            rationale:
+              "Cape Coral and ZIP 33990 identify Florida.",
+          }),
+          patch({
+            path:
+              "location.postalCode",
+            value: "33990",
+          }),
+        ],
+      },
+      clarifications: [],
+    }),
+    "location"
+  );
+
+  assert.deepEqual(
+    florida.draftPatch.fields.map(
+      ({ path, value }) => ({
+        path,
+        value,
+      })
+    ),
+    [
+      {
+        path: "location.city",
+        value: "Cape Coral",
+      },
+      {
+        path: "location.region",
+        value: "FL",
+      },
+      {
+        path: "location.postalCode",
+        value: "33990",
+      },
+    ]
+  );
+
+  const international =
+    parseEmergencyResult(
+      providerResult({
+        summary:
+          "I have the general service area.",
+        draftPatch: {
+          fields: [
+            patch({
+              path:
+                "location.region",
+              value: "Ontario",
+            }),
+          ],
+        },
+        clarifications: [],
+      }),
+      "location"
+    );
+
+  assert.equal(
+    international.draftPatch
+      .fields[0].value,
+    "Ontario"
+  );
+});
+
 test("location clarification accepts null fieldPath under the governed general-area schema", () => {
   const parsed = parseEmergencyResult(
     providerResult({

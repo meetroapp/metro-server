@@ -60,6 +60,67 @@ const VALUE_LIMITS = Object.freeze({
   "location.region": 120,
   "location.postalCode": 32,
 });
+const US_REGION_ABBREVIATIONS = Object.freeze({
+  alabama: "AL",
+  alaska: "AK",
+  arizona: "AZ",
+  arkansas: "AR",
+  california: "CA",
+  colorado: "CO",
+  connecticut: "CT",
+  delaware: "DE",
+  florida: "FL",
+  georgia: "GA",
+  hawaii: "HI",
+  idaho: "ID",
+  illinois: "IL",
+  indiana: "IN",
+  iowa: "IA",
+  kansas: "KS",
+  kentucky: "KY",
+  louisiana: "LA",
+  maine: "ME",
+  maryland: "MD",
+  massachusetts: "MA",
+  michigan: "MI",
+  minnesota: "MN",
+  mississippi: "MS",
+  missouri: "MO",
+  montana: "MT",
+  nebraska: "NE",
+  nevada: "NV",
+  "new hampshire": "NH",
+  "new jersey": "NJ",
+  "new mexico": "NM",
+  "new york": "NY",
+  "north carolina": "NC",
+  "north dakota": "ND",
+  ohio: "OH",
+  oklahoma: "OK",
+  oregon: "OR",
+  pennsylvania: "PA",
+  "rhode island": "RI",
+  "south carolina": "SC",
+  "south dakota": "SD",
+  tennessee: "TN",
+  texas: "TX",
+  utah: "UT",
+  vermont: "VT",
+  virginia: "VA",
+  washington: "WA",
+  "west virginia": "WV",
+  wisconsin: "WI",
+  wyoming: "WY",
+  "district of columbia": "DC",
+  "puerto rico": "PR",
+  guam: "GU",
+  "american samoa": "AS",
+  "northern mariana islands": "MP",
+  "u.s. virgin islands": "VI",
+  "us virgin islands": "VI",
+  "virgin islands": "VI",
+});
+
 const MAX_TEXT_LENGTH = 4000;
 const MAX_SUMMARY_LENGTH = 600;
 const MAX_RATIONALE_LENGTH = 300;
@@ -147,6 +208,18 @@ function boundedText(value, maximum, errorFactory, { allowEmpty = true } = {}) {
   }
   if (!allowEmpty && !value) throw errorFactory("Required text is missing.");
   return value;
+}
+
+function normalizeRegionValue(value) {
+  if (/^[a-z]{2}$/i.test(value)) {
+    return value.toUpperCase();
+  }
+
+  return (
+    US_REGION_ABBREVIATIONS[
+      value.toLowerCase()
+    ] || value
+  );
 }
 
 function normalizeEmergencyIntakeContext(context, input) {
@@ -356,9 +429,14 @@ function normalizePatch(field, allowedPatchPaths = PATCH_PATHS) {
     ["rationale"]
   );
   if (!allowedPatchPaths.has(field.path)) throw resultError("Unsupported Emergency patch path.");
-  const value = boundedText(field.value, VALUE_LIMITS[field.path], resultError, {
+  let value = boundedText(field.value, VALUE_LIMITS[field.path], resultError, {
     allowEmpty: false,
   });
+
+  if (field.path === "location.region") {
+    value = normalizeRegionValue(value);
+  }
+
   rejectPrivateDetail(value);
   if (field.path === "service.specialty" && !SPECIALTIES.has(value)) {
     throw resultError("Unsupported Emergency specialty proposal.");

@@ -419,6 +419,10 @@ test("Emergency Request provider uses a strict proposal-only general-area schema
     body.instructions,
     /infer region from a city plus postal\/ZIP code/
   );
+  assert.match(
+    body.instructions,
+    /two-letter USPS abbreviation/
+  );
   assert.match(body.instructions, /Never ask for or return a full, exact, street or service address/);
   assert.match(body.instructions, /Every proposed field requires explicit homeowner confirmation/);
   assert.doesNotMatch(body.instructions, /create an Emergency request/i);
