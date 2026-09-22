@@ -386,6 +386,202 @@ test("location normalizes U.S. region names to postal abbreviations without chan
   );
 });
 
+test("location deterministically derives reviewed U.S. region from city plus ZIP when provider omits only region", () => {
+  const parsed =
+    parseEmergencyResult(
+      providerResult({
+        summary:
+          "Region was not inferred.",
+        draftPatch: {
+          fields: [
+            patch({
+              path:
+                "location.city",
+              value:
+                "Cape Coral",
+              rationale:
+                "Directly provided by homeowner text.",
+            }),
+            patch({
+              path:
+                "location.postalCode",
+              value:
+                "33990",
+              rationale:
+                "Directly provided by homeowner text.",
+            }),
+          ],
+        },
+        clarifications: [
+          {
+            question:
+              "What state should I use?",
+            fieldPath:
+              "location.region",
+          },
+        ],
+        warnings: [
+          {
+            code:
+              "region_missing",
+            message:
+              "Region was not provided.",
+          },
+        ],
+      }),
+      "location"
+    );
+
+  assert.deepEqual(
+    parsed.draftPatch.fields.map(
+      ({
+        path,
+        value,
+        provenance,
+      }) => ({
+        path,
+        value,
+        provenance,
+      })
+    ),
+    [
+      {
+        path:
+          "location.city",
+        value:
+          "Cape Coral",
+        provenance:
+          "assistant_suggested",
+      },
+      {
+        path:
+          "location.region",
+        value:
+          "FL",
+        provenance:
+          "assistant_inferred",
+      },
+      {
+        path:
+          "location.postalCode",
+        value:
+          "33990",
+        provenance:
+          "assistant_suggested",
+      },
+    ]
+  );
+
+  assert.deepEqual(
+    parsed.clarifications,
+    []
+  );
+
+  assert.deepEqual(
+    parsed.warnings,
+    []
+  );
+
+  assert.equal(
+    parsed.summary,
+    "I have the general service area."
+  );
+});
+
+test("location deterministic ZIP fallback is not Florida-specific and does not override competing warnings", () => {
+  const california =
+    parseEmergencyResult(
+      providerResult({
+        summary:
+          "I have city and ZIP.",
+        draftPatch: {
+          fields: [
+            patch({
+              path:
+                "location.city",
+              value:
+                "Beverly Hills",
+            }),
+            patch({
+              path:
+                "location.postalCode",
+              value:
+                "90210",
+            }),
+          ],
+        },
+        clarifications: [],
+        warnings: [],
+      }),
+      "location"
+    );
+
+  assert.equal(
+    california.draftPatch.fields
+      .find(
+        ({ path }) =>
+          path ===
+          "location.region"
+      )?.value,
+    "CA"
+  );
+
+  const guarded =
+    parseEmergencyResult(
+      providerResult({
+        summary:
+          "Location needs review.",
+        draftPatch: {
+          fields: [
+            patch({
+              path:
+                "location.city",
+              value:
+                "Cape Coral",
+            }),
+            patch({
+              path:
+                "location.postalCode",
+              value:
+                "33990",
+            }),
+          ],
+        },
+        clarifications: [],
+        warnings: [
+          {
+            code:
+              "location_conflict",
+            message:
+              "The location details need review.",
+          },
+        ],
+      }),
+      "location"
+    );
+
+  assert.equal(
+    guarded.draftPatch.fields.some(
+      ({ path }) =>
+        path ===
+        "location.region"
+    ),
+    false
+  );
+
+  assert.deepEqual(
+    guarded.warnings,
+    [
+      {
+        code:
+          "location_conflict",
+        message:
+          "The location details need review.",
+      },
+    ]
+  );
+});
+
 test("location clarification accepts null fieldPath under the governed general-area schema", () => {
   const parsed = parseEmergencyResult(
     providerResult({

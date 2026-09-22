@@ -121,6 +121,82 @@ const US_REGION_ABBREVIATIONS = Object.freeze({
   "virgin islands": "VI",
 });
 
+const US_POSTAL_CODE_REGION_OVERRIDES = Object.freeze({
+  "06390": "NY",
+  "96799": "AS",
+});
+
+const US_ZIP3_REGION_RULES = Object.freeze([
+  [5, 5, "NY"],
+  [6, 7, "PR"],
+  [8, 8, "VI"],
+  [9, 9, "PR"],
+  [10, 27, "MA"],
+  [28, 29, "RI"],
+  [30, 38, "NH"],
+  [39, 49, "ME"],
+  [50, 54, "VT"],
+  [55, 55, "MA"],
+  [56, 59, "VT"],
+  [60, 69, "CT"],
+  [70, 89, "NJ"],
+  [90, 98, "AE"],
+  [100, 149, "NY"],
+  [150, 196, "PA"],
+  [197, 199, "DE"],
+  [200, 200, "DC"],
+  [201, 201, "VA"],
+  [202, 205, "DC"],
+  [206, 219, "MD"],
+  [220, 246, "VA"],
+  [247, 268, "WV"],
+  [270, 289, "NC"],
+  [290, 299, "SC"],
+  [300, 319, "GA"],
+  [320, 339, "FL"],
+  [340, 340, "AA"],
+  [341, 349, "FL"],
+  [350, 369, "AL"],
+  [370, 385, "TN"],
+  [386, 397, "MS"],
+  [398, 399, "GA"],
+  [400, 427, "KY"],
+  [430, 459, "OH"],
+  [460, 479, "IN"],
+  [480, 499, "MI"],
+  [500, 528, "IA"],
+  [530, 549, "WI"],
+  [550, 567, "MN"],
+  [569, 569, "DC"],
+  [570, 577, "SD"],
+  [580, 588, "ND"],
+  [590, 599, "MT"],
+  [600, 629, "IL"],
+  [630, 658, "MO"],
+  [660, 679, "KS"],
+  [680, 693, "NE"],
+  [700, 715, "LA"],
+  [716, 729, "AR"],
+  [730, 732, "OK"],
+  [733, 733, "TX"],
+  [734, 749, "OK"],
+  [750, 799, "TX"],
+  [800, 816, "CO"],
+  [820, 831, "WY"],
+  [832, 838, "ID"],
+  [840, 847, "UT"],
+  [850, 865, "AZ"],
+  [870, 884, "NM"],
+  [885, 885, "TX"],
+  [889, 898, "NV"],
+  [900, 961, "CA"],
+  [962, 966, "AP"],
+  [967, 968, "HI"],
+  [970, 979, "OR"],
+  [980, 994, "WA"],
+  [995, 999, "AK"],
+]);
+
 const MAX_TEXT_LENGTH = 4000;
 const MAX_SUMMARY_LENGTH = 600;
 const MAX_RATIONALE_LENGTH = 300;
@@ -220,6 +296,44 @@ function normalizeRegionValue(value) {
       value.toLowerCase()
     ] || value
   );
+}
+
+function inferUsRegionFromPostalCode(value) {
+  const match =
+    /^(\d{5})(?:-\d{4})?$/.exec(
+      String(value || "").trim()
+    );
+
+  if (!match) {
+    return "";
+  }
+
+  const postalCode = match[1];
+
+  if (
+    Object.hasOwn(
+      US_POSTAL_CODE_REGION_OVERRIDES,
+      postalCode
+    )
+  ) {
+    return (
+      US_POSTAL_CODE_REGION_OVERRIDES[
+        postalCode
+      ]
+    );
+  }
+
+  const prefix =
+    Number(postalCode.slice(0, 3));
+
+  const rule =
+    US_ZIP3_REGION_RULES.find(
+      ([minimum, maximum]) =>
+        prefix >= minimum &&
+        prefix <= maximum
+    );
+
+  return rule ? rule[2] : "";
 }
 
 function normalizeEmergencyIntakeContext(context, input) {
@@ -619,7 +733,7 @@ function parseEmergencyRequestInterpretResult(
     );
   }
 
-  const clarifications =
+  let clarifications =
     payload.clarifications.map(
       (value) =>
         normalizeClarification(
@@ -631,14 +745,135 @@ function parseEmergencyRequestInterpretResult(
         )
     );
 
-  const warnings =
+  let warnings =
     payload.warnings.map(
       normalizeWarning
     );
 
+  let normalizedSummary =
+    summary;
+
+  if (stage === "location") {
+    const currentLocation =
+      semanticInput?.context?.intake
+        ?.location || {};
+
+    const existingRegion =
+      String(
+        currentLocation.region || ""
+      ).trim();
+
+    const regionField =
+      fields.find(
+        ({ path }) =>
+          path === "location.region"
+      );
+
+    const cityField =
+      fields.find(
+        ({ path }) =>
+          path === "location.city"
+      );
+
+    const postalField =
+      fields.find(
+        ({ path }) =>
+          path ===
+          "location.postalCode"
+      );
+
+    const city =
+      cityField?.value ||
+      String(
+        currentLocation.city || ""
+      ).trim();
+
+    const postalCode =
+      postalField?.value ||
+      String(
+        currentLocation.postalCode ||
+          ""
+      ).trim();
+
+    const onlyRegionClarifications =
+      clarifications.every(
+        (clarification) =>
+          clarification.fieldPath ===
+          "location.region"
+      );
+
+    const onlyRegionWarnings =
+      warnings.every(
+        (warning) =>
+          warning.code ===
+          "region_missing"
+      );
+
+    if (
+      !existingRegion &&
+      !regionField &&
+      city &&
+      postalCode &&
+      onlyRegionClarifications &&
+      onlyRegionWarnings
+    ) {
+      const inferredRegion =
+        inferUsRegionFromPostalCode(
+          postalCode
+        );
+
+      if (inferredRegion) {
+        const regionProposal = {
+          path: "location.region",
+          value: inferredRegion,
+          provenance:
+            "assistant_inferred",
+          confidence: 1,
+          uncertainty:
+            "approximate",
+          requiresConfirmation: true,
+          rationale:
+            "The postal code maps to the inferred U.S. region.",
+        };
+
+        const postalIndex =
+          fields.findIndex(
+            ({ path }) =>
+              path ===
+              "location.postalCode"
+          );
+
+        fields.splice(
+          postalIndex < 0
+            ? fields.length
+            : postalIndex,
+          0,
+          regionProposal
+        );
+
+        clarifications =
+          clarifications.filter(
+            (clarification) =>
+              clarification.fieldPath !==
+              "location.region"
+          );
+
+        warnings =
+          warnings.filter(
+            (warning) =>
+              warning.code !==
+              "region_missing"
+          );
+
+        normalizedSummary =
+          "I have the general service area.";
+      }
+    }
+  }
+
   return {
     schemaVersion: 1,
-    summary,
+    summary: normalizedSummary,
     draftPatch: { fields },
     clarifications,
     warnings,
