@@ -349,15 +349,11 @@ function validateEvaluationContent(value) {
 }
 
 function validateCompletionContent(content) {
-  if (
-    !content.observations ||
-    content.findings.length === 0 ||
-    content.scopeRecommendations.length === 0
-  ) {
+  if (!content.observations || !content.diagnosisSummary) {
     return failure(
       409,
       "EVALUATION_INCOMPLETE",
-      "Observations, findings, and scope recommendations are required before completion."
+      "Observations and a recommendation are required before completion."
     );
   }
   return null;

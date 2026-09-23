@@ -470,6 +470,68 @@ test("draft updates require expected version and stale writes cannot both succee
   assert.equal(fixture.state.aggregates[created.evaluation.id].current_version, 2);
 });
 
+test("Emergency completion requires observations and onsite recommendation without Findings or scope recommendations", async () => {
+  const missingRecommendationFixture = createPool();
+
+  const missingRecommendation = await createConfirmed(
+    missingRecommendationFixture.pool,
+    {
+      content: baseContent({
+        observations: "Active supply leak confirmed onsite.",
+        diagnosisSummary: "",
+        findings: [],
+        scopeRecommendations: [],
+      }),
+    }
+  );
+
+  const rejected = await completeEvaluation({
+    pool: missingRecommendationFixture.pool,
+    authenticatedActor: { id: PROFESSIONAL_ID },
+    evaluationId: missingRecommendation.evaluation.id,
+    expectedVersion: 1,
+    idempotencyKey: "complete-missing-onsite-recommendation",
+  });
+
+  assert.equal(rejected.code, "EVALUATION_INCOMPLETE");
+  assert.equal(
+    missingRecommendationFixture.state.aggregates[
+      missingRecommendation.evaluation.id
+    ].current_version,
+    1
+  );
+
+  const fixture = createPool();
+
+  const created = await createConfirmed(fixture.pool, {
+    content: baseContent({
+      observations: "Active supply leak confirmed onsite.",
+      diagnosisSummary:
+        "Replace the failed shut-off valve and test the connection for leaks.",
+      findings: [],
+      scopeRecommendations: [],
+    }),
+  });
+
+  const completed = await completeEvaluation({
+    pool: fixture.pool,
+    authenticatedActor: { id: PROFESSIONAL_ID },
+    evaluationId: created.evaluation.id,
+    expectedVersion: 1,
+    idempotencyKey: "complete-onsite-emergency-recommendation",
+  });
+
+  assert.equal(completed.ok, true);
+  assert.equal(completed.code, "EVALUATION_COMPLETED");
+  assert.equal(completed.evaluation.status, "completed");
+  assert.equal(completed.evaluation.content.findings.length, 0);
+  assert.equal(completed.evaluation.content.scopeRecommendations.length, 0);
+  assert.equal(
+    completed.evaluation.content.diagnosisSummary,
+    "Replace the failed shut-off valve and test the connection for leaks."
+  );
+});
+
 test("completion validates required content and preserves an immutable completed version", async () => {
   const incompleteFixture = createPool();
   const incomplete = await createConfirmed(incompleteFixture.pool, {
