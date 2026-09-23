@@ -4706,20 +4706,27 @@ async function issueQuote(input = {}) {
       logger,
     });
     if (authorityError) return { abort: authorityError };
-    const evaluationError =
-      context?.job_source_type ===
-        "emergency_request"
-        ? await requireEmergencyJobEvaluation({
-            client,
-            context,
-            logger,
-          })
-        : await requireSavedEvaluation({
-            client,
-            context,
-            logger,
-          });
-    if (evaluationError) return { abort: evaluationError };
+    let emergencyEvaluationEvidence = null;
+    if (context?.job_source_type === "emergency_request") {
+      const evaluationRequirement =
+        await requireEmergencyJobEvaluation({
+          client,
+          context,
+          logger,
+          returnEvidence: true,
+        });
+      if (evaluationRequirement?.ok === false) {
+        return { abort: evaluationRequirement };
+      }
+      emergencyEvaluationEvidence = evaluationRequirement;
+    } else {
+      const evaluationError = await requireSavedEvaluation({
+        client,
+        context,
+        logger,
+      });
+      if (evaluationError) return { abort: evaluationError };
+    }
     const authorityGrantId = await loadActiveQuoteGrant(
       client,
       context,
@@ -4910,8 +4917,12 @@ async function issueQuote(input = {}) {
       `INSERT INTO canonical_quote_issuances (
         quote_id, quote_version, job_id, issuer_participant_id,
         authority_grant_id, commercial_evidence_id, idempotency_id,
-        issued_at, source_snapshot_integrity_hash
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        issued_at, source_snapshot_integrity_hash,
+        evaluation_id, evaluation_version
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9,
+        $10, $11
+      )`,
       [
         quoteId,
         issuedVersion,
@@ -4922,6 +4933,10 @@ async function issueQuote(input = {}) {
         idempotency.reservation.id,
         issuedAt,
         version.row.integrity_hash,
+        emergencyEvaluationEvidence?.id || null,
+        emergencyEvaluationEvidence?.evaluation_version == null
+          ? null
+          : Number(emergencyEvaluationEvidence.evaluation_version),
       ]
     );
     const transitioned = await client.query(

@@ -713,3 +713,23 @@ trigger DDL rejection without disabling or bypassing the triggers.
 Migration 105 is discoverable by the governed generic staging migration runner.
 It is intentionally NOT added to the frozen dedicated production Emergency
 migration runner. Production execution requires separately reviewed governance.
+
+### Emergency Quote Evaluation issuance provenance (106)
+
+`202609230001_link_quote_issuance_evaluation.sql` adds immutable Evaluation
+provenance to canonical Quote issuance.
+
+New Emergency Quote issuances preserve the exact completed
+`evaluation_id` and `evaluation_version` that governed the issued Quote.
+The reference is constrained to the same canonical Evaluation version and
+same Job subject. Observation and recommendation narrative text is not
+duplicated into Quote persistence.
+
+Existing Quote issuances remain valid with null Evaluation provenance.
+The migration does not modify existing business rows, does not create
+customer approval, payment, scheduling, Invoice, Work, or completion
+authority, and does not weaken the append-only Quote history model.
+
+This migration is discoverable by the governed generic staging migration
+runner. It is not added to any frozen dedicated production migration chain;
+production execution requires separately reviewed governance.
