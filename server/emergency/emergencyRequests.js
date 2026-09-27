@@ -9,6 +9,20 @@ const emergencyDispatchService = require(
 
 const emergencyOpportunityService = require("./emergencyOpportunityService");
 const emergencyRequestService = require("./emergencyRequestService");
+const emergencyFollowUpJobRequestService = require(
+  "./emergencyFollowUpJobRequestService"
+);
+const {
+  MediaValidationError,
+  createCloudinaryMedia,
+} = require("../media/cloudinary");
+const {
+  rejectUnsupportedMedia,
+} = require("../media/mediaReferencePolicy");
+const {
+  safelyDeleteRequestPhoto,
+} = require("../media/requestPhoto");
+const { sendMediaError } = require("../media/uploadSignature");
 const requestRelationshipService = require(
   "../relationships/requestRelationshipService"
 );
@@ -146,6 +160,7 @@ function createEmergencyRequestHandlers({
   relationshipService = requestRelationshipService,
   selectionService = emergencySelectionService,
   dispatchService = emergencyDispatchService,
+  followUpJobRequestService = emergencyFollowUpJobRequestService,
 }) {
   if (typeof getPool !== "function") {
     throw new TypeError("getPool must be a function.");
@@ -186,6 +201,9 @@ function createEmergencyRequestHandlers({
     markEmergencyEnRoute,
     startEmergencyWork,
   } = dispatchService;
+  const {
+    createEmergencyFollowUpJobRequest,
+  } = followUpJobRequestService;
 
   async function listProfessionalOpportunities(req, res) {
     try {
@@ -677,6 +695,97 @@ function createEmergencyRequestHandlers({
     }
   }
 
+  async function createFollowUpJobRequest(req, res) {
+    res.setHeader?.("Cache-Control", "private, no-store");
+
+    try {
+      if (rejectUnsupportedMedia(req, res, ["image_url"])) return;
+
+      const result = await createEmergencyFollowUpJobRequest({
+        pool: getPool(req),
+        authenticatedActor: req.user,
+        emergencyRequestId:
+          req.params.emergencyRequestId,
+        payload: req.body,
+        idempotencyKey:
+          req.headers?.["idempotency-key"],
+      });
+
+      if (!result || result.ok !== true) {
+        if (
+          Array.isArray(result?.cleanupPhotos) &&
+          result.cleanupPhotos.length > 0
+        ) {
+          try {
+            const media =
+              req.app?.locals?.cloudinaryMedia ||
+              createCloudinaryMedia({
+                env: process.env,
+              });
+
+            for (const photo of result.cleanupPhotos) {
+              await safelyDeleteRequestPhoto(
+                media,
+                photo.public_id,
+                req.user.id
+              );
+            }
+          } catch {
+            console.error(
+              "Emergency follow-up request photo cleanup failed",
+              {
+                code:
+                  "EMERGENCY_FOLLOW_UP_PHOTO_CLEANUP_FAILED",
+              }
+            );
+          }
+        }
+
+        return res
+          .status(result?.status || 500)
+          .json({
+            success: false,
+            code:
+              result?.code ||
+              "EMERGENCY_FOLLOW_UP_JOB_REQUEST_FAILED",
+            message:
+              result?.message ||
+              "The Standard follow-up Job Request could not be created.",
+          });
+      }
+
+      return res
+        .status(result.status || 201)
+        .json({
+          success: true,
+          code: result.code,
+          replayed: Boolean(result.replayed),
+          emergencyRequestId:
+            result.emergencyRequestId,
+          emergencyJobId: result.emergencyJobId,
+          linkageId: result.linkageId,
+          post: result.post,
+          reportedConcern:
+            result.reportedConcern || null,
+        });
+    } catch (error) {
+      if (error instanceof MediaValidationError) {
+        return sendMediaError(res, error);
+      }
+
+      return sendPublicDatabaseError({
+        res,
+        error,
+        operation:
+          "create_emergency_follow_up_job_request",
+        code:
+          "EMERGENCY_FOLLOW_UP_JOB_REQUEST_FAILED",
+        message:
+          "The Standard follow-up Job Request could not be created.",
+      });
+    }
+  }
+
   async function saveSafetyAssessment(req, res) {
     try {
       const result =
@@ -751,6 +860,7 @@ function createEmergencyRequestHandlers({
     cancelRequest,
     completeWork,
     createDraft,
+    createFollowUpJobRequest,
     getRequest,
     listOwnedRequests,
     listAvailableProfessionals,
@@ -778,6 +888,7 @@ function registerEmergencyRequestRoutes({
   relationshipService = requestRelationshipService,
   selectionService = emergencySelectionService,
   dispatchService = emergencyDispatchService,
+  followUpJobRequestService = emergencyFollowUpJobRequestService,
 }) {
   if (!app) {
     throw new TypeError(
@@ -799,6 +910,7 @@ function registerEmergencyRequestRoutes({
     relationshipService,
     selectionService,
     dispatchService,
+    followUpJobRequestService,
   });
 
   app.get(
@@ -877,6 +989,12 @@ function registerEmergencyRequestRoutes({
     "/emergency-requests/:emergencyRequestId/complete",
     authMiddleware,
     handlers.completeWork
+  );
+
+  app.post(
+    "/emergency-requests/:emergencyRequestId/follow-up-job-request",
+    authMiddleware,
+    handlers.createFollowUpJobRequest
   );
 
   app.patch(

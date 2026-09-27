@@ -124,6 +124,7 @@ Current inventory:
 104. `202609190004_generalize_emergency_completion_invoice_history.sql`
 105. `202609210001_add_emergency_available_now_direct_select_authority.sql`
 106. `202609230001_link_quote_issuance_evaluation.sql`
+107. `202609270001_create_emergency_follow_up_job_request_authority.sql`
 
 Migration 84 adds private numbered-draft archive. Application is environment-specific and is recorded by each database migration ledger.
 
@@ -734,3 +735,22 @@ authority, and does not weaken the append-only Quote history model.
 This migration is discoverable by the governed generic staging migration
 runner. It is not added to any frozen dedicated production migration chain;
 production execution requires separately reviewed governance.
+
+### Emergency to Standard follow-up Job Request authority (107)
+
+`202609270001_create_emergency_follow_up_job_request_authority.sql` adds an
+immutable linkage from a completed Emergency Job to a distinct homeowner-owned
+ordinary Job Request.
+
+The completed Emergency remains an `emergency_request` Job and is never
+converted into ordinary work. The follow-up remains a normal `posts` Job
+Request and may later materialize its own `ordinary_request_selection` Job
+through the existing marketplace lifecycle.
+
+The linkage requires canonical Emergency completion, exact homeowner identity,
+a lifecycle-v2 ordinary Job Request, and its completed `job_request.create`
+command. The migration performs no backfill and creates no Quote, payment,
+scheduling, Work, Invoice, or assignment authority.
+
+This migration is discoverable by the governed generic staging migration
+runner. Production execution requires separately reviewed governance.

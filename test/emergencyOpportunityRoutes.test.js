@@ -338,7 +338,7 @@ test("existing authenticated Emergency homeowner routes remain registered", () =
     route.path.startsWith("/emergency-requests/")
   );
 
-  assert.equal(homeownerRoutes.length, 14);
+  assert.equal(homeownerRoutes.length, 15);
   assert.ok(
     homeownerRoutes.some(
       (route) =>

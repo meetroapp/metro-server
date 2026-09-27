@@ -251,6 +251,11 @@ test(
             "/emergency-requests/:emergencyRequestId/complete",
         },
         {
+          method: "POST",
+          path:
+            "/emergency-requests/:emergencyRequestId/follow-up-job-request",
+        },
+        {
           method: "PATCH",
           path:
             "/emergency-requests/:emergencyRequestId",

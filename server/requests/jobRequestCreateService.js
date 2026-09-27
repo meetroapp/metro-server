@@ -401,10 +401,26 @@ async function createJobRequest({
   payload = {},
   idempotencyKey: rawIdempotencyKey,
   env = process.env,
+  transactionClient = null,
+  transactionalAfterCreate = null,
 } = {}) {
   const actorUserId = normalizeActorId(authenticatedActor);
   if (!actorUserId) {
     return failure(401, "AUTHENTICATION_REQUIRED", "Authentication is required.");
+  }
+
+  if (
+    transactionClient !== null &&
+    (!transactionClient || typeof transactionClient.query !== "function")
+  ) {
+    throw new TypeError("transactionClient must be a database client.");
+  }
+
+  if (
+    transactionalAfterCreate !== null &&
+    typeof transactionalAfterCreate !== "function"
+  ) {
+    throw new TypeError("transactionalAfterCreate must be a function.");
   }
 
   const idempotencyValidation =
@@ -469,13 +485,16 @@ async function createJobRequest({
   });
 
   requirePool(pool);
-  const client =
-    typeof pool.connect === "function" ? await pool.connect() : pool;
+  const client = transactionClient ||
+    (typeof pool.connect === "function" ? await pool.connect() : pool);
+  const ownsTransaction = transactionClient === null;
   let transactionStarted = false;
 
   try {
-    await client.query("BEGIN");
-    transactionStarted = true;
+    if (ownsTransaction) {
+      await client.query("BEGIN");
+      transactionStarted = true;
+    }
 
     const requestServiceAuthority =
       await resolveRequestServiceAuthority({
@@ -483,8 +502,10 @@ async function createJobRequest({
         actorUserId,
       });
     if (!requestServiceAuthority.authorized) {
-      await client.query("ROLLBACK");
-      transactionStarted = false;
+      if (ownsTransaction) {
+        await client.query("ROLLBACK");
+        transactionStarted = false;
+      }
       return failure(
         403,
         "REQUEST_SERVICE_AUTHORITY_REQUIRED",
@@ -504,8 +525,10 @@ async function createJobRequest({
         });
 
       if (!existingCustomerTarget) {
-        await client.query("ROLLBACK");
-        transactionStarted = false;
+        if (ownsTransaction) {
+          await client.query("ROLLBACK");
+          transactionStarted = false;
+        }
 
         return failure(
           404,
@@ -518,8 +541,10 @@ async function createJobRequest({
         existingCustomerTarget.meetroRelationshipId !==
         request.source_meetro_relationship_id
       ) {
-        await client.query("ROLLBACK");
-        transactionStarted = false;
+        if (ownsTransaction) {
+          await client.query("ROLLBACK");
+          transactionStarted = false;
+        }
 
         return failure(
           409,
@@ -537,8 +562,10 @@ async function createJobRequest({
     });
 
     if (idempotency.error) {
-      await client.query("ROLLBACK");
-      transactionStarted = false;
+      if (ownsTransaction) {
+        await client.query("ROLLBACK");
+        transactionStarted = false;
+      }
       return idempotency.error;
     }
 
@@ -549,8 +576,10 @@ async function createJobRequest({
         actorUserId,
       });
       if (!existingPost) {
-        await client.query("ROLLBACK");
-        transactionStarted = false;
+        if (ownsTransaction) {
+          await client.query("ROLLBACK");
+          transactionStarted = false;
+        }
         return failure(
           500,
           "JOB_REQUEST_CREATE_INVARIANT_VIOLATION",
@@ -558,8 +587,21 @@ async function createJobRequest({
         );
       }
 
-      await client.query("COMMIT");
-      transactionStarted = false;
+      if (transactionalAfterCreate) {
+        await transactionalAfterCreate({
+          client,
+          actorUserId,
+          post: existingPost,
+          commandId: idempotency.reservation.id,
+          replayed: true,
+          requestPhotos: normalizedRequestPhotos,
+        });
+      }
+
+      if (ownsTransaction) {
+        await client.query("COMMIT");
+        transactionStarted = false;
+      }
       return {
         ok: true,
         status: 200,
@@ -626,8 +668,21 @@ async function createJobRequest({
       });
     }
 
-    await client.query("COMMIT");
-    transactionStarted = false;
+    if (transactionalAfterCreate) {
+      await transactionalAfterCreate({
+        client,
+        actorUserId,
+        post,
+        commandId: idempotency.reservation.id,
+        replayed: false,
+        requestPhotos: normalizedRequestPhotos,
+      });
+    }
+
+    if (ownsTransaction) {
+      await client.query("COMMIT");
+      transactionStarted = false;
+    }
 
     return {
       ok: true,
@@ -684,7 +739,11 @@ async function createJobRequest({
       { cleanupPhotos: normalizedRequestPhotos, cause: error }
     );
   } finally {
-    if (client !== pool && typeof client.release === "function") {
+    if (
+      ownsTransaction &&
+      client !== pool &&
+      typeof client.release === "function"
+    ) {
       client.release();
     }
   }
