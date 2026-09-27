@@ -137,7 +137,7 @@ test("105 is not added to the frozen production Emergency runner or inspector", 
   );
 });
 
-test("105 is registered as the governed repository latest migration", () => {
+test("105 remains registered in the governed repository migration inventory", () => {
   const readme = readFileSync(
     join(__dirname, "..", "migrations", "README.md"),
     "utf8"

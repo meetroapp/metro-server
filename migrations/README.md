@@ -123,6 +123,7 @@ Current inventory:
 103. `202609190003_generalize_emergency_pre_work_authority.sql`
 104. `202609190004_generalize_emergency_completion_invoice_history.sql`
 105. `202609210001_add_emergency_available_now_direct_select_authority.sql`
+106. `202609230001_link_quote_issuance_evaluation.sql`
 
 Migration 84 adds private numbered-draft archive. Application is environment-specific and is recorded by each database migration ledger.
 

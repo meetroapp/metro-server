@@ -46,7 +46,13 @@ const upgradeUrl =
   process.env.EMERGENCY_AVAILABLE_NOW_UPGRADE_DATABASE_URL;
 
 const migration105 =
-  getMigrationFiles().at(-1);
+  getMigrationFiles().find(
+    ({ filename }) =>
+      filename ===
+      "202609210001_add_emergency_available_now_direct_select_authority.sql"
+  );
+
+assert.ok(migration105);
 
 assert.equal(
   migration105.filename,

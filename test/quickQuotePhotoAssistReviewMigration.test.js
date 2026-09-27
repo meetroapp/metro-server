@@ -28,7 +28,7 @@ test(
     const migrations = getMigrationFiles();
 
   assert.equal((migrations[74]?.filename || migrations[74]), "202608310001_create_business_job_customer_message_authority.sql");
-  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202609210001_add_emergency_available_now_direct_select_authority.sql");
+  assert.equal((migrations.at(-1)?.filename || migrations.at(-1)), "202609230001_link_quote_issuance_evaluation.sql");
 
     const migrationIndex =
       migrations.findIndex(
