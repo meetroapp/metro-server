@@ -6,6 +6,7 @@ const {
 const {
   quoteDeliveryFingerprintMap,
 } = require("./quoteDeliveryAuthority");
+const { loadEmergencyLifecycleContext } = require("../emergency/emergencyCommercialContext");
 
 const {
   databaseClient,
@@ -156,6 +157,7 @@ async function loadCustomerJobContext(client, { actorId, jobId }) {
     `SELECT
       jobs.id AS job_id,
       jobs.lifecycle_contract_version,
+      jobs.source_type,
       jobs.job_request_id,
       jobs.source_request_relationship_id AS relationship_id,
       relationships.status AS relationship_status,
@@ -217,16 +219,61 @@ async function loadCustomerJobContext(client, { actorId, jobId }) {
       AND participants.request_relationship_id = relationships.id
       AND participants.user_id = $2
     WHERE jobs.id = $1
+      AND jobs.source_type IN ('ordinary_request_selection', 'existing_customer_request')
     LIMIT 1`,
     [jobId, actorId]
   );
-  return result.rows[0] || null;
+  if (result.rows[0]) return result.rows[0];
+  const emergency = await loadEmergencyLifecycleContext(client, jobId, actorId, {
+    audience: "customer",
+  });
+  if (!emergency) return null;
+  const grants = await client.query(
+    `SELECT EXISTS (
+      SELECT 1 FROM lifecycle_authority_grants grants
+      LEFT JOIN lifecycle_authority_grant_revocations revocations
+        ON revocations.authority_grant_id = grants.id
+      WHERE grants.grantee_participant_id = $1
+        AND grants.capability = 'quote.read_customer'
+        AND grants.job_id = $2
+        AND grants.scope_type = 'job'
+        AND grants.scope_job_id = $2
+        AND grants.scope_concern_id IS NULL
+        AND grants.valid_from <= CURRENT_TIMESTAMP
+        AND (grants.valid_until IS NULL OR grants.valid_until > CURRENT_TIMESTAMP)
+        AND revocations.id IS NULL
+    ) AS can_read_customer_quotes`,
+    [emergency.customer_participant_id, jobId]
+  );
+  return {
+    ...emergency,
+    actor_participant_id: emergency.customer_participant_id,
+    actor_is_customer_representative: emergency.customer_role_active,
+    can_read_customer_quotes: grants.rows[0]?.can_read_customer_quotes === true,
+    issuer_name: emergency.business_name,
+  };
 }
 
-function customerContextUnavailable(context) {
+function customerContextUnavailable(context, { actorId, jobId }) {
   return Boolean(
     !context ||
+    context.job_id !== jobId ||
     Number(context.lifecycle_contract_version) !== 2 ||
+    !(
+      ((context.source_type === "ordinary_request_selection" ||
+        context.source_type === "existing_customer_request") &&
+        Number.isSafeInteger(Number(context.job_request_id)) &&
+        Number(context.job_request_id) > 0) ||
+      (context.source_type === "emergency_request" &&
+        context.job_request_id === null &&
+        Number.isSafeInteger(Number(context.emergency_request_id)) &&
+        Number(context.emergency_request_id) > 0 &&
+        Number(context.homeowner_id) === actorId &&
+        Number.isSafeInteger(Number(context.relationship_id)) &&
+        Number(context.relationship_id) > 0 &&
+        context.customer_participant_id === context.actor_participant_id &&
+        context.conversation_id && context.professional_participant_id)
+    ) ||
     context.relationship_status !== "active" ||
     !context.actor_participant_id ||
     context.actor_is_customer_representative !== true ||
@@ -244,8 +291,56 @@ async function loadCustomerQuotePage(
     relationshipId,
     participantId,
     deliveryFingerprints,
+    sourceType,
+    emergencyRequestId,
+    professionalParticipantId,
+    conversationId,
+    professionalUserId,
   }
 ) {
+  const emergency = sourceType === "emergency_request";
+  const sourceJoins = emergency ? `
+    INNER JOIN jobs
+      ON jobs.id = quotes.job_id
+      AND jobs.source_type = 'emergency_request'
+      AND jobs.lifecycle_contract_version = 2
+      AND jobs.job_request_id IS NULL
+      AND jobs.source_emergency_request_id = $10
+      AND jobs.source_request_relationship_id = quotes.relationship_id
+    INNER JOIN request_relationships relationships
+      ON relationships.id = quotes.relationship_id
+      AND relationships.id = $3
+      AND relationships.emergency_request_id = $10
+      AND relationships.post_id IS NULL
+      AND relationships.status = 'active'
+      AND relationships.homeowner_id = $2
+      AND relationships.professional_user_id = $13` : `
+    INNER JOIN jobs
+      ON jobs.id = quotes.job_id
+      AND jobs.job_request_id = quotes.job_request_id
+      AND jobs.source_request_relationship_id = quotes.relationship_id
+      AND jobs.lifecycle_contract_version = 2
+    INNER JOIN request_relationships relationships
+      ON relationships.id = quotes.relationship_id
+      AND relationships.id = $3
+      AND relationships.post_id = quotes.job_request_id
+      AND relationships.emergency_request_id IS NULL
+      AND relationships.status = 'active'`;
+  const sourcePredicate = emergency ? `
+      AND quotes.source_context_type = 'emergency_request'
+      AND quotes.job_source_type = 'emergency_request'
+      AND quotes.job_request_id IS NULL
+      AND quotes.emergency_request_id = $10
+      AND quotes.business_customer_job_source_id IS NULL
+      AND quotes.issuer_participant_id = $11
+      AND aggregates.source_context_type = 'emergency_request'
+      AND aggregates.ordinary_request_id IS NULL
+      AND aggregates.emergency_request_id = $10
+      AND aggregates.relationship_id = $3
+      AND aggregates.business_customer_job_source_id IS NULL
+      AND issuances.issuer_participant_id = $11
+      AND issuances.source_snapshot_integrity_hash = versions.integrity_hash` : '';
+  const conversationPredicate = emergency ? '\n          AND delivery_conversations.id = $12' : '';
   const result = await client.query(
     `SELECT
       quotes.id,
@@ -318,17 +413,7 @@ async function loadCustomerQuotePage(
       ON issuances.quote_id = quotes.id
       AND issuances.job_id = quotes.job_id
       AND issuances.quote_version = aggregates.current_version
-    INNER JOIN jobs
-      ON jobs.id = quotes.job_id
-      AND jobs.job_request_id = quotes.job_request_id
-      AND jobs.source_request_relationship_id = quotes.relationship_id
-      AND jobs.lifecycle_contract_version = 2
-    INNER JOIN request_relationships relationships
-      ON relationships.id = quotes.relationship_id
-      AND relationships.id = $3
-      AND relationships.post_id = quotes.job_request_id
-      AND relationships.emergency_request_id IS NULL
-      AND relationships.status = 'active'
+    ${sourceJoins}
     INNER JOIN relationship_participants customer
       ON customer.id = $4
       AND customer.job_id = quotes.job_id
@@ -340,6 +425,7 @@ async function loadCustomerQuotePage(
       AND decisions.relationship_id = quotes.relationship_id
       AND decisions.issued_quote_version = aggregates.current_version
     WHERE quotes.job_id = $1
+      ${sourcePredicate}
       AND quotes.status = 'ISSUED'
       AND quotes.issued_at IS NOT NULL
       AND EXISTS (
@@ -362,7 +448,7 @@ async function loadCustomerQuotePage(
           AND delivery_conversations.relationship_id = quotes.relationship_id
           AND delivery_conversations.homeowner_id = $2
           AND delivery_conversations.professional_user_id = relationships.professional_user_id
-          AND delivery_conversations.status = 'active'
+          AND delivery_conversations.status = 'active'${conversationPredicate}
         WHERE deliveries.quote_id = quotes.id
           AND deliveries.job_id = quotes.job_id
           AND deliveries.sender_id = relationships.professional_user_id
@@ -440,6 +526,7 @@ async function loadCustomerQuotePage(
       cursor?.quoteId ?? null,
       limit + 1,
       JSON.stringify(deliveryFingerprints),
+      ...(emergency ? [emergencyRequestId, professionalParticipantId, conversationId, professionalUserId] : []),
     ]
   );
   return result.rows;
@@ -465,8 +552,25 @@ async function loadIssuedQuoteDeliveryFingerprints(client, context) {
      WHERE quotes.job_id = $1
        AND quotes.relationship_id = $2
        AND quotes.status = 'ISSUED'
-       AND quotes.issued_at IS NOT NULL`,
-    [context.job_id, Number(context.relationship_id)]
+       AND quotes.issued_at IS NOT NULL
+       ${context.source_type === "emergency_request" ? `
+       AND quotes.source_context_type = 'emergency_request'
+       AND quotes.job_source_type = 'emergency_request'
+       AND quotes.job_request_id IS NULL
+       AND quotes.emergency_request_id = $3
+       AND quotes.business_customer_job_source_id IS NULL
+       AND quotes.issuer_participant_id = $4
+       AND aggregates.source_context_type = 'emergency_request'
+       AND aggregates.ordinary_request_id IS NULL
+       AND aggregates.emergency_request_id = $3
+       AND aggregates.relationship_id = $2
+       AND aggregates.business_customer_job_source_id IS NULL
+       AND issuances.issuer_participant_id = $4
+       AND issuances.source_snapshot_integrity_hash = versions.integrity_hash` : ''}`,
+    [context.job_id, Number(context.relationship_id),
+      ...(context.source_type === "emergency_request" ? [
+        Number(context.emergency_request_id), context.professional_participant_id,
+      ] : [])]
   );
   return quoteDeliveryFingerprintMap(result.rows, Number(context.professional_user_id));
 }
@@ -505,7 +609,7 @@ async function getCustomerJobQuotes(input = {}) {
   if (validated.error) return validated.error;
   return runReadTransaction(input.pool, async (client) => {
     const context = await loadCustomerJobContext(client, validated);
-    if (customerContextUnavailable(context)) {
+    if (customerContextUnavailable(context, validated)) {
       return failure(
         404,
         "CUSTOMER_JOB_QUOTES_UNAVAILABLE",
@@ -518,6 +622,11 @@ async function getCustomerJobQuotes(input = {}) {
       relationshipId: Number(context.relationship_id),
       participantId: context.actor_participant_id,
       deliveryFingerprints,
+      sourceType: context.source_type,
+      emergencyRequestId: context.emergency_request_id,
+      professionalParticipantId: context.professional_participant_id,
+      conversationId: context.conversation_id,
+      professionalUserId: context.professional_user_id,
     });
     const hasMore = rows.length > validated.limit;
     const pageRows = hasMore ? rows.slice(0, validated.limit) : rows;
@@ -529,7 +638,8 @@ async function getCustomerJobQuotes(input = {}) {
       code: "CUSTOMER_JOB_QUOTES_LOADED",
       job: {
         id: context.job_id,
-        requestId: Number(context.job_request_id),
+        sourceType: context.source_type,
+        requestId: context.job_request_id === null ? null : Number(context.job_request_id),
         title: String(context.job_title || "").trim() ||
           String(context.job_service || "").trim() || "Job",
         service: String(context.job_service || "").trim() || null,

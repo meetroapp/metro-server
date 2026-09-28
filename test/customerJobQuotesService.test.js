@@ -22,6 +22,7 @@ function context(overrides = {}) {
   return {
     job_id: IDS.job,
     lifecycle_contract_version: 2,
+    source_type: "ordinary_request_selection",
     job_request_id: 16,
     relationship_id: 21,
     relationship_status: "active",
@@ -112,6 +113,7 @@ function poolWith({ jobContext = context(), rows = orderedQuotes() } = {}) {
       if (text.includes("SELECT\n      jobs.id AS job_id")) {
         return { rows: jobContext ? [jobContext] : [] };
       }
+      if (text.includes("emergency.title AS job_title")) return { rows: [] };
       if (text.includes("SELECT\n      quotes.id")) {
         const [, actorId, relationshipId, participantId, priority, activityAt, quoteId, queryLimit, deliveryFingerprints] = params;
         assert.equal(actorId, 77);
@@ -145,6 +147,7 @@ test("customer discovery returns only exact issued Job Quotes with independent l
   assert.equal(result.code, "CUSTOMER_JOB_QUOTES_LOADED");
   assert.deepEqual(result.job, {
     id: IDS.job,
+    sourceType: "ordinary_request_selection",
     requestId: 16,
     title: "Synthetic sink repair",
     service: "Handyman",
