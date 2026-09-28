@@ -1859,6 +1859,107 @@ async function listProfessionalJobHistory(input = {}) {
   );
 }
 
+async function listCustomerJobHistory(input = {}) {
+  const allowed = new Set([
+    "pool",
+    "authenticatedActor",
+    "limit",
+    "cursor",
+  ]);
+
+  if (
+    !isPlainObject(input) ||
+    Object.keys(input).some((key) => !allowed.has(key))
+  ) {
+    return failure(
+      400,
+      "JOB_HISTORY_FIELD_REJECTED",
+      "The Job History request is invalid."
+    );
+  }
+
+  const actor = validateAuthenticatedActor(input.authenticatedActor);
+  if (actor.error) return actor.error;
+
+  const limit = historyLimit(input.limit);
+  const cursor = decodeCursor(input.cursor);
+  if (!limit || !cursor) {
+    return failure(
+      400,
+      "INVALID_JOB_HISTORY_PAGE",
+      "The Job History page is invalid."
+    );
+  }
+
+  if (!input.pool || typeof input.pool.query !== "function") {
+    throw new TypeError("A database pool is required.");
+  }
+
+  return runRead(input.pool, async (client) => {
+    const result = await client.query(
+      `
+      WITH history AS (
+        ${HISTORY_BASE_SQL}
+        WHERE relationships.homeowner_id = $1
+
+        UNION ALL
+
+        ${EMERGENCY_HISTORY_SQL}
+        AND emergency_history.homeowner_id = $1
+      ),
+      counted AS (
+        SELECT history.*, count(*) OVER()::integer AS total_count
+        FROM history
+      )
+      SELECT *
+      FROM counted
+      WHERE (
+        $2::timestamptz IS NULL
+        OR (completed_at, job_id) < ($2::timestamptz, $3::uuid)
+      )
+      ORDER BY completed_at DESC, job_id DESC
+      LIMIT $4
+      `,
+      [
+        actor.id,
+        cursor.completedAt,
+        cursor.jobId,
+        limit + 1,
+      ]
+    );
+
+    const hasMore = result.rows.length > limit;
+    const pageRows = result.rows.slice(0, limit);
+
+    for (const row of pageRows) {
+      if (row.source_type !== "emergency_request") continue;
+      const emergency = await enrichEmergencyHistory(
+        client,
+        row,
+        actor.id,
+        "customer"
+      );
+      if (emergency) Object.assign(row, emergency);
+    }
+
+    return {
+      ok: true,
+      success: true,
+      status: 200,
+      code: "CUSTOMER_JOB_HISTORY_FOUND",
+      jobHistory: {
+        contractVersion: 1,
+        totalCount: Number(result.rows[0]?.total_count || 0),
+        jobs: pageRows.map(historySummary),
+        pagination: {
+          limit,
+          nextCursor: hasMore ? encodeCursor(pageRows.at(-1)) : null,
+        },
+      },
+    };
+  });
+}
+
 async function getHistoryDetail(input = {}, audience) {
   const allowed = new Set([
     "pool",
@@ -2150,6 +2251,7 @@ module.exports = {
   completeJob,
   decodeCursor,
   getCustomerJobHistory,
+  listCustomerJobHistory,
   getJobCompletionReview,
   getProfessionalJobHistory,
   historySummary,

@@ -107,9 +107,31 @@ const EMERGENCY_AUTHORIZED_JOBS_SQL = `
   WHERE emergency_jobs.professional_user_id = $1
     AND emergency_jobs.primary_role_active = TRUE
     AND emergency_jobs.customer_role_active = TRUE
-    AND emergency_jobs.completion_id IS NULL
-    AND emergency_jobs.emergency_status IN (
-      'assigned', 'professional_en_route', 'professional_arrived', 'work_in_progress'
+    AND (
+      (
+        emergency_jobs.completion_id IS NULL
+        AND emergency_jobs.emergency_status IN (
+          'assigned', 'professional_en_route', 'professional_arrived', 'work_in_progress'
+        )
+      )
+      OR (
+        emergency_jobs.completion_id IS NOT NULL
+        AND emergency_jobs.emergency_status = 'completed'
+        AND NOT EXISTS (
+          SELECT 1
+          FROM canonical_invoices invoices
+          JOIN LATERAL (
+            SELECT versions.status
+            FROM canonical_invoice_versions versions
+            WHERE versions.invoice_id = invoices.id
+              AND versions.job_id = invoices.job_id
+            ORDER BY versions.version DESC
+            LIMIT 1
+          ) current_invoice ON TRUE
+          WHERE invoices.job_id = emergency_jobs.job_id
+            AND current_invoice.status = 'PAID'
+        )
+      )
     )
     AND NOT EXISTS (
       SELECT 1 FROM unnest($2::text[]) AS required(capability)

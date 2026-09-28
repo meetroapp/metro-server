@@ -66,6 +66,13 @@ function createJobCompletionHandlers({
         authenticatedActor: req.user,
         jobId: req.params.jobId,
       })),
+    listCustomerHistory: handle("list_customer_job_history", "jobHistory", (req) =>
+      completionService.listCustomerJobHistory({
+        pool: getPool(req),
+        authenticatedActor: req.user,
+        limit: req.query?.limit,
+        cursor: req.query?.cursor,
+      })),
     getCustomerHistory: handle("get_customer_job_history", "jobHistory", (req) =>
       completionService.getCustomerJobHistory({
         pool: getPool(req),
@@ -99,6 +106,7 @@ function registerJobCompletionRoutes({
     authMiddleware,
     handlers.getProfessionalHistory
   );
+  app.get("/customer/jobs/history", authMiddleware, handlers.listCustomerHistory);
   app.get(
     "/customer/jobs/:jobId/history",
     authMiddleware,

@@ -29,10 +29,49 @@ test("Job completion registers bounded authenticated completion and history rout
     "GET /professional/jobs/:jobId/completion-review",
     "POST /professional/jobs/:jobId/complete",
     "GET /professional/jobs/:jobId/history",
+    "GET /customer/jobs/history",
     "GET /customer/jobs/:jobId/history",
   ]);
   assert.equal(routes.every((route) => route[2] === auth), true);
 });
+test("Customer Job History list handler forwards only authenticated paging fields", async () => {
+  let input;
+  const handlers = createJobCompletionHandlers({
+    getPool: () => "pool",
+    sendPublicDatabaseError() {},
+    completionService: {
+      async listCustomerJobHistory(value) {
+        input = value;
+        return {
+          ok: true,
+          status: 200,
+          code: "CUSTOMER_JOB_HISTORY_FOUND",
+          jobHistory: {
+            contractVersion: 1,
+            totalCount: 0,
+            jobs: [],
+            pagination: { limit: 20, nextCursor: null },
+          },
+        };
+      },
+    },
+  });
+  const res = response();
+  await handlers.listCustomerHistory({
+    user: { id: 9 },
+    query: { limit: "20", cursor: "cursor-1", jobId: "ignored" },
+    body: { paid: true },
+  }, res);
+  assert.deepEqual(input, {
+    pool: "pool",
+    authenticatedActor: { id: 9 },
+    limit: "20",
+    cursor: "cursor-1",
+  });
+  assert.equal(res.headers["Cache-Control"], "private, no-store");
+  assert.equal(res.body.code, "CUSTOMER_JOB_HISTORY_FOUND");
+});
+
 test("Complete Job handler forwards only authenticated route and command fields", async () => {
   let input;
   const handlers = createJobCompletionHandlers({
