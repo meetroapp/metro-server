@@ -3656,6 +3656,263 @@ function emergencyWorkingContentMatchesDraft(conversion, quote) {
     fingerprint(quote.customerTermsSnapshot || null) === fingerprint(conversion.customerTermsSnapshot || null);
 }
 
+function emergencyLegacyEmptyTermsAreExact(value) {
+  const normalized = normalizeCustomerTermsSnapshot(value);
+
+  if (normalized.error || !normalized.snapshot) {
+    return false;
+  }
+
+  const terms = normalized.snapshot;
+  const agreement = terms.agreement || {};
+
+  return (
+    terms.paymentTerms === "Balance due on completion" &&
+    terms.estimatedDuration === "" &&
+    terms.customerNotes === "" &&
+    Array.isArray(agreement.exclusions) &&
+    agreement.exclusions.length === 0 &&
+    [
+      "additionalWorkTerms",
+      "hiddenConditionsTerms",
+      "diagnosticTerms",
+      "customerResponsibilities",
+      "warrantyTerms",
+      "cancellationTerms",
+      "acceptanceTerms",
+      "preauthorizedAdditionalWorkLimit",
+    ].every((key) => agreement[key] === "")
+  );
+}
+
+function emergencyLegacyEmptyDraftShell(quote, expectedVersion) {
+  const version = positiveInteger(expectedVersion);
+
+  if (
+    !quote ||
+    version !== 1 ||
+    quote.status !== QUOTE_STATUS.DRAFT ||
+    positiveInteger(quote.currentVersion) !== version ||
+    quote.issuedAt != null ||
+    quote.parentQuoteId != null ||
+    quote.lineageType != null ||
+    quote.lineageReasonCategory != null ||
+    quote.decisionState != null ||
+    quote.decisionVersion != null ||
+    quote.decidedAt != null ||
+    quote.approval != null ||
+    quote.documentNumber != null ||
+    quote.sourceBusinessDocument != null ||
+    quote.customerParty != null ||
+    quote.customerSnapshot != null ||
+    quote.integrityVersion !== QUOTE_INTEGRITY_VERSION_V2 ||
+    Number(quote.materialsSubtotalMinor) !== 0 ||
+    Number(quote.laborServiceSubtotalMinor) !== 0 ||
+    Number(quote.totalMinor) !== 0 ||
+    Number(quote.scopeItemCount) !== 0 ||
+    !Array.isArray(quote.conditions) ||
+    quote.conditions.length !== 0 ||
+    !Array.isArray(quote.exclusions) ||
+    quote.exclusions.length !== 0 ||
+    !Array.isArray(quote.scopeItems) ||
+    quote.scopeItems.length !== 0 ||
+    !emergencyLegacyEmptyTermsAreExact(
+      quote.customerTermsSnapshot
+    ) ||
+    !Array.isArray(quote.versions) ||
+    quote.versions.length !== 1
+  ) {
+    return false;
+  }
+
+  const current = quote.versions[0];
+
+  return Boolean(
+    current &&
+    positiveInteger(current.version) === 1 &&
+    current.status === QUOTE_STATUS.DRAFT &&
+    current.currency === quote.currency &&
+    current.issuedAt == null &&
+    current.integrityVersion === QUOTE_INTEGRITY_VERSION_V2 &&
+    Number(current.materialsSubtotalMinor) === 0 &&
+    Number(current.laborServiceSubtotalMinor) === 0 &&
+    Number(current.totalMinor) === 0 &&
+    Number(current.scopeItemCount) === 0 &&
+    Array.isArray(current.conditions) &&
+    current.conditions.length === 0 &&
+    Array.isArray(current.exclusions) &&
+    current.exclusions.length === 0 &&
+    emergencyLegacyEmptyTermsAreExact(
+      current.customerTermsSnapshot
+    ) &&
+    fingerprint(current.customerTermsSnapshot) ===
+      fingerprint(quote.customerTermsSnapshot)
+  );
+}
+
+async function promoteEmergencyLegacyEmptyDraft({
+  client,
+  quote,
+  conversion,
+  jobId,
+  actorParticipantId,
+}) {
+  const quoteId = normalizedUuid(quote?.id);
+  const normalizedJobId = normalizedUuid(jobId);
+  const participantId = normalizedUuid(actorParticipantId);
+  const previousVersion = positiveInteger(quote?.currentVersion);
+
+  if (
+    !quoteId ||
+    !normalizedJobId ||
+    !participantId ||
+    previousVersion !== 1 ||
+    quote?.status !== QUOTE_STATUS.DRAFT ||
+    quote.currency !== conversion?.currency ||
+    !Array.isArray(conversion?.items) ||
+    conversion.items.length < 1 ||
+    !Number.isSafeInteger(conversion?.totals?.totalMinor) ||
+    conversion.totals.totalMinor <= 0 ||
+    !conversion.items.some(
+      (item) => item.includedInTotal === true
+    )
+  ) {
+    return {
+      error: failure(
+        409,
+        "EMERGENCY_WORKING_QUOTE_CONTENT_CONFLICT",
+        "The saved working Quote cannot replace this Emergency Draft."
+      ),
+    };
+  }
+
+  const nextVersion = previousVersion + 1;
+
+  const aggregate = await client.query(
+    `UPDATE commercial_authority_aggregates
+     SET current_version = $2,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE id = $1
+       AND current_version = $3
+       AND aggregate_type = 'quote'
+       AND owning_engine = $4
+     RETURNING id`,
+    [
+      quoteId,
+      nextVersion,
+      previousVersion,
+      OWNING_ENGINE,
+    ]
+  );
+
+  if (!aggregate.rows[0]) {
+    return {
+      error: failure(
+        409,
+        "STALE_QUOTE_VERSION",
+        "The Emergency Draft version changed before it could be updated."
+      ),
+    };
+  }
+
+  const quoteUpdate = await client.query(
+    `UPDATE canonical_quotes
+     SET updated_at = CURRENT_TIMESTAMP
+     WHERE id = $1
+       AND status = 'DRAFT'
+       AND issued_at IS NULL
+       AND currency = $2
+     RETURNING id`,
+    [quoteId, conversion.currency]
+  );
+
+  if (!quoteUpdate.rows[0]) {
+    return {
+      error: failure(
+        409,
+        "EMERGENCY_WORKING_QUOTE_CONTENT_CONFLICT",
+        "The Emergency Draft is no longer eligible for working Quote promotion."
+      ),
+    };
+  }
+
+  const snapshots = conversion.items.map(
+    (item, index) => ({
+      scopeItemId: randomUUID(),
+      scopeItemRevision: 1,
+      sequence: index + 1,
+      ...item,
+      createdAt: null,
+    })
+  );
+
+  for (const snapshot of snapshots) {
+    await client.query(
+      `INSERT INTO canonical_quote_scope_items
+        (id, quote_id, job_id, created_by_participant_id)
+       VALUES ($1, $2, $3, $4)`,
+      [
+        snapshot.scopeItemId,
+        quoteId,
+        normalizedJobId,
+        participantId,
+      ]
+    );
+  }
+
+  const version = await insertQuoteVersion({
+    client,
+    quoteId,
+    version: nextVersion,
+    jobId: normalizedJobId,
+    currency: conversion.currency,
+    actorParticipantId: participantId,
+    snapshots,
+    customerTermsSnapshot:
+      conversion.customerTermsSnapshot,
+  });
+
+  if (version.error || !version.row) {
+    return {
+      error:
+        version.error ||
+        failure(
+          409,
+          "EMERGENCY_WORKING_QUOTE_CONTENT_CONFLICT",
+          "The Emergency Draft could not be populated from the saved working Quote."
+        ),
+    };
+  }
+
+  if (
+    version.totals.totalMinor !==
+    conversion.totals.totalMinor
+  ) {
+    throw new Error(
+      "Emergency working Quote promotion total invariant failed."
+    );
+  }
+
+  for (const snapshot of snapshots) {
+    await insertSnapshot(
+      client,
+      quoteId,
+      nextVersion,
+      normalizedJobId,
+      participantId,
+      snapshot
+    );
+  }
+
+  return {
+    quoteId,
+    previousVersion,
+    nextVersion,
+    snapshots,
+    version,
+  };
+}
+
 function workingQuoteReviewSafety(rawContent) {
   const conversion = workingQuoteConversion(rawContent);
   const blockingErrors = [];
@@ -4235,18 +4492,72 @@ async function importBusinessDocumentDraftQuote(input = {}) {
     }
 
     if (emergencyOrigin && emergencyDraft) {
-      const existingQuote = await loadQuoteProjection(client, emergencyDraft.id);
-      if (!emergencyWorkingContentMatchesDraft(conversion, existingQuote)) {
-        return { abort: failure(409, "EMERGENCY_WORKING_QUOTE_CONTENT_CONFLICT", "The saved working Quote differs from the existing Emergency Draft.") };
+      const existingQuote =
+        await loadQuoteProjection(client, emergencyDraft.id);
+
+      const contentMatches =
+        emergencyWorkingContentMatchesDraft(
+          conversion,
+          existingQuote
+        );
+
+      const promoteEmptyShell =
+        !contentMatches &&
+        emergencyLegacyEmptyDraftShell(
+          existingQuote,
+          expectedCanonicalQuoteVersion
+        ) &&
+        existingQuote.currency === conversion.currency &&
+        Number.isSafeInteger(conversion.totals.totalMinor) &&
+        conversion.totals.totalMinor > 0 &&
+        conversion.items.some(
+          (item) => item.includedInTotal === true
+        );
+
+      if (!contentMatches && !promoteEmptyShell) {
+        return {
+          abort: failure(
+            409,
+            "EMERGENCY_WORKING_QUOTE_CONTENT_CONFLICT",
+            "The saved working Quote differs from the existing Emergency Draft."
+          ),
+        };
       }
+
       const priorSource = await client.query(
         `SELECT source_document_id FROM canonical_quote_business_document_sources
          WHERE quote_id = $1 OR source_document_id = $2 FOR UPDATE`,
         [emergencyDraft.id, draftId]
       );
+
       if (priorSource.rows.length) {
-        return { abort: failure(409, "EMERGENCY_WORKING_QUOTE_MAPPING_CONFLICT", "The Emergency Draft is already bound to a working Quote.") };
+        return {
+          abort: failure(
+            409,
+            "EMERGENCY_WORKING_QUOTE_MAPPING_CONFLICT",
+            "The Emergency Draft is already bound to a working Quote."
+          ),
+        };
       }
+
+      let promotion = null;
+
+      if (promoteEmptyShell) {
+        promotion =
+          await promoteEmergencyLegacyEmptyDraft({
+            client,
+            quote: existingQuote,
+            conversion,
+            jobId,
+            actorParticipantId:
+              context.actor_participant_id,
+          });
+
+        if (promotion.error) {
+          return { abort: promotion.error };
+        }
+      }
+
       const provenance = await client.query(
         `INSERT INTO canonical_quote_business_document_sources (
           quote_id, job_id, contractor_profile_id, source_document_id,
@@ -4254,17 +4565,104 @@ async function importBusinessDocumentDraftQuote(input = {}) {
           source_snapshot_integrity_hash, created_by_user_id
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         RETURNING quote_id`,
-        [emergencyDraft.id, jobId, Number(source.contractor_profile_id),
-          draftId, expectedDocumentVersion, source.document_number,
-          sourceHash, validated.actorId]
+        [
+          emergencyDraft.id,
+          jobId,
+          Number(source.contractor_profile_id),
+          draftId,
+          expectedDocumentVersion,
+          source.document_number,
+          sourceHash,
+          validated.actorId,
+        ]
       );
-      if (!provenance.rows[0]) throw new Error("Emergency working Quote binding failed.");
-      const result = quoteResult("EMERGENCY_WORKING_QUOTE_ADOPTED", 200,
-        await loadQuoteProjection(client, emergencyDraft.id));
-      if (!(await completeIdempotency(client, idempotency.reservation.id, emergencyDraft.id, result))) {
-        throw new Error("Emergency working Quote idempotency completion failed.");
+
+      if (!provenance.rows[0]) {
+        throw new Error(
+          "Emergency working Quote binding failed."
+        );
       }
-      return { result };
+
+      if (promotion) {
+        const evidence = await insertQuoteEvidence({
+          client,
+          quoteId: emergencyDraft.id,
+          relationshipId:
+            positiveInteger(context.relationship_id),
+          actorUserId: validated.actorId,
+          idempotencyId:
+            idempotency.reservation.id,
+          evidenceType:
+            QUOTE_EVIDENCE_TYPES.SCOPE_ADDED,
+          commandName:
+            QUOTE_COMMANDS.IMPORT_BUSINESS_DOCUMENT,
+          previousVersion:
+            promotion.previousVersion,
+          resultingVersion:
+            promotion.nextVersion,
+          totals:
+            promotion.version.totals,
+          scopeItemCount:
+            promotion.snapshots.length,
+        });
+
+        if (!evidence) {
+          throw new Error(
+            "Emergency working Quote promotion evidence creation failed."
+          );
+        }
+
+        await invokeFailure(
+          input.failureInjector,
+          "after_write"
+        );
+      }
+
+      const result = quoteResult(
+        "EMERGENCY_WORKING_QUOTE_ADOPTED",
+        200,
+        await loadQuoteProjection(
+          client,
+          emergencyDraft.id
+        )
+      );
+
+      if (!(
+        await completeIdempotency(
+          client,
+          idempotency.reservation.id,
+          emergencyDraft.id,
+          result
+        )
+      )) {
+        throw new Error(
+          "Emergency working Quote idempotency completion failed."
+        );
+      }
+
+      return {
+        result,
+        ...(promotion
+          ? {
+              afterCommit: () =>
+                logger.info(
+                  "Emergency empty Draft shell promoted from saved working Quote",
+                  {
+                    code:
+                      "EMERGENCY_WORKING_QUOTE_ADOPTED",
+                    quoteId:
+                      emergencyDraft.id,
+                    draftId,
+                    jobId,
+                    previousVersion:
+                      promotion.previousVersion,
+                    resultingVersion:
+                      promotion.nextVersion,
+                  }
+                ),
+            }
+          : {}),
+      };
     }
 
     const existing = await client.query(
@@ -6616,6 +7014,8 @@ module.exports = {
     loadEmergencyQuoteCandidates,
     resolveEmergencyQuoteCandidates,
     emergencyWorkingContentMatchesDraft,
+    emergencyLegacyEmptyDraftShell,
+    promoteEmergencyLegacyEmptyDraft,
     loadQuoteContext,
     loadQuoteProjection,
     loadQualifyingCustomerQuoteDelivery,
