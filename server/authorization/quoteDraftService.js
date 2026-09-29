@@ -3381,6 +3381,7 @@ async function loadBusinessDocumentQuoteReviewIdentity(
     `/* quote_business_document:load_review_identity */
      SELECT drafts.id AS document_id,
        drafts.version AS document_version,
+       drafts.content AS document_content,
        drafts.job_id,
        drafts.contractor_profile_id,
        jobs.job_request_id,
@@ -3655,6 +3656,65 @@ function emergencyWorkingContentMatchesDraft(conversion, quote) {
     fingerprint(quote.customerTermsSnapshot || null) === fingerprint(conversion.customerTermsSnapshot || null);
 }
 
+function workingQuoteReviewSafety(rawContent) {
+  const conversion = workingQuoteConversion(rawContent);
+  const blockingErrors = [];
+  const warnings = [];
+
+  if (conversion.error) {
+    const errorCode = String(conversion.error || "");
+
+    const field = errorCode.includes("DEPOSIT")
+      ? "deposit"
+      : /SCOPE|ROW/.test(errorCode)
+        ? "scope"
+        : "amount";
+
+    blockingErrors.push(Object.freeze({
+      code: "QUOTE_SAVED_CONTENT_INVALID",
+      field,
+      message:
+        field === "deposit"
+          ? "Correct the saved Quote deposit terms before sending."
+          : field === "scope"
+            ? "Correct the saved Quote scope before sending."
+            : "Correct the saved Quote amount or pricing before sending.",
+    }));
+  } else {
+    const totalMinor = conversion?.totals?.totalMinor;
+
+    if (
+      !Number.isSafeInteger(totalMinor) ||
+      totalMinor <= 0
+    ) {
+      blockingErrors.push(Object.freeze({
+        code: "QUOTE_TOTAL_REQUIRED",
+        field: "amount",
+        message: "Enter a Quote total greater than $0 before sending.",
+      }));
+    }
+
+    const paymentTerms = String(
+      conversion?.customerTermsSnapshot?.paymentTerms || ""
+    ).trim();
+
+    if (!paymentTerms) {
+      warnings.push(Object.freeze({
+        code: "QUOTE_PAYMENT_TERMS_MISSING",
+        field: "terms",
+        message:
+          "Add payment terms so the customer knows when payment is expected.",
+      }));
+    }
+  }
+
+  return Object.freeze({
+    ready: blockingErrors.length === 0,
+    blockingErrors: Object.freeze(blockingErrors),
+    warnings: Object.freeze(warnings),
+  });
+}
+
 function businessDocumentQuoteReviewProjection(row, emergency = null) {
   const customerName = boundedText(row?.customer_name, 200);
   const projectTitle = boundedText(row?.project_title, 500);
@@ -3841,6 +3901,7 @@ async function getBusinessDocumentDraftQuoteReview(input = {}) {
       status: 200,
       code: "BUSINESS_DOCUMENT_QUOTE_REVIEW_LOADED",
       review,
+      quoteSafety: workingQuoteReviewSafety(row.document_content),
     };
   } catch (error) {
     if (started) await rollback(client);
@@ -6550,6 +6611,7 @@ module.exports = {
     insertCanonicalQuoteApprovalFromCustomerDecision,
     buildWorkingQuoteTerms,
     businessDocumentQuoteReviewProjection,
+    workingQuoteReviewSafety,
     requireEmergencyWorkingContext,
     loadEmergencyQuoteCandidates,
     resolveEmergencyQuoteCandidates,
