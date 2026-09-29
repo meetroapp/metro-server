@@ -1,6 +1,9 @@
 "use strict";
 
-const { loadEmergencyCustomerQuoteContext } = require("../emergency/emergencyCommercialContext");
+const {
+  loadEmergencyCustomerQuoteContext,
+  loadEmergencyProfessionalContext,
+} = require("../emergency/emergencyCommercialContext");
 
 const { createHash, randomUUID } = require("node:crypto");
 
@@ -3379,12 +3382,16 @@ async function loadBusinessDocumentQuoteReviewIdentity(
      SELECT drafts.id AS document_id,
        drafts.version AS document_version,
        drafts.job_id,
+       drafts.contractor_profile_id,
        jobs.job_request_id,
        jobs.source_request_relationship_id AS relationship_id,
+       jobs.source_emergency_request_id AS emergency_request_id,
+       emergency_requests.homeowner_id AS customer_user_id,
        jobs.lifecycle_contract_version,
        jobs.source_type AS job_source_type,
        COALESCE(
          NULLIF(BTRIM(posts.title), ''),
+         NULLIF(BTRIM(emergency_requests.title), ''),
          NULLIF(BTRIM(drafts.content ->> 'projectTitle'), ''),
          NULLIF(BTRIM(drafts.content ->> 'projectDescription'), ''),
          'Quick Quote'
@@ -3396,6 +3403,7 @@ async function loadBusinessDocumentQuoteReviewIdentity(
        ) AS selected_professional_user_id,
        COALESCE(
          NULLIF(BTRIM(customers.username), ''),
+         NULLIF(BTRIM(emergency_customers.username), ''),
          NULLIF(BTRIM(contacts.display_name), ''),
          NULLIF(BTRIM(drafts.content ->> 'customerName'), ''),
          'Customer'
@@ -3442,6 +3450,11 @@ async function loadBusinessDocumentQuoteReviewIdentity(
        AND posts.id = jobs.job_request_id
        AND posts.lifecycle_contract_version = 2
        AND posts.cancelled_at IS NULL
+     LEFT JOIN emergency_requests
+       ON jobs.source_type = 'emergency_request'
+       AND emergency_requests.id = jobs.source_emergency_request_id
+     LEFT JOIN users emergency_customers
+       ON emergency_customers.id = emergency_requests.homeowner_id
      LEFT JOIN request_relationships relationships
        ON jobs.source_type = 'ordinary_request_selection'
        AND relationships.id = jobs.source_request_relationship_id
@@ -3461,6 +3474,11 @@ async function loadBusinessDocumentQuoteReviewIdentity(
          (
            jobs.source_type = 'ordinary_request_selection'
            AND participants.request_relationship_id = relationships.id
+         )
+         OR (
+           jobs.source_type = 'emergency_request'
+           AND participants.request_relationship_id = jobs.source_request_relationship_id
+           AND participants.source_evidence_type = 'emergency_selection'
          )
          OR
          (
@@ -3487,6 +3505,10 @@ async function loadBusinessDocumentQuoteReviewIdentity(
            AND selections.id IS NOT NULL
          )
          OR (
+           jobs.source_type = 'emergency_request'
+           AND emergency_requests.id IS NOT NULL
+         )
+         OR (
            jobs.source_type = 'business_document'
            AND jobs.contractor_profile_id = drafts.contractor_profile_id
          )
@@ -3497,7 +3519,143 @@ async function loadBusinessDocumentQuoteReviewIdentity(
   return result.rows[0] || null;
 }
 
-function businessDocumentQuoteReviewProjection(row) {
+async function requireEmergencyWorkingContext({
+  client, jobId, actorUserId, contractorProfileId, relationshipId,
+  emergencyRequestId, customerUserId = null, actorParticipantId, logger, lock = false,
+}) {
+  const context = await loadEmergencyProfessionalContext(client, {
+    jobId, actorId: actorUserId, lock,
+  });
+  if (
+    !context ||
+    !normalizedUuid(context.job_id) ||
+    !normalizedUuid(context.actor_participant_id) ||
+    !positiveInteger(context.contractor_profile_id) ||
+    !positiveInteger(context.relationship_id) ||
+    !positiveInteger(context.emergency_request_id) ||
+    normalizedUuid(context.job_id) !== normalizedUuid(jobId) ||
+    Number(context.contractor_profile_id) !== Number(contractorProfileId) ||
+    Number(context.relationship_id) !== Number(relationshipId) ||
+    Number(context.emergency_request_id) !== Number(emergencyRequestId) ||
+    (customerUserId != null && Number(context.homeowner_user_id) !== Number(customerUserId)) ||
+    normalizedUuid(context.actor_participant_id) !== normalizedUuid(actorParticipantId) ||
+    Number(context.actor_user_id) !== Number(actorUserId) ||
+    !positiveInteger(context.homeowner_user_id) ||
+    !positiveInteger(context.conversation_id)
+  ) {
+    return { error: failure(403, "EMERGENCY_WORKING_QUOTE_AUTHORITY_REQUIRED", "Emergency working Quote authority is required.") };
+  }
+  const evaluationError = await requireEmergencyJobEvaluation({ client, context, logger });
+  return evaluationError ? { error: evaluationError } : { context };
+}
+
+async function loadEmergencyQuoteCandidates(client, jobId, { lock = false } = {}) {
+  const result = await client.query(
+    `/* quote_business_document:emergency_candidates */
+     SELECT quotes.id, quotes.job_id, quotes.status, quotes.source_context_type,
+       quotes.job_source_type, quotes.job_request_id, quotes.relationship_id,
+       quotes.emergency_request_id, quotes.issuer_participant_id,
+       quotes.parent_quote_id, quotes.lineage_type,
+       quotes.business_customer_job_source_id,
+       aggregates.aggregate_type, aggregates.owning_engine,
+       aggregates.source_context_type AS aggregate_source_context_type,
+       aggregates.ordinary_request_id,
+       aggregates.emergency_request_id AS aggregate_emergency_request_id,
+       aggregates.relationship_id AS aggregate_relationship_id,
+       aggregates.source_owner_user_id, aggregates.current_version,
+       aggregates.business_document_id, aggregates.contractor_profile_id AS aggregate_contractor_profile_id,
+       versions.status AS current_version_status,
+       parents.job_id AS parent_job_id,
+       parents.source_context_type AS parent_source_context_type,
+       parents.status AS parent_status,
+       EXISTS (SELECT 1 FROM canonical_quote_customer_decisions decisions
+         WHERE decisions.quote_id = quotes.id) AS has_customer_decision,
+       EXISTS (SELECT 1 FROM canonical_quote_approvals approvals
+         WHERE approvals.quote_id = quotes.id) AS has_approval
+     FROM canonical_quotes quotes
+     LEFT JOIN commercial_authority_aggregates aggregates ON aggregates.id = quotes.id
+     LEFT JOIN canonical_quote_versions versions
+       ON versions.quote_id = quotes.id AND versions.version = aggregates.current_version
+     LEFT JOIN canonical_quotes parents ON parents.id = quotes.parent_quote_id
+     WHERE quotes.job_id = $1
+     ${lock ? "FOR UPDATE OF quotes" : ""}`,
+    [jobId]
+  );
+  return result.rows;
+}
+
+function resolveEmergencyQuoteCandidates(rows, context, mapping = null) {
+  const invalid = rows.some((row) =>
+    !normalizedUuid(row.id) ||
+    normalizedUuid(row.job_id) !== normalizedUuid(context.job_id) ||
+    row.source_context_type !== "emergency_request" ||
+    row.job_source_type !== "emergency_request" ||
+    row.job_request_id != null ||
+    row.business_customer_job_source_id != null ||
+    Number(row.relationship_id) !== Number(context.relationship_id) ||
+    Number(row.emergency_request_id) !== Number(context.emergency_request_id) ||
+    normalizedUuid(row.issuer_participant_id) !== normalizedUuid(context.actor_participant_id) ||
+    row.aggregate_type !== "quote" || row.owning_engine !== OWNING_ENGINE ||
+    row.aggregate_source_context_type !== "emergency_request" ||
+    row.ordinary_request_id != null || row.business_document_id != null ||
+    row.aggregate_contractor_profile_id != null ||
+    Number(row.aggregate_emergency_request_id) !== Number(context.emergency_request_id) ||
+    Number(row.aggregate_relationship_id) !== Number(context.relationship_id) ||
+    Number(row.source_owner_user_id) !== Number(context.homeowner_user_id) ||
+    !positiveInteger(row.current_version) || row.current_version_status !== row.status ||
+    (row.parent_quote_id == null && row.lineage_type != null) ||
+    (row.parent_quote_id != null && (
+      !normalizedUuid(row.parent_quote_id) ||
+      normalizedUuid(row.parent_quote_id) === normalizedUuid(row.id) ||
+      normalizedUuid(row.parent_job_id) !== normalizedUuid(context.job_id) ||
+      row.parent_source_context_type !== "emergency_request" ||
+      row.parent_status !== QUOTE_STATUS.ISSUED ||
+      !QUOTE_LINEAGE_TYPES.includes(row.lineage_type)
+    )) ||
+    (row.status === QUOTE_STATUS.DRAFT && (row.has_customer_decision || row.has_approval)) ||
+    ![QUOTE_STATUS.DRAFT, QUOTE_STATUS.ISSUED].includes(row.status)
+  );
+  if (invalid) return { error: failure(409, "EMERGENCY_WORKING_QUOTE_IDENTITY_INVALID", "Emergency Quote identity is inconsistent.") };
+  const drafts = rows.filter((row) => row.status === QUOTE_STATUS.DRAFT);
+  if (drafts.length > 1) return { error: failure(409, "EMERGENCY_WORKING_QUOTE_AMBIGUOUS", "Multiple Emergency Draft Quotes require exact resolution.") };
+  if (mapping && (drafts.length !== 1 || normalizedUuid(drafts[0].id) !== normalizedUuid(mapping.quote_id))) {
+    return { error: failure(409, "EMERGENCY_WORKING_QUOTE_MAPPING_CONFLICT", "The working Quote is no longer bound to the exact Emergency Draft.") };
+  }
+  if (!drafts.length && rows.length) {
+    return { error: failure(409, "EMERGENCY_WORKING_QUOTE_NOT_DRAFT", "An issued Emergency Quote cannot be imported as a Draft.") };
+  }
+  return { draft: drafts[0] || null };
+}
+
+function emergencyWorkingContentMatchesDraft(conversion, quote) {
+  const comparable = (item) => ({
+    classification: item.classification,
+    scopeSemantic: item.scopeSemantic,
+    materialResponsibility: item.materialResponsibility,
+    description: item.description,
+    quantity: Number(item.quantity),
+    unitAmountMinor: Number(item.unitAmountMinor),
+    lineTotalMinor: Number(item.lineTotalMinor),
+    includedInTotal: item.includedInTotal === true,
+    source: {
+      type: item.source?.type,
+      version: item.source?.version || null,
+      findingId: item.source?.findingId || null,
+      recommendationId: item.source?.recommendationId || null,
+      workstreamId: item.source?.workstreamId || null,
+      activityId: item.source?.activityId || null,
+      obligationId: item.source?.obligationId || null,
+    },
+  });
+  return quote?.status === QUOTE_STATUS.DRAFT &&
+    quote.currency === conversion.currency &&
+    Number(quote.totalMinor) === conversion.totals.totalMinor &&
+    Array.isArray(quote.scopeItems) &&
+    fingerprint(quote.scopeItems.map(comparable)) === fingerprint(conversion.items.map(comparable)) &&
+    fingerprint(quote.customerTermsSnapshot || null) === fingerprint(conversion.customerTermsSnapshot || null);
+}
+
+function businessDocumentQuoteReviewProjection(row, emergency = null) {
   const customerName = boundedText(row?.customer_name, 200);
   const projectTitle = boundedText(row?.project_title, 500);
   if (!customerName || !projectTitle) return null;
@@ -3509,6 +3667,15 @@ function businessDocumentQuoteReviewProjection(row) {
     relationshipId: positiveInteger(row.relationship_id) || null,
     customerName,
     projectTitle,
+    ...(emergency ? {
+      sourceContextType: "emergency_request",
+      emergencyRequestId: Number(emergency.context.emergency_request_id),
+      contractorProfileId: Number(emergency.context.contractor_profile_id),
+      customerUserId: Number(emergency.context.homeowner_user_id),
+      canonicalQuoteId: emergency.draft?.id || null,
+      canonicalQuoteVersion: emergency.draft ? Number(emergency.draft.current_version) : null,
+      parentQuoteId: emergency.draft?.parent_quote_id || null,
+    } : {}),
   });
 }
 
@@ -3558,6 +3725,8 @@ async function getBusinessDocumentDraftQuoteReview(input = {}) {
       row.job_source_type === "ordinary_request_selection";
     const businessOrigin =
       row.job_source_type === "business_document";
+    const emergencyOrigin =
+      row.job_source_type === "emergency_request";
 
     const reviewAuthorityValid =
       Number(row.selected_professional_user_id) === Number(validated.id) &&
@@ -3575,6 +3744,12 @@ async function getBusinessDocumentDraftQuoteReview(input = {}) {
           Number(row.lifecycle_contract_version) === 2 &&
           row.actor_is_primary_professional === true &&
           row.actor_can_read_participant === true
+        ) ||
+        (
+          emergencyOrigin &&
+          Number(row.lifecycle_contract_version) === 2 &&
+          row.actor_is_primary_professional === true &&
+          row.actor_can_read_participant === true
         )
       );
 
@@ -3587,7 +3762,49 @@ async function getBusinessDocumentDraftQuoteReview(input = {}) {
         "Working Quote review authority is required."
       );
     }
-    const review = businessDocumentQuoteReviewProjection(row);
+    let emergency = null;
+    if (emergencyOrigin) {
+      if (!positiveInteger(row.customer_user_id)) {
+        await client.query("COMMIT");
+        started = false;
+        return failure(409, "EMERGENCY_WORKING_QUOTE_IDENTITY_INVALID", "Emergency customer identity is unavailable.");
+      }
+      const resolved = await requireEmergencyWorkingContext({
+        client, jobId: row.job_id, actorUserId: validated.id,
+        contractorProfileId: row.contractor_profile_id,
+        relationshipId: row.relationship_id,
+        emergencyRequestId: row.emergency_request_id,
+        customerUserId: row.customer_user_id,
+        actorParticipantId: row.actor_participant_id,
+        logger: safeLogger(input.logger),
+      });
+      if (resolved.error) {
+        await client.query("COMMIT");
+        started = false;
+        return resolved.error;
+      }
+      const mapping = await loadOwnedBusinessDocumentQuoteMapping(client, draftId, validated.id);
+      if (mapping && (
+        normalizedUuid(mapping.job_id) !== normalizedUuid(row.job_id) ||
+        Number(mapping.contractor_profile_id) !== Number(row.contractor_profile_id) ||
+        Number(mapping.source_document_version) !== expectedDocumentVersion
+      )) {
+        await client.query("COMMIT");
+        started = false;
+        return failure(409, "EMERGENCY_WORKING_QUOTE_MAPPING_CONFLICT", "The Emergency working Quote binding is stale.");
+      }
+      const candidates = resolveEmergencyQuoteCandidates(
+        await loadEmergencyQuoteCandidates(client, resolved.context.job_id),
+        resolved.context, mapping
+      );
+      if (candidates.error) {
+        await client.query("COMMIT");
+        started = false;
+        return candidates.error;
+      }
+      emergency = { context: resolved.context, draft: candidates.draft };
+    }
+    const review = businessDocumentQuoteReviewProjection(row, emergency);
     if (
       !review?.documentId ||
       !review?.documentVersion ||
@@ -3600,6 +3817,12 @@ async function getBusinessDocumentDraftQuoteReview(input = {}) {
       (
         marketplaceOrigin &&
         (!review?.requestId || !review?.relationshipId)
+      ) ||
+      (emergencyOrigin && (
+        review?.requestId != null || !review?.emergencyRequestId ||
+        !review?.relationshipId || !review?.contractorProfileId ||
+        !review?.customerUserId
+      )
       )
     ) {
       await client.query("COMMIT");
@@ -3672,11 +3895,20 @@ async function completeExistingBusinessDocumentQuoteMapping({
 }
 
 async function importBusinessDocumentDraftQuote(input = {}) {
-  const validated = validateCommand(input, ["draftId", "expectedDocumentVersion"]);
+  const validated = validateCommand(input, [
+    "draftId", "expectedDocumentVersion", "expectedCanonicalQuoteId", "expectedCanonicalQuoteVersion",
+  ]);
   if (validated.error) return validated.error;
   const draftId = normalizedUuid(input.draftId);
   const expectedDocumentVersion = positiveInteger(input.expectedDocumentVersion);
-  if (!draftId || !expectedDocumentVersion) {
+  const expectedCanonicalQuoteId = input.expectedCanonicalQuoteId == null
+    ? null : normalizedUuid(input.expectedCanonicalQuoteId);
+  const expectedCanonicalQuoteVersion = input.expectedCanonicalQuoteVersion == null
+    ? null : positiveInteger(input.expectedCanonicalQuoteVersion);
+  if (!draftId || !expectedDocumentVersion ||
+      (input.expectedCanonicalQuoteId != null && !expectedCanonicalQuoteId) ||
+      (input.expectedCanonicalQuoteVersion != null && !expectedCanonicalQuoteVersion) ||
+      Boolean(expectedCanonicalQuoteId) !== Boolean(expectedCanonicalQuoteVersion)) {
     return failure(400, "INVALID_BUSINESS_DOCUMENT_QUOTE_IMPORT", "The working Quote import is invalid.");
   }
   const logger = safeLogger(input.logger);
@@ -3749,6 +3981,58 @@ async function importBusinessDocumentDraftQuote(input = {}) {
 
     const businessOrigin =
       context.job_source_type === "business_document";
+    const emergencyOrigin = context.job_source_type === "emergency_request";
+    const ordinaryOrigin = [
+      "ordinary_request_selection", "existing_customer_request",
+    ].includes(context.job_source_type);
+    if (!businessOrigin && !emergencyOrigin && !ordinaryOrigin) {
+      return { abort: failure(409, "JOB_QUOTE_SOURCE_REQUIRED", "The working Quote Job source is unsupported.") };
+    }
+    if (!emergencyOrigin && expectedCanonicalQuoteId) {
+      return { abort: failure(400, "QUOTE_AUTHORITY_FIELD_REJECTED", "Emergency Draft identity is not valid for this Quote source.") };
+    }
+    const emergencySource = emergencyOrigin && mapping
+      ? await loadOwnedBusinessDocumentQuoteSource(client, draftId, validated.actorId, { lock: true })
+      : source;
+    let emergencyDraft = null;
+    if (emergencyOrigin) {
+      const sourceError = validateBusinessDocumentQuoteSource(emergencySource);
+      if (sourceError) return { abort: sourceError };
+      if (
+        normalizedUuid(emergencySource.job_id) !== jobId ||
+        emergencySource.business_contact_id != null ||
+        emergencySource.business_customer_relationship_id != null ||
+        (mapping && (
+          normalizedUuid(mapping.job_id) !== jobId ||
+          Number(mapping.contractor_profile_id) !== Number(emergencySource.contractor_profile_id) ||
+          Number(mapping.source_document_version) !== expectedDocumentVersion ||
+          Number(emergencySource.version) !== expectedDocumentVersion
+        ))
+      ) {
+        return { abort: failure(409, "EMERGENCY_WORKING_QUOTE_IDENTITY_INVALID", "Emergency working Quote identity is inconsistent.") };
+      }
+      const resolved = await requireEmergencyWorkingContext({
+        client, jobId, actorUserId: validated.actorId,
+        contractorProfileId: emergencySource.contractor_profile_id,
+        relationshipId: context.relationship_id,
+        emergencyRequestId: context.job_emergency_request_id,
+        actorParticipantId: context.actor_participant_id,
+        logger, lock: true,
+      });
+      if (resolved.error) return { abort: resolved.error };
+      if (
+        Number(context.homeowner_user_id) !== Number(resolved.context.homeowner_user_id) ||
+        Number(context.selected_professional_user_id) !== Number(resolved.context.selected_professional_user_id)
+      ) {
+        return { abort: failure(409, "EMERGENCY_WORKING_QUOTE_IDENTITY_INVALID", "Emergency Job parties do not match.") };
+      }
+      const candidates = resolveEmergencyQuoteCandidates(
+        await loadEmergencyQuoteCandidates(client, jobId, { lock: true }),
+        resolved.context, mapping
+      );
+      if (candidates.error) return { abort: candidates.error };
+      emergencyDraft = candidates.draft;
+    }
 
     let conversion = null;
     let sourceCustomerParty = null;
@@ -3826,6 +4110,11 @@ async function importBusinessDocumentDraftQuote(input = {}) {
       expectedDocumentVersion,
       sourceSnapshotIntegrityHash: sourceHash,
       customerSnapshotHash,
+      ...(emergencyOrigin ? {
+        sourceContextType: "emergency_request",
+        expectedCanonicalQuoteId,
+        expectedCanonicalQuoteVersion,
+      } : {}),
     });
     const idempotency = await reserveIdempotency({
       client,
@@ -3847,12 +4136,29 @@ async function importBusinessDocumentDraftQuote(input = {}) {
       };
     }
 
+    if (emergencyOrigin && (
+      emergencyDraft
+        ? (expectedCanonicalQuoteId !== normalizedUuid(emergencyDraft.id) ||
+           expectedCanonicalQuoteVersion !== Number(emergencyDraft.current_version))
+        : expectedCanonicalQuoteId != null
+    )) {
+      return { abort: failure(409, "EMERGENCY_WORKING_QUOTE_EXPECTED_IDENTITY_REQUIRED", "The exact reviewed Emergency Draft and version are required.") };
+    }
+
     mapping = mapping || await loadOwnedBusinessDocumentQuoteMapping(
       client,
       draftId,
       validated.actorId
     );
     if (mapping) {
+      if (emergencyOrigin && (
+        normalizedUuid(mapping.quote_id) !== normalizedUuid(emergencyDraft?.id) ||
+        normalizedUuid(mapping.job_id) !== jobId ||
+        Number(mapping.contractor_profile_id) !== Number(emergencySource.contractor_profile_id) ||
+        Number(mapping.source_document_version) !== expectedDocumentVersion
+      )) {
+        return { abort: failure(409, "EMERGENCY_WORKING_QUOTE_MAPPING_CONFLICT", "The Emergency working Quote binding is inconsistent.") };
+      }
       return {
         result: await completeExistingBusinessDocumentQuoteMapping({
           client,
@@ -3865,6 +4171,39 @@ async function importBusinessDocumentDraftQuote(input = {}) {
       return {
         abort: failure(409, "STALE_BUSINESS_DOCUMENT_VERSION", "The working Quote version is stale."),
       };
+    }
+
+    if (emergencyOrigin && emergencyDraft) {
+      const existingQuote = await loadQuoteProjection(client, emergencyDraft.id);
+      if (!emergencyWorkingContentMatchesDraft(conversion, existingQuote)) {
+        return { abort: failure(409, "EMERGENCY_WORKING_QUOTE_CONTENT_CONFLICT", "The saved working Quote differs from the existing Emergency Draft.") };
+      }
+      const priorSource = await client.query(
+        `SELECT source_document_id FROM canonical_quote_business_document_sources
+         WHERE quote_id = $1 OR source_document_id = $2 FOR UPDATE`,
+        [emergencyDraft.id, draftId]
+      );
+      if (priorSource.rows.length) {
+        return { abort: failure(409, "EMERGENCY_WORKING_QUOTE_MAPPING_CONFLICT", "The Emergency Draft is already bound to a working Quote.") };
+      }
+      const provenance = await client.query(
+        `INSERT INTO canonical_quote_business_document_sources (
+          quote_id, job_id, contractor_profile_id, source_document_id,
+          source_document_version, document_number,
+          source_snapshot_integrity_hash, created_by_user_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING quote_id`,
+        [emergencyDraft.id, jobId, Number(source.contractor_profile_id),
+          draftId, expectedDocumentVersion, source.document_number,
+          sourceHash, validated.actorId]
+      );
+      if (!provenance.rows[0]) throw new Error("Emergency working Quote binding failed.");
+      const result = quoteResult("EMERGENCY_WORKING_QUOTE_ADOPTED", 200,
+        await loadQuoteProjection(client, emergencyDraft.id));
+      if (!(await completeIdempotency(client, idempotency.reservation.id, emergencyDraft.id, result))) {
+        throw new Error("Emergency working Quote idempotency completion failed.");
+      }
+      return { result };
     }
 
     const existing = await client.query(
@@ -3882,7 +4221,7 @@ async function importBusinessDocumentDraftQuote(input = {}) {
     const quoteId = randomUUID();
     const sourceContextType = businessOrigin
       ? "business_document"
-      : "ordinary_request";
+      : emergencyOrigin ? "emergency_request" : ordinaryOrigin ? "ordinary_request" : null;
 
     const aggregateResult = await client.query(
       `INSERT INTO commercial_authority_aggregates (
@@ -3891,14 +4230,15 @@ async function importBusinessDocumentDraftQuote(input = {}) {
         source_owner_user_id, created_by_user_id, current_version,
         business_document_id, contractor_profile_id
       ) VALUES (
-        $1, 'quote', $2, $3, $4, NULL, $5, $6, $7, 1, $8, $9
+        $1, 'quote', $2, $3, $4, $5, $6, $7, $8, 1, $9, $10
       )
       RETURNING *`,
       [
         quoteId,
         OWNING_ENGINE,
         sourceContextType,
-        businessOrigin ? null : Number(context.job_request_id),
+        businessOrigin || emergencyOrigin ? null : Number(context.job_request_id),
+        emergencyOrigin ? Number(context.job_emergency_request_id) : null,
         businessOrigin ? null : Number(context.relationship_id),
         businessOrigin
           ? validated.actorId
@@ -3913,16 +4253,17 @@ async function importBusinessDocumentDraftQuote(input = {}) {
     if (!aggregateResult.rows[0]) throw new Error("Canonical Quote aggregate creation failed.");
     const quoteIdentity = await client.query(
       `INSERT INTO canonical_quotes (
-        id, job_id, job_request_id, relationship_id,
+        id, job_id, job_request_id, relationship_id, emergency_request_id,
         issuer_participant_id, currency, status,
         source_context_type, job_source_type
-      ) VALUES ($1, $2, $3, $4, $5, $6, 'DRAFT', $7, $8)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'DRAFT', $8, $9)
       RETURNING *`,
       [
         quoteId,
         jobId,
-        businessOrigin ? null : Number(context.job_request_id),
+        businessOrigin || emergencyOrigin ? null : Number(context.job_request_id),
         businessOrigin ? null : Number(context.relationship_id),
+        emergencyOrigin ? Number(context.job_emergency_request_id) : null,
         context.actor_participant_id,
         conversion.currency,
         sourceContextType,
@@ -6209,6 +6550,10 @@ module.exports = {
     insertCanonicalQuoteApprovalFromCustomerDecision,
     buildWorkingQuoteTerms,
     businessDocumentQuoteReviewProjection,
+    requireEmergencyWorkingContext,
+    loadEmergencyQuoteCandidates,
+    resolveEmergencyQuoteCandidates,
+    emergencyWorkingContentMatchesDraft,
     loadQuoteContext,
     loadQuoteProjection,
     loadQualifyingCustomerQuoteDelivery,

@@ -87,6 +87,7 @@ async function loadEmergencyProfessionalContext(client, { jobId = null, emergenc
       relationships.professional_user_id AS selected_professional_user_id,
       professional.id AS professional_participant_id, professional.id AS actor_participant_id,
       professional.user_id AS actor_user_id, customer.id AS customer_participant_id,
+      profiles.id AS contractor_profile_id,
       conversations.id AS conversation_id, conversations.relationship_id AS conversation_relationship_id,
       conversations.status AS conversation_status, profiles.business_name,
       true AS primary_professional_active

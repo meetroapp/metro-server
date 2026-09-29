@@ -72,6 +72,8 @@ function createQuoteDraftHandlers({
         authenticatedActor: req.user,
         draftId: req.params.draftId,
         expectedDocumentVersion: req.body?.expectedDocumentVersion,
+        expectedCanonicalQuoteId: req.body?.expectedCanonicalQuoteId,
+        expectedCanonicalQuoteVersion: req.body?.expectedCanonicalQuoteVersion,
         idempotencyKey: req.headers?.["idempotency-key"],
       })
     ),
