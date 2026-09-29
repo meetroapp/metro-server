@@ -512,10 +512,11 @@ async function jobAssociationAllowed(
   client,
   actorUserId,
   jobId,
-  contractorProfileId
+  contractorProfileId,
+  documentType
 ) {
   if (!jobId) return true;
-  const owner = await resolveBusinessDocumentOwner(client, actorUserId, jobId);
+  const owner = await resolveBusinessDocumentOwner(client, actorUserId, jobId, documentType);
   return owner.kind === "resolved" &&
     owner.contractorProfileId === Number(contractorProfileId);
 }
@@ -776,15 +777,16 @@ async function cancelCommand(client, commandId) {
 }
 
 const sqlStore = Object.freeze({
-  resolveBusinessOwner(pool, actorUserId, jobId) {
-    return resolveBusinessDocumentOwner(pool, actorUserId, jobId);
+  resolveBusinessOwner(pool, actorUserId, jobId, documentType) {
+    return resolveBusinessDocumentOwner(pool, actorUserId, jobId, documentType);
   },
-  validateJobAssociation(pool, actorUserId, jobId, contractorProfileId) {
+  validateJobAssociation(pool, actorUserId, jobId, contractorProfileId, documentType) {
     return jobAssociationAllowed(
       pool,
       actorUserId,
       jobId,
-      contractorProfileId
+      contractorProfileId,
+      documentType
     );
   },
   validateJobAnalysisSessionOwnership(pool, actorUserId, sessionId) {
@@ -813,7 +815,8 @@ const sqlStore = Object.freeze({
       const owner = await resolveBusinessDocumentOwner(
         client,
         actorUserId,
-        draft.jobId
+        draft.jobId,
+        draft.documentType
       );
       if (
         owner.kind !== "resolved" ||
@@ -966,7 +969,8 @@ const sqlStore = Object.freeze({
         client,
         actorUserId,
         draft.jobId,
-        contractorProfileId
+        contractorProfileId,
+        draft.documentType
       ))) {
         await cancelCommand(client, reserved.id);
         return { kind: "job_unavailable" };
@@ -1181,7 +1185,8 @@ async function createBusinessDocumentDraft(input = {}) {
   const owner = await store.resolveBusinessOwner(
     input.pool,
     validated.actorId,
-    validated.jobId
+    validated.jobId,
+    validated.documentType
   );
   if (owner.kind === "profile_required") return failure(403, "BUSINESS_DOCUMENT_AUTHORITY_REQUIRED", "A professional business profile is required.");
   if (owner.kind === "profile_ambiguous") return failure(409, "BUSINESS_DOCUMENT_PROFILE_AMBIGUOUS", "Select a Job to identify which business owns this document.");
@@ -1290,7 +1295,8 @@ async function updateBusinessDocumentDraft(input = {}) {
     input.pool,
     validated.actorId,
     validated.jobId,
-    Number(context.contractor_profile_id)
+    Number(context.contractor_profile_id),
+    validated.documentType
   ))) {
     return failure(409, "BUSINESS_DOCUMENT_JOB_CONFLICT", "The selected Job is not available to this professional.");
   }

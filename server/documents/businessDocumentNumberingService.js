@@ -156,7 +156,7 @@ async function withTransaction(pool, action) {
   }
 }
 
-async function resolveBusinessDocumentOwner(client, actorUserId, jobId = null) {
+async function resolveBusinessDocumentOwner(client, actorUserId, jobId = null, documentType = null) {
   if (jobId) {
     const result = await client.query(
       `/* business_document_numbering:job_owner */
@@ -168,10 +168,19 @@ async function resolveBusinessDocumentOwner(client, actorUserId, jobId = null) {
          END AS contractor_profile_id
        FROM jobs
        LEFT JOIN request_relationships relationships
-         ON jobs.source_type = 'ordinary_request_selection'
+         ON jobs.source_type IN ('ordinary_request_selection', 'emergency_request')
         AND relationships.id = jobs.source_request_relationship_id
         AND relationships.professional_user_id = $1
         AND relationships.status = 'active'
+        AND (
+          jobs.source_type = 'ordinary_request_selection'
+          AND relationships.post_id = jobs.job_request_id
+          AND relationships.emergency_request_id IS NULL
+          OR jobs.source_type = 'emergency_request'
+          AND $3::text = 'QUOTE'
+          AND relationships.post_id IS NULL
+          AND relationships.emergency_request_id = jobs.source_emergency_request_id
+        )
        INNER JOIN contractor_profiles profiles
          ON profiles.id = CASE
            WHEN jobs.source_type = 'business_document'
@@ -186,6 +195,12 @@ async function resolveBusinessDocumentOwner(client, actorUserId, jobId = null) {
           (
             jobs.source_type = 'ordinary_request_selection'
             AND participants.request_relationship_id = relationships.id
+          )
+          OR (
+            jobs.source_type = 'emergency_request'
+            AND $3::text = 'QUOTE'
+            AND participants.request_relationship_id = relationships.id
+            AND participants.source_evidence_type = 'emergency_selection'
           )
           OR
           (
@@ -208,6 +223,64 @@ async function resolveBusinessDocumentOwner(client, actorUserId, jobId = null) {
              jobs.source_type = 'ordinary_request_selection'
              AND relationships.id IS NOT NULL
            )
+           OR (
+             jobs.source_type = 'emergency_request'
+             AND $3::text = 'QUOTE'
+             AND jobs.lifecycle_contract_version = 2
+             AND jobs.job_request_id IS NULL
+             AND jobs.source_request_selection_id IS NULL
+             AND jobs.contractor_profile_id IS NULL
+             AND jobs.originating_business_document_id IS NULL
+             AND jobs.source_business_customer_job_id IS NULL
+             AND relationships.id IS NOT NULL
+             AND EXISTS (
+               SELECT 1 FROM emergency_requests emergency
+               JOIN relationship_participants customer
+                 ON customer.job_id = jobs.id
+                AND customer.request_relationship_id = relationships.id
+                AND customer.user_id = emergency.homeowner_id
+                AND customer.source_evidence_type = 'emergency_selection'
+               JOIN conversations conversation
+                 ON conversation.relationship_id = relationships.id
+                AND conversation.homeowner_id = emergency.homeowner_id
+                AND conversation.professional_user_id = relationships.professional_user_id
+                AND conversation.contractor_id = relationships.contractor_id
+                AND conversation.status = 'active'
+               WHERE emergency.id = jobs.source_emergency_request_id
+                 AND emergency.homeowner_id = relationships.homeowner_id
+                 AND jobs.created_by_user_id = emergency.homeowner_id
+                 AND emergency.arrived_at IS NOT NULL
+                 AND emergency.status IN ('professional_arrived', 'work_in_progress', 'completed')
+             )
+             AND EXISTS (
+               SELECT 1 FROM canonical_evaluations evaluations
+               JOIN commercial_authority_aggregates evaluation_aggregates
+                 ON evaluation_aggregates.id = evaluations.id
+                AND evaluation_aggregates.aggregate_type = 'evaluation'
+                AND evaluation_aggregates.owning_engine = 'authorization_engine'
+                AND evaluation_aggregates.source_context_type = 'emergency_request'
+                AND evaluation_aggregates.ordinary_request_id IS NULL
+                AND evaluation_aggregates.emergency_request_id = jobs.source_emergency_request_id
+                AND evaluation_aggregates.relationship_id = relationships.id
+                AND evaluation_aggregates.business_customer_job_source_id IS NULL
+               JOIN canonical_evaluation_versions evaluation_versions
+                 ON evaluation_versions.evaluation_id = evaluations.id
+                AND evaluation_versions.version = evaluation_aggregates.current_version
+                AND evaluation_versions.status = 'completed'
+               JOIN canonical_evaluation_job_subjects subjects
+                 ON subjects.evaluation_id = evaluations.id
+                AND subjects.job_id = jobs.id
+                AND subjects.source_context_type = 'emergency_request'
+                AND subjects.job_source_type = 'emergency_request'
+                AND subjects.job_request_id IS NULL
+                AND subjects.relationship_id = relationships.id
+                AND subjects.emergency_request_id = jobs.source_emergency_request_id
+                AND subjects.business_customer_job_source_id IS NULL
+               WHERE evaluations.professional_user_id = $1
+                 AND evaluations.relationship_id = relationships.id
+                 AND evaluations.status = 'completed'
+             )
+           )
            OR
            (
              jobs.source_type = 'business_document'
@@ -215,7 +288,7 @@ async function resolveBusinessDocumentOwner(client, actorUserId, jobId = null) {
            )
          )
        LIMIT 2`,
-      [actorUserId, jobId]
+      [actorUserId, jobId, documentType]
     );
     return result.rows.length === 1
       ? { kind: "resolved", contractorProfileId: Number(result.rows[0].contractor_profile_id) }
@@ -290,15 +363,15 @@ async function allocateDocumentNumber(client, contractorProfileId, documentType)
 }
 
 const sqlNumberingStore = Object.freeze({
-  resolveBusinessOwner(pool, actorUserId, jobId) {
-    return resolveBusinessDocumentOwner(pool, actorUserId, jobId);
+  resolveBusinessOwner(pool, actorUserId, jobId, documentType) {
+    return resolveBusinessDocumentOwner(pool, actorUserId, jobId, documentType);
   },
   async getState({ pool, contractorProfileId, documentType }) {
     return readSequence(pool, contractorProfileId, documentType);
   },
   initialize({ pool, actorUserId, contractorProfileId, documentType, jobId, configuration }) {
     return withTransaction(pool, async (client) => {
-      const owner = await resolveBusinessDocumentOwner(client, actorUserId, jobId);
+      const owner = await resolveBusinessDocumentOwner(client, actorUserId, jobId, documentType);
       if (owner.kind !== "resolved" || owner.contractorProfileId !== contractorProfileId) {
         return owner.kind === "resolved" ? { kind: "job_unavailable" } : owner;
       }
@@ -403,7 +476,8 @@ async function getBusinessDocumentNumbering(input = {}) {
   const owner = await store.resolveBusinessOwner(
     input.pool,
     validated.actorId,
-    validated.jobId
+    validated.jobId,
+    validated.documentType
   );
   if (owner.kind !== "resolved") return ownerFailure(owner);
   const row = await store.getState({
@@ -426,7 +500,8 @@ async function initializeBusinessDocumentNumbering(input = {}) {
   const owner = await store.resolveBusinessOwner(
     input.pool,
     validated.actorId,
-    validated.jobId
+    validated.jobId,
+    validated.documentType
   );
   if (owner.kind !== "resolved") return ownerFailure(owner);
   const result = await store.initialize({
