@@ -15,6 +15,7 @@ function sendQuoteDraftResult(res, result) {
     "quote",
     "quotes",
     "review",
+    "quoteSafety",
     "scopeItem",
     "removedScopeItemId",
     "customerDecision",
