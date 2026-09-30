@@ -25,6 +25,9 @@ test("Job completion registers bounded authenticated completion and history rout
   const auth = () => {};
   registerJobCompletionRoutes({ app, authMiddleware: auth, getPool() {}, sendPublicDatabaseError() {} });
   assert.deepEqual(routes.map(([method, path]) => `${method} ${path}`), [
+    "GET /professional/businesses/:contractorProfileId/native-customers",
+    "GET /professional/businesses/:contractorProfileId/native-customers/:subjectId/history",
+    "GET /professional/businesses/:contractorProfileId/native-customers/:subjectId/jobs/:jobId/history",
     "GET /professional/jobs/history",
     "GET /professional/jobs/:jobId/completion-review",
     "POST /professional/jobs/:jobId/complete",
@@ -100,4 +103,27 @@ test("Complete Job handler forwards only authenticated route and command fields"
   });
   assert.equal(res.headers["Cache-Control"], "private, no-store");
   assert.equal(res.body.code, "JOB_COMPLETED");
+});
+
+test("native customer handlers forward exact business, subject, Job and paging without body authority", async () => {
+  const calls = [];
+  const nativeCustomerService = Object.fromEntries([
+    "listNativeCustomers", "listNativeCustomerHistory", "getNativeCustomerJobHistory",
+  ].map(name => [name, async input => {
+    calls.push([name, input]);
+    const field = name === "listNativeCustomers" ? "nativeCustomers"
+      : name === "listNativeCustomerHistory" ? "nativeCustomerHistory" : "nativeCustomerJobHistory";
+    return { ok: true, status: 200, code: "FOUND", [field]: {} };
+  }]));
+  const handlers = createJobCompletionHandlers({ getPool: () => "pool", nativeCustomerService, sendPublicDatabaseError() {} });
+  const req = { user: { id: 9 }, params: { contractorProfileId: "7", subjectId: "11", jobId: "exact-job" },
+    query: { limit: "20", cursor: "opaque", homeownerUserId: "forged" }, body: { contractorProfileId: "forged" } };
+  await handlers.listNativeCustomers(req, response());
+  await handlers.listNativeCustomerHistory(req, response());
+  await handlers.getNativeCustomerJobHistory(req, response());
+  assert.deepEqual(calls, [
+    ["listNativeCustomers", { pool: "pool", authenticatedActor: { id: 9 }, contractorProfileId: "7", limit: "20", cursor: "opaque" }],
+    ["listNativeCustomerHistory", { pool: "pool", authenticatedActor: { id: 9 }, contractorProfileId: "7", homeownerUserId: "11", limit: "20", cursor: "opaque" }],
+    ["getNativeCustomerJobHistory", { pool: "pool", authenticatedActor: { id: 9 }, contractorProfileId: "7", homeownerUserId: "11", jobId: "exact-job" }],
+  ]);
 });

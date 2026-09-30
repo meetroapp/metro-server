@@ -1,6 +1,7 @@
 "use strict";
 
 const service = require("./jobCompletionService");
+const nativeCustomerHistory = require("./nativeCustomerHistoryService");
 
 function sendResult(res, result, field = null) {
   res.setHeader?.("Cache-Control", "private, no-store");
@@ -24,6 +25,7 @@ function createJobCompletionHandlers({
   getPool,
   sendPublicDatabaseError,
   completionService = service,
+  nativeCustomerService = nativeCustomerHistory,
 } = {}) {
   const handle = (operation, field, action) => async (req, res) => {
     try {
@@ -79,6 +81,25 @@ function createJobCompletionHandlers({
         authenticatedActor: req.user,
         jobId: req.params.jobId,
       })),
+    listNativeCustomers: handle("list_native_customers", "nativeCustomers", (req) =>
+      nativeCustomerService.listNativeCustomers({
+        pool: getPool(req), authenticatedActor: req.user,
+        contractorProfileId: req.params.contractorProfileId,
+        limit: req.query?.limit, cursor: req.query?.cursor,
+      })),
+    listNativeCustomerHistory: handle("list_native_customer_history", "nativeCustomerHistory", (req) =>
+      nativeCustomerService.listNativeCustomerHistory({
+        pool: getPool(req), authenticatedActor: req.user,
+        contractorProfileId: req.params.contractorProfileId,
+        homeownerUserId: req.params.subjectId,
+        limit: req.query?.limit, cursor: req.query?.cursor,
+      })),
+    getNativeCustomerJobHistory: handle("get_native_customer_job_history", "nativeCustomerJobHistory", (req) =>
+      nativeCustomerService.getNativeCustomerJobHistory({
+        pool: getPool(req), authenticatedActor: req.user,
+        contractorProfileId: req.params.contractorProfileId,
+        homeownerUserId: req.params.subjectId, jobId: req.params.jobId,
+      })),
   };
 }
 
@@ -88,12 +109,17 @@ function registerJobCompletionRoutes({
   getPool,
   sendPublicDatabaseError,
   completionService = service,
+  nativeCustomerService = nativeCustomerHistory,
 } = {}) {
   const handlers = createJobCompletionHandlers({
     getPool,
     sendPublicDatabaseError,
     completionService,
+    nativeCustomerService,
   });
+  app.get("/professional/businesses/:contractorProfileId/native-customers", authMiddleware, handlers.listNativeCustomers);
+  app.get("/professional/businesses/:contractorProfileId/native-customers/:subjectId/history", authMiddleware, handlers.listNativeCustomerHistory);
+  app.get("/professional/businesses/:contractorProfileId/native-customers/:subjectId/jobs/:jobId/history", authMiddleware, handlers.getNativeCustomerJobHistory);
   app.get("/professional/jobs/history", authMiddleware, handlers.listProfessionalHistory);
   app.get(
     "/professional/jobs/:jobId/completion-review",
