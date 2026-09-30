@@ -1960,6 +1960,1038 @@ async function listCustomerJobHistory(input = {}) {
   });
 }
 
+
+const CUSTOMER_HISTORY_DEPOSIT_STATES =
+  new Set([
+    "DUE",
+    "PARTIALLY_SATISFIED",
+    "SATISFIED",
+    "TERMS_UNVERIFIED",
+    "SUPERSEDED",
+    "VOIDED",
+  ]);
+
+function customerHistoryDepositProjection(
+  row,
+  paymentRows = []
+) {
+  const quoteId =
+    normalizedUuid(row?.quote_id);
+
+  const requiredMinor =
+    nonNegativeInteger(
+      row?.required_minor
+    );
+
+  const appliedMinor =
+    nonNegativeInteger(
+      row?.applied_minor
+    );
+
+  const remainingMinor =
+    nonNegativeInteger(
+      row?.remaining_minor
+    );
+
+  const currency =
+    typeof row?.currency === "string"
+      ? row.currency.trim()
+      : "";
+
+  if (
+    !quoteId ||
+    !CUSTOMER_HISTORY_DEPOSIT_STATES.has(
+      row?.state
+    ) ||
+    !/^[A-Z]{3}$/.test(currency) ||
+    requiredMinor == null ||
+    appliedMinor == null ||
+    remainingMinor == null ||
+    requiredMinor !==
+      appliedMinor + remainingMinor
+  ) {
+    return null;
+  }
+
+  const payments =
+    paymentRows.map((payment) => {
+      const grossAmountMinor =
+        nonNegativeInteger(
+          payment.gross_amount_minor
+        );
+
+      const appliedPaymentMinor =
+        nonNegativeInteger(
+          payment.applied_minor
+        );
+
+      const paymentCurrency =
+        typeof payment.currency === "string"
+          ? payment.currency.trim()
+          : "";
+
+      const method =
+        typeof payment.method === "string"
+          ? payment.method.trim()
+          : "";
+
+      const receivedAt =
+        iso(payment.received_at);
+
+      if (
+        grossAmountMinor == null ||
+        appliedPaymentMinor == null ||
+        !/^[A-Z]{3}$/.test(
+          paymentCurrency
+        ) ||
+        !method ||
+        !receivedAt
+      ) {
+        return null;
+      }
+
+      return {
+        grossAmountMinor,
+        appliedMinor:
+          appliedPaymentMinor,
+        currency: paymentCurrency,
+        method,
+        receivedAt,
+      };
+    });
+
+  if (payments.some((payment) => !payment)) {
+    return null;
+  }
+
+  return {
+    quoteId,
+    state: row.state,
+    currency,
+    requiredMinor,
+    appliedMinor,
+    remainingMinor,
+    payments,
+  };
+}
+
+function customerHistoryMediaProjection(
+  row
+) {
+  const mediaId =
+    typeof row?.media_id === "string"
+      ? row.media_id.trim()
+      : "";
+
+  const secureUrl =
+    typeof row?.secure_url === "string"
+      ? row.secure_url.trim()
+      : "";
+
+  const format =
+    row?.format == null
+      ? null
+      : String(row.format).trim();
+
+  const uploadedAt =
+    iso(row?.uploaded_at);
+
+  if (
+    !mediaId ||
+    !secureUrl.startsWith(
+      "https://res.cloudinary.com/"
+    ) ||
+    (row?.uploaded_at != null &&
+      !uploadedAt)
+  ) {
+    return null;
+  }
+
+  return {
+    mediaId,
+    secureUrl,
+    format: format || null,
+    uploadedAt,
+    category: "REQUEST_PHOTO",
+  };
+}
+
+function customerHistoryVisitProjection(
+  row
+) {
+  const visitId =
+    normalizedUuid(row?.visit_id);
+
+  const purpose =
+    ["EVALUATION", "APPROVED_WORK"]
+      .includes(row?.purpose)
+      ? row.purpose
+      : null;
+
+  const state =
+    typeof row?.state === "string"
+      ? row.state.trim()
+      : "";
+
+  const scheduledStartAt =
+    iso(row?.scheduled_start_at);
+
+  const scheduledEndAt =
+    iso(row?.scheduled_end_at);
+
+  const completedAt =
+    iso(row?.completed_at);
+
+  const createdAt =
+    iso(row?.created_at);
+
+  if (
+    !visitId ||
+    !purpose ||
+    !state ||
+    (row?.scheduled_start_at != null &&
+      !scheduledStartAt) ||
+    (row?.scheduled_end_at != null &&
+      !scheduledEndAt) ||
+    (row?.completed_at != null &&
+      !completedAt) ||
+    !createdAt
+  ) {
+    return null;
+  }
+
+  return {
+    visitId,
+    purpose,
+    state,
+    scheduledStartAt,
+    scheduledEndAt,
+    timeZone:
+      row?.time_zone == null
+        ? null
+        : String(
+            row.time_zone
+          ).trim() || null,
+    locationMode:
+      row?.location_mode == null
+        ? null
+        : String(
+            row.location_mode
+          ).trim() || null,
+    completedAt,
+    createdAt,
+  };
+}
+
+function customerHistoryFindingState(
+  value
+) {
+  return value === "RESOLVED"
+    ? "RESOLVED"
+    : "NEEDS_ATTENTION";
+}
+
+function customerHistoryRecommendationState(
+  value
+) {
+  if (value === "DEFERRED") {
+    return "DEFERRED";
+  }
+
+  if (
+    [
+      "WITHDRAWN",
+      "SUPERSEDED",
+      "DECLINED",
+    ].includes(value)
+  ) {
+    return "NOT_PROCEEDING";
+  }
+
+  return "RECOMMENDED";
+}
+
+function customerHistoryAssessmentProjection(
+  evaluation,
+  findingRows = [],
+  recommendationRows = []
+) {
+  if (!evaluation) return null;
+
+  const findings =
+    findingRows.map((row) => {
+      const id =
+        normalizedUuid(row.id);
+
+      const statement =
+        typeof row.statement === "string"
+          ? row.statement.trim()
+          : "";
+
+      const createdAt =
+        iso(row.created_at);
+
+      const updatedAt =
+        iso(row.updated_at);
+
+      if (
+        !id ||
+        !statement ||
+        !createdAt ||
+        !updatedAt
+      ) {
+        return null;
+      }
+
+      return {
+        id,
+        statement,
+        state:
+          customerHistoryFindingState(
+            row.resolution_state
+          ),
+        createdAt,
+        updatedAt,
+      };
+    });
+
+  if (findings.some((item) => !item)) {
+    return null;
+  }
+
+  const findingIds =
+    new Set(
+      findings.map(
+        (finding) => finding.id
+      )
+    );
+
+  const recommendations =
+    recommendationRows.map((row) => {
+      const id =
+        normalizedUuid(row.id);
+
+      const findingId =
+        normalizedUuid(
+          row.finding_id
+        );
+
+      const statement =
+        typeof row.statement === "string"
+          ? row.statement.trim()
+          : "";
+
+      const createdAt =
+        iso(row.created_at);
+
+      const updatedAt =
+        iso(row.updated_at);
+
+      if (
+        !id ||
+        !findingId ||
+        !findingIds.has(findingId) ||
+        !statement ||
+        !createdAt ||
+        !updatedAt
+      ) {
+        return null;
+      }
+
+      return {
+        id,
+        findingId,
+        statement,
+        state:
+          customerHistoryRecommendationState(
+            row.status
+          ),
+        createdAt,
+        updatedAt,
+      };
+    });
+
+  if (
+    recommendations.some(
+      (item) => !item
+    )
+  ) {
+    return null;
+  }
+
+  const startedAt =
+    iso(evaluation.created_at);
+
+  const updatedAt =
+    iso(evaluation.updated_at);
+
+  const completedAt =
+    iso(evaluation.completed_at);
+
+  if (
+    !startedAt ||
+    !updatedAt ||
+    (
+      evaluation.completed_at != null &&
+      !completedAt
+    )
+  ) {
+    return null;
+  }
+
+  return {
+    evaluation: {
+      status:
+        evaluation.status ===
+        "completed"
+          ? "COMPLETE"
+          : "IN_PROGRESS",
+      completedAt,
+      startedAt,
+      updatedAt,
+    },
+    findings,
+    recommendations,
+  };
+}
+
+async function loadCustomerHistoryDeposits(
+  client,
+  row
+) {
+  const relationshipId =
+    positiveInteger(
+      row?.relationship_id
+    );
+
+  if (!relationshipId) {
+    return [];
+  }
+
+  const result =
+    await client.query(
+      `
+      SELECT
+        obligations.id,
+        obligations.quote_id,
+        obligations.currency,
+        current.state,
+        current.required_minor,
+        current.applied_minor,
+        current.remaining_minor
+
+      FROM
+        canonical_pre_work_deposit_obligations
+          obligations
+
+      INNER JOIN LATERAL (
+        SELECT
+          versions.state,
+          versions.required_minor,
+          versions.applied_minor,
+          versions.remaining_minor
+
+        FROM
+          canonical_pre_work_deposit_versions
+            versions
+
+        WHERE
+          versions.obligation_id =
+            obligations.id
+
+          AND versions.job_id =
+            obligations.job_id
+
+        ORDER BY
+          versions.version DESC
+
+        LIMIT 1
+      ) current
+        ON TRUE
+
+      WHERE
+        obligations.job_id = $1
+
+        AND obligations.relationship_id =
+            $2
+
+      ORDER BY
+        obligations.effective_at ASC,
+        obligations.id ASC
+      `,
+      [
+        row.job_id,
+        relationshipId,
+      ]
+    );
+
+  const deposits = [];
+
+  for (const obligation of result.rows) {
+    const payments =
+      await client.query(
+        `
+        SELECT
+          receipts.gross_amount_minor,
+          receipts.currency,
+
+          COALESCE(
+            NULLIF(
+              receipts.display_method,
+              ''
+            ),
+            NULLIF(
+              receipts.normalized_method,
+              ''
+            ),
+            'Other'
+          ) AS method,
+
+          receipts.received_at,
+
+          COALESCE(
+            allocations.net_applied_minor,
+            0
+          ) AS applied_minor
+
+        FROM
+          canonical_pre_work_payment_receipts
+            receipts
+
+        LEFT JOIN LATERAL (
+          SELECT
+            COALESCE(
+              sum(
+                allocation.allocated_minor
+              ),
+              0
+            )
+            -
+            COALESCE(
+              sum(
+                allocation.reversed_minor
+              ),
+              0
+            )
+              AS net_applied_minor
+
+          FROM (
+            SELECT
+              payment_allocations.id,
+              payment_allocations.allocated_minor,
+
+              COALESCE(
+                sum(
+                  reversals.reversed_minor
+                ),
+                0
+              ) AS reversed_minor
+
+            FROM
+              canonical_pre_work_payment_allocations
+                payment_allocations
+
+            LEFT JOIN
+              canonical_pre_work_payment_allocation_reversals
+                reversals
+
+              ON reversals.allocation_id =
+                 payment_allocations.id
+
+            WHERE
+              payment_allocations.receipt_id =
+                receipts.id
+
+              AND payment_allocations.obligation_id =
+                $1
+
+            GROUP BY
+              payment_allocations.id,
+              payment_allocations.allocated_minor
+          ) allocation
+        ) allocations
+          ON TRUE
+
+        WHERE EXISTS (
+          SELECT 1
+
+          FROM
+            canonical_pre_work_payment_allocations
+              payment_allocations
+
+          WHERE
+            payment_allocations.receipt_id =
+              receipts.id
+
+            AND payment_allocations.obligation_id =
+              $1
+        )
+
+        ORDER BY
+          receipts.received_at ASC,
+          receipts.id ASC
+        `,
+        [
+          obligation.id,
+        ]
+      );
+
+    const projected =
+      customerHistoryDepositProjection(
+        obligation,
+        payments.rows
+      );
+
+    if (!projected) {
+      throw new Error(
+        "Customer History deposit projection is invalid."
+      );
+    }
+
+    deposits.push(projected);
+  }
+
+  return deposits;
+}
+
+async function loadCustomerHistoryMedia(
+  client,
+  row
+) {
+  const requestId =
+    positiveInteger(
+      row?.job_request_id
+    );
+
+  if (!requestId) {
+    return [];
+  }
+
+  const result =
+    await client.query(
+      `
+      SELECT
+        photo.item->>'public_id'
+          AS media_id,
+
+        photo.item->>'secure_url'
+          AS secure_url,
+
+        photo.item->>'format'
+          AS format,
+
+        photo.item->>'uploaded_at'
+          AS uploaded_at
+
+      FROM posts
+
+      CROSS JOIN LATERAL
+        jsonb_array_elements(
+          CASE
+            WHEN
+              jsonb_typeof(
+                posts.request_photos
+              ) = 'array'
+            THEN
+              posts.request_photos
+            ELSE
+              '[]'::jsonb
+          END
+        )
+        WITH ORDINALITY
+          AS photo(item, ordinal)
+
+      WHERE
+        posts.id = $1
+
+        AND posts.lifecycle_contract_version =
+            2
+
+        AND photo.item->>'purpose' =
+            'request-photo'
+
+        AND photo.item->>'resource_type' =
+            'image'
+
+        AND photo.item->>'lifecycle_state' =
+            'attached'
+
+        AND COALESCE(
+          photo.item->>'public_id',
+          ''
+        ) <> ''
+
+        AND photo.item->>'secure_url'
+            LIKE
+            'https://res.cloudinary.com/%'
+
+      ORDER BY
+        photo.item->>'uploaded_at'
+          ASC NULLS LAST,
+        ordinal ASC
+      `,
+      [requestId]
+    );
+
+  const media =
+    result.rows.map(
+      customerHistoryMediaProjection
+    );
+
+  if (media.some((item) => !item)) {
+    throw new Error(
+      "Customer History media projection is invalid."
+    );
+  }
+
+  return media;
+}
+
+async function loadCustomerHistoryVisits(
+  client,
+  row
+) {
+  if (
+    row?.source_type ===
+    "emergency_request"
+  ) {
+    return [];
+  }
+
+  const result =
+    await client.query(
+      `
+      SELECT
+        visits.id AS visit_id,
+        visits.purpose,
+
+        current.state,
+        current.scheduled_start_at,
+        current.scheduled_end_at,
+        current.time_zone,
+        current.location_mode,
+        current.completed_at,
+
+        visits.created_at
+
+      FROM canonical_visits visits
+
+      INNER JOIN LATERAL (
+        SELECT
+          versions.*
+
+        FROM
+          canonical_visit_versions
+            versions
+
+        WHERE
+          versions.visit_id =
+            visits.id
+
+          AND versions.job_id =
+            visits.job_id
+
+        ORDER BY
+          versions.version DESC
+
+        LIMIT 1
+      ) current
+        ON TRUE
+
+      WHERE
+        visits.job_id = $1
+
+        AND visits.purpose IN (
+          'EVALUATION',
+          'APPROVED_WORK'
+        )
+
+      ORDER BY
+        current.scheduled_start_at
+          ASC NULLS LAST,
+        visits.id ASC
+      `,
+      [row.job_id]
+    );
+
+  const visits =
+    result.rows.map(
+      customerHistoryVisitProjection
+    );
+
+  if (visits.some((item) => !item)) {
+    throw new Error(
+      "Customer History Visit projection is invalid."
+    );
+  }
+
+  return visits;
+}
+
+async function loadCustomerHistoryEmergencyAssessment(
+  client,
+  row
+) {
+  if (
+    row?.source_type !==
+    "emergency_request"
+  ) {
+    return null;
+  }
+
+  const emergencyRequestId =
+    positiveInteger(
+      row?.emergency_request_id
+    );
+
+  const relationshipId =
+    positiveInteger(
+      row?.relationship_id
+    );
+
+  if (
+    !emergencyRequestId ||
+    !relationshipId
+  ) {
+    return null;
+  }
+
+  const evaluationResult =
+    await client.query(
+      `
+      SELECT
+        evaluations.id,
+        evaluations.status,
+        evaluations.completed_at,
+        evaluations.created_at,
+        evaluations.updated_at
+
+      FROM
+        canonical_evaluation_job_subjects
+          subjects
+
+      INNER JOIN
+        canonical_evaluations
+          evaluations
+
+        ON evaluations.id =
+           subjects.evaluation_id
+
+      WHERE
+        subjects.job_id = $1
+
+        AND subjects.source_context_type =
+            'emergency_request'
+
+        AND subjects.job_source_type =
+            'emergency_request'
+
+        AND subjects.emergency_request_id =
+            $2
+
+        AND subjects.relationship_id =
+            $3
+
+      ORDER BY
+        evaluations.updated_at DESC,
+        evaluations.id ASC
+
+      LIMIT 1
+      `,
+      [
+        row.job_id,
+        emergencyRequestId,
+        relationshipId,
+      ]
+    );
+
+  const evaluation =
+    evaluationResult.rows[0];
+
+  if (!evaluation) {
+    return null;
+  }
+
+  const findingsResult =
+    await client.query(
+      `
+      SELECT
+        findings.id,
+        current.statement,
+        current.resolution_state,
+        findings.created_at,
+        current.created_at
+          AS updated_at
+
+      FROM
+        canonical_evaluation_findings
+          findings
+
+      INNER JOIN LATERAL (
+        SELECT
+          versions.statement,
+          versions.confirmation_state,
+          versions.resolution_state,
+          versions.customer_visible,
+          versions.created_at
+
+        FROM
+          canonical_evaluation_finding_versions
+            versions
+
+        WHERE
+          versions.finding_id =
+            findings.id
+
+          AND versions.job_id =
+            findings.job_id
+
+        ORDER BY
+          versions.version DESC
+
+        LIMIT 1
+      ) current
+        ON TRUE
+
+      WHERE
+        findings.evaluation_id = $1
+
+        AND findings.job_id = $2
+
+        AND current.confirmation_state =
+            'CONFIRMED'
+
+        AND current.customer_visible =
+            TRUE
+
+      ORDER BY
+        findings.created_at ASC,
+        findings.id ASC
+      `,
+      [
+        evaluation.id,
+        row.job_id,
+      ]
+    );
+
+  const findingIds =
+    findingsResult.rows.map(
+      (finding) => finding.id
+    );
+
+  const recommendationsResult =
+    findingIds.length === 0
+      ? { rows: [] }
+      : await client.query(
+          `
+          SELECT
+            recommendations.id,
+            recommendations.finding_id,
+            current.statement,
+            current.status,
+            recommendations.created_at,
+            current.created_at
+              AS updated_at
+
+          FROM
+            canonical_recommendations
+              recommendations
+
+          INNER JOIN LATERAL (
+            SELECT
+              versions.statement,
+              versions.status,
+              versions.customer_visible,
+              versions.created_at
+
+            FROM
+              canonical_recommendation_versions
+                versions
+
+            WHERE
+              versions.recommendation_id =
+                recommendations.id
+
+            ORDER BY
+              versions.version DESC
+
+            LIMIT 1
+          ) current
+            ON TRUE
+
+          WHERE
+            recommendations.job_id =
+              $1
+
+            AND recommendations.finding_id =
+              ANY($2::uuid[])
+
+            AND current.customer_visible =
+              TRUE
+
+          ORDER BY
+            recommendations.created_at ASC,
+            recommendations.id ASC
+          `,
+          [
+            row.job_id,
+            findingIds,
+          ]
+        );
+
+  const projection =
+    customerHistoryAssessmentProjection(
+      evaluation,
+      findingsResult.rows,
+      recommendationsResult.rows
+    );
+
+  if (!projection) {
+    throw new Error(
+      "Customer History Emergency assessment projection is invalid."
+    );
+  }
+
+  return projection;
+}
+
+async function loadCustomerHistoryRecords(
+  client,
+  row
+) {
+  const [
+    deposits,
+    media,
+    visits,
+    emergencyAssessment,
+  ] =
+    await Promise.all([
+      loadCustomerHistoryDeposits(
+        client,
+        row
+      ),
+      loadCustomerHistoryMedia(
+        client,
+        row
+      ),
+      loadCustomerHistoryVisits(
+        client,
+        row
+      ),
+      loadCustomerHistoryEmergencyAssessment(
+        client,
+        row
+      ),
+    ]);
+
+  return {
+    deposits,
+    media,
+    visits,
+    emergencyAssessment,
+  };
+}
+
 async function getHistoryDetail(input = {}, audience) {
   const allowed = new Set([
     "pool",
@@ -2189,6 +3221,14 @@ async function getHistoryDetail(input = {}, audience) {
       const summary =
         historySummary(row);
 
+      const historyRecords =
+        audience === "customer"
+          ? await loadCustomerHistoryRecords(
+              client,
+              row
+            )
+          : null;
+
       return {
         ok: true,
         success: true,
@@ -2226,6 +3266,12 @@ async function getHistoryDetail(input = {}, audience) {
             workPlan: row.source_type !== "emergency_request",
           },
 
+          ...(audience === "customer"
+            ? {
+                historyRecords,
+              }
+            : {}),
+
           actions:
             audience === "customer"
               ? {
@@ -2247,6 +3293,12 @@ const getProfessionalJobHistory = (input) => getHistoryDetail(input, "profession
 const getCustomerJobHistory = (input) => getHistoryDetail(input, "customer");
 
 module.exports = {
+  customerHistoryRecordInternals: Object.freeze({
+    customerHistoryAssessmentProjection,
+    customerHistoryDepositProjection,
+    customerHistoryMediaProjection,
+    customerHistoryVisitProjection,
+  }),
   completeEmergencyJobWithClient,
   completeJob,
   decodeCursor,
