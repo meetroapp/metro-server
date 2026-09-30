@@ -348,6 +348,7 @@ async function loadCustomerQuotePage(
       quotes.status,
       quotes.currency,
       quotes.lineage_type,
+      business_sources.document_number AS quote_number,
       quotes.created_at,
       quotes.updated_at,
       quotes.issued_at,
@@ -413,6 +414,9 @@ async function loadCustomerQuotePage(
       ON issuances.quote_id = quotes.id
       AND issuances.job_id = quotes.job_id
       AND issuances.quote_version = aggregates.current_version
+    LEFT JOIN canonical_quote_business_document_sources business_sources
+      ON business_sources.quote_id = quotes.id
+      AND business_sources.job_id = quotes.job_id
     ${sourceJoins}
     INNER JOIN relationship_participants customer
       ON customer.id = $4
@@ -586,6 +590,11 @@ function quoteProjection(row) {
   return {
     quoteId: row.id,
     jobId: row.job_id,
+    quoteNumber:
+      typeof row.quote_number === "string" &&
+      row.quote_number.trim()
+        ? row.quote_number.trim()
+        : null,
     businessStatus: row.business_status,
     status: row.status,
     customerDecision: row.customer_decision || null,

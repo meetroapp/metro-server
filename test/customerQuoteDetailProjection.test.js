@@ -19,6 +19,7 @@ function internalQuote(overrides = {}) {
   return {
     id: IDS.quote,
     jobId: IDS.job,
+    documentNumber: "Q-0000025",
     requestId: 16,
     relationshipId: 21,
     issuerParticipantId: "40000000-0000-4000-8000-000000000004",
@@ -116,6 +117,7 @@ test("customer Quote detail is an exact allowlist with safe pending decision sup
   assert.deepEqual(Object.keys(detail), [
     "quoteId",
     "jobId",
+    "quoteNumber",
     "status",
     "businessStatus",
     "customerDecision",
@@ -133,6 +135,7 @@ test("customer Quote detail is an exact allowlist with safe pending decision sup
   assert.deepEqual(detail, {
     quoteId: IDS.quote,
     jobId: IDS.job,
+    quoteNumber: "Q-0000025",
     status: "ISSUED",
     businessStatus: "WAITING_ON_CUSTOMER",
     customerDecision: null,
@@ -173,6 +176,7 @@ test("customer Quote detail strips every internal and future sentinel recursivel
   const exposedKeys = keysDeep(detail);
   for (const forbidden of [
     "authoritySource",
+    "documentNumber",
     "relationshipId",
     "issuerParticipantId",
     "materialsSubtotalMinor",
@@ -199,6 +203,19 @@ test("customer Quote detail strips every internal and future sentinel recursivel
   ]) {
     assert.equal(exposedKeys.has(forbidden), false, forbidden);
   }
+});
+
+test("customer Quote number is safe metadata and legacy missing numbers remain nullable", () => {
+  assert.equal(
+    customerQuoteDetailProjection(
+      internalQuote({ documentNumber: null }),
+      {
+        canApprove: true,
+        canDecline: true,
+      }
+    ).quoteNumber,
+    null
+  );
 });
 
 test("terminal customer decisions disable actions and derived lineage uses safe labels", () => {

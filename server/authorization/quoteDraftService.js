@@ -3104,6 +3104,7 @@ function customerQuoteDetailProjection(
   const projection = {
     quoteId: quote.id,
     jobId: quote.jobId,
+    quoteNumber: boundedText(quote.documentNumber, 80) || null,
     status: QUOTE_STATUS.ISSUED,
     businessStatus: customerDecision || "WAITING_ON_CUSTOMER",
     customerDecision,

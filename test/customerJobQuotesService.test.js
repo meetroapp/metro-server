@@ -44,6 +44,7 @@ function quote(overrides = {}) {
     status: "ISSUED",
     currency: "USD",
     lineage_type: null,
+    quote_number: "Q-0000025",
     created_at: "2026-08-10T12:00:00.000Z",
     updated_at: "2026-08-13T12:00:00.000Z",
     issued_at: "2026-08-12T12:00:00.000Z",
@@ -172,6 +173,7 @@ test("customer DTO is an explicit privacy allowlist with exact terminal action t
   assert.deepEqual(Object.keys(waiting), [
     "quoteId",
     "jobId",
+    "quoteNumber",
     "businessStatus",
     "status",
     "customerDecision",
@@ -184,6 +186,15 @@ test("customer DTO is an explicit privacy allowlist with exact terminal action t
     "decidedAt",
     "actions",
   ]);
+  assert.equal(waiting.quoteNumber, "Q-0000025");
+
+  assert.equal(
+    customerJobQuotesInternals.quoteProjection(
+      quote({ quote_number: null })
+    ).quoteNumber,
+    null
+  );
+
   assert.deepEqual(waiting.actions, {
     canViewQuote: true,
     canApprove: true,
@@ -318,6 +329,14 @@ test("discovery query is read-only, excludes Drafts, and derives authority from 
   assert.match(sql, /REPEATABLE READ READ ONLY/);
   assert.match(sql, /quotes\.status = 'ISSUED'/);
   assert.match(sql, /canonical_quote_issuances/);
+  assert.match(
+    sql,
+    /LEFT JOIN canonical_quote_business_document_sources business_sources/
+  );
+  assert.match(
+    sql,
+    /business_sources\.document_number AS quote_number/
+  );
   assert.match(sql, /relationships\.status = 'active'/);
   assert.match(sql, /roles\.role = 'CUSTOMER_REPRESENTATIVE'/);
   assert.match(sql, /grants\.capability = 'quote\.read_customer'/);

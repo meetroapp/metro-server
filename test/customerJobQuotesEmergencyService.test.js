@@ -36,7 +36,8 @@ function emergency(overrides = {}) {
 function deliveredQuote() {
   return {
     id: ID.quote, job_id: ID.job, status: "ISSUED", currency: "USD",
-    lineage_type: null, created_at: "2026-08-10T12:00:00Z",
+    lineage_type: null, quote_number: "Q-0000025",
+    created_at: "2026-08-10T12:00:00Z",
     updated_at: "2026-08-13T12:00:00Z", issued_at: "2026-08-12T12:00:00Z",
     total_minor: "92500", customer_decision: null, decided_at: null,
     business_status: "WAITING_ON_CUSTOMER", relevance_priority: 1,
@@ -89,6 +90,7 @@ test("Emergency homeowner receives exact delivered Quote under canonical context
     title: "Emergency leak", service: "Plumbing", issuerName: "ABC Plumbing",
   });
   assert.deepEqual(result.quotes.map(({ quoteId }) => quoteId), [ID.quote]);
+  assert.equal(result.quotes[0].quoteNumber, "Q-0000025");
   assert.equal("emergencyRequestId" in result.job, false);
   const sql = pool.calls.map(({ sql }) => sql).join("\n");
   for (const required of [
