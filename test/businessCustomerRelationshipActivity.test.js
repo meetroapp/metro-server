@@ -17,7 +17,7 @@ const JOB_ID = "33333333-3333-4333-8333-333333333333";
 const QUOTE_ID = "44444444-4444-4444-8444-444444444444";
 const INVOICE_ID = "55555555-5555-4555-8555-555555555555";
 
-function createPool({ owned = true, archived = false, empty = false } = {}) {
+function createPool({ owned = true, archived = false, empty = false, quoteRows = null, invoiceRows = null } = {}) {
   const calls = [];
   const pool = {
     calls,
@@ -58,8 +58,9 @@ function createPool({ owned = true, archived = false, empty = false } = {}) {
         }] };
       }
       if (text.includes("business_customer_relationship:activity_quotes")) {
-        return { rows: empty ? [] : [{
+        return { rows: quoteRows || (empty ? [] : [{
           quote_id: QUOTE_ID,
+          external_approval_current: true,
           job_id: JOB_ID,
           job_title: "Kitchen repair",
           document_number: "Q-0001020",
@@ -74,10 +75,10 @@ function createPool({ owned = true, archived = false, empty = false } = {}) {
           decided_at: "2026-08-22T15:00:00.000Z",
           last_activity_at: "2026-08-22T15:00:00.000Z",
           linked_at: "2026-08-21T13:01:00.000Z",
-        }] };
+        }]) };
       }
       if (text.includes("business_customer_relationship:activity_invoices")) {
-        return { rows: empty ? [] : [{
+        return { rows: invoiceRows || (empty ? [] : [{
           invoice_id: INVOICE_ID,
           invoice_number: "INV-ABCDEF123456",
           job_id: JOB_ID,
@@ -93,7 +94,7 @@ function createPool({ owned = true, archived = false, empty = false } = {}) {
           issued_at: "2026-08-23T14:00:00.000Z",
           last_activity_at: "2026-08-24T13:00:00.000Z",
           linked_at: "2026-08-23T13:01:00.000Z",
-        }] };
+        }]) };
       }
       if (text.includes("business_customer_relationship:activity_media")) {
         return { rows: empty ? [] : [{
@@ -299,5 +300,41 @@ test("relationship activity implementation adds no schema, AI, or downstream mut
   assert.doesNotMatch(source, /openai|provider|ask meetro/i);
   const activitySource = String(businessCustomerRelationshipInternals.sqlStore.getActivity);
   assert.match(activitySource, /business_document_working_drafts documents/);
-  assert.doesNotMatch(activitySource, /business_document_draft_media|moments|conversations/i);
+  assert.doesNotMatch(activitySource, /business_document_draft_media|moments/i);
+});
+
+
+test("history uses issued customer documents and canonical Quote lineage", async () => {
+  const pool = createPool();
+  const result = await getBusinessCustomerRelationshipActivity(input(pool));
+  assert.equal(result.activity.quotes[0].lineageLabel, "Original");
+  for (const [type, label] of [["REVISED_QUOTE", "Revised"], ["SUPPLEMENTAL_QUOTE", "Additional"]]) {
+    const quote = businessCustomerRelationshipInternals.quoteActivityProjection({
+      quote_id: QUOTE_ID, job_id: JOB_ID, parent_quote_id: INVOICE_ID, lineage_type: type,
+    });
+    assert.equal(quote.lineageLabel, label);
+    assert.equal(quote.parentQuoteId, INVOICE_ID);
+    assert.equal(quote.jobId, JOB_ID);
+  }
+  const quoteSql = pool.calls.find(call => call.sql.includes(":activity_quotes")).sql;
+  const invoiceSql = pool.calls.find(call => call.sql.includes(":activity_invoices")).sql;
+  assert.match(quoteSql, /quotes.status = 'ISSUED' AND quotes.issued_at IS NOT NULL/);
+  assert.match(invoiceSql, /current.status <> 'DRAFT' AND issuances.issued_at IS NOT NULL/);
+  const documents = businessCustomerRelationshipInternals.documentActivityProjections(
+    [{ quote_id: QUOTE_ID, job_id: JOB_ID, status: "DRAFT" },
+      { quote_id: INVOICE_ID, job_id: JOB_ID, status: "ISSUED", issued_at: "2026-09-01" }],
+    [{ invoice_id: INVOICE_ID, job_id: JOB_ID, status: "DRAFT", issued_at: "2026-09-01" },
+      { invoice_id: QUOTE_ID, job_id: JOB_ID, status: "SENT", issued_at: null }]);
+  assert.equal(documents.length, 1);
+  assert.equal(documents[0].documentId, INVOICE_ID);
+});
+
+
+test("issued but unsent Quote is excluded from customer documents and history", async () => {
+  const result = await getBusinessCustomerRelationshipActivity(input(createPool({quoteRows:[{
+    quote_id:QUOTE_ID,job_id:JOB_ID,status:"ISSUED",issued_at:"2026-09-01",current_version:2,
+    external_approval_current:false,delivery_fingerprints:[],
+  }]})));
+  assert.deepEqual(result.activity.quotes,[]);
+  assert.equal(result.activity.documents.some(row=>row.documentType === "QUOTE"),false);
 });

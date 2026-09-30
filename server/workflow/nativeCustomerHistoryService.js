@@ -3,6 +3,9 @@
 const { commercialAuthorityInternals } = require("../authorization/commercialAuthorityService");
 const { databaseClient, validateAuthenticatedActor, failure, isPlainObject, normalizedUuid, rollback } = commercialAuthorityInternals;
 
+const { quoteDeliveryFingerprintMap } = require("../authorization/quoteDeliveryAuthority");
+const { businessCustomerRelationshipInternals: projection } = require("../relationships/businessCustomerRelationshipService");
+
 const MAX_LIMIT = 50;
 const DEFAULT_LIMIT = 20;
 const unavailable = () => failure(404, "NATIVE_CUSTOMER_HISTORY_UNAVAILABLE", "Customer History is unavailable.");
@@ -29,9 +32,9 @@ function parseCursor(value, kind, profileId, homeownerId = null) {
     if (kind === "directory") {
       return Object.keys(parsed).length === 5 && positiveId(parsed.afterUserId) ? parsed : false;
     }
-    const completedAt = new Date(parsed.completedAt);
+    const completedAt = new Date(parsed.activityAt || parsed.completedAt);
     return Object.keys(parsed).length === 6 && normalizedUuid(parsed.jobId) &&
-      !Number.isNaN(completedAt.getTime()) && completedAt.toISOString() === parsed.completedAt ? parsed : false;
+      !Number.isNaN(completedAt.getTime()) && completedAt.toISOString() === (parsed.activityAt || parsed.completedAt) ? parsed : false;
   } catch {
     return false;
   }
@@ -40,7 +43,7 @@ function parseCursor(value, kind, profileId, homeownerId = null) {
 function cursorFor(kind, profileId, homeownerId, row) {
   const value = kind === "directory"
     ? { v: 1, kind, profileId, homeownerId: null, afterUserId: Number(row.homeowner_user_id) }
-    : { v: 1, kind, profileId, homeownerId, completedAt: new Date(row.completed_at).toISOString(), jobId: row.job_id };
+    : { v: 1, kind, profileId, homeownerId, activityAt: new Date(row.completed_at || row.job_created_at).toISOString(), jobId: row.job_id };
   return Buffer.from(JSON.stringify(value)).toString("base64url");
 }
 
@@ -66,7 +69,8 @@ async function readOnly(pool, action) {
 // active Conversation, or role valid_until. An explicit role revocation does
 // deny history. The two source branches retain their original identities.
 const NATIVE_JOBS_SQL = `
-  SELECT jobs.id AS job_id, jobs.source_type, relationships.contractor_id AS contractor_profile_id,
+  SELECT DISTINCT jobs.id AS job_id, jobs.source_type, jobs.created_at AS job_created_at,
+    jobs.job_request_id, jobs.source_request_relationship_id AS relationship_id, relationships.contractor_id AS contractor_profile_id,
     relationships.homeowner_id AS homeowner_user_id, homeowner.username AS display_name,
     CASE WHEN jobs.source_type = 'emergency_request' THEN emergency.title ELSE posts.title END AS service_title,
     completions.completed_at, completions.workstream_count, completions.work_item_count,
@@ -228,11 +232,115 @@ const APPROVED_SQL = `LEFT JOIN LATERAL (
 
 function projectJob(row) {
   return { jobId: row.job_id, sourceType: row.source_type,
-    serviceTitle: row.service_title || "Job", completedAt: new Date(row.completed_at).toISOString(),
+    serviceTitle: row.service_title || "Job",
+    createdAt: new Date(row.job_created_at).toISOString(),
+    completionState: row.completed_at ? "COMPLETED" : "ACTIVE",
+    completedAt: row.completed_at ? new Date(row.completed_at).toISOString() : null,
     approvedQuote: row.total_minor == null || !row.currency ? null
       : { currency: row.currency, totalMinor: Number(row.total_minor) },
-    completionSummary: { workstreamCount: Number(row.workstream_count),
-      workItemCount: Number(row.work_item_count), customerUpdateCount: Number(row.customer_update_count) } };
+    completionSummary: { workstreamCount: Number(row.workstream_count || 0),
+      workItemCount: Number(row.work_item_count || 0), customerUpdateCount: Number(row.customer_update_count || 0) } };
+}
+
+// Every commercial/media row starts from the same authorized native subject. No Contact is created.
+const SUBJECT_CTE = `WITH native_jobs AS (${NATIVE_JOBS_SQL}),
+  subject_jobs AS (SELECT * FROM native_jobs WHERE homeowner_user_id = $3)`;
+
+const HISTORY_CTE = `${SUBJECT_CTE}, visible_quotes AS (
+  SELECT quotes.id AS quote_id, quotes.job_id, quotes.parent_quote_id, quotes.lineage_type,
+    sources.document_number, quotes.status, versions.currency, versions.total_minor,
+    quotes.created_at, quotes.updated_at, quotes.issued_at, decisions.decision AS customer_decision,
+    decisions.decided_at, jobs.service_title AS job_title
+  FROM subject_jobs jobs
+  JOIN canonical_quotes quotes ON quotes.job_id = jobs.job_id AND quotes.relationship_id = jobs.relationship_id
+  JOIN commercial_authority_aggregates aggregates ON aggregates.id = quotes.id
+    AND aggregates.aggregate_type = 'quote' AND aggregates.owning_engine = 'authorization_engine'
+  JOIN canonical_quote_versions versions ON versions.quote_id = quotes.id AND versions.job_id = jobs.job_id
+    AND versions.version = aggregates.current_version AND versions.status = 'ISSUED'
+  JOIN canonical_quote_issuances issuances ON issuances.quote_id = quotes.id AND issuances.job_id = jobs.job_id
+    AND issuances.quote_version = versions.version
+  LEFT JOIN canonical_quote_business_document_sources sources ON sources.quote_id = quotes.id AND sources.job_id = jobs.job_id
+  LEFT JOIN canonical_quote_customer_decisions decisions ON decisions.quote_id = quotes.id AND decisions.job_id = jobs.job_id
+    AND decisions.relationship_id = jobs.relationship_id AND decisions.issued_quote_version = versions.version
+  WHERE quotes.status = 'ISSUED' AND quotes.issued_at IS NOT NULL
+    AND ((quotes.parent_quote_id IS NULL AND quotes.lineage_type IS NULL) OR
+      (quotes.parent_quote_id IS NOT NULL AND quotes.lineage_type IN ('REVISED_QUOTE','SUPPLEMENTAL_QUOTE')))
+    AND EXISTS (SELECT 1 FROM messages delivery JOIN conversations conversation ON conversation.id = delivery.conversation_id
+      AND conversation.relationship_id = jobs.relationship_id AND conversation.contractor_id = $1
+      AND conversation.professional_user_id = $2 AND conversation.homeowner_id = $3
+      AND conversation.status IN ('active','closed')
+      WHERE delivery.quote_id = quotes.id AND delivery.job_id = jobs.job_id
+        AND delivery.sender_id = $2 AND delivery.receiver_id = $3
+        AND delivery.message_type = 'quote_shared' AND delivery.workflow_type = 'QUOTE_SHARED'
+        AND delivery.workflow_status = 'SENT'
+        AND delivery.delivery_request_fingerprint = COALESCE($4::jsonb ->> quotes.id::text, '')
+        AND delivery.workflow_payload ->> 'quoteId' = quotes.id::text
+        AND delivery.workflow_payload ->> 'jobId' = jobs.job_id::text)
+), visible_invoices AS (
+  SELECT invoices.id AS invoice_id, invoices.invoice_number, invoices.job_id, current.status,
+    current.currency, current.total_minor, current.paid_minor, current.balance_minor, current.invoice_date,
+    invoices.created_at, current.created_at AS updated_at, issuances.issued_at, jobs.service_title AS job_title
+  FROM subject_jobs jobs JOIN canonical_invoices invoices ON invoices.job_id = jobs.job_id
+    AND invoices.relationship_id = jobs.relationship_id
+  JOIN LATERAL (SELECT versions.* FROM canonical_invoice_versions versions
+    WHERE versions.invoice_id = invoices.id AND versions.job_id = jobs.job_id ORDER BY versions.version DESC LIMIT 1) current ON TRUE
+  JOIN canonical_invoice_issuances issuances ON issuances.invoice_id = invoices.id AND issuances.job_id = jobs.job_id
+  WHERE current.status <> 'DRAFT' AND issuances.issued_at IS NOT NULL
+), visible_media AS (
+  SELECT DISTINCT jobs.job_id, jobs.service_title AS job_title, photo.item->>'public_id' AS media_id,
+    photo.item->>'secure_url' AS secure_url, photo.item->>'format' AS format, photo.item->>'uploaded_at' AS uploaded_at
+  FROM subject_jobs jobs JOIN posts ON posts.id = jobs.job_request_id AND posts.user_id = $3
+    AND posts.lifecycle_contract_version = 2
+  CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(posts.request_photos) = 'array'
+    THEN posts.request_photos ELSE '[]'::jsonb END) photo(item)
+  WHERE photo.item->>'purpose' = 'request-photo' AND photo.item->>'resource_type' = 'image'
+    AND photo.item->>'lifecycle_state' = 'attached' AND COALESCE(photo.item->>'public_id','') <> ''
+    AND photo.item->>'secure_url' LIKE 'https://res.cloudinary.com/%'
+)`;
+
+async function historyEvidence(client, profileId, actorId, homeownerId, jobIds) {
+  const candidates = await client.query(`/* native_history:quote_versions */ ${SUBJECT_CTE}
+    SELECT quotes.id, aggregates.current_version FROM subject_jobs jobs
+    JOIN canonical_quotes quotes ON quotes.job_id = jobs.job_id AND quotes.relationship_id = jobs.relationship_id
+    JOIN commercial_authority_aggregates aggregates ON aggregates.id = quotes.id
+      AND aggregates.aggregate_type = 'quote' AND aggregates.owning_engine = 'authorization_engine'
+    WHERE quotes.status = 'ISSUED' AND quotes.issued_at IS NOT NULL`, [profileId, actorId, homeownerId]);
+  const scope = [profileId, actorId, homeownerId, JSON.stringify(quoteDeliveryFingerprintMap(candidates.rows, actorId))];
+  const summaryResult = await client.query(`/* native_history:summary */ ${HISTORY_CTE}
+    SELECT (SELECT count(*) FROM subject_jobs WHERE completed_at IS NULL)::integer AS active_jobs,
+      (SELECT count(*) FROM subject_jobs WHERE completed_at IS NOT NULL)::integer AS completed_jobs,
+      (SELECT count(*) FROM visible_quotes)::integer AS quotes,
+      (SELECT count(*) FROM visible_invoices)::integer AS invoices,
+      (SELECT count(*) FROM visible_media)::integer AS photos`, scope);
+  const summary = summaryResult.rows[0];
+  const communication = await client.query(`/* native_history:communication */ ${SUBJECT_CTE}
+    SELECT DISTINCT conversation.id FROM subject_jobs jobs
+    JOIN request_relationships relationship ON relationship.id = jobs.relationship_id AND relationship.status = 'active'
+    JOIN conversations conversation ON conversation.relationship_id = relationship.id
+      AND conversation.contractor_id = $1 AND conversation.professional_user_id = $2 AND conversation.homeowner_id = $3
+      AND conversation.status = 'active' AND conversation.professional_archived_at IS NULL
+    WHERE EXISTS (SELECT 1 FROM relationship_participants participant
+      JOIN participant_role_assignments role ON role.participant_id = participant.id AND role.job_id = jobs.job_id
+        AND role.role = 'PRIMARY_PROFESSIONAL' AND role.valid_from <= CURRENT_TIMESTAMP
+        AND (role.valid_until IS NULL OR role.valid_until > CURRENT_TIMESTAMP)
+      WHERE participant.job_id = jobs.job_id AND participant.user_id = $2
+        AND participant.request_relationship_id = relationship.id
+        AND NOT EXISTS (SELECT 1 FROM participant_role_revocations revoked WHERE revoked.role_assignment_id = role.id))
+    ORDER BY conversation.id LIMIT 2`, [profileId, actorId, homeownerId]);
+  const quotes = await client.query(`/* native_history:quotes */ ${HISTORY_CTE}
+    SELECT * FROM visible_quotes WHERE job_id = ANY($5::uuid[]) ORDER BY issued_at DESC, quote_id ASC`, [...scope, jobIds]);
+  const invoices = await client.query(`/* native_history:invoices */ ${HISTORY_CTE}
+    SELECT * FROM visible_invoices WHERE job_id = ANY($5::uuid[]) ORDER BY issued_at DESC, invoice_id ASC`, [...scope, jobIds]);
+  const media = await client.query(`/* native_history:media */ ${HISTORY_CTE}
+    SELECT DISTINCT * FROM visible_media WHERE job_id = ANY($5::uuid[]) ORDER BY uploaded_at DESC NULLS LAST, media_id ASC`, [...scope, jobIds]);
+  return {
+    actionBridge: { canStartNewJob: false, conversationId: communication.rows.length === 1 ? Number(communication.rows[0].id) : null },
+    summary: { activeJobs: Number(summary.active_jobs), completedJobs: Number(summary.completed_jobs),
+      quotes: Number(summary.quotes), invoices: Number(summary.invoices),
+      documents: Number(summary.quotes) + Number(summary.invoices), photos: Number(summary.photos) },
+    quotes: quotes.rows.map(projection.quoteActivityProjection), invoices: invoices.rows.map(projection.invoiceActivityProjection),
+    documents: projection.documentActivityProjections(quotes.rows, invoices.rows), media: media.rows.map(projection.mediaActivityProjection),
+  };
 }
 
 async function listNativeCustomerHistory(input = {}) {
@@ -246,18 +354,18 @@ async function listNativeCustomerHistory(input = {}) {
     if (!await ownedProfile(client, valid.profileId, valid.actorId)) return unavailable();
     const found = await readSubject(client, valid.profileId, valid.actorId, homeownerId);
     if (!found) return unavailable();
-    const result = await client.query(`WITH native_jobs AS (${NATIVE_JOBS_SQL})
-      SELECT native_jobs.*, approved.total_minor, approved.currency,
-        count(*) OVER()::integer AS total_count
+    const result = await client.query(`/* native_history:jobs */ WITH native_jobs AS (${NATIVE_JOBS_SQL})
+      SELECT native_jobs.*, approved.total_minor, approved.currency
       FROM native_jobs ${APPROVED_SQL}
-      WHERE native_jobs.homeowner_user_id = $3 AND native_jobs.completed_at IS NOT NULL
-        AND ($4::timestamptz IS NULL OR (native_jobs.completed_at, native_jobs.job_id) < ($4::timestamptz, $5::uuid))
-      ORDER BY native_jobs.completed_at DESC, native_jobs.job_id DESC LIMIT $6`,
-      [valid.profileId, valid.actorId, homeownerId, cursor?.completedAt || null, cursor?.jobId || null, limit + 1]);
+      WHERE native_jobs.homeowner_user_id = $3
+        AND ($4::timestamptz IS NULL OR (COALESCE(native_jobs.completed_at, native_jobs.job_created_at), native_jobs.job_id) < ($4::timestamptz, $5::uuid))
+      ORDER BY COALESCE(native_jobs.completed_at, native_jobs.job_created_at) DESC, native_jobs.job_id DESC LIMIT $6`,
+      [valid.profileId, valid.actorId, homeownerId, cursor?.activityAt || cursor?.completedAt || null, cursor?.jobId || null, limit + 1]);
     const rows = result.rows.slice(0, limit);
+    const evidence = await historyEvidence(client, valid.profileId, valid.actorId, homeownerId, rows.map(row => row.job_id));
     return { ok: true, status: 200, code: "NATIVE_CUSTOMER_HISTORY_FOUND", nativeCustomerHistory: {
-      contractVersion: 1, subject: subject(valid.profileId, homeownerId), displayName: found.display_name || "Customer",
-      jobs: rows.map(projectJob), pagination: { limit, nextCursor: result.rows.length > limit
+      contractVersion: 2, subject: subject(valid.profileId, homeownerId), displayName: found.display_name || "Customer",
+      ...evidence, jobs: rows.map(projectJob), pagination: { limit, nextCursor: result.rows.length > limit
         ? cursorFor("history", valid.profileId, homeownerId, rows.at(-1)) : null },
     } };
   });
@@ -275,12 +383,12 @@ async function getNativeCustomerJobHistory(input = {}) {
       SELECT native_jobs.*, approved.total_minor, approved.currency
       FROM native_jobs ${APPROVED_SQL}
       WHERE native_jobs.homeowner_user_id = $3 AND native_jobs.job_id = $4
-        AND native_jobs.completed_at IS NOT NULL LIMIT 1`,
+        LIMIT 1`,
       [valid.profileId, valid.actorId, homeownerId, jobId]);
     const row = result.rows[0];
     if (!row) return unavailable();
     return { ok: true, status: 200, code: "NATIVE_CUSTOMER_JOB_HISTORY_FOUND", nativeCustomerJobHistory: {
-      contractVersion: 1, subject: subject(valid.profileId, homeownerId),
+      contractVersion: 2, subject: subject(valid.profileId, homeownerId),
       displayName: row.display_name || "Customer", job: projectJob(row),
     } };
   });

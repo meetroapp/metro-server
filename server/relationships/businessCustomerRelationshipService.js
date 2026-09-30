@@ -1,6 +1,8 @@
 "use strict";
 
 const { createHash, randomUUID } = require("node:crypto");
+const { quoteDeliveryFingerprintMap } = require("../authorization/quoteDeliveryAuthority");
+const { professionalQuotesInternals: { lineageLabel } } = require("../authorization/professionalQuotesService");
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ESTABLISH_OPERATION = "ESTABLISH";
@@ -102,6 +104,9 @@ function workPerformedActivityProjection(row) {
 function quoteActivityProjection(row) {
   return Object.freeze({
     quoteId: String(row.quote_id),
+    parentQuoteId: row.parent_quote_id || null,
+    lineageType: row.lineage_type || null,
+    lineageLabel: lineageLabel(row.lineage_type),
     jobId: String(row.job_id),
     documentNumber: row.document_number || null,
     status: row.status,
@@ -168,8 +173,8 @@ function newestFirst(left, right) {
 
 function documentActivityProjections(quoteRows, invoiceRows) {
   return [
-    ...quoteRows.map((row) => documentActivityProjection(row, "QUOTE")),
-    ...invoiceRows.map((row) => documentActivityProjection(row, "INVOICE")),
+    ...quoteRows.filter((row) => row.status === "ISSUED" && row.issued_at).map((row) => documentActivityProjection(row, "QUOTE")),
+    ...invoiceRows.filter((row) => row.status !== "DRAFT" && row.issued_at).map((row) => documentActivityProjection(row, "INVOICE")),
   ].sort(newestFirst);
 }
 
@@ -623,6 +628,21 @@ const sqlStore = Object.freeze({
       const quotes = await client.query(
         `/* business_customer_relationship:activity_quotes */
          SELECT quotes.id AS quote_id,
+           quotes.parent_quote_id, quotes.lineage_type,
+           aggregates.current_version,
+           (external_approval.issued_quote_version = aggregates.current_version) AS external_approval_current,
+           ARRAY(SELECT delivery.delivery_request_fingerprint
+             FROM messages delivery
+             JOIN conversations conversation ON conversation.id = delivery.conversation_id
+               AND conversation.relationship_id = quotes.relationship_id
+             JOIN contractor_profiles sender ON sender.id = parties.contractor_profile_id
+               AND sender.user_id = conversation.professional_user_id
+             WHERE delivery.quote_id = quotes.id AND delivery.job_id = quotes.job_id
+               AND delivery.sender_id = sender.user_id AND delivery.receiver_id = conversation.homeowner_id
+               AND delivery.message_type = 'quote_shared' AND delivery.workflow_type = 'QUOTE_SHARED'
+               AND delivery.workflow_status = 'SENT'
+               AND delivery.workflow_payload->>'quoteId' = quotes.id::text
+               AND delivery.workflow_payload->>'jobId' = quotes.job_id::text) AS delivery_fingerprints,
            quotes.job_id,
            COALESCE(posts.title,'Job') AS job_title,
            sources.document_number,
@@ -704,9 +724,13 @@ const sqlStore = Object.freeze({
          WHERE parties.contractor_profile_id = $1
            AND parties.business_contact_id = $2
            AND parties.business_customer_relationship_id = $3
+           AND quotes.status = 'ISSUED' AND quotes.issued_at IS NOT NULL
          ORDER BY last_activity_at DESC NULLS LAST, quotes.id ASC`,
         scope
       );
+      const fingerprints = quoteDeliveryFingerprintMap(quotes.rows.map(row => ({ id: row.quote_id, current_version: row.current_version })), actorUserId);
+      const visibleQuoteRows = quotes.rows.filter(row => row.status === "ISSUED" && row.issued_at &&
+        (row.external_approval_current === true || (row.delivery_fingerprints || []).includes(fingerprints[row.quote_id])));
       const invoices = await client.query(
         `/* business_customer_relationship:activity_invoices */
          SELECT invoices.id AS invoice_id,
@@ -761,6 +785,7 @@ const sqlStore = Object.freeze({
          WHERE parties.contractor_profile_id = $1
            AND parties.business_contact_id = $2
            AND parties.business_customer_relationship_id = $3
+           AND current.status <> 'DRAFT' AND issuances.issued_at IS NOT NULL
          ORDER BY last_activity_at DESC NULLS LAST, invoices.id ASC`,
         scope
       );
@@ -852,9 +877,9 @@ const sqlStore = Object.freeze({
           contactStatus: relationship.contact.status,
         }),
         work: Object.freeze(work.rows.map(workActivityProjection)),
-        quotes: Object.freeze(quotes.rows.map(quoteActivityProjection)),
+        quotes: Object.freeze(visibleQuoteRows.map(quoteActivityProjection)),
         invoices: Object.freeze(invoices.rows.map(invoiceActivityProjection)),
-        documents: Object.freeze(documentActivityProjections(quotes.rows, invoices.rows)),
+        documents: Object.freeze(documentActivityProjections(visibleQuoteRows, invoices.rows)),
         media: Object.freeze(media.rows.map(mediaActivityProjection)),
       });
     });

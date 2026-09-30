@@ -26,7 +26,8 @@ test("native Meetro Customer History uses exact canonical completed Emergency pr
     const own = read(pool, f.professional, f.profile, f.homeowner);
     const before = await native.listNativeCustomerHistory(own);
     assert.equal(before.ok, true);
-    assert.deepEqual(before.nativeCustomerHistory.jobs, []);
+    assert.equal(before.nativeCustomerHistory.jobs[0].jobId, f.job);
+    assert.equal(before.nativeCustomerHistory.jobs[0].completionState, "ACTIVE");
     assert.equal((await native.listNativeCustomerHistory(read(pool, f.professional, f.profile, f.outsider))).status, 404);
     assert.equal((await native.listNativeCustomers({ pool, authenticatedActor: { id: f.outsider }, contractorProfileId: f.profile })).status, 404);
 
@@ -198,14 +199,15 @@ test("native Meetro Customer History uses exact canonical completed Emergency pr
       await client.query(`INSERT INTO conversations
         (relationship_id, homeowner_id, contractor_id, professional_user_id)
         VALUES ($1, $2, $3, $4)`, [relationship.id, otherHomeowner, f.profile, f.professional]);
-      await ensureEmergencySelectionJob({ client, emergencyRequest: emergency, relationship,
+      const otherJob = await ensureEmergencySelectionJob({ client, emergencyRequest: emergency, relationship,
         logger: { info() {}, warn() {} } });
       const directory = await native.listNativeCustomers({ pool, authenticatedActor: { id: f.professional }, contractorProfileId: f.profile });
       const rows = directory.nativeCustomers.customers.filter(row => row.displayName === "homeowner");
       assert.equal(rows.length, 2);
       assert.deepEqual(new Set(rows.map(row => row.subject.homeownerUserId)), new Set([f.homeowner, otherHomeowner]));
-      const empty = await native.listNativeCustomerHistory(read(pool, f.professional, f.profile, otherHomeowner));
-      assert.deepEqual(empty.nativeCustomerHistory.jobs, []);
+      const otherHistory = await native.listNativeCustomerHistory(read(pool, f.professional, f.profile, otherHomeowner));
+      assert.deepEqual(otherHistory.nativeCustomerHistory.jobs.map(row => row.jobId), [otherJob.job.id]);
+      assert.deepEqual(otherHistory.nativeCustomerHistory.jobs.map(row => row.completionState), ["ACTIVE"]);
     });
   } finally {
     await client.query("ROLLBACK");
