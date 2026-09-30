@@ -60,10 +60,8 @@ test(
   "business_customer Invoice context uses local exact durable authority",
   () => {
     const body =
-      region(
-        "const BUSINESS_CUSTOMER_INVOICE_CONTEXT_SQL",
-        "async function loadProfessionalJobContext"
-      );
+      require("../server/relationships/businessCustomerInvoiceAuthority").BUSINESS_CUSTOMER_INVOICE_CONTEXT_SQL +
+      region("async function loadBusinessCustomerInvoiceContext", "async function loadProfessionalJobContext");
 
     assert.match(
       body,

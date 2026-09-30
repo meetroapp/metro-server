@@ -1,5 +1,8 @@
 "use strict";
 
+const { BUSINESS_CUSTOMER_INVOICE_CONTEXT_SQL } = require("../relationships/businessCustomerInvoiceAuthority");
+const { EMERGENCY_LIFECYCLE_CONTEXT_SQL } = require("../emergency/emergencyCommercialContext");
+
 const {
   BUSINESS_JOB_CONTEXT_SQL,
 } = require("../relationships/businessJobAuthority");
@@ -28,7 +31,7 @@ WITH authorized_jobs AS (
     ON professional.job_id = jobs.id
    AND professional.request_relationship_id = relationships.id
    AND professional.user_id = $1
-  WHERE jobs.source_type = 'ordinary_request_selection'
+  WHERE jobs.source_type IN ('ordinary_request_selection', 'existing_customer_request')
     AND jobs.lifecycle_contract_version = 2
     AND relationships.status IN ('active', 'closed')
     AND EXISTS (
@@ -54,6 +57,23 @@ WITH authorized_jobs AS (
     ${BUSINESS_JOB_CONTEXT_SQL}
       AND profiles.user_id = $1
   ) business
+
+  UNION
+
+  SELECT business_customer.job_id
+  FROM (
+    ${BUSINESS_CUSTOMER_INVOICE_CONTEXT_SQL}
+      AND profiles.user_id = $1
+  ) business_customer
+
+  UNION
+
+  SELECT emergency_job.job_id
+  FROM (
+    ${EMERGENCY_LIFECYCLE_CONTEXT_SQL}
+      AND professional.user_id = $1
+  ) emergency_job
+  WHERE emergency_job.primary_role_active = TRUE
 )
 `;
 
@@ -541,6 +561,7 @@ async function loadProfessionalRevenueProjection({
 }
 
 module.exports = {
+  AUTHORIZED_JOBS_CTE,
   loadProfessionalRevenueProjection,
 
   revenueFinancialProjectionInternals:

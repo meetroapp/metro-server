@@ -208,7 +208,7 @@ test("Revenue projection stays independent of Invoice workspace display limit", 
 
   assert.match(
     workspace,
-    /loadProfessionalRevenueProjection\(\{\s*client,\s*actorId:\s*validated\.actorId,\s*period,\s*\}\)/
+    /loadProfessionalRevenueProjection\(\{\s*client,\s*actorId:\s*validated\.actorId,\s*period,\s*now,\s*\}\)/
   );
 
   const revenueCallEnd =
@@ -229,7 +229,7 @@ test("Revenue projection stays independent of Invoice workspace display limit", 
 
   assert.match(
     revenueInvocation,
-    /loadProfessionalRevenueProjection\(\{\s*client,\s*actorId:\s*validated\.actorId,\s*period,\s*\}\)/
+    /loadProfessionalRevenueProjection\(\{\s*client,\s*actorId:\s*validated\.actorId,\s*period,\s*now,\s*\}\)/
   );
 
   assert.doesNotMatch(
