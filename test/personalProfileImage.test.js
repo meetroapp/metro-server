@@ -18,8 +18,12 @@ const {
   MediaValidationError,
 } = require("../server/media/cloudinary");
 const {
+  DEFAULT_PROFILE_PHOTO_DISPLAY,
+  normalizePersonalProfileDisplay,
   normalizePersonalProfileImage,
+  persistPersonalProfileDisplay,
   persistPersonalProfileImage,
+  projectPersonalProfileDisplay,
 } = require("../server/profile/personalProfileImage");
 
 const TEST_ENV = Object.freeze({
@@ -49,6 +53,23 @@ function validPayload(overrides = {}) {
   return {
     purpose: "personal_profile",
     media: validMedia(overrides),
+  };
+}
+
+function validDisplay(overrides = {}) {
+  return {
+    version: 1,
+    focus_x: 0.5,
+    focus_y: 0.5,
+    zoom: 1,
+    ...overrides,
+  };
+}
+
+function validDisplayPayload(overrides = {}) {
+  return {
+    purpose: "personal_profile",
+    display: validDisplay(overrides),
   };
 }
 
@@ -91,7 +112,24 @@ function createPool({ oldMedia = null, failUpdate = false } = {}) {
         return { rows: Number(values[0]) === user.id ? [user] : [] };
       }
       if (sql.startsWith("SELECT profile_photo_details FROM users")) {
-        return { rows: Number(values[0]) === user.id ? [{ profile_photo_details: user.profile_photo_details }] : [] };
+        return {
+          rows:
+            Number(values[0]) === user.id
+              ? [{ profile_photo_details: user.profile_photo_details }]
+              : [],
+        };
+      }
+
+      if (sql.startsWith("SELECT profile_photo_url, profile_photo_details FROM users")) {
+        return {
+          rows:
+            Number(values[0]) === user.id
+              ? [{
+                  profile_photo_url: user.profile_photo_url,
+                  profile_photo_details: user.profile_photo_details,
+                }]
+              : [],
+        };
       }
       if (sql.startsWith("UPDATE users SET profile_photo_url")) {
         if (failUpdate) throw new Error("database unavailable test detail");
@@ -99,15 +137,39 @@ function createPool({ oldMedia = null, failUpdate = false } = {}) {
         user.profile_photo_details = JSON.parse(values[1]);
         return { rows: [{ ...user }] };
       }
+
+      if (sql.startsWith("UPDATE users SET profile_photo_details")) {
+        if (failUpdate) throw new Error("database unavailable test detail");
+        user.profile_photo_details = JSON.parse(values[0]);
+        return { rows: [{ ...user }] };
+      }
+
+      if (
+        sql.includes("SELECT users.id, users.username") &&
+        sql.includes("users.profile_photo_details")
+      ) {
+        return {
+          rows: [{
+            ...user,
+            contractor_profile_id: null,
+            has_business_profile: false,
+          }],
+        };
+      }
       throw new Error(`Unexpected profile image query: ${sql}`);
     },
   };
   return pool;
 }
 
-function getHandlers() {
+function getHandlers(
+  pathName = "/auth/profile-photo",
+  method = "put"
+) {
   const layer = app.router.stack.find(
-    (item) => item.route?.path === "/auth/profile-photo" && item.route.methods.put
+    (item) =>
+      item.route?.path === pathName &&
+      item.route.methods[method]
   );
   assert.ok(layer);
   return layer.route.stack.map((item) => item.handle);
@@ -123,7 +185,14 @@ function createResponse() {
   };
 }
 
-async function invoke({ pool, token, body, mediaService } = {}) {
+async function invoke({
+  pool,
+  token,
+  body,
+  mediaService,
+  pathName = "/auth/profile-photo",
+  method = "put",
+} = {}) {
   app.locals.pool = pool;
   app.locals.cloudinaryMedia = mediaService || createMediaService();
   const req = {
@@ -133,7 +202,7 @@ async function invoke({ pool, token, body, mediaService } = {}) {
   };
   const res = createResponse();
   try {
-    for (const handler of getHandlers()) {
+    for (const handler of getHandlers(pathName, method)) {
       if (res.finished) break;
       if (handler.length < 3) {
         await handler(req, res);
@@ -189,6 +258,14 @@ test("authenticated persistence stores canonical metadata and compatibility URL"
   assert.equal(result.body.code, "PROFILE_IMAGE_UPDATED");
   assert.equal(result.body.user.profile_photo_url, validMedia().secure_url);
   assert.equal(pool.user.profile_photo_details.public_id, validMedia().public_id);
+  assert.deepEqual(
+    pool.user.profile_photo_details.display,
+    DEFAULT_PROFILE_PHOTO_DISPLAY
+  );
+  assert.deepEqual(
+    result.body.user.profile_photo_display,
+    DEFAULT_PROFILE_PHOTO_DISPLAY
+  );
   assert.equal(mediaService.deletions.length, 0);
   assert.doesNotMatch(JSON.stringify(result.body), /test-api-secret/);
 });
@@ -267,6 +344,271 @@ test("cleanup failures are normalized without logging secrets", async () => {
   } finally {
     console.error = originalError;
   }
+});
+
+
+test("personal profile display normalization is strict and bounded", () => {
+  assert.deepEqual(
+    normalizePersonalProfileDisplay(validDisplayPayload()),
+    DEFAULT_PROFILE_PHOTO_DISPLAY
+  );
+
+  assert.deepEqual(
+    normalizePersonalProfileDisplay(
+      validDisplayPayload({
+        focus_x: 0,
+        focus_y: 1,
+        zoom: 4,
+      })
+    ),
+    {
+      version: 1,
+      focus_x: 0,
+      focus_y: 1,
+      zoom: 4,
+    }
+  );
+
+  const invalid = [
+    {},
+    { purpose: "other", display: validDisplay() },
+    validDisplayPayload({ version: 2 }),
+    validDisplayPayload({ focus_x: -0.01 }),
+    validDisplayPayload({ focus_x: 1.01 }),
+    validDisplayPayload({ focus_y: -0.01 }),
+    validDisplayPayload({ focus_y: 1.01 }),
+    validDisplayPayload({ zoom: 0.99 }),
+    validDisplayPayload({ zoom: 4.01 }),
+    validDisplayPayload({ zoom: "2" }),
+    {
+      purpose: "personal_profile",
+      display: {
+        ...validDisplay(),
+        extra: true,
+      },
+    },
+  ];
+
+  for (const payload of invalid) {
+    assert.throws(
+      () => normalizePersonalProfileDisplay(payload),
+      MediaValidationError
+    );
+  }
+});
+
+test("stored personal profile display projects safe defaults for legacy or malformed state", () => {
+  assert.deepEqual(
+    projectPersonalProfileDisplay({}),
+    DEFAULT_PROFILE_PHOTO_DISPLAY
+  );
+
+  assert.deepEqual(
+    projectPersonalProfileDisplay({
+      public_id: "owned",
+      display: {
+        version: 1,
+        focus_x: 0.2,
+        focus_y: 0.8,
+        zoom: 2.25,
+      },
+    }),
+    {
+      version: 1,
+      focus_x: 0.2,
+      focus_y: 0.8,
+      zoom: 2.25,
+    }
+  );
+
+  assert.deepEqual(
+    projectPersonalProfileDisplay({
+      display: {
+        version: 1,
+        focus_x: 99,
+        focus_y: 0.5,
+        zoom: 1,
+      },
+    }),
+    DEFAULT_PROFILE_PHOTO_DISPLAY
+  );
+});
+
+test("personal profile display persistence preserves exact media authority", async () => {
+  const oldMedia = validMedia({
+    display: {
+      version: 1,
+      focus_x: 0.5,
+      focus_y: 0.5,
+      zoom: 1,
+    },
+  });
+
+  const pool = createPool({ oldMedia });
+
+  const beforeUrl = pool.user.profile_photo_url;
+  const beforePublicId = pool.user.profile_photo_details.public_id;
+
+  const result = await persistPersonalProfileDisplay({
+    pool,
+    userId: pool.user.id,
+    payload: validDisplayPayload({
+      focus_x: 0.31,
+      focus_y: 0.42,
+      zoom: 1.75,
+    }),
+  });
+
+  assert.equal(pool.user.profile_photo_url, beforeUrl);
+  assert.equal(
+    pool.user.profile_photo_details.public_id,
+    beforePublicId
+  );
+  assert.deepEqual(
+    pool.user.profile_photo_details.display,
+    {
+      version: 1,
+      focus_x: 0.31,
+      focus_y: 0.42,
+      zoom: 1.75,
+    }
+  );
+  assert.deepEqual(
+    result.user.profile_photo_display,
+    pool.user.profile_photo_details.display
+  );
+});
+
+test("personal profile display route requires authentication and existing photo authority", async () => {
+  const authenticatedPool = createPool({
+    oldMedia: validMedia(),
+  });
+
+  const unauthenticated = await invoke({
+    pool: authenticatedPool,
+    body: validDisplayPayload(),
+    pathName: "/auth/profile-photo/display",
+    method: "patch",
+  });
+
+  assert.equal(unauthenticated.statusCode, 401);
+  assert.equal(
+    unauthenticated.body.code,
+    "AUTHENTICATION_REQUIRED"
+  );
+
+  const noPhotoPool = createPool();
+
+  const missingPhoto = await invoke({
+    pool: noPhotoPool,
+    token: createToken(noPhotoPool.user),
+    body: validDisplayPayload(),
+    pathName: "/auth/profile-photo/display",
+    method: "patch",
+  });
+
+  assert.equal(missingPhoto.statusCode, 409);
+  assert.equal(
+    missingPhoto.body.code,
+    "PROFILE_IMAGE_REQUIRED"
+  );
+});
+
+test("authenticated personal profile display route returns only safe display projection", async () => {
+  const pool = createPool({
+    oldMedia: validMedia(),
+  });
+
+  const result = await invoke({
+    pool,
+    token: createToken(pool.user),
+    body: validDisplayPayload({
+      focus_x: 0.28,
+      focus_y: 0.34,
+      zoom: 2,
+    }),
+    pathName: "/auth/profile-photo/display",
+    method: "patch",
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(
+    result.body.code,
+    "PROFILE_DISPLAY_UPDATED"
+  );
+
+  assert.deepEqual(
+    result.body.profile_photo_display,
+    {
+      version: 1,
+      focus_x: 0.28,
+      focus_y: 0.34,
+      zoom: 2,
+    }
+  );
+
+  assert.deepEqual(
+    result.body.user.profile_photo_display,
+    result.body.profile_photo_display
+  );
+
+  assert.equal(
+    Object.hasOwn(
+      result.body.user,
+      "profile_photo_details"
+    ),
+    false
+  );
+
+  assert.doesNotMatch(
+    JSON.stringify(result.body),
+    /public_id/
+  );
+});
+
+test("/auth/me safely projects display framing without exposing canonical media metadata", async () => {
+  const pool = createPool({
+    oldMedia: validMedia({
+      display: {
+        version: 1,
+        focus_x: 0.4,
+        focus_y: 0.2,
+        zoom: 1.5,
+      },
+    }),
+  });
+
+  const result = await invoke({
+    pool,
+    token: createToken(pool.user),
+    pathName: "/auth/me",
+    method: "get",
+  });
+
+  assert.equal(result.statusCode, 200);
+
+  assert.deepEqual(
+    result.body.user.profile_photo_display,
+    {
+      version: 1,
+      focus_x: 0.4,
+      focus_y: 0.2,
+      zoom: 1.5,
+    }
+  );
+
+  assert.equal(
+    Object.hasOwn(
+      result.body.user,
+      "profile_photo_details"
+    ),
+    false
+  );
+
+  assert.doesNotMatch(
+    JSON.stringify(result.body),
+    /public_id/
+  );
 });
 
 test("profile image migration is additive and preserves the compatibility URL", () => {

@@ -22,6 +22,102 @@ const REQUIRED_METADATA_FIELDS = Object.freeze([
   "uploaded_at",
 ]);
 
+const PROFILE_DISPLAY_VERSION = 1;
+const PROFILE_DISPLAY_MAX_ZOOM = 4;
+
+const DEFAULT_PROFILE_PHOTO_DISPLAY = Object.freeze({
+  version: PROFILE_DISPLAY_VERSION,
+  focus_x: 0.5,
+  focus_y: 0.5,
+  zoom: 1,
+});
+
+const PROFILE_DISPLAY_FIELDS = Object.freeze([
+  "version",
+  "focus_x",
+  "focus_y",
+  "zoom",
+]);
+
+function isPlainRecord(value) {
+  return Boolean(value) &&
+    typeof value === "object" &&
+    !Array.isArray(value);
+}
+
+function requireFiniteDisplayNumber(value, code = "PROFILE_DISPLAY_INVALID") {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new MediaValidationError(code);
+  }
+  return value;
+}
+
+function normalizeProfilePhotoDisplayValue(value) {
+  if (!isPlainRecord(value)) {
+    throw new MediaValidationError("PROFILE_DISPLAY_INVALID");
+  }
+
+  const keys = Object.keys(value).sort();
+  const expected = [...PROFILE_DISPLAY_FIELDS].sort();
+
+  if (
+    keys.length !== expected.length ||
+    keys.some((key, index) => key !== expected[index])
+  ) {
+    throw new MediaValidationError("PROFILE_DISPLAY_INVALID");
+  }
+
+  if (value.version !== PROFILE_DISPLAY_VERSION) {
+    throw new MediaValidationError("PROFILE_DISPLAY_VERSION_INVALID");
+  }
+
+  const focusX = requireFiniteDisplayNumber(value.focus_x);
+  const focusY = requireFiniteDisplayNumber(value.focus_y);
+  const zoom = requireFiniteDisplayNumber(value.zoom);
+
+  if (
+    focusX < 0 ||
+    focusX > 1 ||
+    focusY < 0 ||
+    focusY > 1 ||
+    zoom < 1 ||
+    zoom > PROFILE_DISPLAY_MAX_ZOOM
+  ) {
+    throw new MediaValidationError("PROFILE_DISPLAY_RANGE_INVALID");
+  }
+
+  return Object.freeze({
+    version: PROFILE_DISPLAY_VERSION,
+    focus_x: focusX,
+    focus_y: focusY,
+    zoom,
+  });
+}
+
+function normalizePersonalProfileDisplay(payload) {
+  const source = isPlainRecord(payload) ? payload : {};
+
+  if (source.purpose !== "personal_profile") {
+    throw new MediaValidationError("MEDIA_PURPOSE_INVALID");
+  }
+
+  return normalizeProfilePhotoDisplayValue(source.display);
+}
+
+function projectPersonalProfileDisplay(details) {
+  if (!isPlainRecord(details)) {
+    return { ...DEFAULT_PROFILE_PHOTO_DISPLAY };
+  }
+
+  try {
+    return {
+      ...normalizeProfilePhotoDisplayValue(details.display),
+    };
+  } catch {
+    return { ...DEFAULT_PROFILE_PHOTO_DISPLAY };
+  }
+}
+
 function requirePositiveInteger(value, code = "MEDIA_METADATA_INVALID") {
   const number = Number(value);
   if (!Number.isInteger(number) || number <= 0) {
@@ -112,6 +208,7 @@ function normalizePersonalProfileImage(payload, { env = process.env, userId } = 
     height: requirePositiveInteger(media.height),
     version: requirePositiveInteger(media.version),
     uploaded_at: normalizeUploadedAt(media.uploaded_at),
+    display: { ...DEFAULT_PROFILE_PHOTO_DISPLAY },
   });
 }
 
@@ -183,7 +280,13 @@ async function persistPersonalProfileImage({
         "OLD_PROFILE_IMAGE_DELETE_FAILED"
       );
     }
-    return { user: updated.rows[0], media: metadata };
+    return {
+      user: {
+        ...updated.rows[0],
+        profile_photo_display: { ...metadata.display },
+      },
+      media: metadata,
+    };
   } catch (error) {
     if (transactionStarted) {
       try { await client.query("ROLLBACK"); } catch { /* preserve primary failure */ }
@@ -204,9 +307,118 @@ async function persistPersonalProfileImage({
   }
 }
 
+async function persistPersonalProfileDisplay({
+  pool,
+  userId,
+  payload,
+} = {}) {
+  const display = normalizePersonalProfileDisplay(payload);
+  let client = null;
+  let transactionStarted = false;
+
+  try {
+    client =
+      typeof pool?.connect === "function"
+        ? await pool.connect()
+        : pool;
+
+    if (!client || typeof client.query !== "function") {
+      throw new TypeError("A database client is required");
+    }
+
+    await client.query("BEGIN");
+    transactionStarted = true;
+
+    const current = await client.query(
+      `SELECT profile_photo_url, profile_photo_details
+       FROM users
+       WHERE id = $1
+       FOR UPDATE`,
+      [userId]
+    );
+
+    const row = current.rows[0];
+
+    if (!row) {
+      throw new MediaValidationError("MEDIA_OWNER_INVALID");
+    }
+
+    const currentDetails = isPlainRecord(row.profile_photo_details)
+      ? row.profile_photo_details
+      : {};
+
+    const currentMedia = parseStoredMedia(currentDetails);
+
+    if (
+      !String(row.profile_photo_url || "").trim() ||
+      !currentMedia?.public_id
+    ) {
+      throw new MediaValidationError("PROFILE_IMAGE_REQUIRED");
+    }
+
+    const nextDetails = {
+      ...currentDetails,
+      display: { ...display },
+    };
+
+    const updated = await client.query(
+      `
+      UPDATE users
+      SET profile_photo_details = $1::jsonb
+      WHERE id = $2
+      RETURNING id, username, email, role, account_type, business_name,
+                business_category, profile_photo_url, token_version, created_at
+      `,
+      [JSON.stringify(nextDetails), userId]
+    );
+
+    if (!updated.rows[0]) {
+      throw new MediaValidationError("MEDIA_OWNER_INVALID");
+    }
+
+    await client.query("COMMIT");
+    transactionStarted = false;
+
+    const {
+      profile_photo_details: _profilePhotoDetails,
+      ...safeUser
+    } = updated.rows[0];
+
+    return {
+      user: {
+        ...safeUser,
+        profile_photo_display: { ...display },
+      },
+      display: { ...display },
+    };
+  } catch (error) {
+    if (transactionStarted) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        // Preserve the primary failure.
+      }
+    }
+    throw error;
+  } finally {
+    if (
+      client &&
+      client !== pool &&
+      typeof client.release === "function"
+    ) {
+      client.release();
+    }
+  }
+}
+
 function sendPersonalProfileImageError(res, error) {
   if (error instanceof MediaValidationError) {
-    const status = error.code === "MEDIA_OWNER_INVALID" ? 404 : 400;
+    const status =
+      error.code === "MEDIA_OWNER_INVALID"
+        ? 404
+        : error.code === "PROFILE_IMAGE_REQUIRED"
+        ? 409
+        : 400;
     return res.status(status).json({
       success: false,
       code: error.code,
@@ -228,6 +440,27 @@ function sendPersonalProfileImageError(res, error) {
     code: "PROFILE_IMAGE_PERSISTENCE_FAILED",
     message: "The profile image could not be saved.",
   });
+}
+
+function createPersonalProfileDisplayHandler({ getPool } = {}) {
+  return async function personalProfileDisplayHandler(req, res) {
+    try {
+      const result = await persistPersonalProfileDisplay({
+        pool: getPool(req),
+        userId: req.user.id,
+        payload: req.body,
+      });
+
+      return res.json({
+        success: true,
+        code: "PROFILE_DISPLAY_UPDATED",
+        user: result.user,
+        profile_photo_display: result.display,
+      });
+    } catch (error) {
+      return sendPersonalProfileImageError(res, error);
+    }
+  };
 }
 
 function createPersonalProfileImageHandler({ getPool, env = process.env } = {}) {
@@ -252,9 +485,16 @@ function createPersonalProfileImageHandler({ getPool, env = process.env } = {}) 
 }
 
 module.exports = {
+  DEFAULT_PROFILE_PHOTO_DISPLAY,
+  PROFILE_DISPLAY_MAX_ZOOM,
+  PROFILE_DISPLAY_VERSION,
   REQUIRED_METADATA_FIELDS,
+  createPersonalProfileDisplayHandler,
   createPersonalProfileImageHandler,
+  normalizePersonalProfileDisplay,
   normalizePersonalProfileImage,
+  persistPersonalProfileDisplay,
   persistPersonalProfileImage,
+  projectPersonalProfileDisplay,
   sendPersonalProfileImageError,
 };

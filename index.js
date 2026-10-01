@@ -45,7 +45,11 @@ const {
 const {
   createQuoteDraftPhotoCleanupHandler,
 } = require("./server/media/quoteDraftPhoto");
-const { createPersonalProfileImageHandler } = require("./server/profile/personalProfileImage");
+const {
+  createPersonalProfileDisplayHandler,
+  createPersonalProfileImageHandler,
+  projectPersonalProfileDisplay,
+} = require("./server/profile/personalProfileImage");
 const { createBusinessProfileLogoHandler } = require("./server/profile/businessProfileLogo");
 const {
   createPortfolioCleanupHandler,
@@ -1427,6 +1431,12 @@ app.put(
   createPersonalProfileImageHandler({ getPool })
 );
 
+app.patch(
+  "/auth/profile-photo/display",
+  authMiddleware,
+  createPersonalProfileDisplayHandler({ getPool })
+);
+
 app.put(
   "/contractor-profile/logo",
   authMiddleware,
@@ -1484,7 +1494,8 @@ app.get("/auth/me", authMiddleware, async (req, res) => {
       SELECT users.id, users.username, users.email, users.role, users.account_type,
              COALESCE(profile.business_name, users.business_name) AS business_name,
              COALESCE(profile.category, users.business_category) AS business_category,
-             users.profile_photo_url, users.created_at,
+             users.profile_photo_url, users.profile_photo_details,
+             users.created_at,
              profile.id AS contractor_profile_id,
              (profile.id IS NOT NULL) AS has_business_profile
       FROM users
@@ -1502,8 +1513,23 @@ app.get("/auth/me", authMiddleware, async (req, res) => {
       [req.user.id]
     );
 
-    res.json({
-      user: result.rows[0],
+    const user = result.rows[0];
+
+    if (!user) {
+      return res.json({ user: null });
+    }
+
+    const {
+      profile_photo_details: profilePhotoDetails,
+      ...safeUser
+    } = user;
+
+    return res.json({
+      user: {
+        ...safeUser,
+        profile_photo_display:
+          projectPersonalProfileDisplay(profilePhotoDetails),
+      },
     });
   } catch {
     logAuthFailure("auth_me", "AUTH_ME_FAILED", req.user.id);
