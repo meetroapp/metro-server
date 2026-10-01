@@ -80,7 +80,7 @@ async function readManagement(input) {
     return {ok:true,status:200,assignment:{id:a.id,membershipId:a.membership_id,memberName:a.member_name,jobId:a.job_id,jobTitle:ctx.source.job_title,sourceType:ctx.source.job_source_type,state:a.state,version:a.version,activationVersion:a.activation_version,currentAuthority:a.current_authority},
       canManage:permissionForRole(ctx.member.role,'JOB_ASSIGNMENT_MANAGE'),canManagePolicy:permissionForRole(ctx.member.role,'TIME_SETTINGS_MANAGE'),
       customerLocation:reference?{address:reference.address,source:{type:reference.source_type,id:reference.source_id,version:reference.source_version,revision:reference.source_revision}}:null,
-      sites,policies,proximityEnforced:false};
+      sites,policies,proximityEnforced:true};
   });
 }
 function writeIdentity(input) {
@@ -121,7 +121,7 @@ async function saveAssignmentSite(input) {
       assignmentId:ctx.assignment.id,siteId:result.site.id,siteVersion:result.site.version,expectedVersion:input.expectedVersion,
       assignmentActivationVersion:input.assignmentActivationVersion,state:'ACTIVE'});
     if(linked.ok===false)return linked;
-    return {ok:true,status:200,site:result.site,association:linked.association,replayed:Boolean(result.replayed&&linked.replayed),proximityEnforced:false};
+    return {ok:true,status:200,site:result.site,association:linked.association,replayed:Boolean(result.replayed&&linked.replayed),proximityEnforced:true};
   });
 }
 async function changeAuthorization(input) {

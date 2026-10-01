@@ -29,7 +29,7 @@ test('PostgreSQL certifies business Punch-location management using the frozen A
    assert.equal(result.site.source.type,['ordinary_request_selection','business_customer','emergency_request'][i]);assert.equal(result.site.jobId,job);
    assert.equal(result.site.geometryCapture.source,'FOREGROUND_DEVICE');assert.equal(result.site.geometryCapture.accuracyMeters,8);assert.equal(result.site.geometryCapture.sampledAt,request.site.capture.sampledAt);
    const reread=success(await read(job)),site=reread.sites.find(s=>s.id===result.site.id);assert.equal(site.currentAuthorization,true);assert.deepEqual(site.geometryCapture,result.site.geometryCapture);
-   assert.equal(site.source.revision,context.customerLocation.source.revision);assert.equal(site.geometry.latitude,request.site.capture.latitude);assert.equal(reread.proximityEnforced,false);
+   assert.equal(site.source.revision,context.customerLocation.source.revision);assert.equal(site.geometry.latitude,request.site.capture.latitude);assert.equal(reread.proximityEnforced,true);
    assert.doesNotMatch(JSON.stringify(reread),/PRIVATE_|private-contact|email|phone|access_notes|distanceMeters|verificationResult/);
    assert.ok(!reread.sites.some(s=>s.kind==='CUSTOMER_JOB'&&s.jobId!==job));
    const replay=success(await management.saveAssignmentSite(request));assert.equal(replay.replayed,true);assert.equal(replay.site.id,result.site.id);

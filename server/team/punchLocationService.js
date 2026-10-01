@@ -183,7 +183,7 @@ async function listSites(input){
       sites.push({...projectSite(row,reference),currentAuthority:current,...(!managed?{associationVersion:row.association_version,assignmentActivationVersion:row.assignment_activation_version}:{})});
     }
     const policies=managed?(await client.query('SELECT DISTINCT ON(id) * FROM business_punch_policy_versions WHERE contractor_profile_id=$1 ORDER BY id,version DESC',[ids.businessId])).rows.map(projectPolicy):undefined;
-    return {ok:true,status:200,sites,...(managed?{policies}:{}),proximityEnforced:false};
+    return {ok:true,status:200,sites,...(managed?{policies}:{}),proximityEnforced:true};
   },{readOnly:true});
 }
 async function recordSnapshot(input){
