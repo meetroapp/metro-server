@@ -260,7 +260,7 @@ test("completed exact-set command replays without another assignment or Alert mu
     if (/FROM business_team_memberships memberships/.test(sql) && /business_name/.test(sql)) {
       return result([{ id: OWNER_MEMBERSHIP_ID, role: "OWNER", business_name: "Meetro Test" }]);
     }
-    if (/SELECT jobs\.id AS job_id/.test(sql)) {
+    if (/business_employee_job_sources\(profiles.id, \$2::uuid\)/.test(sql)) {
       return result([{ job_id: JOB_ID, job_title: "Repair cabinet" }]);
     }
     if (/INSERT INTO business_job_assignment_commands/.test(sql)) return result([]);
@@ -296,7 +296,7 @@ test("cross-business or non-field assignment targets fail before any assignment 
     if (/FROM business_team_memberships memberships/.test(sql) && /business_name/.test(sql)) {
       return result([{ id: OWNER_MEMBERSHIP_ID, role: "OWNER", business_name: "Meetro Test" }]);
     }
-    if (/SELECT jobs\.id AS job_id/.test(sql)) {
+    if (/business_employee_job_sources\(profiles.id, \$2::uuid\)/.test(sql)) {
       return result([{ job_id: JOB_ID, job_title: "Repair cabinet" }]);
     }
     if (/INSERT INTO business_job_assignment_commands/.test(sql)) {

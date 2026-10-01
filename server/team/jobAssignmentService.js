@@ -65,6 +65,7 @@ function serializeAssignment(row = {}) {
     memberStatus: row.member_status || row.membership_status || null,
     state: row.state,
     version: Number(row.version),
+    ...(row.activation_version != null ? { activationVersion: Number(row.activation_version) } : {}),
     assignedAt: iso(row.initial_assigned_at),
     changedAt: iso(row.last_state_changed_at),
   };
@@ -105,6 +106,10 @@ function safePhotos(value) {
 }
 
 function serviceLocation(row = {}) {
+  if (["business_customer", "emergency_request"].includes(row.job_source_type) &&
+      row.location_normalization_status !== "normalized") {
+    return { serviceArea: row.discovery_area_label || null, address: null };
+  }
   const normalized = row.location_normalization_status === "normalized";
   const exact = normalized && row.location_intake_mode === "exact_on_file";
   return {
@@ -181,63 +186,30 @@ async function loadActorMembership(database, actorUserId, businessId) {
 
 async function loadBusinessJob(database, businessId, jobId, { lock = false } = {}) {
   const result = await database.query(
-    `SELECT jobs.id AS job_id, jobs.job_request_id, posts.title AS job_title
+    `SELECT source.*
        FROM contractor_profiles profiles
-       JOIN request_relationships relationships
-         ON relationships.professional_user_id = profiles.user_id
-        AND relationships.emergency_request_id IS NULL
-        AND relationships.status = 'active'
-       JOIN jobs
-         ON jobs.source_request_relationship_id = relationships.id
-        AND jobs.job_request_id = relationships.post_id
-        AND jobs.lifecycle_contract_version = 2
-       JOIN posts
-         ON posts.id = jobs.job_request_id
-        AND posts.lifecycle_contract_version = 2
-        AND posts.cancelled_at IS NULL
-      WHERE profiles.id = $1 AND jobs.id = $2
+       JOIN LATERAL business_employee_job_sources(profiles.id, $2::uuid) source ON TRUE
+       JOIN jobs ON jobs.id = source.job_id
+      WHERE profiles.id = $1
       ${lock ? "FOR UPDATE OF jobs" : ""}`,
     [businessId, jobId]
   );
-  return result.rows[0] || null;
+  return result.rows.length === 1 ? result.rows[0] : null;
 }
-
-const JOB_PROJECTION_SELECT = `
-  SELECT jobs.id AS job_id, jobs.created_at AS job_created_at,
-         posts.title AS job_title, posts.description AS job_description,
-         posts.category AS job_category, posts.request_photos,
-         posts.location_intake_mode, posts.location_normalization_status,
-         posts.service_address_line1, posts.service_city,
-         posts.service_region, posts.service_postal_code,
-         posts.service_country_code, posts.discovery_area_label,
-         customers.username AS customer_name
-    FROM contractor_profiles profiles
-    JOIN request_relationships relationships
-      ON relationships.professional_user_id = profiles.user_id
-     AND relationships.emergency_request_id IS NULL
-     AND relationships.status = 'active'
-    JOIN jobs
-      ON jobs.source_request_relationship_id = relationships.id
-     AND jobs.job_request_id = relationships.post_id
-     AND jobs.lifecycle_contract_version = 2
-    JOIN posts
-      ON posts.id = jobs.job_request_id
-     AND posts.lifecycle_contract_version = 2
-     AND posts.cancelled_at IS NULL
-    JOIN users customers ON customers.id = relationships.homeowner_id`;
 
 async function loadJobRows(database, businessId, membershipId = null) {
   const result = await database.query(
-    `${JOB_PROJECTION_SELECT}
+    `SELECT source.* FROM contractor_profiles profiles
+       JOIN LATERAL business_employee_job_sources(profiles.id) source ON TRUE
       WHERE profiles.id = $1
         AND ($2::uuid IS NULL OR EXISTS (
           SELECT 1 FROM business_job_assignments assignments
            WHERE assignments.contractor_profile_id = profiles.id
-             AND assignments.job_id = jobs.id
+             AND assignments.job_id = source.job_id
              AND assignments.membership_id = $2
              AND assignments.state = 'ACTIVE'
         ))
-      ORDER BY jobs.created_at DESC, jobs.id ASC
+      ORDER BY source.job_created_at DESC, source.job_id ASC
       LIMIT 100`,
     [businessId, membershipId]
   );
@@ -247,7 +219,9 @@ async function loadJobRows(database, businessId, membershipId = null) {
 async function loadAssignments(database, businessId, jobIds) {
   if (jobIds.length === 0) return [];
   const result = await database.query(
-    `SELECT assignments.*, memberships.user_id AS member_user_id,
+    `SELECT assignments.*, (SELECT max(e.assignment_version) FROM business_job_assignment_events e
+              WHERE e.assignment_id=assignments.id AND e.event_type IN ('ASSIGNED','REASSIGNED')) AS activation_version,
+            memberships.user_id AS member_user_id,
             memberships.role AS member_role,
             memberships.status AS member_status,
             users.username AS member_name, users.email AS member_email
@@ -322,6 +296,9 @@ function projectJobs(rows, assignmentRows, scopeRows, { employeeMembershipId = n
     const assignments = assignmentsByJob.get(row.job_id) || [];
     return {
       id: row.job_id,
+      sourceType: row.job_source_type,
+      source: { type: row.job_source_type, id: row.source_id,
+        version: row.source_version == null ? null : Number(row.source_version) },
       title: row.job_title || "Job",
       category: row.job_category || null,
       instructions: row.job_description || "",
@@ -406,15 +383,10 @@ async function listEmployeeSchedule({ pool, authenticatedActor, businessId }) {
       `SELECT visits.id AS visit_id, visits.job_id, visits.purpose,
               versions.version, versions.state,
               versions.scheduled_start_at, versions.scheduled_end_at,
-              versions.time_zone, versions.location_mode,
-              posts.title AS job_title,
-              posts.location_intake_mode, posts.location_normalization_status,
-              posts.service_address_line1, posts.service_city,
-              posts.service_region, posts.service_postal_code,
-              posts.service_country_code, posts.discovery_area_label
+              versions.time_zone, versions.location_mode, source.*
          FROM business_job_assignments assignments
-         JOIN jobs ON jobs.id = assignments.job_id
-         JOIN posts ON posts.id = jobs.job_request_id
+         JOIN LATERAL business_employee_job_sources(assignments.contractor_profile_id,
+           assignments.job_id) source ON TRUE
          JOIN canonical_visits visits ON visits.job_id = assignments.job_id
          JOIN LATERAL (
            SELECT versions.* FROM canonical_visit_versions versions
@@ -440,6 +412,9 @@ async function listEmployeeSchedule({ pool, authenticatedActor, businessId }) {
         visitId: row.visit_id,
         jobId: row.job_id,
         jobTitle: row.job_title || "Job",
+        sourceType: row.job_source_type,
+        source: { type: row.job_source_type, id: row.source_id,
+          version: row.source_version == null ? null : Number(row.source_version) },
         purpose: row.purpose,
         state: row.state,
         version: Number(row.version),
@@ -590,7 +565,9 @@ async function setJobAssignments({
     }
 
     const current = await client.query(
-      `SELECT assignments.*, memberships.user_id AS member_user_id,
+      `SELECT assignments.*, (SELECT max(e.assignment_version) FROM business_job_assignment_events e
+              WHERE e.assignment_id=assignments.id AND e.event_type IN ('ASSIGNED','REASSIGNED')) AS activation_version,
+            memberships.user_id AS member_user_id,
               memberships.role AS member_role,
               memberships.status AS member_status,
               users.username AS member_name, users.email AS member_email

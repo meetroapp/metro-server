@@ -7,6 +7,10 @@ function createTimeEvidenceHandlers({ getPool, sendPublicDatabaseError, service 
   const handle = (operation, action) => async (req, res) => {
     res.setHeader?.("Cache-Control", "private, no-store");
     try {
+      if (operation.startsWith("clock_")) {
+        const allowed=["businessId","category","jobId","assignmentId","assignmentActivationVersion","sessionId","location","siteId","siteVersion","associationVersion","idempotencyKey"];
+        if (!req.body || typeof req.body !== "object" || Array.isArray(req.body) || Object.keys(req.body).some(k=>!allowed.includes(k))) return send(res,{ok:false,status:400,code:"PUNCH_REQUEST_INVALID",message:"Only your current assignment and device position may be submitted."});
+      }
       return send(res, await action(req));
     } catch (error) {
       return sendPublicDatabaseError({
@@ -29,11 +33,14 @@ function createTimeEvidenceHandlers({ getPool, sendPublicDatabaseError, service 
       businessId: req.body?.businessId, category: req.body?.category,
       jobId: req.body?.jobId, assignmentId: req.body?.assignmentId,
       location: req.body?.location, idempotencyKey: req.body?.idempotencyKey,
+      assignmentActivationVersion:req.body?.assignmentActivationVersion,siteId:req.body?.siteId,siteVersion:req.body?.siteVersion,associationVersion:req.body?.associationVersion,
     })),
     clockOut: handle("clock_out_employee_time", (req) => service.clockOut({
       pool: getPool(req), authenticatedActor: req.user,
       businessId: req.body?.businessId, sessionId: req.body?.sessionId,
+      jobId:req.body?.jobId,assignmentId:req.body?.assignmentId,
       location: req.body?.location, idempotencyKey: req.body?.idempotencyKey,
+      assignmentActivationVersion:req.body?.assignmentActivationVersion,siteId:req.body?.siteId,siteVersion:req.body?.siteVersion,associationVersion:req.body?.associationVersion,
     })),
   };
 }

@@ -142,6 +142,8 @@ const {
 const {
   registerFieldCustomerCommunicationRoutes,
 } = require("./server/team/fieldCustomerCommunication");
+const { registerBusinessPunchLocationRoutes } = require("./server/team/businessPunchLocations");
+const { registerPunchLocationRoutes } = require("./server/team/punchLocations");
 const {
   registerTimeEvidenceRoutes,
 } = require("./server/team/timeEvidence");
@@ -959,6 +961,9 @@ registerFieldCustomerCommunicationRoutes({
   getPool,
   sendPublicDatabaseError,
 });
+
+registerPunchLocationRoutes({ app, authMiddleware, getPool, sendPublicDatabaseError });
+registerBusinessPunchLocationRoutes({ app, authMiddleware, getPool, sendPublicDatabaseError });
 
 registerTimeEvidenceRoutes({
   app,

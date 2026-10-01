@@ -97,14 +97,15 @@ async function loadAssignment(database, businessId, jobId, assignmentId, { lock 
   const result = await database.query(
     `SELECT assignments.*, memberships.user_id AS member_user_id,
             memberships.role AS member_role, memberships.status AS member_status,
-            users.username AS member_name, posts.title AS job_title
+            users.username AS member_name, source.job_title
        FROM business_job_assignments assignments
        JOIN business_team_memberships memberships
          ON memberships.id = assignments.membership_id
         AND memberships.contractor_profile_id = assignments.contractor_profile_id
        JOIN users ON users.id = memberships.user_id
        JOIN jobs ON jobs.id = assignments.job_id
-       JOIN posts ON posts.id = jobs.job_request_id
+       JOIN LATERAL business_employee_job_sources(assignments.contractor_profile_id,
+         assignments.job_id) source ON TRUE
       WHERE assignments.id = $1
         AND assignments.contractor_profile_id = $2
         AND assignments.job_id = $3
@@ -221,7 +222,7 @@ async function loadManagedCommunicationAssignments(
      SELECT assignments.*, memberships.user_id AS member_user_id,
             memberships.role AS member_role,
             memberships.status AS member_status,
-            users.username AS member_name, posts.title AS job_title
+            users.username AS member_name, source.job_title
        FROM business_job_assignments assignments
        JOIN business_team_memberships memberships
          ON memberships.id = assignments.membership_id
@@ -232,7 +233,8 @@ async function loadManagedCommunicationAssignments(
        JOIN jobs
          ON jobs.id = assignments.job_id
         AND jobs.lifecycle_contract_version = 2
-       JOIN posts ON posts.id = jobs.job_request_id
+       JOIN LATERAL business_employee_job_sources(assignments.contractor_profile_id,
+         assignments.job_id) source ON TRUE
       WHERE assignments.contractor_profile_id = $1
         AND assignments.job_id = $2
         AND assignments.state = 'ACTIVE'

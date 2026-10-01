@@ -180,9 +180,9 @@ async function getTeamToday({ pool, authenticatedActor, businessId }) {
             timer.clocked_in_at AS timer_started_at,
             timer.job_id AS timer_job_id, timer.assignment_id AS timer_assignment_id,
             timer.clock_in_location_status,
-            timer_job.title AS timer_job_title,
+            CASE timer_jobs.source_type WHEN 'business_customer' THEN timer_native.project_title WHEN 'emergency_request' THEN timer_emergency.title ELSE timer_job.title END AS timer_job_title,
             assignment.id AS active_assignment_id, assignment.job_id AS active_assignment_job_id,
-            assignment_job.title AS active_assignment_job_title,
+            CASE assignment_jobs.source_type WHEN 'business_customer' THEN assignment_native.project_title WHEN 'emergency_request' THEN assignment_emergency.title ELSE assignment_job.title END AS active_assignment_job_title,
             field_status.to_status AS field_status
        FROM business_team_memberships memberships
        JOIN users ON users.id = memberships.user_id
@@ -197,6 +197,9 @@ async function getTeamToday({ pool, authenticatedActor, businessId }) {
        ) timer ON TRUE
        LEFT JOIN jobs timer_jobs ON timer_jobs.id = timer.job_id
        LEFT JOIN posts timer_job ON timer_job.id = timer_jobs.job_request_id
+       LEFT JOIN business_customer_job_sources timer_native ON timer_native.id = timer_jobs.source_business_customer_job_id
+        AND timer_native.contractor_profile_id = memberships.contractor_profile_id
+       LEFT JOIN emergency_requests timer_emergency ON timer_emergency.id = timer_jobs.source_emergency_request_id
        LEFT JOIN LATERAL (
          SELECT assignments.*
            FROM business_job_assignments assignments
@@ -208,6 +211,9 @@ async function getTeamToday({ pool, authenticatedActor, businessId }) {
        ) assignment ON TRUE
        LEFT JOIN jobs assignment_jobs ON assignment_jobs.id = assignment.job_id
        LEFT JOIN posts assignment_job ON assignment_job.id = assignment_jobs.job_request_id
+       LEFT JOIN business_customer_job_sources assignment_native ON assignment_native.id = assignment_jobs.source_business_customer_job_id
+        AND assignment_native.contractor_profile_id = memberships.contractor_profile_id
+       LEFT JOIN emergency_requests assignment_emergency ON assignment_emergency.id = assignment_jobs.source_emergency_request_id
        LEFT JOIN LATERAL (
          SELECT events.to_status
            FROM business_job_field_status_events events
@@ -273,7 +279,7 @@ async function getTimesheets({ pool, authenticatedActor, businessId, range }) {
   });
   const result = await pool.query(
     `SELECT sessions.*, users.username AS employee_name, memberships.role,
-            posts.title AS job_title
+            CASE jobs.source_type WHEN 'business_customer' THEN native_source.project_title WHEN 'emergency_request' THEN emergency.title ELSE posts.title END AS job_title
        FROM business_time_sessions sessions
        JOIN business_team_memberships memberships
          ON memberships.id = sessions.membership_id
@@ -281,6 +287,9 @@ async function getTimesheets({ pool, authenticatedActor, businessId, range }) {
        JOIN users ON users.id = sessions.user_id
        LEFT JOIN jobs ON jobs.id = sessions.job_id
        LEFT JOIN posts ON posts.id = jobs.job_request_id
+       LEFT JOIN business_customer_job_sources native_source ON native_source.id = jobs.source_business_customer_job_id
+        AND native_source.contractor_profile_id = sessions.contractor_profile_id
+       LEFT JOIN emergency_requests emergency ON emergency.id = jobs.source_emergency_request_id
       WHERE sessions.contractor_profile_id = $1
         AND sessions.clocked_in_at >= $2::timestamptz
         AND sessions.clocked_in_at < $3::timestamptz
