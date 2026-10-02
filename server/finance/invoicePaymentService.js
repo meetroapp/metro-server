@@ -10,6 +10,7 @@ const {
 } = require("./revenueFinancialProjectionService");
 
 const {
+  normalizeRevenueDate,
   normalizeRevenuePeriod,
   buildRevenuePeriod,
 } = require("./revenuePeriod");
@@ -1552,7 +1553,12 @@ function invoiceInReportingPeriod(row, { requested, range } = {}) {
 }
 
 async function getProfessionalInvoiceWorkspace(input = {}) {
-  const validated = validateInput(input, ["limit", "period"]);
+  const validated = validateInput(input, [
+    "limit",
+    "period",
+    "startDate",
+    "endDate",
+  ]);
   if (validated.error) return validated.error;
 
   const limit = workspaceLimit(input.limit);
@@ -1581,6 +1587,38 @@ async function getProfessionalInvoiceWorkspace(input = {}) {
     );
   }
 
+  const customDateRequested =
+    input.startDate != null ||
+    input.endDate != null;
+
+  let startDate = null;
+  let endDate = null;
+
+  if (period === "CUSTOM_RANGE") {
+    startDate =
+      normalizeRevenueDate(input.startDate);
+    endDate =
+      normalizeRevenueDate(input.endDate);
+
+    if (
+      !startDate ||
+      !endDate ||
+      startDate > endDate
+    ) {
+      return failure(
+        400,
+        "INVALID_REVENUE_RANGE",
+        "Choose a valid Revenue date range."
+      );
+    }
+  } else if (customDateRequested) {
+    return failure(
+      400,
+      "INVALID_REVENUE_RANGE",
+      "Custom Revenue dates require CUSTOM_RANGE."
+    );
+  }
+
   return runTransaction(input.pool, "REPEATABLE READ READ ONLY", async (client) => {
     let revenue = null;
     const now = new Date();
@@ -1590,11 +1628,20 @@ async function getProfessionalInvoiceWorkspace(input = {}) {
         client,
         actorId: validated.actorId,
         period,
+        startDate,
+        endDate,
         now,
       });
     }
     const invoiceRange = revenueRequested && revenue?.timeZone
-      ? buildRevenuePeriod({ period, timeZone: revenue.timeZone, now }) : null;
+      ? buildRevenuePeriod({
+          period,
+          timeZone: revenue.timeZone,
+          startDate,
+          endDate,
+          now,
+        })
+      : null;
 
     const ready = await client.query(
       `WITH completion_evidence AS (

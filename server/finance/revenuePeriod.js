@@ -15,6 +15,7 @@ const REVENUE_PERIODS = Object.freeze([
   "LAST_30_DAYS",
   "LAST_90_DAYS",
   "THIS_YEAR",
+  "CUSTOM_RANGE",
 ]);
 
 function normalizeRevenuePeriod(value) {
@@ -28,6 +29,31 @@ function normalizeRevenuePeriod(value) {
   return REVENUE_PERIODS.includes(normalized)
     ? normalized
     : null;
+}
+
+function normalizeRevenueDate(value) {
+  const normalized =
+    String(value || "").trim();
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+    return null;
+  }
+
+  const [year, month, day] =
+    normalized.split("-").map(Number);
+
+  const candidate =
+    new Date(Date.UTC(year, month - 1, day));
+
+  if (
+    candidate.getUTCFullYear() !== year ||
+    candidate.getUTCMonth() !== month - 1 ||
+    candidate.getUTCDate() !== day
+  ) {
+    return null;
+  }
+
+  return normalized;
 }
 
 function firstDayOfMonth(dateKey) {
@@ -60,12 +86,21 @@ function firstDayOfNextYear(dateKey) {
 function buildRevenuePeriod({
   period = "THIS_MONTH",
   timeZone,
+  startDate = null,
+  endDate = null,
   now = new Date(),
 } = {}) {
   const normalizedPeriod =
     normalizeRevenuePeriod(period);
 
   if (!normalizedPeriod) {
+    return null;
+  }
+
+  if (
+    normalizedPeriod !== "CUSTOM_RANGE" &&
+    (startDate != null || endDate != null)
+  ) {
     return null;
   }
 
@@ -123,6 +158,27 @@ function buildRevenuePeriod({
         firstDayOfNextYear(today);
       break;
 
+    case "CUSTOM_RANGE": {
+      const normalizedStartDate =
+        normalizeRevenueDate(startDate);
+      const normalizedEndDate =
+        normalizeRevenueDate(endDate);
+
+      if (
+        !normalizedStartDate ||
+        !normalizedEndDate ||
+        normalizedStartDate > normalizedEndDate
+      ) {
+        return null;
+      }
+
+      localStartDate =
+        normalizedStartDate;
+      localEndDateExclusive =
+        addLocalDays(normalizedEndDate, 1);
+      break;
+    }
+
     default:
       return null;
   }
@@ -164,5 +220,6 @@ module.exports = {
   firstDayOfNextMonth,
   firstDayOfNextYear,
   firstDayOfYear,
+  normalizeRevenueDate,
   normalizeRevenuePeriod,
 };

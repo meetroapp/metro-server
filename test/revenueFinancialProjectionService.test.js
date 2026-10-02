@@ -508,3 +508,82 @@ test("Revenue SQL preserves both Job authority families and never limits financi
     /ORDER BY versions\.invoice_id ASC,\s*versions\.version ASC/
   );
 });
+
+test("CUSTOM_RANGE sends exact Business-local boundaries through the existing Revenue projection", async () => {
+  const client = fakeClient();
+
+  await loadProfessionalRevenueProjection({
+    client,
+    actorId: 65,
+    period: "CUSTOM_RANGE",
+    startDate: "2026-09-12",
+    endDate: "2026-09-12",
+    now: NOW,
+  });
+
+  const receipt = client.calls.find(
+    (call) =>
+      call.key ===
+      "revenue:pre_work_receipts"
+  );
+
+  const payment = client.calls.find(
+    (call) =>
+      call.key ===
+      "revenue:invoice_payments"
+  );
+
+  assert.deepEqual(receipt.params, [
+    65,
+    "2026-09-12T04:00:00.000Z",
+    "2026-09-13T04:00:00.000Z",
+  ]);
+
+  assert.deepEqual(payment.params, [
+    65,
+    "2026-09-12",
+    "2026-09-13",
+  ]);
+});
+
+test("Revenue projection rejects invalid CUSTOM_RANGE before financial reads", async () => {
+  const client = fakeClient();
+
+  await assert.rejects(
+    loadProfessionalRevenueProjection({
+      client,
+      actorId: 65,
+      period: "CUSTOM_RANGE",
+      startDate: "2026-09-20",
+      endDate: "2026-09-12",
+      now: NOW,
+    }),
+    /Invalid Revenue custom range/
+  );
+
+  assert.equal(
+    client.calls.length,
+    0
+  );
+});
+
+test("preset Revenue projection rejects injected custom dates before financial reads", async () => {
+  const client = fakeClient();
+
+  await assert.rejects(
+    loadProfessionalRevenueProjection({
+      client,
+      actorId: 65,
+      period: "THIS_MONTH",
+      startDate: "2026-09-01",
+      endDate: "2026-09-02",
+      now: NOW,
+    }),
+    /Preset Revenue periods cannot include custom dates/
+  );
+
+  assert.equal(
+    client.calls.length,
+    0
+  );
+});

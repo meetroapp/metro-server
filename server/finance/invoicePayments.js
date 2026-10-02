@@ -47,6 +47,12 @@ function createInvoicePaymentHandlers({
         authenticatedActor: req.user,
         limit: req.query?.limit,
         period: req.query?.period,
+        ...(req.query?.startDate !== undefined
+          ? { startDate: req.query.startDate }
+          : {}),
+        ...(req.query?.endDate !== undefined
+          ? { endDate: req.query.endDate }
+          : {}),
       })),
     createInvoice: handle("create_invoice", ["invoice"], (req) =>
       invoicePaymentService.createInvoice({

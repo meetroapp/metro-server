@@ -13,6 +13,7 @@ const {
 
 const {
   buildRevenuePeriod,
+  normalizeRevenueDate,
   normalizeRevenuePeriod,
 } = require("./revenuePeriod");
 
@@ -372,6 +373,8 @@ async function loadProfessionalRevenueProjection({
   client,
   actorId,
   period = "THIS_MONTH",
+  startDate = null,
+  endDate = null,
   now = new Date(),
 } = {}) {
   if (
@@ -401,6 +404,33 @@ async function loadProfessionalRevenueProjection({
     );
   }
 
+  let normalizedStartDate = null;
+  let normalizedEndDate = null;
+
+  if (normalizedPeriod === "CUSTOM_RANGE") {
+    normalizedStartDate =
+      normalizeRevenueDate(startDate);
+    normalizedEndDate =
+      normalizeRevenueDate(endDate);
+
+    if (
+      !normalizedStartDate ||
+      !normalizedEndDate ||
+      normalizedStartDate > normalizedEndDate
+    ) {
+      throw new TypeError(
+        "Invalid Revenue custom range."
+      );
+    }
+  } else if (
+    startDate != null ||
+    endDate != null
+  ) {
+    throw new TypeError(
+      "Preset Revenue periods cannot include custom dates."
+    );
+  }
+
   const timeZoneResult =
     await client.query(
       SQL.timeZone,
@@ -423,6 +453,8 @@ async function loadProfessionalRevenueProjection({
     buildRevenuePeriod({
       period: normalizedPeriod,
       timeZone,
+      startDate: normalizedStartDate,
+      endDate: normalizedEndDate,
       now,
     });
 

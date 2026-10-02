@@ -17,6 +17,7 @@ test("Revenue accepts exactly the governed reporting periods", () => {
       "LAST_30_DAYS",
       "LAST_90_DAYS",
       "THIS_YEAR",
+      "CUSTOM_RANGE",
     ]
   );
 
@@ -44,6 +45,7 @@ test("Revenue accepts exactly the governed reporting periods", () => {
     "YEAR",
     "ALL_TIME",
     "CUSTOM",
+    "DATE",
   ]) {
     assert.equal(
       normalizeRevenuePeriod(invalid),
@@ -218,6 +220,100 @@ test("Revenue period calculation rejects an invalid instant", () => {
       period: "THIS_MONTH",
       timeZone: "America/New_York",
       now: "not-a-date",
+    }),
+    null
+  );
+});
+
+test("CUSTOM_RANGE treats both supplied dates as inclusive Business-local dates", () => {
+  const result = buildRevenuePeriod({
+    period: "CUSTOM_RANGE",
+    timeZone: "America/New_York",
+    startDate: "2026-10-02",
+    endDate: "2026-10-02",
+    now: new Date("2026-10-02T12:00:00.000Z"),
+  });
+
+  assert.deepEqual(result, {
+    period: "CUSTOM_RANGE",
+    timeZone: "America/New_York",
+    localStartDate: "2026-10-02",
+    localEndDateExclusive: "2026-10-03",
+    startsAt: "2026-10-02T04:00:00.000Z",
+    endsAt: "2026-10-03T04:00:00.000Z",
+  });
+});
+
+test("CUSTOM_RANGE accepts an inclusive multi-day interval", () => {
+  const result = buildRevenuePeriod({
+    period: "CUSTOM_RANGE",
+    timeZone: "America/New_York",
+    startDate: "2026-10-02",
+    endDate: "2026-10-09",
+    now: new Date("2026-10-09T12:00:00.000Z"),
+  });
+
+  assert.equal(result.localStartDate, "2026-10-02");
+  assert.equal(result.localEndDateExclusive, "2026-10-10");
+});
+
+test("CUSTOM_RANGE remains DST-safe", () => {
+  const result = buildRevenuePeriod({
+    period: "CUSTOM_RANGE",
+    timeZone: "America/New_York",
+    startDate: "2026-03-08",
+    endDate: "2026-03-09",
+    now: new Date("2026-03-09T16:00:00.000Z"),
+  });
+
+  assert.equal(result.localStartDate, "2026-03-08");
+  assert.equal(result.localEndDateExclusive, "2026-03-10");
+  assert.equal(result.startsAt, "2026-03-08T05:00:00.000Z");
+  assert.equal(result.endsAt, "2026-03-10T04:00:00.000Z");
+});
+
+test("CUSTOM_RANGE rejects missing malformed impossible and reversed dates", () => {
+  const base = {
+    period: "CUSTOM_RANGE",
+    timeZone: "America/New_York",
+    now: new Date("2026-10-02T12:00:00.000Z"),
+  };
+
+  for (const range of [
+    {},
+    { startDate: "2026-10-02" },
+    { endDate: "2026-10-02" },
+    {
+      startDate: "2026-02-30",
+      endDate: "2026-03-01",
+    },
+    {
+      startDate: "10/02/2026",
+      endDate: "2026-10-03",
+    },
+    {
+      startDate: "2026-10-03",
+      endDate: "2026-10-02",
+    },
+  ]) {
+    assert.equal(
+      buildRevenuePeriod({
+        ...base,
+        ...range,
+      }),
+      null
+    );
+  }
+});
+
+test("preset periods reject caller-supplied custom dates", () => {
+  assert.equal(
+    buildRevenuePeriod({
+      period: "THIS_MONTH",
+      timeZone: "America/New_York",
+      startDate: "2026-10-01",
+      endDate: "2026-10-02",
+      now: new Date("2026-10-02T12:00:00.000Z"),
     }),
     null
   );

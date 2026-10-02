@@ -180,3 +180,78 @@ test("Workspace handler forwards governed Revenue period independently of list l
     "READY"
   );
 });
+
+test("Workspace handler forwards governed custom Revenue dates exactly", async () => {
+  let input = null;
+
+  const handlers =
+    createInvoicePaymentHandlers({
+      getPool: () => "pool",
+
+      sendPublicDatabaseError() {
+        throw new Error(
+          "Unexpected workspace route error."
+        );
+      },
+
+      invoicePaymentService: {
+        async getProfessionalInvoiceWorkspace(value) {
+          input = value;
+
+          return {
+            ok: true,
+            status: 200,
+            code:
+              "PROFESSIONAL_INVOICE_WORKSPACE_LOADED",
+            workspace: {
+              contractVersion: 1,
+              revenue: {
+                state: "READY",
+              },
+              summary: {},
+              readyJobs: [],
+              invoices: [],
+              limit: 50,
+            },
+          };
+        },
+      },
+    });
+
+  const res = response();
+
+  await handlers.getWorkspace(
+    {
+      user: {
+        id: 65,
+      },
+
+      query: {
+        limit: "50",
+        period: "CUSTOM_RANGE",
+        startDate: "2026-10-02",
+        endDate: "2026-10-09",
+      },
+    },
+    res
+  );
+
+  assert.deepEqual(
+    input,
+    {
+      pool: "pool",
+      authenticatedActor: {
+        id: 65,
+      },
+      limit: "50",
+      period: "CUSTOM_RANGE",
+      startDate: "2026-10-02",
+      endDate: "2026-10-09",
+    }
+  );
+
+  assert.equal(
+    res.statusCode,
+    200
+  );
+});
