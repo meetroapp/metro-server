@@ -1,0 +1,257 @@
+"use strict";
+
+const assert = require("node:assert/strict");
+const test = require("node:test");
+const {
+  createInvoicePaymentHandlers,
+  registerInvoicePaymentRoutes,
+} = require("../server/finance/invoicePayments");
+
+function response() {
+  return {
+    headers: {}, statusCode: 0, body: null,
+    setHeader(name, value) { this.headers[name] = value; },
+    status(value) { this.statusCode = value; return this; },
+    json(value) { this.body = value; return this; },
+  };
+}
+
+test("Invoice and Payment routes are authenticated and exact-identity scoped", () => {
+  const routes = [];
+  const app = {
+    get(path, auth, handler) { routes.push(["GET", path, auth, handler]); },
+    post(path, auth, handler) { routes.push(["POST", path, auth, handler]); },
+  };
+  const auth = () => {};
+  registerInvoicePaymentRoutes({ app, authMiddleware: auth, getPool() {}, sendPublicDatabaseError() {} });
+  assert.deepEqual(routes.map(([method, path]) => `${method} ${path}`), [
+    "GET /professional/invoices/:invoiceId/customer-pdf",
+    "GET /customer/invoices/:invoiceId/customer-pdf",
+    "GET /professional/invoices/workspace",
+    "POST /professional/jobs/:jobId/invoices",
+    "GET /professional/jobs/:jobId/invoice",
+    "GET /professional/invoices/:invoiceId",
+    "POST /professional/invoices/:invoiceId/issue",
+    "POST /professional/invoices/:invoiceId/issue-external",
+    "POST /professional/invoices/:invoiceId/external-email",
+    "POST /professional/invoices/:invoiceId/payments",
+    "GET /customer/invoices/:invoiceId",
+    "GET /customer/jobs/:jobId/invoice",
+  ]);
+  assert.equal(routes.every((route) => route[2] === auth), true);
+});
+
+test("Payment handler forwards only governed command fields", async () => {
+  let input;
+  const handlers = createInvoicePaymentHandlers({
+    getPool: () => "pool",
+    sendPublicDatabaseError() {},
+    invoicePaymentService: {
+      async recordPayment(value) {
+        input = value;
+        return { ok: true, status: 201, code: "PAYMENT_RECORDED", invoice: {}, payment: {} };
+      },
+    },
+  });
+  const res = response();
+  await handlers.recordPayment({
+    user: { id: 65 },
+    params: { invoiceId: "invoice-path" },
+    headers: { "idempotency-key": "payment-1" },
+    body: {
+      expectedVersion: 2,
+      amountMinor: 46000,
+      method: "CHECK",
+      receivedDate: "2026-08-15",
+      customerReference: "Check 1042",
+      status: "PAID",
+      jobId: "forbidden",
+    },
+  }, res);
+  assert.deepEqual(input, {
+    pool: "pool",
+    authenticatedActor: { id: 65 },
+    invoiceId: "invoice-path",
+    expectedVersion: 2,
+    amountMinor: 46000,
+    method: "CHECK",
+    receivedDate: "2026-08-15",
+    customerReference: "Check 1042",
+    idempotencyKey: "payment-1",
+  });
+  assert.equal(res.headers["Cache-Control"], "private, no-store");
+  assert.equal(res.body.code, "PAYMENT_RECORDED");
+});
+
+test('external email route rejects caller-owned recipient, provider and financial fields',async()=>{
+ const handlers=createInvoicePaymentHandlers({getPool(){throw Error('No database call for rejected input');},sendPublicDatabaseError(){throw Error('Unexpected route exception');}});
+ for(const field of ['recipientEmail','emailDelivery','paidMinor','status','jobId']) {
+  const res={setHeader(){},status(value){this.statusCode=value;return this;},json(value){this.body=value;return this;}};
+  await handlers.emailInvoice({body:{expectedVersion:2,purpose:'REMINDER',[field]:'injected'},params:{invoiceId:'11111111-1111-4111-8111-111111111111'},user:{id:1},headers:{}},res);
+  assert.equal(res.statusCode,400);assert.equal(res.body.code,'INVOICE_EMAIL_FIELD_REJECTED');
+ }
+});
+
+test("Workspace handler forwards governed Revenue period independently of list limit", async () => {
+  let input = null;
+
+  const handlers =
+    createInvoicePaymentHandlers({
+      getPool: () => "pool",
+      sendPublicDatabaseError() {
+        throw new Error(
+          "Unexpected workspace route error."
+        );
+      },
+      invoicePaymentService: {
+        async getProfessionalInvoiceWorkspace(
+          value
+        ) {
+          input = value;
+
+          return {
+            ok: true,
+            status: 200,
+            code:
+              "PROFESSIONAL_INVOICE_WORKSPACE_LOADED",
+            workspace: {
+              contractVersion: 1,
+              revenue: {
+                state: "READY",
+              },
+              summary: {},
+              readyJobs: [],
+              invoices: [],
+              limit: 50,
+            },
+          };
+        },
+      },
+    });
+
+  const res = response();
+
+  await handlers.getWorkspace(
+    {
+      user: { id: 65 },
+
+      query: {
+        limit: "50",
+        period: "LAST_30_DAYS",
+      },
+    },
+    res
+  );
+
+  assert.deepEqual(
+    input,
+    {
+      pool: "pool",
+      authenticatedActor: {
+        id: 65,
+      },
+      limit: "50",
+      period: "LAST_30_DAYS",
+    }
+  );
+
+  assert.equal(
+    res.statusCode,
+    200
+  );
+
+  assert.equal(
+    res.headers["Cache-Control"],
+    "private, no-store"
+  );
+
+  assert.equal(
+    res.body.code,
+    "PROFESSIONAL_INVOICE_WORKSPACE_LOADED"
+  );
+
+  assert.equal(
+    res.body.workspace.limit,
+    50
+  );
+
+  assert.equal(
+    res.body.workspace.revenue.state,
+    "READY"
+  );
+});
+
+test("Workspace handler forwards governed custom Revenue dates exactly", async () => {
+  let input = null;
+
+  const handlers =
+    createInvoicePaymentHandlers({
+      getPool: () => "pool",
+
+      sendPublicDatabaseError() {
+        throw new Error(
+          "Unexpected workspace route error."
+        );
+      },
+
+      invoicePaymentService: {
+        async getProfessionalInvoiceWorkspace(value) {
+          input = value;
+
+          return {
+            ok: true,
+            status: 200,
+            code:
+              "PROFESSIONAL_INVOICE_WORKSPACE_LOADED",
+            workspace: {
+              contractVersion: 1,
+              revenue: {
+                state: "READY",
+              },
+              summary: {},
+              readyJobs: [],
+              invoices: [],
+              limit: 50,
+            },
+          };
+        },
+      },
+    });
+
+  const res = response();
+
+  await handlers.getWorkspace(
+    {
+      user: {
+        id: 65,
+      },
+
+      query: {
+        limit: "50",
+        period: "CUSTOM_RANGE",
+        startDate: "2026-10-02",
+        endDate: "2026-10-09",
+      },
+    },
+    res
+  );
+
+  assert.deepEqual(
+    input,
+    {
+      pool: "pool",
+      authenticatedActor: {
+        id: 65,
+      },
+      limit: "50",
+      period: "CUSTOM_RANGE",
+      startDate: "2026-10-02",
+      endDate: "2026-10-09",
+    }
+  );
+
+  assert.equal(
+    res.statusCode,
+    200
+  );
+});

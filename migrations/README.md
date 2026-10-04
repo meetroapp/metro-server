@@ -44,13 +44,354 @@ Current inventory:
 24. `202608070001_create_job_request_create_command_idempotency.sql`
 25. `202608070002_create_intelligence_operation_idempotency.sql`
 26. `202608070003_add_job_request_service_location.sql`
-27. `202608090001_create_legacy_orphan_message_archive.sql`
+27. `202608090001_create_job_lifecycle_concern_foundation.sql`
+28. `202608090002_create_job_participant_authority_foundation.sql`
+29. `202608090003_create_ordinary_evaluation_finding_foundation.sql`
+30. `202608100001_create_workstream_activity_foundation.sql`
+31. `202608100002_create_recommendation_hierarchy_foundation.sql`
+32. `202608100003_create_canonical_quote_scope_foundation.sql`
+33. `202608100004_create_quote_composition_feedback.sql`
+34. `202608110001_create_request_modification_authority_foundation.sql`
+35. `202608120001_create_business_portfolio_authority_foundation.sql`
+36. `202608130001_create_canonical_visit_persistence_foundation.sql`
+37. `202608130002_activate_evaluation_visit_authority.sql`
+38. `202608130003_activate_approved_work_visit_authority.sql`
+39. `202608140001_create_canonical_quote_delivery_foundation.sql`
+40. `202608150001_activate_customer_safe_efr.sql`
+41. `202608150002_activate_work_plan_execution.sql`
+42. `202608150003_create_job_completion_history.sql`
+43. `202608150004_create_canonical_invoice_payment_foundation.sql`
+44. `202608150005_create_ask_meetro_workflow_review.sql`
+45. `202608180001_expand_ask_meetro_workflow_review_operations.sql`
+46. `202608190001_create_quick_quote_analysis_session_foundation.sql`
+47. `202608190002_expand_ask_meetro_analysis_continuation_review.sql`
+48. `202608210001_create_business_document_working_drafts.sql`
+49. `202608210002_create_business_document_delivery_foundation.sql`
+50. `202608230001_add_business_document_numbers.sql`
+51. `202608230002_add_canonical_quote_customer_terms_snapshot.sql`
+52. `202608230003_create_canonical_quote_business_document_sources.sql`
+53. `202608230004_create_business_contact_foundation.sql`
+54. `202608230005_create_business_customer_relationship_foundation.sql`
+55. `202608240001_create_customer_party_linkage_foundation.sql`
+56. `202608250001_correct_evaluation_visit_authority_and_negotiation.sql`
+57. `202608260001_create_evaluation_remote_provenance.sql`
+58. `202608270001_add_canonical_visit_start_authority.sql`
+59. `202608280001_create_pre_work_deposit_payment_authority.sql`
+60. `202608280002_create_canonical_materials_work_preparation_authority.sql`
+61. `202608280003_create_canonical_approved_work_execution_authority.sql`
+62. `202608290001_add_invoice_line_source_authority.sql`
+63. `202608290002_add_deposit_request_document_authority.sql`
+64. `202608290003_add_canonical_alert_event_identity.sql`
+65. `202608300001_create_professional_subscription_foundation.sql`
+66. `202608300002_add_stripe_subscription_authority.sql`
+67. `202608300003_add_professional_subscription_plan.sql`
+68. `202608300004_create_meetro_business_trial_authority.sql`
+69. `202608300005_create_business_team_membership_authority.sql`
+70. `202608300006_create_business_job_assignment_authority.sql`
+71. `202608300007_create_business_job_field_operations_authority.sql`
+72. `202608300008_create_business_time_evidence_authority.sql`
+73. `202608300009_add_business_time_settings_authority.sql`
+74. `202608300010_allow_pending_team_invitation_token_rotation.sql`
+75. `202608310001_create_business_job_customer_message_authority.sql`
+76. `202609020001_add_business_origin_commercial_job_foundation.sql`
+77. `202609020002_create_quote_external_approval_authority.sql`
+78. `202609020003_generalize_pre_work_deposit_approval_authority.sql`
+79. `202609020004_generalize_approved_work_visit_approval_authority.sql`
+80. `202609020005_create_external_visit_schedule_confirmation.sql`
+81. `202609020006_generalize_work_preparation_execution_approval.sql`
+82. `202609020007_create_payment_reminder_evidence.sql`
+83. `202609040001_add_evaluation_revision_authority.sql`
+84. `202609070001_archive_numbered_business_document_drafts.sql`
+85. `202609120001_generalize_business_job_invoice_completion.sql`
+86. `202609160001_create_meetro_customer_business_relationship_foundation.sql`
+87. `202609160002_create_homeowner_saved_professionals.sql`
+88. `202609160004_create_existing_customer_request_source_foundation.sql`
+89. `202609160005_create_existing_customer_request_conversation_authority.sql`
+90. `202609160006_create_existing_customer_request_job_foundation.sql`
+91. `202609160007_create_business_customer_job_source_foundation.sql`
+92. `202609160008_generalize_canonical_evaluation_job_sources.sql`
+93. `202609160009_create_business_customer_evaluation_visit_confirmation.sql`
+94. `202609160010_generalize_canonical_job_quote_sources.sql`
+95. `202609160011_generalize_external_quote_approval_sources.sql`
+96. `202609160012_generalize_pre_work_deposit_job_origins.sql`
+97. `202609160013_generalize_approved_work_root_job_origins.sql`
+98. `202609160014_generalize_external_visit_confirmation_sources.sql`
+99. `202609160015_generalize_invoice_job_origins.sql`
+100. `202609180001_create_business_complimentary_access_authority.sql`
+101. `202609190001_create_emergency_job_foundation.sql`
+102. `202609190002_generalize_emergency_job_evaluation_quote.sql`
+103. `202609190003_generalize_emergency_pre_work_authority.sql`
+104. `202609190004_generalize_emergency_completion_invoice_history.sql`
+105. `202609210001_add_emergency_available_now_direct_select_authority.sql`
+106. `202609230001_link_quote_issuance_evaluation.sql`
+107. `202609270001_create_emergency_follow_up_job_request_authority.sql`
+108. `202609300001_generalize_employee_assignment_source_authority.sql`
+109. `202609300002_create_canonical_punch_location_authority.sql`
+110. `202609300003_extend_canonical_punch_verification_authority.sql`
+
+Migration 110 extends canonical punch verification authority.
+Migration 109 creates canonical punch-location authority.
+Migration 108 generalizes employee assignment source authority.
+
+Migration 84 adds private numbered-draft archive. Application is environment-specific and is recorded by each database migration ledger.
+
+Migration 83 adds bounded completed-Evaluation revision authority. `evaluation.revise` appends a new canonical completed Evaluation version with `evaluation_revised` evidence while preserving the existing completion state and original completion timestamp. It does not mutate Quote, approval, deposit, payment, scheduling, work, relationship, or customer authority.
 
 README and other non-SQL files are ignored. Malformed SQL migration filenames
 cause discovery to fail closed.
 
 This inventory records migration source files, not applied database state.
 Migration creation and governed migration execution remain separate operations.
+
+`202609020007_create_payment_reminder_evidence.sql` adds append-only,
+retry-safe Payment Reminder communication evidence for governed Invoice and
+pre-work Deposit reminders. A Reminder is not Payment evidence and does not
+change Invoice or Deposit balances, scheduling, approval, work, or customer
+identity.
+
+`202608310001_create_business_job_customer_message_authority.sql` adds
+assignment-scoped delegated Field Employee customer-message commands and
+immutable authorship provenance for ordinary canonical business-to-customer
+messages. It does not add Field Employees as canonical Conversation
+participants, create messages by migration or backfill, or grant Quote,
+Invoice, payment, billing, scheduling, or canonical lifecycle authority.
+
+`202608300009_add_business_time_settings_authority.sql` adds nullable,
+Business-owned IANA timezone and week-start presentation authority to the
+existing contractor profile, with exact active-membership update evidence. It
+does not guess or backfill historical Business settings and does not mutate
+canonical time sessions, Team membership, Jobs, Billing, subscription, trial,
+provider, field-status, customer communication, payroll, or Alert authority.
+
+`202608300008_create_business_time_evidence_authority.sql` adds replay-safe
+Clock In / Clock Out commands, one-active-timer enforcement, server-timestamped
+time sessions, append-only time events, exact Team membership authority, exact
+active Job assignment binding for `JOB_WORK`, and optional clock-boundary
+location evidence. It creates no timers or evidence rows, performs no backfill,
+creates no customer Alert, and does not mutate Job, commercial, Billing,
+subscription, trial, provider, payroll, or field-status authority.
+
+`202608300007_create_business_job_field_operations_authority.sql` adds exact
+active-assignment-bound Field Employee status commands, append-only transition
+evidence, and internal employee-to-business Job messages. It creates no field
+status or message rows, does not use customer conversations, and does not
+mutate Job, commercial, Billing, subscription, trial, or provider authority.
+
+`202608300006_create_business_job_assignment_authority.sql` adds exact
+business/Job/Team-member assignment identity, replay-safe command evidence,
+append-only assigned/reassigned/unassigned events, and database-enforced
+business ownership and preset-role boundaries. It creates no assignment,
+Alert, message, Visit, time entry, Billing record, subscription, or provider
+transaction and performs no backfill.
+
+`202608300005_create_business_team_membership_authority.sql` adds durable
+business Team memberships, preset role authority, invitation history, exact
+user acceptance, and pending-seat reservation evidence. It backfills only each
+existing business owner as the required OWNER seat; it creates no employee
+account, invitation, subscription, provider transaction, Job assignment,
+message, time entry, Billing record, or Alert.
+
+`202608300004_create_meetro_business_trial_authority.sql` adds the one-time,
+server-governed 14-day Meetro Business Trial reservation, activation, expiry,
+and paid-conversion evidence. Trial identity is account-owned and independent
+of Apple and Stripe provider subscriptions; the migration creates no provider
+transaction, paid subscription, Job billing, Alert, or Employee/Team row and
+performs no backfill.
+
+`202608300001_create_professional_subscription_foundation.sql` adds the
+business-owned professional subscription account, one effective verified Apple
+subscription authority, and replay-safe provider-event identity. It creates no
+subscription, transaction, entitlement, Job billing, or Alert rows and performs
+no backfill.
+
+`202608300002_add_stripe_subscription_authority.sql` extends that single
+business-owned authority to verified Stripe Billing subscriptions and stores
+the Stripe customer binding used for Checkout and Billing Portal. It creates
+no subscription, provider transaction, entitlement, Job billing, or Alert rows
+and performs no backfill.
+
+`202608300003_add_professional_subscription_plan.sql` extends the existing
+business-owned subscription authority with the 10-seat Professional monthly
+plan. It changes only the allowed plan and seat-limit constraints and creates
+no subscription, provider transaction, entitlement, Job billing, or Alert rows.
+
+`202608290002_add_deposit_request_document_authority.sql` adds the distinct
+`DEPOSIT_REQUEST` private working-document purpose, binds it to one exact
+pre-work deposit obligation and Job, prevents Invoice-number consumption, and
+allows the existing governed delivery ledger to record its deliberate sends.
+It creates no request, delivery, message, payment, Invoice, or lifecycle row.
+
+`202608290001_add_invoice_line_source_authority.sql` adds database-enforced
+Invoice line source truth for exact approved Quote scope and professionally
+reviewed Extra work. Existing Invoice lines retain their exact Quote lineage
+and migrate as `APPROVED_QUOTE_SCOPE`; Extra work must carry no Quote source.
+It also permits a draft Invoice to carry an already-received pre-work payment
+without creating a duplicate Invoice payment record. It creates no Invoice,
+payment, Quote, Job completion, or History row.
+
+`202608290003_add_canonical_alert_event_identity.sql` adds nullable,
+server-derived permanent event identity for lifecycle Alerts, unique per exact
+recipient, plus strict Job, Visit, Quote, and Invoice destination vocabulary.
+Existing Alert rows are not backfilled, and Communication attention-window
+aggregation retains its existing active dedupe behavior.
+
+`202608250001_correct_evaluation_visit_authority_and_negotiation.sql` adds the
+Job-scoped `evaluation_visit` authority shape, immutable
+`VISIT_SCHEDULE_PROPOSED` transition vocabulary, the distinct
+`visit.link_evaluation` command, and an active-grant lookup index. It creates no
+grants or business rows, performs no legacy backfill, and preserves the single
+canonical Visit engine for Conversation coordination, Work Center / Schedule
+operations, and Dashboard attention projections.
+
+`202608260001_create_evaluation_remote_provenance.sql` adds immutable,
+exact-version remote/no-Visit Evaluation provenance with exact Job,
+professional-participant, and completed-command references. Database guards
+bind role and grant authority to the exact completion-command timestamp, while
+a minimal internal Evaluation claim serializes physical and remote provenance
+through one unique key under both read-committed and snapshot isolation. It
+creates no provenance, claims, or other business rows, performs no backfill,
+and does not infer authority from absent Visit history.
+
+`202608270001_add_canonical_visit_start_authority.sql` adds the canonical
+`STARTED` Visit state, immutable `started_at` evidence, `visit.start` command
+vocabulary, the `VISIT_STARTED` event, and bounded schedule-variance
+acknowledgment evidence. It expands the existing append-only Visit aggregate,
+creates no grants or business rows, performs no backfill, and preserves legacy
+SCHEDULED-to-COMPLETED history without fabricating Visit starts. Runtime and
+client Visit-start behavior remain separately governed work.
+
+`202608280001_create_pre_work_deposit_payment_authority.sql` adds exact
+accepted-Quote-scoped pre-work deposit obligations, immutable obligation
+versions and events, manual-external/future-processor receipt evidence,
+explicit payment allocations, append-only allocation reversals, and bounded
+command-idempotency persistence. It creates no obligation, receipt, allocation,
+payment, Visit, scheduling grant, Work, or Invoice row; performs no backfill;
+and leaves runtime payment confirmation and scheduling enforcement as separately
+governed work.
+
+`202608280002_create_canonical_materials_work_preparation_authority.sql` adds
+exact accepted-Quote-scoped Work Preparation plans and immutable versions,
+stable item identities and plan-version snapshots, append-only internal
+material purchase and correction evidence, ordered preparation/readiness
+events, governed evidence references, bounded command idempotency, and static
+future capability vocabulary. Committed evidence structurally records either
+no-deposit-required authority from the accepted decision or one exact
+SATISFIED Migration 59 obligation version. It creates no Job-scoped business
+rows, performs no backfill, does not invent Quote detail for TOTAL_ONLY pricing,
+and leaves runtime planning, purchase, preparation, Work-start, and projection
+behavior as separately governed work.
+
+`202608280003_create_canonical_approved_work_execution_authority.sql` adds an
+exact approved-decision execution aggregate, append-only execution versions,
+immutable Workstream bindings, explicit EXECUTION/NON_EXECUTION Activity
+classification, TOTAL_ONLY-safe DECISION_WIDE scope, exact included Quote-scope
+lineage, and Activity/Approved Work Visit start-evidence foundations. It also
+adds a deferred consistency guard preventing future Work Preparation versions
+from combining policy NONE with required Work-start items. It creates no
+execution business rows or grants, performs no backfill, and legacy Workstreams
+and Activities remain unbound and unclassified.
+
+`202608210001_create_business_document_working_drafts.sql` adds private,
+noncanonical Quote/Invoice working drafts, independently governed media role and
+customer visibility, optimistic versions, and exact create/update idempotency.
+It creates no canonical Quote, Invoice, Job, delivery, approval, Payment,
+completion, or lifecycle record and does not make saved media customer-visible.
+
+`202608210002_create_business_document_delivery_foundation.sql` adds
+noncanonical, version-bound business-document delivery evidence for Email and
+governed Meetro Message channels. It does not issue, accept, pay, or close a
+canonical Quote, Invoice, or Job.
+
+`202608230001_add_business_document_numbers.sql` adds explicitly initialized,
+auditable, immutable, business-scoped Quote and Invoice number sequences.
+Legacy working drafts remain nullable and receive no guessed historical number;
+the numbers remain separate from internal IDs and draft/lifecycle status. The
+migration grants no issuance, approval, payment, or Job lifecycle authority.
+
+`202608230002_add_canonical_quote_customer_terms_snapshot.sql` adds a strict,
+normalized customer-facing terms snapshot to immutable canonical Quote versions.
+Legacy v1 integrity hashes remain unchanged; terms-bearing versions use integrity
+v2, and the existing issuance and sole APPROVED/DECLINED customer-decision chain
+continues to bind to the exact resulting hash.
+
+`202608230003_create_canonical_quote_business_document_sources.sql` adds an
+append-only one-to-one provenance bridge from one exact saved, numbered working
+Quote version to one canonical Draft Quote. The inherited number is never
+allocated again, private workspace state is excluded, and the bridge creates no
+issuance, customer decision, payment, scheduling, or Job lifecycle authority.
+
+`202608230004_create_business_contact_foundation.sql` adds durable, private,
+business-owned PERSON and ORGANIZATION Contact identities, owner-scoped duplicate
+candidates, optimistic versioning, idempotent mutations, archival lifecycle, and
+append-only multi-role classification history. Contact data and roles grant no
+Meetro account, relationship, Conversation, Job, Quote, payment, scheduling, or
+lifecycle authority; future verified account linking can reference the stable
+Contact UUID without rewriting Contact history.
+
+`202608230005_create_business_customer_relationship_foundation.sql` adds one
+durable business-owned Customer Relationship per Business Contact, with exact
+idempotent establishment and owner-scoped reads. Contact identity remains joined
+from the Contact authority; no Meetro account, marketplace request, Conversation,
+Job, Quote, Invoice, payment, scheduling, or lifecycle authority is created.
+
+`202608240001_create_customer_party_linkage_foundation.sql` adds explicit,
+owner-consistent foreign-key linkage from mutable business-document drafts and
+immutable canonical Jobs, Quotes, and Invoices to an existing durable Contact
+and Customer Relationship. It performs no identity matching or backfill, copies
+no Contact data into historical document snapshots, and grants no commercial,
+communication, payment, scheduling, or lifecycle authority.
+
+`202608150001_activate_customer_safe_efr.sql` adds explicit, conservative
+customer visibility to append-only Finding and Recommendation versions and
+registers bounded version-edit commands. Existing EFR records remain
+professional-only and no customer grant, Quote, decision, Workstream, or Job
+state is changed.
+
+`202608150002_activate_work_plan_execution.sql` adds conservative customer
+visibility to append-only Work Activity versions and registers the bounded
+Work Activity update command. Existing Activities remain professional-only;
+the migration creates no Workstream, Activity, Quote, Job, Invoice, Payment,
+or completion business record.
+
+`202608150003_create_job_completion_history.sql` adds append-only operational
+Job completion evidence and an exact, idempotent completion-command ledger.
+It creates no completion business record, changes no Quote or Visit truth,
+and introduces no Invoice, Payment, Portfolio, or financial settlement state.
+
+`202608150004_create_canonical_invoice_payment_foundation.sql` adds versioned
+Invoice authority, immutable approved-scope line snapshots, exact Conversation
+issuance evidence, append-only offline Payment evidence, and durable command
+idempotency. It creates no Invoice, Payment, message, alert, Job, Quote, Visit,
+or Work Plan business record and introduces no payment-processor authority.
+
+`202608150005_create_ask_meetro_workflow_review.sql` adds append-only human
+review evidence for bounded Ask Meetro proposals. It stores accepted, edited,
+and rejected decisions without granting Evaluation, Finding, Recommendation,
+Quote, Invoice, Payment, Job, or Portfolio authority and creates no business
+record by itself.
+
+`202608180001_expand_ask_meetro_workflow_review_operations.sql` expands only
+the append-only Ask Meetro review-event operation allowlist to include governed
+standalone Quick Quote photo assistance. It creates no Quote, Job, Request,
+customer-visible media, pricing, lifecycle, Payment, or other business record
+and grants no canonical mutation authority.
+
+`202608190001_create_quick_quote_analysis_session_foundation.sql` adds durable
+private Quick Quote Job Analysis session identity, exact authenticated-user
+ownership, immutable evidence versions and fingerprints, ordered private turns,
+and bounded command idempotency. Session deletion remains available for a later
+explicit governed discard so private draft evidence and conversation history can
+be permanently removed. It creates no Job, Quote, Request, Conversation,
+customer-visible record, pricing, lifecycle, Invoice, Payment, publication, or
+provider-continuation authority.
+
+`202608190002_expand_ask_meetro_analysis_continuation_review.sql` expands
+only the append-only Ask Meetro workflow-review operation allowlist to
+include governed private `quick_quote.analysis.continue` proposals. It
+stores explicit ACCEPTED, EDITED, or REJECTED professional decisions and
+grants no Quote, Job, Request, Conversation, customer-visible content,
+pricing, lifecycle, Invoice, Payment, Visit, publication, or canonical
+mutation authority.
 
 `202608030002_create_canonical_alerts.sql` creates the additive
 recipient-scoped `alerts` table for canonical backend alert persistence. It
@@ -89,13 +430,104 @@ locations remain untouched and are classified as `legacy_unclassified`; the
 migration does not parse legacy addresses, alter professional disclosure,
 create selection authority, or add geospatial data.
 
-`202608090001_create_legacy_orphan_message_archive.sql` creates immutable,
-non-authoritative historical evidence storage for exact legacy message records
-approved through `MC-PRODUCTION-RECONCILIATION-001`. It does not select source
-rows, move or delete messages, infer thread identity, or grant Conversation,
-Relationship, Quote, Workflow, or commercial authority. Only the separately
-governed production reconciliation runner may archive and remove reviewed rows
-after backup, fingerprint, target, and schema preconditions pass.
+`202608090001_create_job_lifecycle_concern_foundation.sql` defaults every
+existing and ungated request to lifecycle v1, adds selection-sourced Job
+identity for explicitly activated v2 requests, and preserves fresh confirmed
+Reported Concern text as append-only customer truth. It performs no legacy
+concern backfill and creates no Evaluation, Workstream, Quote, or approval.
+
+`202608090002_create_job_participant_authority_foundation.sql` separates
+authenticated relationship participants, temporal role history, and explicit
+scoped authority grants. Slice 001 registers only concern read/clarification
+and participant-read capabilities; role names grant no commercial authority.
+
+`202608090003_create_ordinary_evaluation_finding_foundation.sql` reuses the
+canonical Evaluation aggregate and version history for ordinary lifecycle-v2
+Jobs. It adds explicit Job subjects, stable Finding identities with append-only
+versions, restrictive Reported Concern links, and typed evidence references.
+It does not convert Emergency Evaluation JSON, fabricate Evaluation or Finding
+history, activate runtime authority, or add Workstream/Recommendation schema.
+Workstream linkage is implemented separately by the additive Slice 003 schema.
+
+`202608100001_create_workstream_activity_foundation.sql` adds stable canonical
+Workstream, Work Activity, and obligation identities with append-only versions.
+It adds one-per-Finding same-Job Workstream assignment and append-only Finding
+resolution evidence tied to the exact immutable Finding version/state. Temporary
+activity, obligation, Workstream, Finding-resolution, and overall Job states
+remain structurally independent. It registers only the bounded Slice 003 runtime
+capabilities and durable workflow command-idempotency contract; it creates no
+business rows. Resolution and completion remain explicit Job-scoped commands;
+the migration adds no Job completion, Quote, Recommendation, specialist
+lifecycle, or automatic state transition.
+An explicitly governed DEFERRED Finding or DEFERRED/EXCLUDED obligation is
+nonblocking for accepted-scope eligibility, but it does not assert technical
+resolution and never completes a Workstream automatically; completion remains
+a separate explicit command.
+
+`202608100002_create_recommendation_hierarchy_foundation.sql` adds stable
+Primary and Alternative Recommendation identities, append-only versions,
+same-Finding hierarchy, separate customer-constraint evidence, and explicit
+disposition history. It preserves legacy Evaluation recommendation JSON and
+registers only bounded Job-scoped Recommendation capabilities. It creates no
+Recommendation business rows, Quote, pricing, procurement, scheduling, Job
+completion, Finding-resolution, or Workstream-state authority.
+
+`202608100003_create_canonical_quote_scope_foundation.sql` adds canonical Draft
+Quote identity, immutable Quote versions and scope snapshots, exact lifecycle
+source references, server-owned integer-minor-unit totals, and eight bounded
+professional/customer capabilities. It permits governed Draft preparation,
+the explicit DRAFT-to-ISSUED transition, an append-only terminal customer
+decision against the exact issued version, and explicit empty derived Drafts
+with parent Quote lineage. Exact grant/evidence/idempotency links preserve the
+issued commercial snapshot; approval or decline never changes its status,
+scope, amount, source, or integrity hash. It creates no Quote rows,
+retroactive grants, procurement, scheduling, invoicing, or payment authority.
+Legacy `quote_requests` and browser Quote Builder state remain unchanged and
+non-canonical.
+
+`202608100004_create_quote_composition_feedback.sql` adds append-only
+professional Accept/Edit/Reject evidence for non-canonical AI Quote Composition
+Proposals already persisted by the governed Intelligence operation ledger. It
+creates no proposal, Quote, issue, customer decision, payment, scheduling,
+Finding-resolution, Workstream-completion, or Job-completion authority.
+
+`202608110001_create_request_modification_authority_foundation.sql` adds an
+optimistic modification version to ordinary requests and an append-only,
+request/concern/Job-scoped photo attachment evidence ledger. It creates no
+Agreement Revision, Change Order, Supplemental Quote, production migration,
+or automatic lifecycle transition authority.
+
+`202608120001_create_business_portfolio_authority_foundation.sql` adds nullable
+legacy-preserving publication authority, deterministic per-contractor display
+order, future-insert Draft defaults, server-owned feature/privacy/version
+foundations, and an append-only publication-transition ledger. It does not
+classify existing projects, publish Portfolio content, create lifecycle HTTP
+commands, change governed media, or create frontend authority.
+
+`202608130001_create_canonical_visit_persistence_foundation.sql` adds immutable
+Job-child Visit identities, append-only scheduling versions and typed events,
+future command-idempotency persistence, exact approved-Quote decision evidence,
+same-Job Evaluation and Workstream links, and bounded Visit capability
+definitions. It creates no Visit business rows, grants no capability, infers no
+historical schedule, exposes no route, and does not transition Evaluation,
+Quote, Workstream, Activity, Job, Invoice, or completion authority.
+
+`202608130002_activate_evaluation_visit_authority.sql` adds an Evaluation-only
+lifecycle grant scope and immutable activation evidence. It creates no grants,
+activations, Visits, or adjacent-domain business rows. Explicit professional
+activation remains required for the exact same-Job Evaluation subject.
+
+`202608130003_activate_approved_work_visit_authority.sql` adds an exact
+approved-Quote-decision lifecycle grant scope and immutable Approved Work Visit
+activation evidence. It creates no grants, activations, Visits, or adjacent
+business rows. Quote approval remains scope authority; explicit professional
+activation governs only the timing and attendance capability.
+
+`202608140001_create_canonical_quote_delivery_foundation.sql` adds exact
+canonical Quote and Job references plus bounded delivery-idempotency evidence
+to structured Conversation messages. It preserves ordinary text messages and
+creates no Quote status, customer decision, Visit, scheduling, or external-share
+authority.
 
 ## Migration Ledger and Transactions
 
@@ -242,3 +674,90 @@ The workflow-event migration has a dedicated, fail-closed production runner in
 `scripts/apply-production-workflow-events.js`. It requires explicit production
 environment evidence, the exact migration filename, and two CLI confirmations;
 normal application startup and `npm test` never invoke it.
+
+Migration 85 adds explicit business-customer Invoice identity, external issuance and email evidence, exact approval references, and professional work capabilities for business Jobs. Marketplace foreign keys and all historical evidence remain intact. It is validated only in disposable local databases by this change.
+
+`202609190003_generalize_emergency_pre_work_authority.sql` adds the fifth
+pre-work origin: an exact Emergency Job with authenticated MEETRO_CUSTOMER
+approval. It generalizes the existing obligation shape and deposit/payment
+origin guards, preserves all foreign keys and four existing origins, and
+validates historical provenance without writing data. It creates no parallel
+tables and grants no Schedule, Invoice, or Completion authority.
+
+### Emergency completion, Invoice, and history (104)
+
+`202609190004_generalize_emergency_completion_invoice_history.sql` permits zero
+Workstreams only for exact Emergency canonical completion provenance. The four
+prior origins still require positive Workstream counts. It validates historical
+completion records without writing business rows and adds Emergency Meetro
+Invoice/approved-scope authority. External issuance stays limited to the two
+business-owned origins. No new tables or lifecycle grants are introduced.
+
+
+### Emergency Available Now direct-selection authority (105)
+
+`202609210001_add_emergency_available_now_direct_select_authority.sql`
+adds explicit Emergency-only relationship provenance for the additive
+Available Now direct-selection path.
+
+Existing Emergency relationships are truthfully backfilled as
+`professional_response`, because direct selection did not exist when those
+records were created. New direct selections use
+`available_now_direct_select` and require `responded_at IS NULL`; they therefore
+cannot be represented as professional responses. Ordinary/non-Emergency
+relationships retain `emergency_authority_source IS NULL` and a non-null
+`responded_at`.
+
+The migration preserves compatibility with the pre-105 Emergency response
+runtime by normalizing the exact legacy Emergency response insert shape to
+`professional_response`. It does not create a second relationship, Conversation,
+Job, selection, or dispatch architecture.
+
+Because deployed `request_relationships` authority checks include DEFERRABLE
+constraint triggers, Migration 105 explicitly flushes the deferred events queued
+by its provenance backfill before later `ALTER TABLE` statements. This preserves
+those existing authority checks and avoids PostgreSQL SQLSTATE 55006 pending-
+trigger DDL rejection without disabling or bypassing the triggers.
+
+Migration 105 is discoverable by the governed generic staging migration runner.
+It is intentionally NOT added to the frozen dedicated production Emergency
+migration runner. Production execution requires separately reviewed governance.
+
+### Emergency Quote Evaluation issuance provenance (106)
+
+`202609230001_link_quote_issuance_evaluation.sql` adds immutable Evaluation
+provenance to canonical Quote issuance.
+
+New Emergency Quote issuances preserve the exact completed
+`evaluation_id` and `evaluation_version` that governed the issued Quote.
+The reference is constrained to the same canonical Evaluation version and
+same Job subject. Observation and recommendation narrative text is not
+duplicated into Quote persistence.
+
+Existing Quote issuances remain valid with null Evaluation provenance.
+The migration does not modify existing business rows, does not create
+customer approval, payment, scheduling, Invoice, Work, or completion
+authority, and does not weaken the append-only Quote history model.
+
+This migration is discoverable by the governed generic staging migration
+runner. It is not added to any frozen dedicated production migration chain;
+production execution requires separately reviewed governance.
+
+### Emergency to Standard follow-up Job Request authority (107)
+
+`202609270001_create_emergency_follow_up_job_request_authority.sql` adds an
+immutable linkage from a completed Emergency Job to a distinct homeowner-owned
+ordinary Job Request.
+
+The completed Emergency remains an `emergency_request` Job and is never
+converted into ordinary work. The follow-up remains a normal `posts` Job
+Request and may later materialize its own `ordinary_request_selection` Job
+through the existing marketplace lifecycle.
+
+The linkage requires canonical Emergency completion, exact homeowner identity,
+a lifecycle-v2 ordinary Job Request, and its completed `job_request.create`
+command. The migration performs no backfill and creates no Quote, payment,
+scheduling, Work, Invoice, or assignment authority.
+
+This migration is discoverable by the governed generic staging migration
+runner. Production execution requires separately reviewed governance.

@@ -38,7 +38,12 @@ function requestBody({ text = "The cabinet under my sink is swollen from a leak.
           domain: "",
           specialty: "",
         },
-        location: { affectedArea: "kitchen" },
+        location: {
+          affectedArea: "kitchen",
+          city: "Cape Coral",
+          region: "",
+          postalCode: "",
+        },
         timing: { urgency: "", desiredTiming: "", availability: "" },
         details: { measurements: "", expectations: "", additionalNotes: "" },
         fieldState: [],
@@ -93,13 +98,28 @@ function fixture({ complete } = {}) {
       },
     },
   };
+  const requestServiceUsers = new Map([
+    [91, { id: 91, role: "homeowner", account_type: "homeowner" }],
+    [92, { id: 92, role: "painting", account_type: "professional" }],
+    [93, { id: 93, role: "admin", account_type: "internal" }],
+  ]);
   return {
     repository,
     providerCalls,
     usageCalls,
     run(overrides = {}) {
       return executeIntelligenceGateway({
-        pool: { name: "repository-fake" },
+        pool: {
+          name: "repository-fake",
+          async query(text, values) {
+            assert.match(
+              String(text),
+              /request_service_authority:authenticated_account/
+            );
+            const user = requestServiceUsers.get(Number(values[0]));
+            return { rows: user ? [user] : [] };
+          },
+        },
         authenticatedActor: { id: 91, role: "homeowner" },
         idempotencyKey: randomUUID(),
         body: requestBody(),
@@ -117,25 +137,42 @@ function fixture({ complete } = {}) {
   };
 }
 
-test("canonical registration declares one bounded homeowner operation and fixed engines", () => {
+test("canonical registration retains the bounded homeowner operation and fixed engines", () => {
   const operations = canonicalIntelligenceOperationRegistry.list();
-  assert.equal(operations.length, 1);
-  assert.deepEqual(operations[0], {
+  assert.deepEqual(
+    operations.map(({ operation }) => operation).sort(),
+    [
+      "companion.converse",
+      "emergency_request.interpret",
+      "estimate.compose",
+      "evaluation.assist",
+      "invoice.assist",
+      "job_request.interpret",
+      "quick_quote.photo_assist",
+      "quote.compose",
+    ]
+  );
+  assert.deepEqual(operations.find(({ operation }) => operation === "job_request.interpret"), {
     operation: "job_request.interpret",
     capability: "job_request.interpret",
-    supportedRoles: ["homeowner"],
+    supportedRoles: ["homeowner", "professional"],
     engineIds: ["job_request_capability", "job_request_validation"],
     providerName: "job_request",
   });
+  assert.equal(
+    canonicalIntelligenceOperationRegistry.get("job_request.interpret")
+      .roleAuthorization,
+    "request_service"
+  );
   assert.equal(canonicalIntelligenceOperationRegistry.get("ask_meetro"), null);
   assert.equal(canonicalIntelligenceOperationRegistry.get("test.echo"), null);
 });
 
-test("authentication, role, capability, and browser actor spoofing fail before execution", async () => {
+test("authentication, requester authority, capability, and browser actor spoofing fail before execution", async () => {
   const current = fixture();
   const unauthenticated = await current.run({ authenticatedActor: null });
   const ineligible = await current.run({
-    authenticatedActor: { id: 91, role: "professional" },
+    authenticatedActor: { id: 93, role: "homeowner" },
   });
   const wrongCapability = await current.run({
     body: { ...requestBody(), capability: "job_request.create" },
@@ -174,16 +211,52 @@ test("provider request contains only bounded text, draft state, and server-selec
   assert.equal(request.operation, "job_request.interpret");
   assert.equal(request.homeownerText, "The cabinet under my sink is swollen from a leak.");
   assert.equal(request.currentDraft.location.affectedArea, "kitchen");
+  assert.equal(request.currentDraft.location.city, "Cape Coral");
   assert.equal(request.currentDraft.photosAttached, true);
   assert.deepEqual(Object.keys(request.operationContext).sort(), ["capability", "validation"]);
   assert.equal(request.operationContext.capability.mediaAllowed, false);
+  const canonicalRequestServiceIds =
+    request.operationContext.validation.canonicalRequestServiceIds.split(",");
+  assert.equal(canonicalRequestServiceIds.length, 246);
+  assert.equal(
+    canonicalRequestServiceIds.includes("structural_repairs"),
+    true
+  );
+  assert.equal(
+    canonicalRequestServiceIds.includes("drywall_repair"),
+    true
+  );
+  assert.deepEqual(request.instructions.serviceRecommendation, {
+    targetPath: "service.specialty",
+    canonicalValuesFrom:
+      "operationContext.validation.canonicalRequestServiceIds",
+    preserveExistingHomeownerSelection: true,
+    requiresConfirmation: true,
+    ambiguityBehavior: "clarify_without_selecting",
+    classificationGuidance: {
+      structuralSignals: [
+        "reported_separation",
+        "temporary_bracing",
+        "requested_rebuild_of_wall_or_structural_section",
+      ],
+      classificationIsNotDiagnosis: true,
+      surfaceFinishOnlyDoesNotEstablishStructuralRepairs: true,
+    },
+  });
+  assert.equal(
+    request.instructions.requirements.includes(
+      "reported_separation_temporary_bracing_or_rebuild_scope_reasonably_supports_structural_repairs_without_asserting_a_diagnosis"
+    ),
+    true
+  );
   for (const prohibited of [
     "localDraftId", "serviceAddress", "unitNumber", "accessNotes", "previewUrl",
     "file", "submission", "postId", "relationshipId", "conversationId", "payment",
-    "authorization", "localStorage", "providerName", "model", "memory",
+    "authorization", "localStorage", "providerName", "memory",
   ]) {
     assert.equal(serialized.includes(prohibited), false, prohibited);
   }
+  assert.equal(serialized.includes('"model"'), false, "model metadata");
 });
 
 test("strict context rejects whole-draft, address, media, and authority additions before reservation", async () => {
@@ -204,6 +277,23 @@ test("strict context rejects whole-draft, address, media, and authority addition
   }
   assert.equal(current.providerCalls.length, 0);
   assert.equal(current.repository.calls.length, 0);
+});
+
+test("legacy clients may omit general locality while exact address remains excluded", async () => {
+  const current = fixture();
+  const result = await current.run({
+    body: requestBody({
+      draft: { location: { affectedArea: "front entry" } },
+    }),
+  });
+
+  assert.equal(result.code, "INTELLIGENCE_OPERATION_COMPLETED");
+  assert.deepEqual(current.providerCalls[0].currentDraft.location, {
+    affectedArea: "front entry",
+    city: "",
+    region: "",
+    postalCode: "",
+  });
 });
 
 test("first completion, replay, and conflict execute and finalize exactly once", async () => {
@@ -256,13 +346,209 @@ test("parser accepts strict JSON and constrains proposal provenance and confirma
   assert.equal(parsed.validation.taxonomy, "validated");
 });
 
+test("parser removes follow-ups for fields already present or proposed", () => {
+  const parsed = parseJobRequestInterpretResult(
+    providerResult({
+      draftPatch: {
+        fields: [
+          patch({ path: "location.city", value: "Cape Coral" }),
+          patch({ path: "timing.availability", value: "Available this week" }),
+        ],
+      },
+      clarifications: [
+        { question: "Which city?", fieldPath: "location.city" },
+        { question: "What timing do you prefer?", fieldPath: "timing.desiredTiming" },
+        { question: "Is there anything else to add?" },
+      ],
+    }),
+    {
+      semanticInput: {
+        context: {
+          draft: {
+            location: { affectedArea: "front entry" },
+          },
+        },
+      },
+    }
+  );
+
+  assert.deepEqual(parsed.clarifications, [
+    { question: "Is there anything else to add?" },
+  ]);
+});
+
+test("one homeowner message can propose existing request fields without invented commercial facts", async () => {
+  const homeownerText =
+    "I need someone to repair a cracked section of the wall by my front entry in Cape Coral. It is separating and temporarily braced. I would like someone to inspect it and repair or rebuild the damaged area. I am available this week and I can add photos.";
+  const proposedFields = [
+    patch({ path: "job.title", value: "Repair cracked wall by front entry" }),
+    patch({ path: "job.description", value: homeownerText }),
+    patch({ path: "service.specialty", value: "structural_repairs" }),
+    patch({ path: "location.affectedArea", value: "front entry wall" }),
+    patch({ path: "location.city", value: "Cape Coral" }),
+    patch({ path: "timing.availability", value: "Available this week" }),
+    patch({
+      path: "details.additionalNotes",
+      value: "The section is separating and temporarily braced. The homeowner can add photos.",
+    }),
+  ];
+  const current = fixture({
+    complete(request) {
+      assert.equal(request.homeownerText, homeownerText);
+      assert.ok(request.instructions.allowedPatchPaths.includes("location.city"));
+      assert.ok(
+        request.instructions.requirements.includes(
+          "extract_all_homeowner_supplied_facts_before_clarifying"
+        )
+      );
+      return providerResult({
+        summary: "Review the project facts supplied by the homeowner.",
+        draftPatch: { fields: proposedFields },
+        clarifications: [
+          { question: "What region and postal code should be used?", fieldPath: "location.region" },
+        ],
+        warnings: [],
+      });
+    },
+  });
+
+  const result = await current.run({
+    authenticatedActor: {
+      id: 91,
+      role: "customer",
+      accountType: "homeowner",
+    },
+    body: requestBody({ text: homeownerText }),
+  });
+  const serialized = JSON.stringify(result.result);
+
+  assert.equal(result.code, "INTELLIGENCE_OPERATION_COMPLETED");
+  assert.deepEqual(
+    result.result.draftPatch.fields.map(({ path }) => path),
+    [
+      "job.title",
+      "job.description",
+      "service.specialty",
+      "location.affectedArea",
+      "location.city",
+      "timing.availability",
+      "details.additionalNotes",
+    ]
+  );
+  assert.equal(result.result.clarifications.length, 1);
+  assert.deepEqual(
+    result.result.draftPatch.fields.find(
+      ({ path }) => path === "service.specialty"
+    ),
+    {
+      ...proposedFields[2],
+      value: "structural_repairs",
+      taxonomy: {
+        validated: true,
+        vocabulary: "request_service",
+      },
+    }
+  );
+  assert.equal(/price|materials|diagnosis|permit|payment/i.test(serialized), false);
+  assert.equal(current.providerCalls.length, 1);
+});
+
+test("the same Cape Coral intake is authorized for a professional requester without reclassification", async () => {
+  const professionalText =
+    "I need someone to repair a cracked section of the wall by my front entry in Cape Coral. It is separating and temporarily braced. I would like someone to inspect it and repair or rebuild the damaged area. I am available this week and I can add photos.";
+  const current = fixture({
+    complete(request) {
+      assert.equal(request.homeownerText, professionalText);
+      return providerResult({
+        summary: "Review the supplied request facts.",
+        draftPatch: {
+          fields: [
+            patch({ path: "location.affectedArea", value: "front entry wall" }),
+            patch({ path: "service.specialty", value: "structural_repairs" }),
+            patch({ path: "location.city", value: "Cape Coral" }),
+            patch({ path: "timing.availability", value: "Available this week" }),
+          ],
+        },
+        clarifications: [],
+        warnings: [],
+      });
+    },
+  });
+
+  const result = await current.run({
+    authenticatedActor: {
+      id: 92,
+      role: "customer",
+      accountType: "professional",
+    },
+    body: requestBody({ text: professionalText }),
+  });
+
+  assert.equal(result.code, "INTELLIGENCE_OPERATION_COMPLETED");
+  assert.deepEqual(
+    result.result.draftPatch.fields.map(({ path, value }) => ({ path, value })),
+    [
+      { path: "location.affectedArea", value: "front entry wall" },
+      { path: "service.specialty", value: "structural_repairs" },
+      { path: "location.city", value: "Cape Coral" },
+      { path: "timing.availability", value: "Available this week" },
+    ]
+  );
+  assert.equal(current.providerCalls.length, 1);
+  assert.equal(current.repository.records.size, 1);
+  const [record] = current.repository.records.values();
+  assert.equal(record.actor_user_id, 92);
+  assert.equal(record.authority_scope, "user:92");
+});
+
+test("ambiguous service descriptions produce a bounded clarification without selecting taxonomy", async () => {
+  const current = fixture({
+    complete(request) {
+      assert.equal(
+        request.instructions.serviceRecommendation.ambiguityBehavior,
+        "clarify_without_selecting"
+      );
+      return providerResult({
+        summary: "More detail is needed to recommend one service.",
+        draftPatch: {
+          fields: [patch({ path: "job.title", value: "Inspect reported problem" })],
+        },
+        clarifications: [
+          {
+            question: "Is the problem with plumbing, electrical service, or the wall itself?",
+            fieldPath: "service.specialty",
+          },
+        ],
+        warnings: [],
+      });
+    },
+  });
+
+  const result = await current.run({
+    body: requestBody({ text: "Something near the wall is not working." }),
+  });
+
+  assert.equal(result.code, "INTELLIGENCE_OPERATION_COMPLETED");
+  assert.equal(
+    result.result.draftPatch.fields.some(({ path }) => path.startsWith("service.")),
+    false
+  );
+  assert.deepEqual(result.result.clarifications, [
+    {
+      question: "Is the problem with plumbing, electrical service, or the wall itself?",
+      fieldPath: "service.specialty",
+    },
+  ]);
+  assert.equal(current.providerCalls.length, 1);
+});
+
 test("parser fails closed for malformed, unknown, oversized, or unsafe provider output", () => {
   const invalidResults = [
     "{not-json",
     [],
     providerResult({ summary: "x".repeat(601) }),
     providerResult({ draftPatch: { fields: [patch({ path: "submission.status" })] } }),
-    providerResult({ draftPatch: { fields: Array.from({ length: 14 }, (_, index) => patch({ path: JOB_REQUEST_INTERPRET_PATCH_PATHS[index % 13] })) } }),
+    providerResult({ draftPatch: { fields: Array.from({ length: 17 }, (_, index) => patch({ path: JOB_REQUEST_INTERPRET_PATCH_PATHS[index % 16] })) } }),
     providerResult({ draftPatch: { fields: [patch({ value: "x".repeat(161) })] } }),
     providerResult({ draftPatch: { fields: [patch({ provenance: "user_entered" })] } }),
     providerResult({ draftPatch: { fields: [patch({ confidence: -0.1 })] } }),

@@ -12,6 +12,12 @@ function createUnavailableDelivery(status) {
     async sendPasswordResetEmail() {
       return { accepted: false, status };
     },
+    async sendBusinessDocumentEmail() {
+      return { accepted: false, status };
+    },
+    async sendTeamInvitationEmail() {
+      return { accepted: false, status };
+    },
   });
 }
 

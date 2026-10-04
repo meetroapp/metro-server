@@ -9,6 +9,20 @@ const emergencyDispatchService = require(
 
 const emergencyOpportunityService = require("./emergencyOpportunityService");
 const emergencyRequestService = require("./emergencyRequestService");
+const emergencyFollowUpJobRequestService = require(
+  "./emergencyFollowUpJobRequestService"
+);
+const {
+  MediaValidationError,
+  createCloudinaryMedia,
+} = require("../media/cloudinary");
+const {
+  rejectUnsupportedMedia,
+} = require("../media/mediaReferencePolicy");
+const {
+  safelyDeleteRequestPhoto,
+} = require("../media/requestPhoto");
+const { sendMediaError } = require("../media/uploadSignature");
 const requestRelationshipService = require(
   "../relationships/requestRelationshipService"
 );
@@ -85,6 +99,34 @@ function sendOpportunityResult(res, result) {
   });
 }
 
+function sendAvailableProfessionalResult(res, result) {
+  if (!result || result.ok !== true) {
+    return res.status(result?.status || 500).json({
+      success: false,
+      code:
+        result?.code ||
+        "EMERGENCY_AVAILABLE_PROFESSIONALS_FETCH_FAILED",
+      message:
+        result?.message ||
+        "Available Emergency professionals could not be loaded.",
+    });
+  }
+
+  return res.status(result.status || 200).json({
+    success: true,
+    code:
+      result.code ||
+      "EMERGENCY_AVAILABLE_PROFESSIONALS_FOUND",
+    emergencyRequest: {
+      id: result.emergencyRequest.id,
+      status: result.emergencyRequest.status,
+    },
+    professionals: Array.isArray(result.professionals)
+      ? result.professionals
+      : [],
+  });
+}
+
 function sendDispatchResult(res, result) {
   if (!result || result.success !== true) {
     return res.status(result?.status || 500).json({
@@ -118,6 +160,7 @@ function createEmergencyRequestHandlers({
   relationshipService = requestRelationshipService,
   selectionService = emergencySelectionService,
   dispatchService = emergencyDispatchService,
+  followUpJobRequestService = emergencyFollowUpJobRequestService,
 }) {
   if (typeof getPool !== "function") {
     throw new TypeError("getPool must be a function.");
@@ -140,6 +183,7 @@ function createEmergencyRequestHandlers({
     validateEmergencyRequestListOptions,
   } = service;
   const {
+    listHomeownerAvailableEmergencyProfessionals,
     listProfessionalEmergencyOpportunities,
     professionalCanSeeEmergencyOpportunity,
   } = opportunityService;
@@ -148,6 +192,7 @@ function createEmergencyRequestHandlers({
     listHomeownerEmergencyResponses,
   } = relationshipService;
   const {
+    selectHomeownerAvailableEmergencyProfessional,
     selectHomeownerEmergencyResponse,
   } = selectionService;
   const {
@@ -156,6 +201,9 @@ function createEmergencyRequestHandlers({
     markEmergencyEnRoute,
     startEmergencyWork,
   } = dispatchService;
+  const {
+    createEmergencyFollowUpJobRequest,
+  } = followUpJobRequestService;
 
   async function listProfessionalOpportunities(req, res) {
     try {
@@ -306,6 +354,142 @@ function createEmergencyRequestHandlers({
         code: "EMERGENCY_REQUEST_FETCH_FAILED",
         message:
           "The Emergency request could not be loaded.",
+      });
+    }
+  }
+
+  async function listAvailableProfessionals(req, res) {
+    try {
+      const result =
+        await listHomeownerAvailableEmergencyProfessionals({
+          pool: getPool(req),
+          homeownerUserId: req.user.id,
+          emergencyRequestId:
+            req.params.emergencyRequestId,
+        });
+
+      return sendAvailableProfessionalResult(
+        res,
+        result
+      );
+    } catch (error) {
+      return sendPublicDatabaseError({
+        res,
+        error,
+        operation:
+          "fetch_available_emergency_professionals",
+        code:
+          "EMERGENCY_AVAILABLE_PROFESSIONALS_FETCH_FAILED",
+        message:
+          "Available Emergency professionals could not be loaded.",
+      });
+    }
+  }
+
+
+  async function selectAvailableProfessional(
+    req,
+    res
+  ) {
+    try {
+      const result =
+        await selectHomeownerAvailableEmergencyProfessional({
+          pool: getPool(req),
+          homeownerUserId: req.user.id,
+          emergencyRequestId:
+            req.params.emergencyRequestId,
+          contractorProfileId:
+            req.params.contractorProfileId,
+        });
+
+      if (
+        !result ||
+        result.ok !== true
+      ) {
+        return res
+          .status(result?.status || 500)
+          .json({
+            success: false,
+            code:
+              result?.code ||
+              "EMERGENCY_AVAILABLE_PROFESSIONAL_SELECT_FAILED",
+            message:
+              result?.message ||
+              "The available Emergency professional could not be selected.",
+          });
+      }
+
+      return res
+        .status(result.status || 200)
+        .json({
+          success: true,
+          code:
+            result.code ||
+            "EMERGENCY_AVAILABLE_PROFESSIONAL_SELECTED",
+          alreadySelected:
+            Boolean(
+              result.alreadySelected
+            ),
+          declinedResponseCount:
+            Number(
+              result
+                .declinedResponseCount ||
+              0
+            ),
+          emergencyRequest: {
+            id:
+              result
+                .emergencyRequest.id,
+            status:
+              result
+                .emergencyRequest.status,
+            assignedAt:
+              result
+                .emergencyRequest
+                .assigned_at ||
+              null,
+            updatedAt:
+              result
+                .emergencyRequest
+                .updated_at ||
+              null,
+          },
+          relationship: {
+            id:
+              result.relationship.id,
+            emergencyRequestId:
+              result.relationship
+                .emergency_request_id,
+            status:
+              result.relationship.status,
+            acceptedAt:
+              result.relationship
+                .accepted_at ||
+              null,
+            conversationAvailable:
+              true,
+          },
+          conversation: {
+            id:
+              result.conversation.id,
+            relationshipId:
+              result.conversation
+                .relationship_id,
+            status:
+              result.conversation
+                .status,
+          },
+        });
+    } catch (error) {
+      return sendPublicDatabaseError({
+        res,
+        error,
+        operation:
+          "select_available_emergency_professional",
+        code:
+          "EMERGENCY_AVAILABLE_PROFESSIONAL_SELECT_FAILED",
+        message:
+          "The available Emergency professional could not be selected.",
       });
     }
   }
@@ -511,6 +695,97 @@ function createEmergencyRequestHandlers({
     }
   }
 
+  async function createFollowUpJobRequest(req, res) {
+    res.setHeader?.("Cache-Control", "private, no-store");
+
+    try {
+      if (rejectUnsupportedMedia(req, res, ["image_url"])) return;
+
+      const result = await createEmergencyFollowUpJobRequest({
+        pool: getPool(req),
+        authenticatedActor: req.user,
+        emergencyRequestId:
+          req.params.emergencyRequestId,
+        payload: req.body,
+        idempotencyKey:
+          req.headers?.["idempotency-key"],
+      });
+
+      if (!result || result.ok !== true) {
+        if (
+          Array.isArray(result?.cleanupPhotos) &&
+          result.cleanupPhotos.length > 0
+        ) {
+          try {
+            const media =
+              req.app?.locals?.cloudinaryMedia ||
+              createCloudinaryMedia({
+                env: process.env,
+              });
+
+            for (const photo of result.cleanupPhotos) {
+              await safelyDeleteRequestPhoto(
+                media,
+                photo.public_id,
+                req.user.id
+              );
+            }
+          } catch {
+            console.error(
+              "Emergency follow-up request photo cleanup failed",
+              {
+                code:
+                  "EMERGENCY_FOLLOW_UP_PHOTO_CLEANUP_FAILED",
+              }
+            );
+          }
+        }
+
+        return res
+          .status(result?.status || 500)
+          .json({
+            success: false,
+            code:
+              result?.code ||
+              "EMERGENCY_FOLLOW_UP_JOB_REQUEST_FAILED",
+            message:
+              result?.message ||
+              "The Standard follow-up Job Request could not be created.",
+          });
+      }
+
+      return res
+        .status(result.status || 201)
+        .json({
+          success: true,
+          code: result.code,
+          replayed: Boolean(result.replayed),
+          emergencyRequestId:
+            result.emergencyRequestId,
+          emergencyJobId: result.emergencyJobId,
+          linkageId: result.linkageId,
+          post: result.post,
+          reportedConcern:
+            result.reportedConcern || null,
+        });
+    } catch (error) {
+      if (error instanceof MediaValidationError) {
+        return sendMediaError(res, error);
+      }
+
+      return sendPublicDatabaseError({
+        res,
+        error,
+        operation:
+          "create_emergency_follow_up_job_request",
+        code:
+          "EMERGENCY_FOLLOW_UP_JOB_REQUEST_FAILED",
+        message:
+          "The Standard follow-up Job Request could not be created.",
+      });
+    }
+  }
+
   async function saveSafetyAssessment(req, res) {
     try {
       const result =
@@ -585,8 +860,10 @@ function createEmergencyRequestHandlers({
     cancelRequest,
     completeWork,
     createDraft,
+    createFollowUpJobRequest,
     getRequest,
     listOwnedRequests,
+    listAvailableProfessionals,
     listHomeownerResponses,
     listProfessionalOpportunities,
     markArrived,
@@ -595,6 +872,7 @@ function createEmergencyRequestHandlers({
     respondToProfessionalOpportunity,
     selectHomeownerResponse,
     saveSafetyAssessment,
+    selectAvailableProfessional,
     startWork,
     updateDraft,
   };
@@ -610,6 +888,7 @@ function registerEmergencyRequestRoutes({
   relationshipService = requestRelationshipService,
   selectionService = emergencySelectionService,
   dispatchService = emergencyDispatchService,
+  followUpJobRequestService = emergencyFollowUpJobRequestService,
 }) {
   if (!app) {
     throw new TypeError(
@@ -631,6 +910,7 @@ function registerEmergencyRequestRoutes({
     relationshipService,
     selectionService,
     dispatchService,
+    followUpJobRequestService,
   });
 
   app.get(
@@ -661,6 +941,18 @@ function registerEmergencyRequestRoutes({
     "/emergency-requests/:emergencyRequestId",
     authMiddleware,
     handlers.getRequest
+  );
+
+  app.get(
+    "/emergency-requests/:emergencyRequestId/available-professionals",
+    authMiddleware,
+    handlers.listAvailableProfessionals
+  );
+
+  app.post(
+    "/emergency-requests/:emergencyRequestId/available-professionals/:contractorProfileId/select",
+    authMiddleware,
+    handlers.selectAvailableProfessional
   );
 
   app.get(
@@ -699,6 +991,12 @@ function registerEmergencyRequestRoutes({
     handlers.completeWork
   );
 
+  app.post(
+    "/emergency-requests/:emergencyRequestId/follow-up-job-request",
+    authMiddleware,
+    handlers.createFollowUpJobRequest
+  );
+
   app.patch(
     "/emergency-requests/:emergencyRequestId",
     authMiddleware,
@@ -729,6 +1027,7 @@ function registerEmergencyRequestRoutes({
 module.exports = {
   createEmergencyRequestHandlers,
   registerEmergencyRequestRoutes,
+  sendAvailableProfessionalResult,
   sendDispatchResult,
   sendEmergencyRequestListResult,
   sendOpportunityResult,

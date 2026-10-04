@@ -12,6 +12,16 @@ const {
   getCommunicationAttentionWindowWithClient,
   resolveCommunicationRecipient,
 } = require("../alerts/communicationAlertService");
+const { createAlert } = require("../alerts/alertService");
+const {
+  resolveCanonicalLifecycleAlertsWithClient,
+} = require("../alerts/lifecycleAlertService");
+const {
+  deriveQuoteDepositGate,
+} = require("../authorization/quoteDecisionHandoff");
+const {
+  createFieldCustomerReplyAlertsWithClient,
+} = require("../team/fieldCustomerCommunicationService");
 
 const DEFAULT_MESSAGE_PAGE_SIZE = 50;
 const MAX_MESSAGE_PAGE_SIZE = 100;
@@ -19,6 +29,122 @@ const MAX_MESSAGE_TEXT_LENGTH = 5000;
 const CONVERSATION_MESSAGE_FIELDS = new Set([
   "message_text",
 ]);
+
+function boundedDecisionAlertText(value, maximum = 160) {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  return normalized ? normalized.slice(0, maximum) : null;
+}
+
+async function createProfessionalQuoteDecisionAlertWithClient({
+  client,
+  context,
+  quote,
+  decisionRow,
+  delivery,
+}) {
+  const approved = decisionRow?.decision === "APPROVED";
+  const declined = decisionRow?.decision === "DECLINED";
+  if (
+    !client || typeof client.query !== "function" ||
+    (!approved && !declined) ||
+    !decisionRow?.id ||
+    !quote?.id ||
+    !quote?.jobId ||
+    !Number.isSafeInteger(Number(quote.currentVersion)) ||
+    Number(quote.currentVersion) !== Number(decisionRow.issued_quote_version) ||
+    !Number.isSafeInteger(Number(context?.professional_user_id)) ||
+    !Number.isSafeInteger(Number(context?.customer_user_id)) ||
+    !Number.isSafeInteger(Number(delivery?.conversation_id))
+  ) {
+    throw new TypeError("Canonical Quote decision attention identity is required.");
+  }
+
+  await resolveCanonicalLifecycleAlertsWithClient({
+    client,
+    sourceDomain: "commercial",
+    sourceEntityType: "quote",
+    sourceEntityId: quote.id,
+    sourceEventTypes: ["quote.delivered"],
+    recipientUserId: Number(context.customer_user_id),
+    resolvedAt: decisionRow.decided_at || null,
+  });
+
+  const deposit = approved
+    ? deriveQuoteDepositGate({
+        customerTermsSnapshot: quote.customerTermsSnapshot,
+        totalMinor: quote.totalMinor,
+      })
+    : { state: "NONE" };
+  const safePayload = {
+    shortPreview: boundedDecisionAlertText(context.job_title) || "Customer project",
+    workCenterStage:
+      approved && deposit.state === "DEPOSIT_DUE"
+        ? "deposit"
+        : "quote",
+    projectTitle: boundedDecisionAlertText(context.job_title) || "Customer project",
+    customerLabel: boundedDecisionAlertText(context.customer_display_name) || "Customer",
+    quoteNumber: boundedDecisionAlertText(quote.documentNumber, 80) || "Quote",
+    quoteTotalMinor: Number(quote.totalMinor),
+    currency: boundedDecisionAlertText(quote.currency, 3) || "USD",
+    decision: decisionRow.decision,
+    issuedQuoteVersion: Number(decisionRow.issued_quote_version),
+    depositState: deposit.state,
+  };
+  if (deposit.state === "DEPOSIT_DUE") {
+    safePayload.depositPercent = deposit.percent;
+    safePayload.depositDueMinor = deposit.dueMinor;
+    safePayload.remainingMinor = deposit.remainingMinor;
+  }
+
+  const created = await createAlert({
+    client,
+    input: {
+      recipientUserId: Number(context.professional_user_id),
+      sourceDomain: "commercial",
+      sourceEventType: approved
+        ? "quote.customer_approved"
+        : "quote.customer_declined",
+      sourceEntityType: "quote",
+      sourceEntityId: quote.id,
+      sourceEventId: decisionRow.id,
+      permanentEvent: true,
+      category: "proposal",
+      priority: "high",
+      titleKey: approved
+        ? "alerts.commercial.quoteApproved.title"
+        : "alerts.commercial.quoteDeclined.title",
+      messageKey: approved
+        ? "alerts.commercial.quoteApproved.message"
+        : "alerts.commercial.quoteDeclined.message",
+      safePayload,
+      destination: {
+        type: "conversation",
+        payload: {
+          conversationId: Number(delivery.conversation_id),
+          jobId: quote.jobId,
+          quoteId: quote.id,
+        },
+      },
+      dedupeKey: [
+        "commercial",
+        "quote",
+        quote.id,
+        "version",
+        Number(decisionRow.issued_quote_version),
+        "decision",
+        decisionRow.decision,
+        "professional",
+        Number(context.professional_user_id),
+      ].join(":"),
+      availableAt: decisionRow.decided_at || null,
+      expiresAt: null,
+    },
+  });
+  if (!created.ok || !created.alert?.id) {
+    throw new Error("Canonical Quote decision attention could not be created.");
+  }
+  return { alertId: created.alert.id, created: created.created };
+}
 
 function requireDatabasePool(pool) {
   if (!pool || typeof pool.query !== "function") {
@@ -123,6 +249,360 @@ function validateConversationMessageInput(payload) {
       messageText,
     },
   };
+}
+
+async function createBusinessDocumentDeliveryMessageWithClient({
+  client,
+  conversation,
+  senderUserId,
+  recipientUserId,
+  messageText,
+  workflowPayload,
+}) {
+  requireDatabasePool(client);
+  if (!conversation?.id || conversation.status !== "active" ||
+      !parsePositiveInteger(senderUserId) || !parsePositiveInteger(recipientUserId) ||
+      senderUserId === recipientUserId || !textForBusinessDelivery(messageText) ||
+      !workflowPayload || typeof workflowPayload !== "object" || Array.isArray(workflowPayload)) {
+    throw new TypeError("A governed business-document Conversation message is required.");
+  }
+  await ensureConversationParticipantStatesWithClient({ client, conversationId: conversation.id });
+  const attention = await getCommunicationAttentionWindowWithClient({
+    client,
+    conversationId: conversation.id,
+    recipientUserId,
+  });
+  const inserted = await client.query(
+    `/* conversation_message:business_document_delivery */
+     INSERT INTO messages (
+       quote_request_id, conversation_id, sender_id, receiver_id, message_text,
+       image_url, message_type, workflow_type, workflow_status, workflow_payload
+     ) VALUES (NULL, $1, $2, $3, $4, NULL, 'text', 'BUSINESS_DOCUMENT_SHARED', 'SENT', $5::jsonb)
+     RETURNING *`,
+    [conversation.id, senderUserId, recipientUserId, textForBusinessDelivery(messageText), JSON.stringify(workflowPayload)]
+  );
+  const message = inserted.rows[0];
+  if (!message) throw new Error("The business-document Conversation message was not returned.");
+  await advanceConversationParticipantReadStateWithClient({
+    client,
+    conversation,
+    participantUserId: senderUserId,
+    lastReadMessageId: message.id,
+    lastReadAt: message.created_at || null,
+  });
+  const activity = await client.query(
+    "UPDATE conversations SET updated_at = COALESCE($2, CURRENT_TIMESTAMP) WHERE id = $1",
+    [conversation.id, message.created_at || null]
+  );
+  if (activity.rowCount === 0) throw new Error("Conversation activity could not be updated.");
+  await createOrRefreshCommunicationMessageAlert({
+    client,
+    conversation,
+    senderUserId,
+    recipientUserId,
+    recipientLastReadMessageId: attention.lastReadMessageId,
+    message,
+  });
+  return message;
+}
+
+async function createPaymentLifecycleMessageWithClient({
+  client,
+  conversation,
+  senderUserId,
+  recipientUserId,
+  messageText,
+  messageType,
+  workflowType,
+  workflowPayload,
+  quoteId,
+  jobId,
+}) {
+  requireDatabasePool(client);
+  const supported = (
+    messageType === "payment_request" && workflowType === "PAYMENT_REQUEST"
+  ) || (
+    messageType === "payment_received" && workflowType === "PAYMENT_RECEIVED"
+  );
+  if (!supported || !conversation?.id || conversation.status !== "active" ||
+      !parsePositiveInteger(senderUserId) || !parsePositiveInteger(recipientUserId) ||
+      senderUserId === recipientUserId || !textForBusinessDelivery(messageText) ||
+      !workflowPayload || typeof workflowPayload !== "object" || Array.isArray(workflowPayload) ||
+      typeof quoteId !== "string" || !quoteId || typeof jobId !== "string" || !jobId ||
+      workflowPayload.quoteId !== quoteId || workflowPayload.jobId !== jobId) {
+    throw new TypeError("A governed Payment lifecycle Conversation message is required.");
+  }
+  await ensureConversationParticipantStatesWithClient({ client, conversationId: conversation.id });
+  const attention = await getCommunicationAttentionWindowWithClient({
+    client,
+    conversationId: conversation.id,
+    recipientUserId,
+  });
+  const inserted = await client.query(
+    `/* conversation_message:payment_lifecycle */
+     INSERT INTO messages (
+       quote_request_id, conversation_id, sender_id, receiver_id, message_text,
+       image_url, message_type, workflow_type, workflow_status, workflow_payload
+     ) VALUES (NULL, $1, $2, $3, $4, NULL, $5, $6, 'SENT', $7::jsonb)
+     RETURNING *`,
+    [
+      conversation.id,
+      senderUserId,
+      recipientUserId,
+      textForBusinessDelivery(messageText),
+      messageType,
+      workflowType,
+      JSON.stringify(workflowPayload),
+    ]
+  );
+  const message = inserted.rows[0];
+  if (!message) throw new Error("The Payment lifecycle Conversation message was not returned.");
+  await advanceConversationParticipantReadStateWithClient({
+    client,
+    conversation,
+    participantUserId: senderUserId,
+    lastReadMessageId: message.id,
+    lastReadAt: message.created_at || null,
+  });
+  const activity = await client.query(
+    "UPDATE conversations SET updated_at = COALESCE($2, CURRENT_TIMESTAMP) WHERE id = $1",
+    [conversation.id, message.created_at || null]
+  );
+  if (activity.rowCount === 0) throw new Error("Conversation activity could not be updated.");
+  await createOrRefreshCommunicationMessageAlert({
+    client,
+    conversation,
+    senderUserId,
+    recipientUserId,
+    recipientLastReadMessageId: attention.lastReadMessageId,
+    message,
+  });
+  return message;
+}
+
+
+async function createPaymentReminderMessageWithClient({
+  client,
+  conversation,
+  senderUserId,
+  recipientUserId,
+  messageText,
+  workflowPayload,
+  jobId,
+}) {
+  requireDatabasePool(client);
+
+  const uuid = (value) =>
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+      ? value.toLowerCase()
+      : null;
+
+  const sourceType = workflowPayload?.sourceType;
+  const reminderId = uuid(workflowPayload?.reminderId);
+  const canonicalJobId = uuid(jobId);
+  const payloadJobId = uuid(workflowPayload?.jobId);
+  const invoiceId = uuid(workflowPayload?.invoiceId);
+  const paymentRequirementId =
+    uuid(workflowPayload?.paymentRequirementId);
+
+  const sourceVersion = Number(workflowPayload?.sourceVersion);
+  const amountMinor = Number(workflowPayload?.amountMinor);
+  const classifiedOn =
+    typeof workflowPayload?.classifiedOn === "string" &&
+    /^\d{4}-\d{2}-\d{2}$/.test(workflowPayload.classifiedOn)
+      ? workflowPayload.classifiedOn
+      : null;
+
+  let reminderTimeZone = null;
+
+  try {
+    const submitted =
+      typeof workflowPayload?.timeZone === "string"
+        ? workflowPayload.timeZone.trim()
+        : "";
+
+    if (
+      submitted.includes("/") &&
+      submitted.length >= 3 &&
+      submitted.length <= 100
+    ) {
+      reminderTimeZone =
+        new Intl.DateTimeFormat(
+          "en-US",
+          {
+            timeZone:
+              submitted,
+          }
+        )
+          .resolvedOptions()
+          .timeZone ||
+        submitted;
+    }
+  } catch {
+    reminderTimeZone =
+      null;
+  }
+
+  const classifications = sourceType === "INVOICE"
+    ? new Set(["UPCOMING_DUE", "DUE_TODAY", "OVERDUE"])
+    : new Set(["DEPOSIT_DUE", "DEPOSIT_REMAINING"]);
+
+  const due = workflowPayload?.due;
+  const invoiceDueValid =
+    sourceType === "INVOICE" &&
+    due &&
+    typeof due === "object" &&
+    !Array.isArray(due) &&
+    ["DUE_ON_RECEIPT", "SPECIFIC_DATE"].includes(due.mode) &&
+    typeof due.effectiveDate === "string" &&
+    /^\d{4}-\d{2}-\d{2}$/.test(due.effectiveDate) &&
+    (
+      (
+        due.mode === "DUE_ON_RECEIPT" &&
+        due.date == null
+      )
+      ||
+      (
+        due.mode === "SPECIFIC_DATE" &&
+        typeof due.date === "string" &&
+        /^\d{4}-\d{2}-\d{2}$/.test(due.date) &&
+        due.date === due.effectiveDate
+      )
+    );
+
+  const sourceValid =
+    (
+      sourceType === "INVOICE" &&
+      invoiceId &&
+      !paymentRequirementId &&
+      invoiceDueValid
+    )
+    ||
+    (
+      sourceType === "DEPOSIT" &&
+      !invoiceId &&
+      paymentRequirementId &&
+      due == null
+    );
+
+  if (
+    workflowPayload?.schemaVersion !== 1 ||
+    !conversation?.id ||
+    conversation.status !== "active" ||
+    !parsePositiveInteger(senderUserId) ||
+    !parsePositiveInteger(recipientUserId) ||
+    senderUserId === recipientUserId ||
+    !textForBusinessDelivery(messageText) ||
+    !reminderId ||
+    !canonicalJobId ||
+    payloadJobId !== canonicalJobId ||
+    !Number.isSafeInteger(sourceVersion) ||
+    sourceVersion < 1 ||
+    !Number.isSafeInteger(amountMinor) ||
+    amountMinor < 1 ||
+    !classifiedOn ||
+    !reminderTimeZone ||
+    workflowPayload?.timeZone !== reminderTimeZone ||
+    !/^[A-Z]{3}$/.test(workflowPayload?.currency || "") ||
+    !classifications.has(workflowPayload?.classification) ||
+    !sourceValid
+  ) {
+    throw new TypeError(
+      "A governed Payment Reminder Conversation message is required."
+    );
+  }
+
+  await ensureConversationParticipantStatesWithClient({
+    client,
+    conversationId: conversation.id,
+  });
+
+  const attention =
+    await getCommunicationAttentionWindowWithClient({
+      client,
+      conversationId: conversation.id,
+      recipientUserId,
+    });
+
+  const inserted = await client.query(
+    `/* conversation_message:payment_reminder */
+     INSERT INTO messages (
+       quote_request_id,
+       conversation_id,
+       sender_id,
+       receiver_id,
+       message_text,
+       image_url,
+       message_type,
+       workflow_type,
+       workflow_status,
+       workflow_payload
+     )
+     VALUES (
+       NULL,
+       $1,
+       $2,
+       $3,
+       $4,
+       NULL,
+       'payment_reminder',
+       'PAYMENT_REMINDER',
+       'SENT',
+       $5::jsonb
+     )
+     RETURNING *`,
+    [
+      conversation.id,
+      senderUserId,
+      recipientUserId,
+      textForBusinessDelivery(messageText),
+      JSON.stringify(workflowPayload),
+    ]
+  );
+
+  const message = inserted.rows[0];
+
+  if (!message) {
+    throw new Error(
+      "The Payment Reminder Conversation message was not returned."
+    );
+  }
+
+  await advanceConversationParticipantReadStateWithClient({
+    client,
+    conversation,
+    participantUserId: senderUserId,
+    lastReadMessageId: message.id,
+    lastReadAt: message.created_at || null,
+  });
+
+  const activity = await client.query(
+    "UPDATE conversations SET updated_at = COALESCE($2, CURRENT_TIMESTAMP) WHERE id = $1",
+    [conversation.id, message.created_at || null]
+  );
+
+  if (activity.rowCount === 0) {
+    throw new Error(
+      "Conversation activity could not be updated."
+    );
+  }
+
+  await createOrRefreshCommunicationMessageAlert({
+    client,
+    conversation,
+    senderUserId,
+    recipientUserId,
+    recipientLastReadMessageId: attention.lastReadMessageId,
+    message,
+  });
+
+  return message;
+}
+
+function textForBusinessDelivery(value) {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  return normalized && normalized.length <= MAX_MESSAGE_TEXT_LENGTH ? normalized : null;
 }
 
 async function createConversationMessage({
@@ -331,6 +811,14 @@ async function createConversationMessage({
       message,
     });
 
+    if (senderUserId === Number(conversation.homeowner_id)) {
+      await createFieldCustomerReplyAlertsWithClient({
+        client,
+        conversation,
+        message,
+      });
+    }
+
     await client.query("COMMIT");
 
     return {
@@ -501,8 +989,126 @@ async function listConversationMessages({
       messages.workflow_type,
       messages.workflow_status,
       messages.workflow_payload,
+      messages.quote_id,
+      messages.invoice_id,
+      messages.job_id,
+      messages.delivery_request_fingerprint,
+      quote_decisions.decision AS canonical_quote_decision,
+      quote_decisions.issued_quote_version AS canonical_quote_decision_version,
+      quote_decisions.decided_at AS canonical_quote_decided_at,
+      decision_customers.user_id AS canonical_quote_customer_user_id,
+      quote_aggregates.current_version AS canonical_quote_current_version,
+      quote_sources.document_number AS canonical_quote_number,
+      CASE
+        WHEN delegated_commands.id IS NOT NULL
+          AND delegated_assignments.id IS NOT NULL
+          AND delegated_memberships.id IS NOT NULL
+          AND delegated_users.id IS NOT NULL
+          AND delegated_jobs.id IS NOT NULL
+          AND messages.sender_id = message_conversations.professional_user_id
+          AND messages.receiver_id = message_conversations.homeowner_id
+          AND messages.message_type = 'text'
+          AND NULLIF(btrim(messages.message_text), '') IS NOT NULL
+          AND messages.image_url IS NULL
+          AND messages.workflow_type IS NULL
+          AND messages.workflow_status IS NULL
+          AND COALESCE(messages.workflow_payload, '{}'::jsonb) = '{}'::jsonb
+          AND messages.quote_id IS NULL
+          AND messages.invoice_id IS NULL
+          AND messages.job_id IS NULL
+          AND messages.delivery_idempotency_key IS NULL
+          AND messages.delivery_request_fingerprint IS NULL
+          AND messages.invoice_delivery_idempotency_key IS NULL
+          AND messages.invoice_delivery_request_fingerprint IS NULL
+        THEN 'FIELD_EMPLOYEE'
+        ELSE NULL
+      END AS delegated_author_type,
+      CASE
+        WHEN delegated_commands.id IS NOT NULL
+          AND delegated_assignments.id IS NOT NULL
+          AND delegated_memberships.id IS NOT NULL
+          AND delegated_users.id IS NOT NULL
+          AND delegated_jobs.id IS NOT NULL
+          AND messages.sender_id = message_conversations.professional_user_id
+          AND messages.receiver_id = message_conversations.homeowner_id
+          AND messages.message_type = 'text'
+          AND NULLIF(btrim(messages.message_text), '') IS NOT NULL
+          AND messages.image_url IS NULL
+          AND messages.workflow_type IS NULL
+          AND messages.workflow_status IS NULL
+          AND COALESCE(messages.workflow_payload, '{}'::jsonb) = '{}'::jsonb
+          AND messages.quote_id IS NULL
+          AND messages.invoice_id IS NULL
+          AND messages.job_id IS NULL
+          AND messages.delivery_idempotency_key IS NULL
+          AND messages.delivery_request_fingerprint IS NULL
+          AND messages.invoice_delivery_idempotency_key IS NULL
+          AND messages.invoice_delivery_request_fingerprint IS NULL
+        THEN delegated_users.username
+        ELSE NULL
+      END AS delegated_author_display_name,
+      CASE
+        WHEN delegated_commands.id IS NOT NULL
+          AND delegated_assignments.id IS NOT NULL
+          AND delegated_memberships.id IS NOT NULL
+          AND delegated_users.id IS NOT NULL
+          AND delegated_jobs.id IS NOT NULL
+          AND messages.sender_id = message_conversations.professional_user_id
+          AND messages.receiver_id = message_conversations.homeowner_id
+          AND messages.message_type = 'text'
+          AND NULLIF(btrim(messages.message_text), '') IS NOT NULL
+          AND messages.image_url IS NULL
+          AND messages.workflow_type IS NULL
+          AND messages.workflow_status IS NULL
+          AND COALESCE(messages.workflow_payload, '{}'::jsonb) = '{}'::jsonb
+          AND messages.quote_id IS NULL
+          AND messages.invoice_id IS NULL
+          AND messages.job_id IS NULL
+          AND messages.delivery_idempotency_key IS NULL
+          AND messages.delivery_request_fingerprint IS NULL
+          AND messages.invoice_delivery_idempotency_key IS NULL
+          AND messages.invoice_delivery_request_fingerprint IS NULL
+        THEN 'FIELD_EMPLOYEE'
+        ELSE NULL
+      END AS delegated_author_role,
       messages.created_at
     FROM messages
+    INNER JOIN conversations message_conversations
+      ON message_conversations.id = messages.conversation_id
+    LEFT JOIN canonical_quote_customer_decisions quote_decisions
+      ON quote_decisions.quote_id = messages.quote_id
+      AND quote_decisions.job_id = messages.job_id
+      AND quote_decisions.relationship_id = message_conversations.relationship_id
+    LEFT JOIN relationship_participants decision_customers
+      ON decision_customers.id = quote_decisions.customer_participant_id
+      AND decision_customers.job_id = quote_decisions.job_id
+      AND decision_customers.request_relationship_id = quote_decisions.relationship_id
+    LEFT JOIN commercial_authority_aggregates quote_aggregates
+      ON quote_aggregates.id = messages.quote_id
+      AND quote_aggregates.aggregate_type = 'quote'
+    LEFT JOIN canonical_quote_business_document_sources quote_sources
+      ON quote_sources.quote_id = messages.quote_id
+      AND quote_sources.job_id = messages.job_id
+    LEFT JOIN business_job_customer_message_commands delegated_commands
+      ON delegated_commands.result_message_id = messages.id
+      AND delegated_commands.completed_at IS NOT NULL
+    LEFT JOIN business_job_assignments delegated_assignments
+      ON delegated_assignments.id = delegated_commands.assignment_id
+      AND delegated_assignments.contractor_profile_id = delegated_commands.contractor_profile_id
+      AND delegated_assignments.job_id = delegated_commands.job_id
+      AND delegated_assignments.membership_id = delegated_commands.membership_id
+    LEFT JOIN business_team_memberships delegated_memberships
+      ON delegated_memberships.id = delegated_commands.membership_id
+      AND delegated_memberships.contractor_profile_id = delegated_commands.contractor_profile_id
+      AND delegated_memberships.user_id = delegated_commands.actor_user_id
+    LEFT JOIN users delegated_users
+      ON delegated_users.id = delegated_commands.actor_user_id
+      AND delegated_users.id = delegated_memberships.user_id
+    LEFT JOIN jobs delegated_jobs
+      ON delegated_jobs.id = delegated_commands.job_id
+      AND delegated_jobs.source_request_selection_id = message_conversations.request_selection_id
+      AND delegated_jobs.source_request_relationship_id = message_conversations.relationship_id
+      AND delegated_jobs.lifecycle_contract_version = 2
     WHERE messages.conversation_id = $1
       AND (
         $2::boolean = FALSE
@@ -573,7 +1179,11 @@ module.exports = {
   DEFAULT_MESSAGE_PAGE_SIZE,
   MAX_MESSAGE_TEXT_LENGTH,
   MAX_MESSAGE_PAGE_SIZE,
+  createProfessionalQuoteDecisionAlertWithClient,
   createConversationMessage,
+  createBusinessDocumentDeliveryMessageWithClient,
+  createPaymentLifecycleMessageWithClient,
+  createPaymentReminderMessageWithClient,
   decodeMessageCursor,
   encodeMessageCursor,
   listConversationMessages,

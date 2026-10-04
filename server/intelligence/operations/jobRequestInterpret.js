@@ -1,6 +1,7 @@
 "use strict";
 
 const {
+  REQUEST_SERVICE_IDS,
   SUPPORTED_REQUEST_DOMAINS,
   getRequestServiceDomain,
   isSupportedRequestService,
@@ -23,6 +24,9 @@ const JOB_REQUEST_INTERPRET_PATCH_PATHS = Object.freeze([
   "service.domain",
   "service.specialty",
   "location.affectedArea",
+  "location.city",
+  "location.region",
+  "location.postalCode",
   "timing.urgency",
   "timing.desiredTiming",
   "timing.availability",
@@ -67,6 +71,9 @@ const PATCH_VALUE_LIMITS = Object.freeze({
   "service.domain": 80,
   "service.specialty": 120,
   "location.affectedArea": 200,
+  "location.city": 120,
+  "location.region": 120,
+  "location.postalCode": 32,
   "timing.urgency": 120,
   "timing.desiredTiming": 300,
   "timing.availability": 500,
@@ -82,6 +89,9 @@ const MAX_WARNINGS = 5;
 const MAX_QUESTION_LENGTH = 300;
 const MAX_WARNING_LENGTH = 300;
 const WARNING_CODE_PATTERN = /^[a-z][a-z0-9_]{0,79}$/;
+const CANONICAL_REQUEST_SERVICE_IDS = Object.freeze(
+  [...REQUEST_SERVICE_IDS].sort()
+);
 
 function operationError(message, code) {
   return Object.assign(new Error(message), { code });
@@ -125,6 +135,37 @@ function normalizeContextGroup(value, keys) {
       return [key.name, boundedText(value[key.name], PATCH_VALUE_LIMITS[path], contextError)];
     })
   );
+}
+
+function normalizeLocationContext(value) {
+  assertExactKeys(
+    value,
+    ["affectedArea"],
+    ["city", "region", "postalCode"],
+    contextError
+  );
+  return {
+    affectedArea: boundedText(
+      value.affectedArea,
+      PATCH_VALUE_LIMITS["location.affectedArea"],
+      contextError
+    ),
+    city: boundedText(
+      value.city || "",
+      PATCH_VALUE_LIMITS["location.city"],
+      contextError
+    ),
+    region: boundedText(
+      value.region || "",
+      PATCH_VALUE_LIMITS["location.region"],
+      contextError
+    ),
+    postalCode: boundedText(
+      value.postalCode || "",
+      PATCH_VALUE_LIMITS["location.postalCode"],
+      contextError
+    ),
+  };
 }
 
 function normalizeJobRequestDraftContext(context, input) {
@@ -192,9 +233,7 @@ function normalizeJobRequestDraftContext(context, input) {
       { name: "domain", path: "service.domain" },
       { name: "specialty", path: "service.specialty" },
     ]),
-    location: normalizeContextGroup(draft.location, [
-      { name: "affectedArea", path: "location.affectedArea" },
-    ]),
+    location: normalizeLocationContext(draft.location),
     timing: normalizeContextGroup(draft.timing, [
       { name: "urgency", path: "timing.urgency" },
       { name: "desiredTiming", path: "timing.desiredTiming" },
@@ -237,7 +276,35 @@ function buildJobRequestInterpretProviderRequest({ semanticInput, engineContext 
         "require_homeowner_confirmation",
         "avoid_professional_diagnosis",
         "ask_bounded_clarifications",
+        "extract_all_homeowner_supplied_facts_before_clarifying",
+        "do_not_ask_for_information_already_supplied_or_present",
+        "do_not_infer_unsupplied_location_details",
+        "do_not_invent_price_diagnosis_repair_method_or_materials",
+        "when_the_project_is_concrete_propose_job.title_and_job.description",
+        "extract_explicit_location.city_and_timing.availability",
+        "normalize_timing.availability_to_concise_sentence_case_without_changing_meaning",
+        "do_not_ask_for_desired_timing_when_supplied_availability_already_answers_it",
+        "when_one_canonical_service_is_a_reasonable_match_propose_service.specialty",
+        "reported_separation_temporary_bracing_or_rebuild_scope_reasonably_supports_structural_repairs_without_asserting_a_diagnosis",
+        "when_multiple_canonical_services_are_plausible_ask_one_service.specialty_clarification",
       ],
+      serviceRecommendation: {
+        targetPath: "service.specialty",
+        canonicalValuesFrom:
+          "operationContext.validation.canonicalRequestServiceIds",
+        preserveExistingHomeownerSelection: true,
+        requiresConfirmation: true,
+        ambiguityBehavior: "clarify_without_selecting",
+        classificationGuidance: {
+          structuralSignals: [
+            "reported_separation",
+            "temporary_bracing",
+            "requested_rebuild_of_wall_or_structural_section",
+          ],
+          classificationIsNotDiagnosis: true,
+          surfaceFinishOnlyDoesNotEstablishStructuralRepairs: true,
+        },
+      },
       prohibitedActions: [
         "submit_job_request",
         "select_professional",
@@ -300,7 +367,7 @@ function normalizePatch(field) {
     uncertainty: field.uncertainty,
     requiresConfirmation: true,
   };
-  if (Object.hasOwn(field, "rationale")) {
+  if (field.rationale != null) {
     normalized.rationale = boundedText(field.rationale, MAX_RATIONALE_LENGTH, resultError);
   }
   return normalized;
@@ -311,7 +378,7 @@ function normalizeClarification(value) {
   const clarification = {
     question: boundedText(value.question, MAX_QUESTION_LENGTH, resultError, { allowEmpty: false }),
   };
-  if (Object.hasOwn(value, "fieldPath")) {
+  if (value.fieldPath != null) {
     if (!PATCH_PATHS.has(value.fieldPath)) {
       throw resultError("Unsupported clarification field path.");
     }
@@ -329,6 +396,32 @@ function normalizeWarning(value) {
     code: value.code,
     message: boundedText(value.message, MAX_WARNING_LENGTH, resultError, { allowEmpty: false }),
   };
+}
+
+function draftValueAtPath(draft, path) {
+  return String(path || "")
+    .split(".")
+    .reduce((cursor, key) => cursor?.[key], draft);
+}
+
+function removeRedundantClarifications(clarifications, patches, currentDraft = {}) {
+  const proposedPaths = new Set(patches.map(({ path }) => path));
+  const relatedSatisfiedPaths = new Map([
+    ["timing.desiredTiming", ["timing.availability"]],
+    ["timing.availability", ["timing.desiredTiming"]],
+  ]);
+  return clarifications.filter((clarification) => {
+    if (!clarification.fieldPath) return true;
+    if (proposedPaths.has(clarification.fieldPath)) return false;
+    if (
+      (relatedSatisfiedPaths.get(clarification.fieldPath) || []).some(
+        (path) => proposedPaths.has(path) || String(draftValueAtPath(currentDraft, path) || "").trim()
+      )
+    ) {
+      return false;
+    }
+    return !String(draftValueAtPath(currentDraft, clarification.fieldPath) || "").trim();
+  });
 }
 
 function validateServicePatches(patches, currentService = {}) {
@@ -406,7 +499,11 @@ function parseJobRequestInterpretResult(providerResult, { semanticInput } = {}) 
   if (new Set(patches.map(({ path }) => path)).size !== patches.length) {
     throw resultError("Duplicate draft patch path.");
   }
-  const clarifications = payload.clarifications.map(normalizeClarification);
+  const clarifications = removeRedundantClarifications(
+    payload.clarifications.map(normalizeClarification),
+    patches,
+    semanticInput?.context?.draft || {}
+  );
   const warnings = payload.warnings.map(normalizeWarning);
   const taxonomy = validateServicePatches(
     patches,
@@ -468,6 +565,7 @@ const jobRequestInterpretEngines = Object.freeze([
       return {
         schemaVersion: 1,
         taxonomy: "request_service",
+        canonicalRequestServiceIds: CANONICAL_REQUEST_SERVICE_IDS.join(","),
         patchWhitelistEnforced: true,
       };
     },
@@ -477,7 +575,8 @@ const jobRequestInterpretEngines = Object.freeze([
 const jobRequestInterpretOperationDefinition = Object.freeze({
   operation: JOB_REQUEST_INTERPRET_OPERATION,
   capability: JOB_REQUEST_INTERPRET_CAPABILITY,
-  supportedRoles: Object.freeze(["homeowner"]),
+  supportedRoles: Object.freeze(["homeowner", "professional"]),
+  roleAuthorization: "request_service",
   engineIds: JOB_REQUEST_INTERPRET_ENGINE_IDS,
   providerName: JOB_REQUEST_INTERPRET_PROVIDER,
   buildContext: buildJobRequestInterpretContext,

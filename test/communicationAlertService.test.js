@@ -313,14 +313,15 @@ test("first unread message creates one recipient-scoped communication alert", as
   assert.equal(insert.params[3], "conversation");
   assert.equal(insert.params[4], "91");
   assert.equal(insert.params[5], "201");
-  assert.deepEqual(JSON.parse(insert.params[10]), {
+  assert.equal(insert.params[6], null);
+  assert.deepEqual(JSON.parse(insert.params[11]), {
     shortPreview: "Hello professional",
     unreadCount: 1,
   });
-  assert.equal(insert.params[11], "conversation");
-  assert.deepEqual(JSON.parse(insert.params[12]), { conversationId: 91 });
-  assert.equal(insert.params[13], "communication:conversation:91:recipient:9:after:0");
-  assert.doesNotMatch(insert.params[10], /message_text|body|content|location|email|phone/i);
+  assert.equal(insert.params[12], "conversation");
+  assert.deepEqual(JSON.parse(insert.params[13]), { conversationId: 91 });
+  assert.equal(insert.params[14], "communication:conversation:91:recipient:9:after:0");
+  assert.doesNotMatch(insert.params[11], /message_text|body|content|location|email|phone/i);
 });
 
 test("same unread window refreshes presentation without reopening a dismissed alert", async () => {
@@ -391,7 +392,7 @@ test("post-read marker produces a new attention-window dedupe key", async () => 
     },
   });
   const insert = fake.calls.find(({ sql }) => sql.includes("INSERT INTO alerts"));
-  assert.equal(insert.params[13], "communication:conversation:91:recipient:9:after:202");
+  assert.equal(insert.params[14], "communication:conversation:91:recipient:9:after:202");
 });
 
 test("different recipients and conversations have independent attention windows", () => {
@@ -843,9 +844,9 @@ test("Emergency-backed canonical conversations expose only communication-safe al
   });
   const insert = fake.calls.find(({ sql }) => sql.includes("INSERT INTO alerts"));
   assert.equal(insert.params[1], "communication");
-  assert.equal(insert.params[6], "communication");
-  assert.equal(insert.params[11], "conversation");
-  assert.deepEqual(JSON.parse(insert.params[12]), { conversationId: 91 });
+  assert.equal(insert.params[7], "communication");
+  assert.equal(insert.params[12], "conversation");
+  assert.deepEqual(JSON.parse(insert.params[13]), { conversationId: 91 });
   const persisted = JSON.stringify(insert.params);
   assert.doesNotMatch(
     persisted,

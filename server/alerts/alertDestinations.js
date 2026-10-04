@@ -67,6 +67,11 @@ function positiveIdentity(value) {
     : null;
 }
 
+function uuidIdentity(value) {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return UUID_PATTERN.test(normalized) ? normalized : null;
+}
+
 function normalizeDestination(input = {}) {
   const root = exactDataObject(input, ["type", "payload"]);
   if (!root) {
@@ -87,8 +92,104 @@ function normalizeDestination(input = {}) {
     return { value: { type, payload: {}, public: { type } } };
   }
 
+  if (type === "conversation") {
+    const basic = exactDataObject(root.payload, ["conversationId"]);
+    const workContext = exactDataObject(root.payload, [
+      "conversationId",
+      "jobId",
+      "quoteId",
+    ]);
+    if (!basic && !workContext) return { error: invalidDestination() };
+    const conversationId = positiveIdentity(root.payload.conversationId);
+    if (!conversationId) return { error: invalidDestination() };
+    if (basic) {
+      return {
+        value: {
+          type,
+          payload: { conversationId },
+          public: { type, conversationId },
+        },
+      };
+    }
+    const jobId = uuidIdentity(root.payload.jobId);
+    const quoteId = uuidIdentity(root.payload.quoteId);
+    if (!jobId || !quoteId) return { error: invalidDestination() };
+    return {
+      value: {
+        type,
+        payload: { conversationId, jobId, quoteId },
+        public: { type, conversationId, jobId, quoteId },
+      },
+    };
+  }
+
+  if (type === "job") {
+    const payload = exactDataObject(root.payload, ["jobId"]);
+    const jobId = payload ? uuidIdentity(payload.jobId) : null;
+    if (!jobId) return { error: invalidDestination() };
+    return {
+      value: {
+        type,
+        payload: { jobId },
+        public: { type, jobId },
+      },
+    };
+  }
+
+  const jobResourceDestinations = {
+    quote: "quoteId",
+    invoice: "invoiceId",
+  };
+
+  if (type === "visit") {
+    const basic = exactDataObject(root.payload, ["jobId", "visitId"]);
+    const conversationContext = exactDataObject(root.payload, [
+      "conversationId",
+      "jobId",
+      "requestId",
+      "visitId",
+    ]);
+    if (!basic && !conversationContext) return { error: invalidDestination() };
+    const jobId = uuidIdentity(root.payload.jobId);
+    const visitId = uuidIdentity(root.payload.visitId);
+    if (!jobId || !visitId) return { error: invalidDestination() };
+    if (basic) {
+      return {
+        value: {
+          type,
+          payload: { jobId, visitId },
+          public: { type, jobId, visitId },
+        },
+      };
+    }
+    const conversationId = positiveIdentity(root.payload.conversationId);
+    const requestId = positiveIdentity(root.payload.requestId);
+    if (!conversationId || !requestId) return { error: invalidDestination() };
+    return {
+      value: {
+        type,
+        payload: { conversationId, jobId, requestId, visitId },
+        public: { type, conversationId, jobId, requestId, visitId },
+      },
+    };
+  }
+
+  if (jobResourceDestinations[type]) {
+    const resourceField = jobResourceDestinations[type];
+    const payload = exactDataObject(root.payload, ["jobId", resourceField]);
+    const jobId = payload ? uuidIdentity(payload.jobId) : null;
+    const resourceId = payload ? uuidIdentity(payload[resourceField]) : null;
+    if (!jobId || !resourceId) return { error: invalidDestination() };
+    return {
+      value: {
+        type,
+        payload: { jobId, [resourceField]: resourceId },
+        public: { type, jobId, [resourceField]: resourceId },
+      },
+    };
+  }
+
   const numericDestinations = {
-    conversation: "conversationId",
     emergency_request: "emergencyRequestId",
     request: "requestId",
     project: "requestId",

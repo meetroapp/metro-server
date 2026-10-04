@@ -58,10 +58,10 @@ function createFixture({ providerComplete, parseResult, buildContext } = {}) {
   const providers = {
     fixture: {
       name: "fixture",
-      async complete(request) {
+      async complete(request, options) {
         providerRequests.push(request);
         return providerComplete
-          ? providerComplete(request)
+          ? providerComplete(request, options)
           : { answer: "bounded fixture result" };
       },
     },
@@ -90,20 +90,78 @@ function createFixture({ providerComplete, parseResult, buildContext } = {}) {
   };
 }
 
-test("production registry ships only the bounded Job Request interpretation operation", () => {
-  assert.deepEqual(canonicalIntelligenceOperationRegistry.list(), [{
-    operation: "job_request.interpret",
-    capability: "job_request.interpret",
-    supportedRoles: ["homeowner"],
-    engineIds: ["job_request_capability", "job_request_validation"],
-    providerName: "job_request",
-  }]);
+test("production registry preserves governed workflow operations and adds text-only conversation", () => {
+  assert.deepEqual(canonicalIntelligenceOperationRegistry.list().filter(({ operation }) => operation !== "companion.converse"), [
+    {
+      operation: "job_request.interpret",
+      capability: "job_request.interpret",
+      supportedRoles: ["homeowner", "professional"],
+      engineIds: ["job_request_capability", "job_request_validation"],
+      providerName: "job_request",
+    },
+    {
+      operation: "emergency_request.interpret",
+      capability: "emergency_request.interpret",
+      supportedRoles: ["homeowner", "professional"],
+      engineIds: ["emergency_request_capability", "emergency_request_validation"],
+      providerName: "emergency_request",
+    },
+    {
+      operation: "quote.compose",
+      capability: "quote.compose",
+      supportedRoles: ["professional"],
+      engineIds: ["quote_composition_advisory", "quote_composition_authority_boundary"],
+      providerName: "quote_composition",
+    },
+    {
+      operation: "quick_quote.photo_assist",
+      capability: "quick_quote.photo_assist",
+      supportedRoles: ["professional"],
+      engineIds: ["quick_quote_photo_advisory_boundary"],
+      providerName: "workflow_assistance",
+    },
+    {
+      operation: "evaluation.assist",
+      capability: "evaluation.assist",
+      supportedRoles: ["professional"],
+      engineIds: ["evaluation_advisory_boundary"],
+      providerName: "workflow_assistance",
+    },
+    {
+      operation: "estimate.compose",
+      capability: "estimate.compose",
+      supportedRoles: ["professional"],
+      engineIds: ["estimate_advisory_boundary"],
+      providerName: "workflow_assistance",
+    },
+    {
+      operation: "invoice.assist",
+      capability: "invoice.assist",
+      supportedRoles: ["professional"],
+      engineIds: ["invoice_advisory_boundary"],
+      providerName: "workflow_assistance",
+    },
+  ]);
   assert.deepEqual(canonicalIntelligenceEngineRegistry.list(), [
+    "emergency_request_capability",
+    "emergency_request_validation",
+    "estimate_advisory_boundary",
+    "evaluation_advisory_boundary",
+    "invoice_advisory_boundary",
     "job_request_capability",
     "job_request_validation",
+    "quick_quote_photo_advisory_boundary",
+    "quote_composition_advisory",
+    "quote_composition_authority_boundary",
   ]);
   assert.equal(canonicalIntelligenceOperationRegistry.get("test.echo"), null);
   assert.ok(canonicalIntelligenceOperationRegistry.get("job_request.interpret"));
+  assert.ok(canonicalIntelligenceOperationRegistry.get("emergency_request.interpret"));
+  assert.ok(canonicalIntelligenceOperationRegistry.get("quote.compose"));
+  assert.ok(canonicalIntelligenceOperationRegistry.get("quick_quote.photo_assist"));
+  assert.ok(canonicalIntelligenceOperationRegistry.get("evaluation.assist"));
+  assert.ok(canonicalIntelligenceOperationRegistry.get("estimate.compose"));
+  assert.ok(canonicalIntelligenceOperationRegistry.get("invoice.assist"));
 });
 
 test("operation registration requires explicit server-owned provider packaging", () => {
@@ -118,6 +176,36 @@ test("operation registration requires explicit server-owned provider packaging",
     }]),
     /missing_provider_request_builder/
   );
+});
+
+test("operation registration keeps provider-request depth finite and server-owned", () => {
+  const definition = {
+    operation: "test.depth",
+    capability: "test.depth",
+    supportedRoles: ["homeowner"],
+    engineIds: [],
+    providerName: "fixture",
+    providerRequestMaxDepth: 9,
+    buildContext: () => ({}),
+    buildProviderRequest: () => ({}),
+    parseResult: (result) => result,
+  };
+  const registry = createIntelligenceOperationRegistry([definition]);
+
+  assert.equal(registry.get("test.depth").providerRequestMaxDepth, 9);
+  assert.equal(
+    Object.hasOwn(registry.list()[0], "providerRequestMaxDepth"),
+    false
+  );
+  for (const providerRequestMaxDepth of [0, 17, 8.5, "9"]) {
+    assert.throws(
+      () => createIntelligenceOperationRegistry([{
+        ...definition,
+        providerRequestMaxDepth,
+      }]),
+      /invalid_provider_request_max_depth/
+    );
+  }
 });
 
 test("unknown operations and unauthorized capabilities fail before durable or provider work", async () => {
@@ -301,6 +389,64 @@ test("provider failures and unsafe normalized results do not leak or become succ
   assert.equal(unsafe.providerRequests.length, 1);
 });
 
+test("provider timeout aborts the in-flight provider request and remains a governed failure", async () => {
+  let providerSignal = null;
+
+  const fixture = createFixture({
+    providerComplete(_request, { signal } = {}) {
+      providerSignal = signal;
+
+      return new Promise((resolve, reject) => {
+        signal.addEventListener(
+          "abort",
+          () => reject(signal.reason),
+          { once: true }
+        );
+      });
+    },
+  });
+
+  const result = await fixture.run({
+    providerTimeoutMs: 5,
+  });
+
+  assert.equal(
+    result.code,
+    "INTELLIGENCE_PROVIDER_TIMEOUT"
+  );
+  assert.equal(result.status, 504);
+  assert.equal(providerSignal.aborted, true);
+  assert.equal(fixture.providerRequests.length, 1);
+});
+
+test("parser rejection logs only a non-secret diagnostic fingerprint", async () => {
+  const events = [];
+  const fixture = createFixture({
+    parseResult() {
+      throw Object.assign(new Error("private provider result detail"), {
+        code: "malformed_operation_result",
+        diagnosticCode: "0123456789abcdef",
+      });
+    },
+  });
+
+  const result = await fixture.run({
+    logger: {
+      info() {},
+      warn(event, metadata) { events.push({ event, metadata }); },
+    },
+  });
+
+  assert.equal(result.code, "INTELLIGENCE_RESULT_REJECTED");
+  const rejected = events.find((event) => event.event === "intelligence.orchestration.result_rejected");
+  assert.deepEqual(rejected.metadata, {
+    operation: "test.echo",
+    operationId: result.operationId,
+    diagnosticCode: "0123456789abcdef",
+  });
+  assert.equal(JSON.stringify(events).includes("private provider result detail"), false);
+});
+
 test("canonical runtime has no direct product-domain imports", () => {
   const intelligenceDirectory = join(__dirname, "..", "server", "intelligence");
   const runtimeFiles = [
@@ -318,7 +464,67 @@ test("canonical runtime has no direct product-domain imports", () => {
 
   assert.doesNotMatch(
     source,
-    /require\([^)]*(requests|relationships|conversations|evaluations|quotes|invoices|payments|workflow|projects)/i
+    /require\([^)]*(?:\/requests\/|\/relationships\/|\/conversations\/|\/evaluations\/|\/quotes\/|\/invoices\/|\/payments\/|\/workflow\/|\/projects\/)/i
   );
   assert.doesNotMatch(source, /test\.echo|ask_meetro/);
+});
+
+test("orchestrator forwards estimate parser diagnostics to orchestration rejection logs", async () => {
+  const diagnostics = [];
+  const providerMetadata = {
+    providerRequestId: "req_route_gate_01",
+    configuredModel: "gpt-5.4-mini",
+  };
+  const result = await createFixture({
+    providerComplete() {
+      return { answer: "unused", __providerMetadata: providerMetadata };
+    },
+    parseResult(_, { providerMetadata: receivedMetadata }) {
+      const error = Object.assign(
+        new Error("Estimate schema invalid for diagnostics capture."),
+        {
+          code: "malformed_operation_result",
+          diagnosticCode: "0123456789abcdef",
+          parserDiagnostics: {
+            operation: "estimate.compose",
+            schemaVersion: 1,
+            parserStage: "payload_shape",
+            validationBranch: "missing_fields",
+            structuralFingerprint: "abc123",
+            missingFields: ["disposal"],
+            extraFields: ["unexpected"],
+            rejectionClassification: "missing_required_fields",
+            providerRequestId: receivedMetadata?.providerRequestId || null,
+            configuredModel: receivedMetadata?.configuredModel || null,
+            timestamp: new Date().toISOString(),
+          },
+        }
+      );
+      throw error;
+    },
+  }).run({
+    logger: {
+      warn(event, metadata) {
+        diagnostics.push({ event, metadata });
+      },
+      info() {},
+    },
+  });
+
+  assert.equal(result.code, "INTELLIGENCE_RESULT_REJECTED");
+  const rejected = diagnostics.find((entry) => entry.event === "intelligence.orchestration.result_rejected");
+  assert.equal(rejected?.metadata?.operation, "test.echo");
+  assert.deepEqual(rejected?.metadata?.parserDiagnostics, {
+    operation: "estimate.compose",
+    schemaVersion: 1,
+    parserStage: "payload_shape",
+    validationBranch: "missing_fields",
+    structuralFingerprint: "abc123",
+    missingFields: ["disposal"],
+    extraFields: ["unexpected"],
+    rejectionClassification: "missing_required_fields",
+    providerRequestId: providerMetadata.providerRequestId,
+    configuredModel: providerMetadata.configuredModel,
+    timestamp: typeof rejected?.metadata?.parserDiagnostics.timestamp === "string" ? rejected.metadata.parserDiagnostics.timestamp : undefined,
+  });
 });

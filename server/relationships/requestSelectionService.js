@@ -3,11 +3,20 @@
 const { createHash, randomUUID } = require("node:crypto");
 
 const {
+  createCanonicalLifecycleAlertWithClient,
+  resolveCanonicalLifecycleAlertsWithClient,
+} = require("../alerts/lifecycleAlertService");
+
+const {
+  parsePositiveOpaqueId,
   parsePositiveInteger,
 } = require("./requestRelationships");
 const {
   ensureConversationParticipantStatesWithClient,
 } = require("../conversations/conversationParticipantStateService");
+const {
+  bootstrapLifecycleJob,
+} = require("../workflow/jobFoundationService");
 
 const COMMAND_NAME = "request_selection.select";
 const IMPLEMENTATION_MILESTONE_ID =
@@ -81,6 +90,85 @@ function createSelectionFingerprint({ postId, responseId }) {
 
 function sameId(left, right) {
   return String(left ?? "") === String(right ?? "");
+}
+
+async function ensureDurableHomeownerProfessionalRelationship({
+  client,
+  homeownerUserId,
+  contractorProfileId,
+  professionalUserId,
+  requestSelectionId,
+} = {}) {
+  const result = await client.query(
+    `
+    /* request_selection:relationship_projection */
+    WITH inserted AS (
+      INSERT INTO meetro_customer_business_relationships
+      (
+        homeowner_user_id,
+        contractor_profile_id,
+        professional_user_id,
+        established_from_request_selection_id
+      )
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT ON CONSTRAINT
+        meetro_customer_business_relationships_homeowner_business_key
+      DO NOTHING
+      RETURNING
+        id,
+        homeowner_user_id,
+        contractor_profile_id,
+        professional_user_id,
+        established_from_request_selection_id,
+        created_at
+    )
+    SELECT
+      id,
+      homeowner_user_id,
+      contractor_profile_id,
+      professional_user_id,
+      established_from_request_selection_id,
+      created_at
+    FROM inserted
+
+    UNION ALL
+
+    SELECT
+      relationships.id,
+      relationships.homeowner_user_id,
+      relationships.contractor_profile_id,
+      relationships.professional_user_id,
+      relationships.established_from_request_selection_id,
+      relationships.created_at
+    FROM meetro_customer_business_relationships relationships
+    WHERE relationships.homeowner_user_id = $1
+      AND relationships.contractor_profile_id = $2
+      AND NOT EXISTS (SELECT 1 FROM inserted)
+
+    LIMIT 1
+    `,
+    [
+      homeownerUserId,
+      contractorProfileId,
+      professionalUserId,
+      requestSelectionId,
+    ]
+  );
+
+  const relationship = result.rows[0] || null;
+
+  if (
+    !relationship ||
+    !sameId(relationship.homeowner_user_id, homeownerUserId) ||
+    !sameId(relationship.contractor_profile_id, contractorProfileId) ||
+    !sameId(relationship.professional_user_id, professionalUserId)
+  ) {
+    throw new Error(
+      "Durable Meetro homeowner-professional relationship identity conflict."
+    );
+  }
+
+  return relationship;
 }
 
 function canonicalPairIsValid(response, relationship) {
@@ -747,10 +835,11 @@ async function selectProfessionalResponse({
   payload = {},
   idempotencyKey: rawIdempotencyKey,
   failureInjector,
+  lifecycleJobBootstrap = bootstrapLifecycleJob,
 }) {
   const actorUserId = normalizeActorId(authenticatedActor);
   const postId = parsePositiveInteger(rawPostId);
-  const responseId = parsePositiveInteger(rawResponseId);
+  const responseId = parsePositiveOpaqueId(rawResponseId);
   const payloadValidation = validateSelectionPayload(payload);
   const idempotencyValidation =
     validateSelectionIdempotencyKey(rawIdempotencyKey);
@@ -803,7 +892,8 @@ async function selectProfessionalResponse({
     const requestResult = await client.query(
       `
       /* request_selection:request_lock */
-      SELECT id, user_id, title, status, location, unit_number
+      SELECT id, user_id, title, status, location, unit_number,
+             lifecycle_contract_version
       FROM posts
       WHERE id = $1
         AND user_id = $2
@@ -1153,6 +1243,24 @@ async function selectProfessionalResponse({
     });
     await invokeFailure(failureInjector, "participant_creation");
 
+    const lifecycleJob = await lifecycleJobBootstrap({
+      client,
+      request,
+      selection: selectionInsert.rows[0],
+      relationship,
+      professionalUserId: response.professional_user_id,
+    });
+    await invokeFailure(failureInjector, "lifecycle_job_bootstrap");
+
+    await ensureDurableHomeownerProfessionalRelationship({
+      client,
+      homeownerUserId: actorUserId,
+      contractorProfileId: response.contractor_id,
+      professionalUserId: response.professional_user_id,
+      requestSelectionId: identities.request_selection_id,
+    });
+    await invokeFailure(failureInjector, "relationship_projection");
+
     const correlationId = randomUUID();
     await client.query(
       `
@@ -1242,6 +1350,34 @@ async function selectProfessionalResponse({
     }
     await invokeFailure(failureInjector, "idempotency_completion");
 
+    await resolveCanonicalLifecycleAlertsWithClient({
+      client,
+      sourceDomain: "workflow",
+      sourceEntityType: "request",
+      sourceEntityId: String(postId),
+      sourceEventTypes: ["request.professional_response_submitted"],
+      recipientUserId: actorUserId,
+    });
+    await createCanonicalLifecycleAlertWithClient({
+      client,
+      recipientUserId: Number(response.professional_user_id),
+      sourceDomain: "workflow",
+      sourceEventType: "request.professional_selected",
+      sourceEntityType: "request_selection",
+      sourceEntityId: String(identities.request_selection_id),
+      sourceEventId: String(identities.request_selection_id),
+      category: "request",
+      priority: "high",
+      titleKey: "alerts.request.professionalSelected.title",
+      messageKey: "alerts.request.professionalSelected.message",
+      safePayload: { shortPreview: "You were selected" },
+      destination: {
+        type: "conversation",
+        payload: { conversationId: Number(identities.conversation_id) },
+      },
+      availableAt: selectionInsert.rows[0].selected_at || null,
+    });
+
     await client.query("SET CONSTRAINTS ALL IMMEDIATE");
     await invokeFailure(failureInjector, "deferred_validation");
     await invokeFailure(failureInjector, "before_commit");
@@ -1294,6 +1430,7 @@ async function selectProfessionalResponse({
       status: 201,
       code: "REQUEST_SELECTION_CREATED",
       ...serializeSelectionResult(resultRow),
+      lifecycleJob: lifecycleJob.created ? lifecycleJob.job : null,
     };
   } catch (error) {
     if (transactionStarted) {

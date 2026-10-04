@@ -1,6 +1,10 @@
 "use strict";
 
 const {
+  projectEmergencyResponseAlertWithClient,
+} = require("../alerts/opportunityAlertService");
+
+const {
   parsePositiveInteger,
   validateEmergencyResponsePayload,
 } = require("./requestRelationships");
@@ -11,6 +15,7 @@ async function createProfessionalEmergencyResponse({
   emergencyRequestId: rawEmergencyRequestId,
   payload,
   professionalCanSeeEmergencyOpportunity,
+  projectEmergencyResponseAlert = projectEmergencyResponseAlertWithClient,
 }) {
   const emergencyRequestId = parsePositiveInteger(rawEmergencyRequestId);
   const responseValidation = validateEmergencyResponsePayload(payload);
@@ -149,10 +154,20 @@ async function createProfessionalEmergencyResponse({
           homeowner_id,
           contractor_id,
           professional_user_id,
+          emergency_authority_source,
           status,
           introduction_text
         )
-        VALUES (NULL, $1, $2, $3, $4, 'pending', '')
+        VALUES (
+          NULL,
+          $1,
+          $2,
+          $3,
+          $4,
+          'professional_response',
+          'pending',
+          ''
+        )
         ON CONFLICT (emergency_request_id, contractor_id)
         WHERE emergency_request_id IS NOT NULL
         DO NOTHING
@@ -194,6 +209,14 @@ async function createProfessionalEmergencyResponse({
         code: "EMERGENCY_RESPONSE_NOT_PENDING",
         message: "This Emergency response is no longer pending.",
       };
+    }
+
+    if (relationship.created) {
+      await projectEmergencyResponseAlert({
+        client,
+        emergencyRequest,
+        relationship,
+      });
     }
 
     await client.query("COMMIT");
@@ -294,6 +317,8 @@ async function listHomeownerEmergencyResponses({
     WHERE request_relationships.emergency_request_id = $1
       AND request_relationships.post_id IS NULL
       AND request_relationships.homeowner_id = $2
+      AND request_relationships.emergency_authority_source =
+        'professional_response'
     ORDER BY
       request_relationships.responded_at ASC NULLS LAST,
       request_relationships.created_at ASC,
@@ -336,6 +361,9 @@ async function listHomeownerRequestRelationships({
       request_relationships.id,
       request_relationships.post_id,
       request_relationships.contractor_id,
+      request_relationships.professional_response_id,
+      request_relationships.ordinary_authority_source,
+      request_relationships.current_version AS relationship_current_version,
       request_relationships.status,
       request_relationships.introduction_text,
       request_relationships.created_at,
@@ -347,7 +375,12 @@ async function listHomeownerRequestRelationships({
       contractor_profiles.business_name,
       contractor_profiles.category AS professional_category,
       contractor_profiles.image_url AS business_image_url,
-      posts.title AS request_title
+      posts.title AS request_title,
+      professional_responses.id AS response_id,
+      professional_responses.status AS response_status,
+      professional_responses.current_version AS response_current_version,
+      professional_responses.introduction_text AS response_introduction_text,
+      professional_responses.submitted_at AS response_submitted_at
     FROM request_relationships
     JOIN contractor_profiles
       ON request_relationships.contractor_id = contractor_profiles.id

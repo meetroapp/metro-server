@@ -55,13 +55,11 @@ test("004C registers only the five approved recipient alert routes", () => {
   }
 });
 
-test("004D permits only the canonical communication producer and resolver", () => {
+test("B1 permits only the bounded canonical Alert producer and resolver set", () => {
   const producerCandidates = [
     "server/emergency/emergencyDispatchService.js",
     "server/emergency/emergencyOpportunityService.js",
-    "server/emergency/emergencyRequestService.js",
     "server/emergency/emergencySelectionService.js",
-    "server/relationships/requestRelationshipService.js",
     "server/authorization/evaluationService.js",
     "server/authorization/commercialAuthorityService.js",
   ];
@@ -80,13 +78,37 @@ test("004D permits only the canonical communication producer and resolver", () =
   const participantSource = read(
     "server/conversations/conversationParticipantStateService.js"
   );
+  const quoteDeliverySource = read(
+    "server/authorization/quoteDeliveryService.js"
+  );
+  const invoiceDeliverySource = read(
+    "server/finance/invoicePaymentService.js"
+  );
   assert.match(messageSource, /createOrRefreshCommunicationMessageAlert/);
   assert.match(messageSource, /getCommunicationAttentionWindowWithClient/);
   assert.match(participantSource, /resolveCommunicationMessageAlerts/);
+  assert.match(quoteDeliverySource, /createOrRefreshCommunicationMessageAlert/);
+  assert.match(quoteDeliverySource, /getCommunicationAttentionWindowWithClient/);
+  assert.match(invoiceDeliverySource, /createOrRefreshCommunicationMessageAlert/);
+  assert.match(invoiceDeliverySource, /getCommunicationAttentionWindowWithClient/);
 
   const approved = new Set([
     "server/conversations/conversationMessageService.js",
     "server/conversations/conversationParticipantStateService.js",
+    "server/authorization/quoteDeliveryService.js",
+    "server/documents/businessDocumentDeliveryService.js",
+    "server/finance/invoicePaymentService.js",
+    "server/finance/preWorkDepositService.js",
+    "server/relationships/professionalResponseService.js",
+    "server/relationships/requestSelectionService.js",
+    "server/relationships/requestRelationshipService.js",
+    "server/requests/jobRequestCreateService.js",
+    "server/emergency/emergencyRequestService.js",
+    "server/team/jobAssignmentService.js",
+    "server/team/fieldOperationsService.js",
+    "server/team/fieldCustomerCommunicationService.js",
+    "server/workflow/visitService.js",
+    "server/workflow/jobCompletionService.js",
   ]);
   for (const relativePath of listJsFilesRecursively("server")
     .filter((item) => !item.startsWith("server/alerts/"))) {

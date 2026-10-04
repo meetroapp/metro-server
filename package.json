@@ -14,13 +14,20 @@
   "author": "",
   "license": "ISC",
   "type": "commonjs",
+  "engines": {
+    "node": ">=20.9.0"
+  },
   "dependencies": {
+    "@apple/app-store-server-library": "^3.1.0",
     "bcrypt": "^6.0.0",
     "cloudinary": "^2.10.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.3",
-    "pg": "^8.20.0"
+    "jspdf": "^4.2.1",
+    "pg": "^8.20.0",
+    "sharp": "^0.35.3",
+    "stripe": "^22.6.0"
   }
 }

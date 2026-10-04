@@ -19,6 +19,9 @@ const {
 const {
   orchestrateIntelligenceOperation,
 } = require("./intelligenceOrchestrator");
+const {
+  resolveIntelligenceAuthority,
+} = require("./intelligenceAuthorityResolver");
 
 function gatewayResponse(ok, status, code, message) {
   return { ok, status, code, message };
@@ -26,9 +29,15 @@ function gatewayResponse(ok, status, code, message) {
 
 function normalizeActor(authenticatedActor) {
   const id = authenticatedActor?.id;
-  const role = typeof authenticatedActor?.role === "string"
+  const accountType = typeof authenticatedActor?.accountType === "string"
+    ? authenticatedActor.accountType.trim().toLowerCase()
+    : "";
+  const rawRole = typeof authenticatedActor?.role === "string"
     ? authenticatedActor.role.trim().toLowerCase()
     : "";
+  const role = ["homeowner", "professional"].includes(accountType)
+    ? accountType
+    : rawRole;
   if (!Number.isInteger(id) || id <= 0 || !/^[a-z][a-z0-9_]*$/.test(role)) {
     return null;
   }
@@ -52,10 +61,13 @@ async function executeIntelligenceGateway({
   repository,
   usageFinalizer,
   providerTimeoutMs,
+  retailerReferenceAdapter,
   logger = null,
   onDiagnostics,
+  retrievalServices,
+  retrievalClock,
 } = {}) {
-  const actor = normalizeActor(authenticatedActor);
+  let actor = normalizeActor(authenticatedActor);
   if (!actor) {
     return gatewayResponse(
       false,
@@ -85,8 +97,41 @@ async function executeIntelligenceGateway({
       "The Intelligence operation is not permitted."
     );
   }
-  if (
-    definition.capability !== request.capability ||
+  if (definition.capability !== request.capability) {
+    return gatewayResponse(
+      false,
+      403,
+      "INTELLIGENCE_CAPABILITY_FORBIDDEN",
+      "The Intelligence capability is not permitted."
+    );
+  }
+
+  if (definition.roleAuthorization === "request_service") {
+    const requestServiceAuthority =
+      await resolveIntelligenceAuthority({
+        authority: definition.roleAuthorization,
+        pool,
+        actorUserId: actor.id,
+      });
+    if (
+      !requestServiceAuthority.authorized ||
+      !definition.supportedRoles.includes(
+        requestServiceAuthority.accountType
+      )
+    ) {
+      return gatewayResponse(
+        false,
+        403,
+        "INTELLIGENCE_CAPABILITY_FORBIDDEN",
+        "The Intelligence capability is not permitted."
+      );
+    }
+    actor = Object.freeze({
+      id: actor.id,
+      role: requestServiceAuthority.accountType,
+    });
+  } else if (
+    definition.roleAuthorization !== "context_builder" &&
     !definition.supportedRoles.includes(actor.role)
   ) {
     return gatewayResponse(
@@ -109,8 +154,34 @@ async function executeIntelligenceGateway({
 
   let semanticInput;
   try {
-    semanticInput = prepareOperationSemanticInput({ definition, request });
+    semanticInput = await prepareOperationSemanticInput({
+      definition,
+      request,
+      runtimeContext: { pool, authenticatedActor: actor, retailerReferenceAdapter, retrievalServices, retrievalClock },
+    });
   } catch (error) {
+    const governedFailure = {
+      intelligence_retrieval_unavailable: [503, "INTELLIGENCE_RETRIEVAL_UNAVAILABLE", "Authorized retrieval is temporarily unavailable. Please retry."],
+      intelligence_continuation_invalid: [400, "INTELLIGENCE_CONTINUATION_INVALID", "This conversation context is unavailable. Reopen the record or search again."],
+      intelligence_job_unavailable: [404, "INTELLIGENCE_JOB_UNAVAILABLE", "The Job is unavailable."],
+      intelligence_lifecycle_v2_required: [409, "INTELLIGENCE_LIFECYCLE_V2_REQUIRED", "A lifecycle-v2 Job is required."],
+      intelligence_quote_authority_required: [403, "INTELLIGENCE_QUOTE_AUTHORITY_REQUIRED", "Professional Quote authority is required."],
+      intelligence_estimate_solution_ready_invalid: [400, "INTELLIGENCE_ESTIMATE_SOLUTION_READY_INVALID", "A valid reviewed Internal Estimate is required."],
+      intelligence_estimate_solution_ready_unavailable: [404, "INTELLIGENCE_ESTIMATE_SOLUTION_READY_UNAVAILABLE", "The reviewed Internal Estimate is unavailable."],
+      intelligence_estimate_solution_ready_job_mismatch: [409, "INTELLIGENCE_ESTIMATE_SOLUTION_READY_JOB_MISMATCH", "The reviewed Internal Estimate does not belong to this Job."],
+      intelligence_quote_draft_unavailable: [404, "INTELLIGENCE_QUOTE_DRAFT_UNAVAILABLE", "The requested Draft Quote is unavailable."],
+      intelligence_evaluation_authority_required: [403, "INTELLIGENCE_EVALUATION_AUTHORITY_REQUIRED", "Professional Evaluation authority is required."],
+      intelligence_quick_quote_media_authority_required: [403, "INTELLIGENCE_QUICK_QUOTE_MEDIA_AUTHORITY_REQUIRED", "Professional Quick Quote media authority is required."],
+      intelligence_quick_quote_analysis_authority_required: [403, "INTELLIGENCE_QUICK_QUOTE_ANALYSIS_AUTHORITY_REQUIRED", "Professional Job Analysis authority is required."],
+      intelligence_quick_quote_analysis_session_unavailable: [404, "INTELLIGENCE_QUICK_QUOTE_ANALYSIS_SESSION_UNAVAILABLE", "The private Job Analysis session is unavailable."],
+      intelligence_quick_quote_analysis_evidence_stale: [409, "INTELLIGENCE_QUICK_QUOTE_ANALYSIS_EVIDENCE_STALE", "Job Analysis evidence changed before continuation."],
+      intelligence_quick_quote_analysis_prior_proposal_unavailable: [404, "INTELLIGENCE_QUICK_QUOTE_ANALYSIS_PRIOR_PROPOSAL_UNAVAILABLE", "The prior Job Analysis proposal is unavailable."],
+      intelligence_evaluation_unavailable: [404, "INTELLIGENCE_EVALUATION_UNAVAILABLE", "The Evaluation is unavailable."],
+      intelligence_invoice_unavailable: [404, "INTELLIGENCE_INVOICE_UNAVAILABLE", "The Invoice context is unavailable."],
+    }[error?.code];
+    if (governedFailure) {
+      return gatewayResponse(false, governedFailure[0], governedFailure[1], governedFailure[2]);
+    }
     if (
       error?.code !== "intelligence_context_invalid" &&
       error?.code !== "intelligence_context_prohibited"
@@ -151,7 +222,7 @@ async function executeIntelligenceGateway({
         logger,
         onDiagnostics,
       }),
-    finalizeUsage: usageFinalizer
+    finalizeUsage: usageFinalizer && !(semanticInput.context.retrieval && semanticInput.context.retrieval.deterministicText !== null)
       ? (identity) => usageFinalizer({ ...identity, capability: definition.capability })
       : undefined,
   });

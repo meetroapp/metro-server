@@ -63,6 +63,15 @@ async function orchestrateIntelligenceOperation({
   onDiagnostics,
 }) {
   const startedAt = Date.now();
+  const deterministic = definition.resolveWithoutProvider?.({ semanticInput, operationId });
+  if (deterministic) {
+    onDiagnostics?.({ providerExecutionCount: 0, selectedEngines: [] });
+    logMetadata(logger, "info", "intelligence.orchestration.completed", {
+      operation: definition.operation, operationId, correlationId, selectedEngines: [],
+      providerInvoked: false, answerSource: "DETERMINISTIC_RETRIEVAL", elapsedMs: Date.now() - startedAt,
+    });
+    return cloneBoundedJson(deterministic);
+  }
   const engineContext = await collectOperationEngineContext({
     definition,
     semanticInput,
@@ -83,7 +92,10 @@ async function orchestrateIntelligenceOperation({
   }
   const providerRequest = cloneBoundedJson(providerRequestCandidate, {
     maxBytes: 65536,
+    maxDepth: definition.providerRequestMaxDepth,
     maxStringLength: 12000,
+    maxKeys: 1800,
+    maxArrayLength: 250,
   });
 
   const providerResult = await invokeIntelligenceProvider({
@@ -96,12 +108,33 @@ async function orchestrateIntelligenceOperation({
       selectedEngines: [...definition.engineIds],
     }),
   });
-  const parsedResult = await definition.parseResult(providerResult, {
-    semanticInput,
-    engineContext,
-    operationId,
-    correlationId,
-  });
+  const providerMetadata = providerResult && typeof providerResult === "object"
+    ? providerResult.__providerMetadata || providerResult.providerMetadata || null
+    : null;
+  let parsedResult;
+  try {
+    parsedResult = await definition.parseResult(providerResult, {
+      semanticInput,
+      engineContext,
+      operationId,
+      correlationId,
+      providerMetadata,
+    });
+  } catch (error) {
+    const diagnosticCode = /^[a-f0-9]{16}$/.test(String(error?.diagnosticCode || ""))
+      ? error.diagnosticCode
+      : null;
+    const warningMetadata = {
+      operation: definition.operation,
+      operationId,
+      diagnosticCode,
+    };
+    if (error?.parserDiagnostics) {
+      warningMetadata.parserDiagnostics = error.parserDiagnostics;
+    }
+    logMetadata(logger, "warn", "intelligence.orchestration.result_rejected", warningMetadata);
+    throw error;
+  }
   if (!isPlainObject(parsedResult)) {
     throw Object.assign(new Error("The provider result was not a normalized object."), {
       code: "malformed_operation_result",
@@ -110,6 +143,8 @@ async function orchestrateIntelligenceOperation({
   const result = cloneBoundedJson(parsedResult, {
     maxBytes: 65536,
     maxStringLength: 12000,
+    maxKeys: 1800,
+    maxArrayLength: 250,
   });
 
   logMetadata(logger, "info", "intelligence.orchestration.completed", {

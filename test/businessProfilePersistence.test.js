@@ -145,6 +145,9 @@ test("business profile queries enforce authenticated ownership and preserve stab
   const update = buildUpdateBusinessProfileQuery(7, 41, profile);
 
   assert.match(create.text, /profile_details/);
+  assert.match(create.text, /INSERT INTO meetro_business_trials/);
+  assert.match(create.text, /'BUSINESS_ACTIVATION'/);
+  assert.match(create.text, /CURRENT_TIMESTAMP \+ INTERVAL '14 days'/);
   assert.equal(create.values[0], 41);
   assert.deepEqual(JSON.parse(create.values[7]).service_specialties, completePayload.service_specialties);
   assert.doesNotMatch(update.text, /image_url\s*=/);

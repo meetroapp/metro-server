@@ -43,6 +43,30 @@ test("selection atomically creates one canonical selection and exact conversatio
   assert.equal(result.relationship.current_version, 2);
 
   assert.equal(fake.state.selections.length, 1);
+  assert.equal(fake.state.durableRelationships.length, 1);
+
+  assert.deepEqual(
+    {
+      homeownerUserId:
+        Number(fake.state.durableRelationships[0].homeowner_user_id),
+      contractorProfileId:
+        Number(fake.state.durableRelationships[0].contractor_profile_id),
+      professionalUserId:
+        Number(fake.state.durableRelationships[0].professional_user_id),
+      selectionId:
+        String(
+          fake.state.durableRelationships[0]
+            .established_from_request_selection_id
+        ),
+    },
+    {
+      homeownerUserId: 7,
+      contractorProfileId: 80,
+      professionalUserId: 9,
+      selectionId: String(fake.state.selections[0].id),
+    }
+  );
+
   assert.equal(fake.state.conversations.length, 1);
   assert.equal(fake.state.participants.length, 2);
   assert.deepEqual(
@@ -52,6 +76,13 @@ test("selection atomically creates one canonical selection and exact conversatio
   assert.equal(fake.state.selectionEvidence.length, 1);
   assert.equal(fake.state.idempotency.length, 1);
   assert.ok(fake.state.idempotency[0].completed_at);
+  assert.equal(fake.state.alerts.length, 1);
+  assert.equal(fake.state.alerts[0].recipient_user_id, 9);
+  assert.equal(fake.state.alerts[0].source_event_type, "request.professional_selected");
+  assert.deepEqual(fake.state.alerts[0].destination_payload, {
+    conversationId: 801,
+  });
+  assert.match(fake.state.alerts[0].canonical_event_key, /^[0-9a-f]{64}$/);
   assert.equal(
     fake.state.selectionEvidence[0].implementation_milestone_id,
     IMPLEMENTATION_MILESTONE_ID
@@ -92,11 +123,85 @@ test("selection atomically creates one canonical selection and exact conversatio
 
   assert.deepEqual(fake.state.messages, []);
   assert.deepEqual(fake.state.workflowEvents, []);
+
   const sql = fake.calls.map((call) => call.sql).join("\n");
+
+  assert.match(
+    sql,
+    /INSERT INTO meetro_customer_business_relationships/i
+  );
+  assert.doesNotMatch(sql, /business_contact_id/i);
+  assert.doesNotMatch(sql, /business_customer_relationship_id/i);
   assert.doesNotMatch(
     sql,
     /INSERT INTO (?:messages|workflow_events|quotes|invoices|payments|projects)/i
   );
+});
+
+test("selection preserves a PostgreSQL BIGINT professional response identity", async () => {
+  const responseId = "9007199254740993";
+  const fake = createRequestSelectionFake();
+  fake.state.responses[0].id = responseId;
+  fake.state.relationships[0].professional_response_id = responseId;
+
+  const result = await select(fake, { responseId });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.response.id, responseId);
+  assert.equal(result.selection.response_id, responseId);
+  assert.equal(fake.state.selections[0].professional_response_id, responseId);
+});
+
+test("lifecycle-v2 selection bootstraps one Job from the canonical selection", async () => {
+  const fake = createRequestSelectionFake({
+    request: {
+      id: 41,
+      user_id: 7,
+      title: "Dishwasher issue",
+      status: "open",
+      lifecycle_contract_version: 2,
+    },
+  });
+  const bootstrapCalls = [];
+  const result = await select(fake, {
+    lifecycleJobBootstrap: async (input) => {
+      bootstrapCalls.push(input);
+      return {
+        created: true,
+        job: { id: "11111111-1111-4111-8111-111111111111" },
+      };
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(bootstrapCalls.length, 1);
+  assert.equal(bootstrapCalls[0].request.lifecycle_contract_version, 2);
+  assert.equal(String(bootstrapCalls[0].selection.id), String(result.selection.id));
+  assert.equal(bootstrapCalls[0].relationship.id, result.relationship.id);
+  assert.equal(result.lifecycleJob.id, "11111111-1111-4111-8111-111111111111");
+});
+
+test("lifecycle Job bootstrap failure rolls back selection, relationship, and conversation", async () => {
+  const fake = createRequestSelectionFake({
+    request: {
+      id: 41,
+      user_id: 7,
+      title: "Dishwasher issue",
+      status: "open",
+      lifecycle_contract_version: 2,
+    },
+  });
+  const before = JSON.stringify(fake.state);
+
+  await assert.rejects(
+    select(fake, {
+      lifecycleJobBootstrap: async () => {
+        throw new Error("synthetic lifecycle bootstrap failure");
+      },
+    }),
+    /synthetic lifecycle bootstrap failure/
+  );
+  assert.equal(JSON.stringify(fake.state), before);
 });
 
 test("selection closes every competing submitted response without a conversation", async () => {
@@ -155,6 +260,7 @@ test("same command key replays the exact result without duplicate authority", as
   assert.equal(fake.state.conversations.length, 1);
   assert.equal(fake.state.selectionEvidence.length, 1);
   assert.equal(fake.state.idempotency.length, 1);
+  assert.equal(fake.state.durableRelationships.length, 1);
 });
 
 test("different key for the selected response returns existing authority without writes", async () => {
@@ -170,6 +276,59 @@ test("different key for the selected response returns existing authority without
   assert.equal(existing.selection.id, first.selection.id);
   assert.equal(fake.state.idempotency.length, 1);
   assert.equal(fake.state.selectionEvidence.length, 1);
+  assert.equal(fake.state.durableRelationships.length, 1);
+});
+
+test("existing exact durable relationship is reused without replacing original provenance", async () => {
+  const fake = createRequestSelectionFake({
+    durableRelationships: [
+      {
+        id: "durable-existing",
+        homeowner_user_id: 7,
+        contractor_profile_id: 80,
+        professional_user_id: 9,
+        established_from_request_selection_id: "611",
+        created_at: "2026-07-01T12:00:00.000Z",
+      },
+    ],
+  });
+
+  const result = await select(fake);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.code, "REQUEST_SELECTION_CREATED");
+  assert.equal(fake.state.durableRelationships.length, 1);
+  assert.equal(
+    String(
+      fake.state.durableRelationships[0]
+        .established_from_request_selection_id
+    ),
+    "611"
+  );
+});
+
+test("conflicting durable relationship identity fails closed and rolls back selection", async () => {
+  const fake = createRequestSelectionFake({
+    durableRelationships: [
+      {
+        id: "durable-conflict",
+        homeowner_user_id: 7,
+        contractor_profile_id: 80,
+        professional_user_id: 99,
+        established_from_request_selection_id: "611",
+        created_at: "2026-07-01T12:00:00.000Z",
+      },
+    ],
+  });
+
+  const before = JSON.stringify(fake.state);
+
+  await assert.rejects(
+    select(fake),
+    /Durable Meetro homeowner-professional relationship identity conflict/
+  );
+
+  assert.equal(JSON.stringify(fake.state), before);
 });
 
 test("different response after selection conflicts without changing sole authority", async () => {
@@ -335,6 +494,7 @@ test("every injected transactional failure rolls back all selection authority", 
     "competing_response_disposition",
     "conversation_creation",
     "participant_creation",
+    "relationship_projection",
     "evidence_creation",
     "idempotency_completion",
     "deferred_validation",

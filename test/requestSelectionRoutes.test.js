@@ -124,6 +124,23 @@ test("selection route returns only the canonical exact authority result", async 
   assert.doesNotMatch(serialized, /location|unit_number|access|email|phone/i);
 });
 
+test("selection route preserves an opaque PostgreSQL BIGINT response parameter", async () => {
+  const responseId = "9007199254740993";
+  const fake = createRequestSelectionFake();
+  fake.state.responses[0].id = responseId;
+  fake.state.relationships[0].professional_response_id = responseId;
+
+  const result = await invoke({ pool: fake.pool, responseId });
+
+  assert.equal(result.statusCode, 201);
+  assert.equal(result.body.response.id, responseId);
+  assert.equal(result.body.selection.response_id, responseId);
+  assert.equal(
+    fake.state.selections[0].professional_response_id,
+    responseId
+  );
+});
+
 test("selection route rejects browser-authored authority fields", async () => {
   const fake = createRequestSelectionFake();
   const result = await invoke({

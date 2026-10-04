@@ -9,6 +9,7 @@ const {
   ALERT_SOURCE_DOMAINS,
   alertFailure,
   assertAllowed,
+  deriveCanonicalEventKey,
   isPlainObject,
   normalizeBoundedToken,
   normalizeLocalizationKey,
@@ -25,6 +26,7 @@ const {
 const { normalizeSafePayload } = require("./alertPayload");
 const {
   archiveAlertWithClient,
+  countCommunicationAttentionForRecipientWithClient,
   countAlertsForRecipientWithClient,
   dismissAlertWithClient,
   expireAlertWithClient,
@@ -36,6 +38,10 @@ const {
   markAlertReadWithClient,
   resolveAlertsBySourceWithClient,
 } = require("./alertRepository");
+const {
+  countWorkCenterAttentionForRecipientWithClient,
+  projectWorkCenterAttention,
+} = require("./workCenterAttention");
 const {
   logSafeServerError,
 } = require("../errors/publicErrors");
@@ -366,6 +372,14 @@ function validateAlertInput(input = {}) {
         ALERT_LIMITS.sourceEventId
       );
 
+  if (Object.hasOwn(input, "canonicalEventKey")) {
+    return alertFailure(
+      ALERT_ERROR_CODES.INVALID_SOURCE,
+      "Alert event identity is server-derived."
+    );
+  }
+  const permanentEvent = input.permanentEvent === true;
+
   if (
     !sourceDomain ||
     !sourceEventType ||
@@ -373,7 +387,8 @@ function validateAlertInput(input = {}) {
     !sourceEntityId ||
     (sourceEventIdSupplied &&
       input.sourceEventId !== null &&
-      sourceEventId === null)
+      sourceEventId === null) ||
+    (permanentEvent && !sourceEventId)
   ) {
     return alertFailure(
       ALERT_ERROR_CODES.INVALID_SOURCE,
@@ -454,6 +469,15 @@ function validateAlertInput(input = {}) {
       sourceEntityType,
       sourceEntityId,
       sourceEventId,
+      canonicalEventKey: permanentEvent
+        ? deriveCanonicalEventKey({
+            sourceDomain,
+            sourceEventType,
+            sourceEntityType,
+            sourceEntityId,
+            sourceEventId,
+          })
+        : null,
       category,
       priority,
       titleKey,
@@ -639,11 +663,25 @@ async function getAlertCountsForRecipient({
   const database = client || pool;
   try {
     requireDatabasePool(database);
-    const rows = await countAlertsForRecipientWithClient({
-      client: database,
-      recipientUserId: parsedRecipientId,
-    });
-    if (!Array.isArray(rows)) {
+    const [rows, communicationRows, workCenterRows] = await Promise.all([
+      countAlertsForRecipientWithClient({
+        client: database,
+        recipientUserId: parsedRecipientId,
+      }),
+      countCommunicationAttentionForRecipientWithClient({
+        client: database,
+        recipientUserId: parsedRecipientId,
+      }),
+      countWorkCenterAttentionForRecipientWithClient({
+        client: database,
+        recipientUserId: parsedRecipientId,
+      }),
+    ]);
+    if (
+      !Array.isArray(rows) ||
+      !Array.isArray(communicationRows) ||
+      !Array.isArray(workCenterRows)
+    ) {
       throw new TypeError("Alert count rows are invalid.");
     }
 
@@ -662,11 +700,61 @@ async function getAlertCountsForRecipient({
       unread += categoryUnread;
     }
 
+    const communication = {
+      unread: 0,
+      customerUnread: 0,
+      teamUnread: 0,
+      byJob: [],
+      byConversation: [],
+    };
+    const jobScopes = new Map();
+    const conversationScopes = new Map();
+    for (const row of communicationRows) {
+      const count = normalizeAlertCount(row?.unread_count);
+      const audience = row?.audience;
+      const businessId = parsePositiveSafeInteger(row?.business_id);
+      const jobId = typeof row?.job_id === "string" ? row.job_id : null;
+      const conversationId = parsePositiveSafeInteger(row?.conversation_id);
+      if (!businessId || !["customer", "team"].includes(audience)) continue;
+      communication.unread += count;
+      if (audience === "team") communication.teamUnread += count;
+      else communication.customerUnread += count;
+      if (jobId) {
+        const key = `${businessId}:${jobId}`;
+        const scope = jobScopes.get(key) || {
+          businessId,
+          jobId,
+          customerUnread: 0,
+          teamUnread: 0,
+        };
+        scope[`${audience}Unread`] += count;
+        jobScopes.set(key, scope);
+      }
+      if (audience === "customer" && conversationId) {
+        const scope = conversationScopes.get(conversationId) || {
+          conversationId,
+          customerUnread: 0,
+        };
+        scope.customerUnread += count;
+        conversationScopes.set(conversationId, scope);
+      }
+    }
+    communication.byJob = [...jobScopes.values()];
+    communication.byConversation = [...conversationScopes.values()];
+
+    const workCenter = projectWorkCenterAttention(workCenterRows);
+
     return {
       ok: true,
       status: 200,
       code: "ALERT_COUNTS_RETRIEVED",
-      counts: { active, unread, byCategory },
+      counts: {
+        active,
+        unread,
+        byCategory,
+        communication,
+        workCenter,
+      },
     };
   } catch (error) {
     logSafeServerError(logger, {

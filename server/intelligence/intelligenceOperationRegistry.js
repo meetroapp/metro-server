@@ -7,6 +7,20 @@ const {
 const {
   jobRequestInterpretOperationDefinition,
 } = require("./operations/jobRequestInterpret");
+const {
+  emergencyRequestInterpretOperationDefinition,
+} = require("./operations/emergencyRequestInterpret");
+const {
+  quoteComposeOperationDefinition,
+} = require("./operations/quoteCompose");
+const {
+  quickQuotePhotoAssistOperationDefinition,
+} = require("./operations/quickQuotePhotoAssist");
+const {
+  estimateComposeOperationDefinition,
+  evaluationAssistOperationDefinition,
+  invoiceAssistOperationDefinition,
+} = require("./operations/workflowAssist");
 
 function validateOperationDefinition(definition) {
   const operation = normalizeOperation(definition?.operation);
@@ -18,6 +32,8 @@ function validateOperationDefinition(definition) {
     ? [...new Set(definition.engineIds.map((id) => String(id).trim().toLowerCase()))]
     : [];
   const providerName = String(definition?.providerName || "default").trim().toLowerCase();
+  const roleAuthorization = definition?.roleAuthorization || "registry";
+  const providerRequestMaxDepth = definition?.providerRequestMaxDepth ?? 8;
   const errors = [];
 
   if (!operation) errors.push("invalid_operation");
@@ -29,6 +45,16 @@ function validateOperationDefinition(definition) {
     errors.push("invalid_engine_ids");
   }
   if (!/^[a-z][a-z0-9_-]*$/.test(providerName)) errors.push("invalid_provider_name");
+  if (!["registry", "context_builder", "request_service"].includes(roleAuthorization)) {
+    errors.push("invalid_role_authorization");
+  }
+  if (
+    !Number.isInteger(providerRequestMaxDepth) ||
+    providerRequestMaxDepth < 1 ||
+    providerRequestMaxDepth > 16
+  ) {
+    errors.push("invalid_provider_request_max_depth");
+  }
   if (typeof definition?.buildContext !== "function") errors.push("missing_context_builder");
   if (typeof definition?.buildProviderRequest !== "function") {
     errors.push("missing_provider_request_builder");
@@ -46,9 +72,12 @@ function validateOperationDefinition(definition) {
           supportedRoles: Object.freeze(supportedRoles),
           engineIds: Object.freeze(engineIds),
           providerName,
+          roleAuthorization,
+          providerRequestMaxDepth,
           buildContext: definition.buildContext,
           buildProviderRequest: definition.buildProviderRequest,
           parseResult: definition.parseResult,
+          ...(typeof definition.resolveWithoutProvider === "function" ? { resolveWithoutProvider: definition.resolveWithoutProvider } : {}),
         }),
   };
 }
@@ -73,16 +102,31 @@ function createIntelligenceOperationRegistry(definitions = []) {
       return operations.get(normalizeOperation(operation)) || null;
     },
     list() {
-      return [...operations.values()].map(({ buildContext, buildProviderRequest, parseResult, ...metadata }) => ({
-        ...metadata,
-      }));
+      return [...operations.values()].map(({
+        buildContext,
+        buildProviderRequest,
+        parseResult,
+        resolveWithoutProvider,
+        roleAuthorization,
+        providerRequestMaxDepth,
+        ...metadata
+      }) => ({ ...metadata }));
     },
   });
 }
 
+const { companionConverseOperationDefinition } = require("./operations/companionConverse");
+
 const canonicalIntelligenceOperationRegistry =
   createIntelligenceOperationRegistry([
     jobRequestInterpretOperationDefinition,
+    emergencyRequestInterpretOperationDefinition,
+    quoteComposeOperationDefinition,
+    quickQuotePhotoAssistOperationDefinition,
+    evaluationAssistOperationDefinition,
+    estimateComposeOperationDefinition,
+    invoiceAssistOperationDefinition,
+    companionConverseOperationDefinition,
   ]);
 
 module.exports = {

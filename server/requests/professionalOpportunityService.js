@@ -138,6 +138,7 @@ async function listProfessionalOpportunities({
     SELECT ${OPPORTUNITY_COLUMNS}
     FROM posts
     WHERE posts.status = 'open'
+      AND COALESCE(posts.request_origin, 'marketplace') = 'marketplace'
       AND posts.user_id <> $1
       AND posts.location_normalization_status = 'normalized'
       AND NOT EXISTS (

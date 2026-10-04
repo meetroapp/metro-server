@@ -23,6 +23,9 @@ const {
   serializeConversationSummaryForProfessional,
   validateConversationStatus,
 } = require("../server/conversations/conversations");
+const {
+  quoteDeliveryRequestFingerprint,
+} = require("../server/authorization/quoteDeliveryAuthority");
 
 test("conversation statuses expose the governed shared lifecycle", () => {
   assert.deepEqual(CONVERSATION_STATUSES, {
@@ -450,6 +453,17 @@ test("conversation detail serializer exposes canonical participant-scoped data",
 
   const serialized =
     serializeConversationDetail(row, 7);
+  const jobBound = serializeConversationDetail(
+    {
+      ...row,
+      job_id: "11111111-1111-4111-8111-111111111111",
+    },
+    7
+  );
+  assert.equal(
+    jobBound.relationship.jobId,
+    "11111111-1111-4111-8111-111111111111"
+  );
 
   for (const internalField of [
     "homeowner_id",
@@ -608,6 +622,62 @@ test("conversation message serializer exposes only the canonical public contract
   }
 });
 
+test("delivered Quote message reconciles only the exact canonical customer decision", () => {
+  const quoteId = "f08a4f3b-8a21-4da8-a6b0-4258f5a8df9b";
+  const jobId = "072c8736-5d97-4253-ba3e-dd1bce281a20";
+  const row = {
+    id: 203,
+    sender_id: 24,
+    receiver_id: 12,
+    message_text: "All Handyman Services shared a Quote.",
+    image_url: null,
+    message_type: "quote_shared",
+    workflow_type: "QUOTE_SHARED",
+    workflow_status: "SENT",
+    workflow_payload: {
+      schemaVersion: 1,
+      quoteId,
+      jobId,
+      lineageLabel: "Original",
+      businessStatus: "WAITING_ON_CUSTOMER",
+      totalMinor: 68000,
+      currency: "USD",
+      scopeItems: [],
+      conditions: [],
+      exclusions: [],
+      issuedAt: "2026-08-27T21:37:29.830Z",
+      decidedAt: null,
+      business: { displayName: "All Handyman Services" },
+      job: { title: "Inspect damaged cabinet door and trim", service: "handyman" },
+    },
+    quote_id: quoteId,
+    job_id: jobId,
+    canonical_quote_number: "Q-0000001",
+    canonical_quote_decision: "APPROVED",
+    canonical_quote_decision_version: 2,
+    canonical_quote_current_version: 2,
+    canonical_quote_customer_user_id: 12,
+    canonical_quote_decided_at: "2026-08-28T14:00:00.000Z",
+    delivery_request_fingerprint: quoteDeliveryRequestFingerprint({
+      actorId: 24,
+      quoteId,
+      expectedIssuedVersion: 2,
+    }),
+    created_at: "2026-08-27T21:37:30.000Z",
+  };
+  const serialized = serializeConversationMessage(row, 24);
+  assert.equal(serialized.workflow.payload.businessStatus, "APPROVED");
+  assert.equal(serialized.workflow.payload.decidedAt, "2026-08-28T14:00:00.000Z");
+  assert.equal(serialized.workflow.payload.quoteNumber, "Q-0000001");
+
+  const stale = serializeConversationMessage({
+    ...row,
+    canonical_quote_decision_version: 1,
+  }, 24);
+  assert.equal(stale.workflow.payload.businessStatus, "WAITING_ON_CUSTOMER");
+  assert.equal(stale.workflow.payload.decidedAt, null);
+});
+
 test("conversation message serializer normalizes malformed workflow payloads", () => {
   const serialized =
     serializeConversationMessage(
@@ -646,11 +716,13 @@ test("conversation message serializer normalizes malformed workflow payloads", (
 
 
 test("Emergency conversation serializers expose explicit Emergency source identity", () => {
+  const emergencyJobId = "22222222-2222-4222-8222-222222222222";
   const row = {
     id: 92,
     relationship_id: 52,
     post_id: null,
     emergency_request_id: 61,
+    job_id: emergencyJobId,
     source_type: "emergency",
     request_title: "Emergency Plumbing",
     source_service_domain: "home_services",
@@ -681,6 +753,8 @@ test("Emergency conversation serializers expose explicit Emergency source identi
   assert.equal(homeowner.emergency_request_id, 61);
   assert.equal(homeowner.source.type, "emergency");
   assert.equal(homeowner.source.isEmergency, true);
+  assert.equal(homeowner.relationship.id, 52);
+  assert.equal(homeowner.relationship.jobId, emergencyJobId);
   assert.equal(homeowner.viewer.role, "homeowner");
   assert.equal(homeowner.workflow.status, "assigned");
   assert.deepEqual(homeowner.workflow.allowedActions, []);
@@ -692,13 +766,15 @@ test("Emergency conversation serializers expose explicit Emergency source identi
   assert.equal(professional.viewer.role, "professional");
   assert.deepEqual(
     professional.workflow.allowedActions,
-    ["mark_en_route"]
+    []
   );
-  assert.equal(professional.permissions.canMarkEnRoute, true);
+  assert.equal(professional.permissions.canMarkEnRoute, false);
+  assert.equal(professional.relationship.jobId, emergencyJobId);
   assert.equal(Object.hasOwn(professional, "location"), false);
   const detail = serializeConversationDetail(row, 7);
   assert.equal(detail.conversation.type, "emergency");
   assert.equal(detail.relationship.emergencyRequestId, 61);
+  assert.equal(detail.relationship.jobId, emergencyJobId);
   assert.equal(Object.hasOwn(detail.relationship, "requestId"), false);
   assert.deepEqual(detail.location, {
     locationText: "101 Synthetic Test Ave",
@@ -718,19 +794,32 @@ test("Emergency conversation serializers expose explicit Emergency source identi
     JSON.stringify(detail).includes("safety"),
     false
   );
+
+  const withoutCanonicalJob = { ...row };
+  delete withoutCanonicalJob.job_id;
+  for (const projection of [
+    serializeConversationSummaryForHomeowner(withoutCanonicalJob),
+    serializeConversationSummaryForProfessional(withoutCanonicalJob),
+    serializeConversationDetail(withoutCanonicalJob, 7),
+  ]) {
+    assert.equal(
+      Object.hasOwn(projection.relationship, "jobId"),
+      false
+    );
+  }
 });
 
-test("Emergency workflow derivation grants only the professional's exact next action", () => {
+test("Emergency workflow derivation is read-only for both participants at every status", () => {
   const cases = [
-    ["ready_for_distribution", null],
-    ["assigned", "mark_en_route"],
-    ["professional_en_route", "mark_arrived"],
-    ["professional_arrived", "start_work"],
-    ["work_in_progress", "complete_work"],
-    ["completed", null],
+    "ready_for_distribution",
+    "assigned",
+    "professional_en_route",
+    "professional_arrived",
+    "work_in_progress",
+    "completed",
   ];
 
-  for (const [status, expectedAction] of cases) {
+  for (const status of cases) {
     const row = {
       emergency_request_id: 61,
       source_relationship_status: "active",
@@ -746,31 +835,32 @@ test("Emergency workflow derivation grants only the professional's exact next ac
       viewerRole: "homeowner",
     });
 
-    assert.deepEqual(
-      professional.workflow.allowedActions,
-      expectedAction ? [expectedAction] : []
-    );
-    assert.deepEqual(
-      homeowner.workflow.allowedActions,
-      []
-    );
-    assert.equal(
-      homeowner.permissions.canManageWorkflow,
-      false
-    );
+    for (const projection of [professional, homeowner]) {
+      assert.deepEqual(projection.workflow.allowedActions, []);
+      assert.equal(projection.permissions.canSendMessages, true);
+      for (const permission of [
+        "canManageWorkflow",
+        "canMarkEnRoute",
+        "canMarkArrived",
+        "canStartWork",
+        "canCompleteWork",
+      ]) {
+        assert.equal(projection.permissions[permission], false);
+      }
+    }
   }
 });
 
 test("both participants recover every Emergency dispatch stage from canonical rows", () => {
   const cases = [
-    ["assigned", "mark_en_route"],
-    ["professional_en_route", "mark_arrived"],
-    ["professional_arrived", "start_work"],
-    ["work_in_progress", "complete_work"],
-    ["completed", null],
+    "assigned",
+    "professional_en_route",
+    "professional_arrived",
+    "work_in_progress",
+    "completed",
   ];
 
-  for (const [status, expectedAction] of cases) {
+  for (const status of cases) {
     const row = {
       id: 92,
       relationship_id: 52,
@@ -817,28 +907,22 @@ test("both participants recover every Emergency dispatch stage from canonical ro
       professionalDetail,
     ]) {
       assert.equal(projection.workflow.status, status);
-      assert.equal(
-        projection.workflow.completedAt,
-        status === "completed" ? "completed" : null
-      );
+      assert.equal(projection.workflow.assignedAt, row.source_assigned_at);
+      assert.equal(projection.workflow.enRouteAt, row.source_en_route_at);
+      assert.equal(projection.workflow.arrivedAt, row.source_arrived_at);
+      assert.equal(projection.workflow.workStartedAt, row.source_work_started_at);
+      assert.equal(projection.workflow.completedAt, row.source_completed_at);
+      assert.deepEqual(projection.workflow.allowedActions, []);
+      for (const permission of [
+        "canManageWorkflow",
+        "canMarkEnRoute",
+        "canMarkArrived",
+        "canStartWork",
+        "canCompleteWork",
+      ]) {
+        assert.equal(projection.permissions[permission], false);
+      }
     }
-
-    assert.deepEqual(
-      homeownerList.workflow.allowedActions,
-      []
-    );
-    assert.deepEqual(
-      homeownerDetail.workflow.allowedActions,
-      []
-    );
-    assert.deepEqual(
-      professionalList.workflow.allowedActions,
-      expectedAction ? [expectedAction] : []
-    );
-    assert.deepEqual(
-      professionalDetail.workflow.allowedActions,
-      expectedAction ? [expectedAction] : []
-    );
   }
 });
 

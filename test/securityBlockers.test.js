@@ -64,6 +64,8 @@ test("post list query is scoped to the authenticated user", () => {
   assert.match(query.text, /FROM posts/);
   assert.match(query.text, /WHERE user_id = \$1/);
   assert.doesNotMatch(query.text, /JOIN users/i);
+  assert.match(query.text, /request_origin/);
+  assert.match(query.text, /source_meetro_relationship_id/);
   assert.deepEqual(query.values, [101]);
 });
 
@@ -72,12 +74,15 @@ test("single post query rejects cross-user access by requiring owner scope", () 
 
   assert.match(query.text, /WHERE id = \$1 AND user_id = \$2/);
   assert.doesNotMatch(query.text, /JOIN users/i);
+  assert.match(query.text, /request_origin/);
+  assert.match(query.text, /source_meetro_relationship_id/);
   assert.deepEqual(query.values, ["202", 101]);
 });
 
 test("safe post serialization removes owner identity fields", () => {
   const post = toSafePostRow({
     id: 201,
+    lifecycle_contract_version: 1,
     user_id: 999,
     title: "Private request",
     description: "Needs help",
@@ -108,6 +113,8 @@ test("safe post serialization removes owner identity fields", () => {
 
   assert.deepEqual(post, {
     id: 201,
+    lifecycle_contract_version: 1,
+    modification_version: 1,
     title: "Private request",
     description: "Needs help",
     location: "Fort Myers",
@@ -126,6 +133,8 @@ test("safe post serialization removes owner identity fields", () => {
     unit_number: "204",
     access_notes: "Private access note",
     status: "open",
+    request_origin: "marketplace",
+    source_meetro_relationship_id: null,
     created_at: "2026-07-04T12:00:00.000Z",
     updated_at: "2026-07-04T12:05:00.000Z",
     cancelled_at: null,
@@ -183,24 +192,43 @@ test("invalid JSON handler returns safe 400 response without implementation deta
   assert.equal(Object.hasOwn(response.body, "details"), false);
 });
 
-test("production CORS allows only approved origins and never wildcard origins", async () => {
+test("production CORS allows the canonical iOS and configured web origins only", async () => {
   const options = createCorsOptions({
     NODE_ENV: "production",
-    ALLOWED_ORIGINS: "https://getmeetro.com,https://app.getmeetro.com",
+    ALLOWED_ORIGINS: "https://meetro-community.vercel.app,https://app.getmeetro.com,*",
   });
 
-  const approved = await resolveCorsOrigin(options, "https://getmeetro.com");
-  const rejected = await resolveCorsOrigin(options, "https://evil.example");
+  for (const origin of [
+    "capacitor://localhost",
+    "https://meetro-community.vercel.app",
+    "https://app.getmeetro.com",
+  ]) {
+    const approved = await resolveCorsOrigin(options, origin);
+    assert.equal(approved.error, null, `${origin} should not produce a CORS error`);
+    assert.equal(approved.allowed, true, `${origin} should be approved`);
+  }
 
-  assert.equal(approved.allowed, true);
-  assert.equal(rejected.allowed, undefined);
-  assert.match(rejected.error.message, /Origin not allowed/);
+  for (const origin of [
+    "http://localhost",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "capacitor://evil",
+    "capacitor://example.com",
+    "ionic://localhost",
+    "https://untrusted.example",
+  ]) {
+    const rejected = await resolveCorsOrigin(options, origin);
+    assert.equal(rejected.allowed, undefined, `${origin} should remain denied`);
+    assert.match(rejected.error.message, /Origin not allowed/);
+  }
 
   const origins = getApprovedCorsOrigins({
     NODE_ENV: "production",
-    ALLOWED_ORIGINS: "https://getmeetro.com,*",
+    ALLOWED_ORIGINS: "https://meetro-community.vercel.app,*",
   });
 
+  assert.equal(origins.has("capacitor://localhost"), true);
+  assert.equal(origins.has("https://meetro-community.vercel.app"), true);
   assert.equal(origins.has("*"), false);
 });
 
@@ -209,6 +237,7 @@ test("development CORS keeps localhost origins without production wildcard behav
     NODE_ENV: "development",
   });
 
+  assert.equal(origins.has("capacitor://localhost"), true);
   assert.equal(origins.has("http://localhost:5173"), true);
   assert.equal(origins.has("*"), false);
 });

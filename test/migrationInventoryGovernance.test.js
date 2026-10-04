@@ -1,0 +1,94 @@
+"use strict";
+
+const assert = require("node:assert/strict");
+const { createHash } = require("node:crypto");
+const { readFileSync } = require("node:fs");
+const { join } = require("node:path");
+const test = require("node:test");
+
+const { getMigrationFiles } = require("../scripts/run-migrations");
+const {
+  ARCHIVE_MIGRATION,
+  BASELINE_FILENAME,
+  CURRENT_PRODUCTION_LEDGER,
+  TARGET_MIGRATIONS,
+} = require("../production-convergence/004/manifest");
+
+const migrationsDirectory = join(__dirname, "..", "migrations");
+const filenamePattern = /^\d{12}_[a-z0-9]+(?:_[a-z0-9]+)*\.sql$/;
+const repositoryPrefix = CURRENT_PRODUCTION_LEDGER
+  .filter(({ filename }) => filename !== ARCHIVE_MIGRATION.filename)
+  .map(({ filename, checksum }) => ({ filename, checksum }));
+const externalLifecycleMigrations = require("./helpers/externalLifecycleMigrationInventory");
+const expectedInventory = [
+  {
+    filename: BASELINE_FILENAME,
+    checksum: "9deb147862d67b15b8779ab9ab69d8561a1f5dc87a0ad5599e0fc7c9de067236",
+  },
+  ...repositoryPrefix,
+  ...TARGET_MIGRATIONS.map(({ filename, checksum }) => ({ filename, checksum })),
+  ...externalLifecycleMigrations,
+  { filename: "202609070001_archive_numbered_business_document_drafts.sql", checksum: "6cafac5527170caeaaeb8fa0c896702fb171ac12e3c5818c68b1c8b97bef9129" },
+  { filename: "202609120001_generalize_business_job_invoice_completion.sql", checksum: "33289c8c1e0b88a4767d6dd10d1198f0d2b3d3e0b8199283ac71356b937f4cff" },
+
+  { filename: "202609160001_create_meetro_customer_business_relationship_foundation.sql", checksum: "3ea8e836c5a6d8b884fac268774dc2f374f3d9ac2d770990d4fbd4b751748b94" },
+  { filename: "202609160002_create_homeowner_saved_professionals.sql", checksum: "5ba6afea883b7985a982184f61bc1c722e5f8a0b80b4d4a8e18dcd0b42ca9bb1" },
+  { filename: "202609160004_create_existing_customer_request_source_foundation.sql", checksum: "80b7644a7a653b4380fbb4551011373b29a4a09a88473c742893749111100d59" },
+  { filename: "202609160005_create_existing_customer_request_conversation_authority.sql", checksum: "00a20647e10ffa7d4cdba0b0dab9d0db2ecc11a4a0ed449bc833ead0d659e1f6" },
+  { filename: "202609160006_create_existing_customer_request_job_foundation.sql", checksum: "2a7cbb6b6d4df0065d901d8953f4dd3d46e6f5f71939c55f48fc122090880f39" },
+  { filename: "202609160007_create_business_customer_job_source_foundation.sql", checksum: "afdf67cfd81f2edef0fd74a27d43934ef0f3e440ae5daf0498e24418321d6020" },
+  { filename: "202609160008_generalize_canonical_evaluation_job_sources.sql", checksum: "a7c4c12941bcf56f157aae4b61c9c7085c1c7c3d3d25f28e22a925c184f87f60" },
+  { filename: "202609160009_create_business_customer_evaluation_visit_confirmation.sql", checksum: "7c6aeeedfb4bb1cf51583903c988fc4ab4bb1894c6086bd96b83ffea567b9201" },
+  { filename: "202609160010_generalize_canonical_job_quote_sources.sql", checksum: "274a0d61169d5affdeb1506b1293614fae7b1a6e266eaa2cd6545512692e5227" },
+  { filename: "202609160011_generalize_external_quote_approval_sources.sql", checksum: "eb22fa582973a55499c8a48cb826a02d992a466226e448d1be3458ba0c22641d" },
+  { filename: "202609160012_generalize_pre_work_deposit_job_origins.sql", checksum: "92d750fa0be823d71955ad2bdbb00f49d9df7b01976af1bcc87593850958f606" },
+  { filename: "202609160013_generalize_approved_work_root_job_origins.sql", checksum: "9062981305df8706793023f13b6d2520bb0101f74d0553a382706345f8bdcd0a" },
+  { filename: "202609160014_generalize_external_visit_confirmation_sources.sql", checksum: "a439856b88be927f188ca27f73ac51dd3bbe6312c8abce19863fadf1f6cb5196" },
+  { filename: "202609160015_generalize_invoice_job_origins.sql", checksum: "f140bf3f70c2d44c1676aa11d9bca33e6e3976df9f24f07c47c317b0ac13078e" },
+  { filename: "202609180001_create_business_complimentary_access_authority.sql", checksum: "95eb5dc794b10e224e1a6b19c6f398860c84f100dffbdebb975aa4d59da0b4fb" },
+  { filename: "202609190001_create_emergency_job_foundation.sql", checksum: "4f68f95499f006761445db7001b646deb9379f580cc6ff5bbc9b41b17e416f55" },
+  { filename: "202609190002_generalize_emergency_job_evaluation_quote.sql", checksum: "0644836aca0bc7ca34856b4cd77f8d65de4b3fd5712fa6044902aa74489a6d84" },
+  { filename: "202609190003_generalize_emergency_pre_work_authority.sql", checksum: "2706a13c9fe418383b67d7e1d56cea4ab181b81c11d2e1feff9003bc2f1fbf8a" },
+  { filename: "202609190004_generalize_emergency_completion_invoice_history.sql", checksum: "d5e4df95299ae55f2b6bd46c47a91e9c1f828f11404d03d932a12f021cda29a3" },
+  { filename: "202609210001_add_emergency_available_now_direct_select_authority.sql", checksum: "589570db8a0f71e659d2401910dbe9b11833b76c4f3a7af39a5f6d8a95e86f80" },
+  { filename: "202609230001_link_quote_issuance_evaluation.sql", checksum: "c918a6523874ecc546e1c0235feb693da4b6a1ae6e2ab3762b4b5427ee30d9af" },
+  { filename: "202609270001_create_emergency_follow_up_job_request_authority.sql", checksum: "4fa07b4abdf8c3afcb442d8bba0397f61d516f6a5da78c3cba3e4525e45b77e2" },
+  { filename: "202609300001_generalize_employee_assignment_source_authority.sql", checksum: "6c5d21ce365e163f06b8f92575d5c31219730a26f4da00a76b2f8d4eca2843bd" },
+  { filename: "202609300002_create_canonical_punch_location_authority.sql", checksum: "3d37e3b48a6650be48f3e7ec8cf8d782a013d36dde47fc54a31ee985e6f3ae27" },
+  { filename: "202609300003_extend_canonical_punch_verification_authority.sql", checksum: "049aa6abc1bf0052085519c72a73337d41887c8293fb2bb6bf1bc9a88c17568f" },
+].sort((left, right) => left.filename.localeCompare(right.filename));
+
+function checksum(filename) {
+  return createHash("sha256")
+    .update(readFileSync(join(migrationsDirectory, filename), "utf8"))
+    .digest("hex");
+}
+
+test("the governed repository migration inventory is the exact 110-file generation through canonical punch verification authority", () => {
+  const actual = getMigrationFiles().map(({ filename }) => filename);
+  const expected = expectedInventory.map(({ filename }) => filename);
+
+  assert.equal(expectedInventory.length, 110);
+  assert.deepEqual(actual, expected);
+  assert.equal(actual.at(-1), "202609300003_extend_canonical_punch_verification_authority.sql");
+  assert.equal(new Set(actual).size, actual.length);
+  assert.ok(actual.every((filename) => filenamePattern.test(filename)));
+});
+
+test("every governed migration retains its exact certified checksum", () => {
+  for (const expected of expectedInventory) {
+    assert.equal(checksum(expected.filename), expected.checksum, expected.filename);
+  }
+});
+
+test("duplicate timestamp prefixes remain distinct full-filename identities", () => {
+  assert.equal(
+    TARGET_MIGRATIONS[0].filename,
+    "202608090001_create_job_lifecycle_concern_foundation.sql"
+  );
+  assert.equal(
+    ARCHIVE_MIGRATION.filename,
+    "202608090001_create_legacy_orphan_message_archive.sql"
+  );
+  assert.notEqual(TARGET_MIGRATIONS[0].checksum, ARCHIVE_MIGRATION.checksum);
+});

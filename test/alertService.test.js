@@ -219,6 +219,35 @@ test("alert service validates backend alert input before persistence", () => {
   assert.equal(Object.hasOwn(serverOwned.alert, "resolvedAt"), false);
 });
 
+test("permanent lifecycle identity is deterministic, required, and server derived", () => {
+  const event = alertInput({
+    sourceDomain: "workflow",
+    sourceEventType: "request.professional_selected",
+    sourceEntityType: "request_selection",
+    sourceEntityId: "55",
+    sourceEventId: "selection:55",
+    permanentEvent: true,
+  });
+  const first = validateAlertInput(event);
+  const replay = validateAlertInput({ ...event, dedupeKey: "replayed-command" });
+
+  assert.equal(first.ok, true);
+  assert.match(first.alert.canonicalEventKey, /^[0-9a-f]{64}$/);
+  assert.equal(replay.alert.canonicalEventKey, first.alert.canonicalEventKey);
+  assert.equal(
+    validateAlertInput({ ...event, sourceEventId: null }).code,
+    "INVALID_ALERT_SOURCE"
+  );
+  assert.equal(
+    validateAlertInput({ ...event, canonicalEventKey: "a".repeat(64) }).code,
+    "INVALID_ALERT_SOURCE"
+  );
+
+  const communication = validateAlertInput(alertInput());
+  assert.equal(communication.ok, true);
+  assert.equal(communication.alert.canonicalEventKey, null);
+});
+
 test("alert service creates and serializes a backend alert in a service-owned transaction", async () => {
   const context = createPool();
   const result = await createAlert({
@@ -960,10 +989,36 @@ test("alert list rejects malformed and authority-bearing queries before SQL", as
 });
 
 test("alert count service normalizes one recipient-scoped aggregate", async () => {
-  let params;
+  const params = [];
   const pool = {
-    async query(_text, values) {
-      params = values;
+    async query(text, values) {
+      params.push(values);
+      if (text.includes("alerts:work_center_attention_counts")) {
+        return {
+          rows: [
+            {
+              job_id: "072c8736-5d97-4253-ba3e-dd1bce281a20",
+              request_id: 41,
+              stage: "evaluation",
+              unread_count: "1",
+            },
+            {
+              job_id: "072c8736-5d97-4253-ba3e-dd1bce281a20",
+              request_id: 41,
+              stage: "quote",
+              unread_count: "2",
+            },
+          ],
+        };
+      }
+      if (text.includes("alerts:communication_attention_counts")) {
+        return {
+          rows: [
+            { audience: "team", business_id: "7", job_id: "072c8736-5d97-4253-ba3e-dd1bce281a20", conversation_id: null, unread_count: "1" },
+            { audience: "customer", business_id: 7, job_id: "072c8736-5d97-4253-ba3e-dd1bce281a20", conversation_id: "342", unread_count: "2" },
+          ],
+        };
+      }
       return {
         rows: [
           { category: "communication", active_count: "2", unread_count: "1" },
@@ -981,13 +1036,37 @@ test("alert count service normalizes one recipient-scoped aggregate", async () =
     logger: () => {},
   });
 
-  assert.deepEqual(params, [7]);
+  assert.deepEqual(params, [[7], [7], [7]]);
   assert.deepEqual(result.counts, {
     active: 5,
     unread: 3,
     byCategory: {
       communication: { active: 2, unread: 1 },
       emergency: { active: 3, unread: 2 },
+    },
+    communication: {
+      unread: 3,
+      customerUnread: 2,
+      teamUnread: 1,
+      byJob: [{
+        businessId: 7,
+        jobId: "072c8736-5d97-4253-ba3e-dd1bce281a20",
+        customerUnread: 2,
+        teamUnread: 1,
+      }],
+      byConversation: [{ conversationId: 342, customerUnread: 2 }],
+    },
+    workCenter: {
+      unread: 3,
+      byJob: [{
+        jobId: "072c8736-5d97-4253-ba3e-dd1bce281a20",
+        requestId: 41,
+        unread: 3,
+        stages: [
+          { stage: "evaluation", unread: 1 },
+          { stage: "quote", unread: 2 },
+        ],
+      }],
     },
   });
 });

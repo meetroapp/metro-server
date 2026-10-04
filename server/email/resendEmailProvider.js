@@ -2,6 +2,7 @@
 
 const { buildSecurityVerificationEmail } = require("./securityVerificationEmail");
 const { buildPasswordResetEmail } = require("./passwordResetEmail");
+const { buildTeamInvitationEmail } = require("./teamInvitationEmail");
 
 const RESEND_EMAIL_ENDPOINT = "https://api.resend.com/emails";
 
@@ -26,10 +27,16 @@ function createResendEmailProvider({
       async sendPasswordResetEmail() {
         return { accepted: false, status: "configuration_error" };
       },
+      async sendBusinessDocumentEmail() {
+        return { accepted: false, status: "configuration_error" };
+      },
+      async sendTeamInvitationEmail() {
+        return { accepted: false, status: "configuration_error" };
+      },
     });
   }
 
-  async function sendEmail({ recipientEmail, subject, text, html }) {
+  async function sendEmail({ recipientEmail, subject, text, html, idempotencyKey, attachments }) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -38,6 +45,7 @@ function createResendEmailProvider({
         headers: {
           Authorization: `Bearer ${normalizedApiKey}`,
           "Content-Type": "application/json",
+          ...(idempotencyKey ? { "Idempotency-Key": String(idempotencyKey) } : {}),
         },
         body: JSON.stringify({
           from: normalizedFrom,
@@ -45,13 +53,30 @@ function createResendEmailProvider({
           subject,
           text,
           html,
+          ...(Array.isArray(attachments) && attachments.length ? {
+            attachments: attachments.map((attachment) => ({
+              filename: attachment.filename,
+              content: attachment.content,
+              content_type: attachment.contentType,
+            })),
+          } : {}),
           ...(normalizedReplyTo ? { reply_to: normalizedReplyTo } : {}),
         }),
         signal: controller.signal,
       });
-      return response.ok
-        ? { accepted: true, status: "accepted" }
-        : { accepted: false, status: "provider_rejected" };
+      if (!response.ok) return { accepted: false, status: "provider_rejected" };
+      let providerReference = null;
+      try {
+        const result = await response.json();
+        providerReference = typeof result?.id === "string" ? result.id : null;
+      } catch {
+        // A provider acceptance without a response identifier remains truthful.
+      }
+      return {
+        accepted: true,
+        status: "accepted",
+        ...(providerReference ? { providerReference } : {}),
+      };
     } catch (error) {
       return {
         accepted: false,
@@ -72,6 +97,41 @@ function createResendEmailProvider({
     async sendPasswordResetEmail({ recipientEmail, resetUrl, expiresInMinutes }) {
       const email = buildPasswordResetEmail({ resetUrl, expiresInMinutes });
       return sendEmail({ recipientEmail, ...email });
+    },
+    async sendBusinessDocumentEmail({
+      recipientEmail,
+      subject,
+      text,
+      html,
+      attachment,
+      idempotencyKey,
+    }) {
+      return sendEmail({
+        recipientEmail,
+        subject,
+        text,
+        html,
+        idempotencyKey,
+        attachments: attachment ? [attachment] : [],
+      });
+    },
+    async sendTeamInvitationEmail({
+      recipientEmail,
+      businessName,
+      role,
+      joinUrl,
+      idempotencyKey,
+    }) {
+      const email = buildTeamInvitationEmail({
+        businessName,
+        role,
+        joinUrl,
+      });
+      return sendEmail({
+        recipientEmail,
+        ...email,
+        idempotencyKey,
+      });
     },
   });
 }

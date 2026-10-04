@@ -26,6 +26,7 @@ const { professionalCanSeeRequest } = require("../server/requests/requestLifecyc
 const HOMEOWNER_ID = 7;
 const OTHER_HOMEOWNER_ID = 8;
 const PROFESSIONAL_ID = 9;
+const INTERNAL_ID = 10;
 
 function validPayload(overrides = {}) {
   return {
@@ -95,6 +96,7 @@ function rowFromPostValues(id, values, requestPhotos) {
     service_postal_code: values[17],
     service_country_code: values[18],
     discovery_area_label: values[19],
+    lifecycle_contract_version: Number(values[20] || 1),
     created_at: `2026-08-07T12:00:0${id}.000Z`,
     updated_at: `2026-08-07T12:00:0${id}.000Z`,
     cancelled_at: null,
@@ -106,6 +108,7 @@ function createPool({
     [HOMEOWNER_ID, { id: HOMEOWNER_ID, role: "homeowner", account_type: "homeowner" }],
     [OTHER_HOMEOWNER_ID, { id: OTHER_HOMEOWNER_ID, role: "homeowner", account_type: "homeowner" }],
     [PROFESSIONAL_ID, { id: PROFESSIONAL_ID, role: "painting", account_type: "professional" }],
+    [INTERNAL_ID, { id: INTERNAL_ID, role: "admin", account_type: "internal" }],
   ]),
   failAt,
 } = {}) {
@@ -120,6 +123,7 @@ function createPool({
     quotes: [],
     invoices: [],
     evaluations: [],
+    reportedConcerns: [],
   };
   const calls = [];
   let transactionSnapshot = null;
@@ -161,9 +165,13 @@ function createPool({
         };
       }
 
-      if (sql.includes("job_request_create:homeowner_authority")) {
+      if (sql.includes("request_service_authority:authenticated_account")) {
         const user = users.get(Number(values[0]));
         return { rows: user ? [user] : [] };
+      }
+
+      if (sql.includes("opportunity_alert:eligible_professional_profiles")) {
+        return { rows: [] };
       }
 
       if (sql.includes("job_request_create:idempotency_reserve")) {
@@ -212,6 +220,28 @@ function createPool({
         return { rows: [row] };
       }
 
+      if (sql.includes("reported_concern:create")) {
+        if (failAt === "reported_concern") {
+          throw new Error("private concern failure");
+        }
+        const [id, postId, reporterUserId, originalText, sourceEvidenceId, sequence, integrityHash] = values;
+        const row = {
+          id,
+          job_request_id: postId,
+          reporter_user_id: reporterUserId,
+          original_text: originalText,
+          source_evidence_id: sourceEvidenceId,
+          sequence,
+          integrity_algorithm: "sha256",
+          integrity_hash: integrityHash,
+          integrity_version: 1,
+          reported_at: "2026-08-09T12:00:00.000Z",
+          created_at: "2026-08-09T12:00:00.000Z",
+        };
+        state.reportedConcerns.push(row);
+        return { rows: [row] };
+      }
+
       if (sql.includes("job_request_create:idempotency_complete")) {
         if (failAt === "idempotency_complete") {
           throw new Error("private idempotency failure");
@@ -239,7 +269,7 @@ function createPool({
     },
   };
 
-  return { calls, pool, state };
+  return { calls, pool, state, users };
 }
 
 function submit(fixture, overrides = {}) {
@@ -272,7 +302,13 @@ function response() {
   };
 }
 
-async function invokePost({ fixture, body = validPayload(), headers = {} } = {}) {
+async function invokePost({
+  fixture,
+  body = validPayload(),
+  headers = {},
+  actorUserId = HOMEOWNER_ID,
+  actorRole = "homeowner",
+} = {}) {
   app.locals.pool = fixture.pool;
   const req = {
     app,
@@ -280,9 +316,9 @@ async function invokePost({ fixture, body = validPayload(), headers = {} } = {})
     params: {},
     headers: {
       authorization: `Bearer ${createToken({
-        id: HOMEOWNER_ID,
-        email: "owner@example.test",
-        role: "homeowner",
+        id: actorUserId,
+        email: `user${actorUserId}@example.test`,
+        role: actorRole,
         token_version: 0,
       })}`,
       ...headers,
@@ -407,6 +443,64 @@ test("first keyed create atomically creates one post and command identity", asyn
   assert.equal(fixture.state.idempotency.length, 1);
   assert.equal(fixture.state.idempotency[0].post_id, 1);
   assert.equal(fixture.state.idempotency[0].completed_at !== null, true);
+  assert.equal(result.post.lifecycle_contract_version, 1);
+  assert.deepEqual(fixture.state.reportedConcerns, []);
+});
+
+test("server-gated v2 creation atomically preserves confirmed Reported Concern truth", async () => {
+  const fixture = createPool();
+  const result = await submit(fixture, {
+    env: {
+      JOB_LIFECYCLE_V2_ENABLED: "true",
+      JOB_LIFECYCLE_V2_READINESS: "MC-JOB-LIFECYCLE-004B",
+      CLOUDINARY_CLOUD_NAME: "demo",
+      CLOUDINARY_API_KEY: "key",
+      CLOUDINARY_API_SECRET: "secret",
+      CLOUDINARY_UPLOAD_FOLDER: "meetro-test",
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.post.lifecycle_contract_version, 2);
+  assert.equal(result.reportedConcern.originalText, "Paint the living room walls.");
+  assert.equal(result.reportedConcern.sequence, 1);
+  assert.match(result.reportedConcern.integrity.hash, /^[0-9a-f]{64}$/);
+  assert.equal(fixture.state.posts.length, 1);
+  assert.equal(fixture.state.reportedConcerns.length, 1);
+  assert.deepEqual(fixture.state.relationships, []);
+  assert.deepEqual(fixture.state.selections, []);
+});
+
+test("v2 gate rejects incomplete readiness and browser-declared versions", async () => {
+  const fixture = createPool();
+  const rejected = await submit(fixture, {
+    env: { JOB_LIFECYCLE_V2_ENABLED: "true" },
+  });
+  const browserDeclared = await submit(fixture, {
+    payload: validPayload({ lifecycle_contract_version: 2 }),
+  });
+
+  assert.equal(rejected.status, 503);
+  assert.equal(rejected.code, "LIFECYCLE_V2_ACTIVATION_REJECTED");
+  assert.equal(browserDeclared.code, "UNSUPPORTED_REQUEST_FIELDS");
+  assert.deepEqual(fixture.state.posts, []);
+  assert.deepEqual(fixture.state.reportedConcerns, []);
+});
+
+test("v2 concern persistence failure rolls back request and command identity", async () => {
+  const fixture = createPool({ failAt: "reported_concern" });
+  const result = await submit(fixture, {
+    env: {
+      JOB_LIFECYCLE_V2_ENABLED: "true",
+      JOB_LIFECYCLE_V2_READINESS: "MC-JOB-LIFECYCLE-004B",
+    },
+  });
+
+  assert.equal(result.status, 500);
+  assert.equal(result.code, "JOB_REQUEST_CREATE_FAILED");
+  assert.deepEqual(fixture.state.posts, []);
+  assert.deepEqual(fixture.state.reportedConcerns, []);
+  assert.deepEqual(fixture.state.idempotency, []);
 });
 
 test("same actor key and canonical payload replays the first post", async () => {
@@ -518,7 +612,7 @@ test("different key and actor scoping allow deliberate separate commands", async
   assert.equal(fixture.state.idempotency.length, 3);
 });
 
-test("homeowner authority is server-side and rejects professional-only identity", async () => {
+test("REQUEST_SERVICE authority aligns homeowner and professional canonical creation", async () => {
   const fixture = createPool();
   const unauthenticated = await createJobRequest({
     pool: fixture.pool,
@@ -526,19 +620,48 @@ test("homeowner authority is server-side and rejects professional-only identity"
     payload: validPayload(),
     idempotencyKey: "11111111-1111-4111-8111-111111111111",
   });
-  const forbidden = await submit(fixture, {
+  const professional = await submit(fixture, {
     authenticatedActor: {
       id: PROFESSIONAL_ID,
       role: "homeowner",
       account_type: "homeowner",
     },
   });
+  const professionalReplay = await submit(fixture, {
+    authenticatedActor: { id: PROFESSIONAL_ID, role: "customer" },
+  });
+  const payloadSpoof = await submit(fixture, {
+    authenticatedActor: {
+      id: INTERNAL_ID,
+      role: "homeowner",
+      account_type: "professional",
+    },
+    payload: validPayload({
+      isRequester: true,
+      requestService: true,
+    }),
+  });
+  const forbidden = await submit(fixture, {
+    authenticatedActor: {
+      id: INTERNAL_ID,
+      role: "homeowner",
+      account_type: "professional",
+    },
+  });
 
   assert.equal(unauthenticated.status, 401);
   assert.equal(unauthenticated.code, "AUTHENTICATION_REQUIRED");
+  assert.equal(professional.status, 201);
+  assert.equal(fixture.state.posts[0].user_id, PROFESSIONAL_ID);
+  assert.equal(professionalReplay.status, 200);
+  assert.equal(professionalReplay.post.id, professional.post.id);
+  assert.equal(fixture.users.get(PROFESSIONAL_ID).account_type, "professional");
+  assert.equal(fixture.users.size, 4);
+  assert.equal(payloadSpoof.status, 400);
   assert.equal(forbidden.status, 403);
-  assert.equal(forbidden.code, "HOMEOWNER_AUTHORITY_REQUIRED");
-  assert.equal(fixture.state.posts.length, 0);
+  assert.equal(forbidden.code, "REQUEST_SERVICE_AUTHORITY_REQUIRED");
+  assert.equal(fixture.state.posts.length, 1);
+  assert.equal(fixture.state.idempotency.length, 1);
 });
 
 test("validation and direct-request defense fail before command reservation", async () => {
@@ -673,6 +796,21 @@ test("POST /posts routes all ordinary create traffic through governed idempotenc
   assert.equal(keyed.body.post.id, 1);
   assert.equal(keyed.headers.get("cache-control"), "private, no-store");
   assert.equal(keyedFixture.state.idempotency.length, 1);
+
+  const professionalFixture = createPool();
+  const professional = await invokePost({
+    fixture: professionalFixture,
+    actorUserId: PROFESSIONAL_ID,
+    actorRole: "painting",
+    headers: {
+      "idempotency-key": "44444444-4444-4444-8444-444444444444",
+    },
+  });
+
+  assert.equal(professional.statusCode, 201);
+  assert.equal(professionalFixture.state.posts[0].user_id, PROFESSIONAL_ID);
+  assert.equal(professionalFixture.users.get(PROFESSIONAL_ID).account_type, "professional");
+  assert.equal(professionalFixture.users.size, 4);
 
   const unkeyedFixture = createPool();
   const unkeyed = await invokePost({ fixture: unkeyedFixture });

@@ -16,6 +16,7 @@ function createRequestSelectionFake({
   selections = [],
   conversations = [],
   idempotency = [],
+  durableRelationships = [],
 } = {}) {
   const state = {
     requests: clone([request || {
@@ -109,12 +110,14 @@ function createRequestSelectionFake({
     selections: clone(selections),
     conversations: clone(conversations),
     idempotency: clone(idempotency),
+    durableRelationships: clone(durableRelationships),
     versions: [],
     responseEvidence: [],
     selectionEvidence: [],
     participants: [],
     messages: [],
     workflowEvents: [],
+    alerts: [],
   };
   const calls = [];
   let selectionSequence = 700;
@@ -372,6 +375,52 @@ function createRequestSelectionFake({
           return { rows: [clone(row)] };
         }
 
+        if (tag === "relationship_projection") {
+          const [
+            homeownerUserId,
+            contractorProfileId,
+            professionalUserId,
+            requestSelectionId,
+          ] = values;
+
+          const existing = current.durableRelationships.find(
+            (row) =>
+              Number(row.homeowner_user_id) === Number(homeownerUserId) &&
+              Number(row.contractor_profile_id) === Number(contractorProfileId)
+          );
+
+          if (existing) {
+            return { rows: [clone(existing)] };
+          }
+
+          const selection = current.selections.find(
+            (row) =>
+              String(row.id) === String(requestSelectionId) &&
+              Number(row.selected_by_user_id) === Number(homeownerUserId) &&
+              Number(row.contractor_id) === Number(contractorProfileId) &&
+              Number(row.professional_user_id) === Number(professionalUserId)
+          );
+
+          if (!selection) {
+            throw new Error(
+              "Fake durable relationship provenance is unavailable."
+            );
+          }
+
+          const row = {
+            id:
+              `durable-relationship-${current.durableRelationships.length + 1}`,
+            homeowner_user_id: homeownerUserId,
+            contractor_profile_id: contractorProfileId,
+            professional_user_id: professionalUserId,
+            established_from_request_selection_id: String(requestSelectionId),
+            created_at: "2026-08-06T13:00:00.000Z",
+          };
+
+          current.durableRelationships.push(row);
+          return { rows: [clone(row)] };
+        }
+
         if (tag === "response_version") {
           current.versions.push({
             professional_response_id: String(values[0]),
@@ -510,6 +559,57 @@ function createRequestSelectionFake({
           row.result_classification = "created";
           row.result_reference = JSON.parse(values[4]);
           row.completed_at = "2026-08-06T13:00:00.000Z";
+          return { rows: [clone(row)] };
+        }
+
+        if (
+          sql.startsWith("UPDATE alerts") &&
+          sql.includes("lifecycle_state = 'resolved'")
+        ) {
+          const resolved = current.alerts.filter((row) =>
+            row.source_domain === values[0] &&
+            row.source_entity_type === values[1] &&
+            row.source_entity_id === values[2] &&
+            (values[3] == null || row.source_event_type === values[3]) &&
+            (values[4] == null || Number(row.recipient_user_id) === Number(values[4])) &&
+            ["active", "dismissed"].includes(row.lifecycle_state)
+          );
+          for (const row of resolved) {
+            row.lifecycle_state = "resolved";
+            row.resolved_at = values[5] || "2026-08-06T13:00:00.000Z";
+          }
+          return { rows: resolved.map(clone) };
+        }
+
+        if (sql.startsWith("INSERT INTO alerts")) {
+          const row = {
+            id: current.alerts.length + 1,
+            recipient_user_id: values[0],
+            source_domain: values[1],
+            source_event_type: values[2],
+            source_entity_type: values[3],
+            source_entity_id: values[4],
+            source_event_id: values[5],
+            canonical_event_key: values[6],
+            category: values[7],
+            priority: values[8],
+            title_key: values[9],
+            message_key: values[10],
+            safe_payload: JSON.parse(values[11]),
+            destination_type: values[12],
+            destination_payload: JSON.parse(values[13]),
+            dedupe_key: values[14],
+            lifecycle_state: "active",
+            available_at: values[15] || "2026-08-06T13:00:00.000Z",
+            expires_at: values[16],
+            read_at: null,
+            dismissed_at: null,
+            resolved_at: null,
+            archived_at: null,
+            created_at: "2026-08-06T13:00:00.000Z",
+            updated_at: "2026-08-06T13:00:00.000Z",
+          };
+          current.alerts.push(row);
           return { rows: [clone(row)] };
         }
 

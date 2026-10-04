@@ -377,6 +377,9 @@ function createEmergencyMockPool(handler) {
     async query(text, params = []) {
       const sql = String(text).replace(/\s+/g, " ").trim();
       calls.push({ sql, params });
+      if (sql.includes("opportunity_alert:eligible_professional_profiles")) {
+        return { rows: [] };
+      }
       return handler({ sql, params });
     },
     release() {
@@ -606,7 +609,7 @@ test("owned read scopes request identity to homeowner identity", async () => {
       sql,
       /emergency_requests\.id = \$1.*emergency_requests\.homeowner_id = \$2/i
     );
-    assert.deepEqual(params, [41, 7]);
+    assert.deepEqual(params, [41, 7, "active"]);
     return { rows: [] };
   });
 
@@ -847,6 +850,12 @@ test("complete safe plumbing draft prepares with empty optional fields", async (
   assert.equal(
     result.emergencyRequest.safetyAssessment.additionalSafetyContext,
     ""
+  );
+  assert.equal(
+    pool.calls.filter((call) =>
+      call.sql.includes("opportunity_alert:eligible_professional_profiles")
+    ).length,
+    1
   );
   for (const field of [
     "immediateDanger",

@@ -257,10 +257,37 @@ function buildCreateBusinessProfileQuery(userId, profile) {
             business_category = $3
         WHERE id = $1 AND EXISTS (SELECT 1 FROM inserted_profile)
         RETURNING id
+      ), created_business_trial AS (
+        INSERT INTO meetro_business_trials
+          (user_id, contractor_profile_id, created_reason, starts_at, ends_at)
+        SELECT updated_user.id,
+               inserted_profile.id,
+               'BUSINESS_ACTIVATION',
+               CURRENT_TIMESTAMP,
+               CURRENT_TIMESTAMP + INTERVAL '14 days'
+        FROM updated_user
+        CROSS JOIN inserted_profile
+        ON CONFLICT (user_id) DO NOTHING
+        RETURNING user_id
+      ), created_owner_membership AS (
+        INSERT INTO business_team_memberships
+          (contractor_profile_id, user_id, role, status, activated_at, created_by_user_id)
+        SELECT inserted_profile.id,
+               updated_user.id,
+               'OWNER',
+               'ACTIVE',
+               CURRENT_TIMESTAMP,
+               updated_user.id
+        FROM updated_user
+        CROSS JOIN inserted_profile
+        ON CONFLICT (contractor_profile_id, user_id) DO NOTHING
+        RETURNING user_id
       )
       SELECT inserted_profile.*
       FROM inserted_profile
       LEFT JOIN updated_user ON TRUE
+      LEFT JOIN created_business_trial ON created_business_trial.user_id = updated_user.id
+      LEFT JOIN created_owner_membership ON created_owner_membership.user_id = updated_user.id
     `,
     values: [
       userId,

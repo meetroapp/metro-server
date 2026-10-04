@@ -42,19 +42,26 @@ const {
   parseStoredRequestPhotos,
   safelyDeleteRequestPhoto,
 } = require("./server/media/requestPhoto");
-const { createPersonalProfileImageHandler } = require("./server/profile/personalProfileImage");
+const {
+  createQuoteDraftPhotoCleanupHandler,
+} = require("./server/media/quoteDraftPhoto");
+const {
+  createPersonalProfileDisplayHandler,
+  createPersonalProfileImageHandler,
+  projectPersonalProfileDisplay,
+} = require("./server/profile/personalProfileImage");
 const { createBusinessProfileLogoHandler } = require("./server/profile/businessProfileLogo");
 const {
   createPortfolioCleanupHandler,
-  createPortfolioProjectHandler,
-  serializeOwnedPortfolioProject,
-  serializePublicPortfolioProject,
 } = require("./server/media/businessPortfolio");
+const {
+  registerBusinessPortfolioRoutes,
+} = require("./server/portfolio/businessPortfolioRoutes");
+const { serializePublicReview } = require("./server/reviews/publicReview");
 const {
   professionalCanSeeRequest,
   serializeOwnedRequest,
   serializeProfessionalOpportunity,
-  validateRequestPayload,
 } = require("./server/requests/requestLifecycle");
 const {
   listProfessionalOpportunities,
@@ -62,10 +69,6 @@ const {
 const {
   createJobRequest,
 } = require("./server/requests/jobRequestCreateService");
-const {
-  LOCATION_NORMALIZATION_STATUS,
-} = require("./server/requests/serviceLocation");
-
 const {
   serializeConversationDetail,
   serializeConversationMessage,
@@ -118,14 +121,127 @@ const {
 const {
   registerEvaluationRoutes,
 } = require("./server/authorization/evaluations");
+const {
+  registerRecommendationRoutes,
+} = require("./server/authorization/recommendations");
+const {
+  registerQuoteDraftRoutes,
+} = require("./server/authorization/quoteDrafts");
 
 const {
   registerAlertRoutes,
 } = require("./server/alerts/alerts");
+const {
+  registerSubscriptionRoutes,
+} = require("./server/subscriptions/subscriptions");
+const {
+  registerTeamRoutes,
+} = require("./server/team/team");
+const {
+  registerJobAssignmentRoutes,
+} = require("./server/team/jobAssignments");
+const {
+  registerFieldOperationsRoutes,
+} = require("./server/team/fieldOperations");
+const {
+  registerFieldCustomerCommunicationRoutes,
+} = require("./server/team/fieldCustomerCommunication");
+const { registerBusinessPunchLocationRoutes } = require("./server/team/businessPunchLocations");
+const { registerPunchLocationRoutes } = require("./server/team/punchLocations");
+const {
+  registerTimeEvidenceRoutes,
+} = require("./server/team/timeEvidence");
+const {
+  registerBusinessTimeSettingsRoutes,
+} = require("./server/team/businessTimeSettings");
+const {
+  registerTimeOperationsRoutes,
+} = require("./server/team/timeOperations");
+const {
+  activateReservedMeetroBusinessTrial,
+} = require("./server/subscriptions/subscriptionService");
 
 const {
   registerIntelligenceRoutes,
 } = require("./server/intelligence/intelligenceRoutes");
+const {
+  createWorkflowProviderConfiguration,
+} = require("./server/intelligence/openAiWorkflowProvider");
+const {
+  registerLifecycleRoutes,
+} = require("./server/requests/lifecycleRoutes");
+const {
+  registerRequestModificationRoutes,
+} = require("./server/requests/requestModificationRoutes");
+const {
+  registerWorkstreamRoutes,
+} = require("./server/workflow/workstreams");
+const {
+  registerLiveJobRoutes,
+} = require("./server/workflow/liveJobs");
+const {
+  registerWorkPlanRoutes,
+} = require("./server/workflow/workPlans");
+const {
+  registerVisitRoutes,
+} = require("./server/workflow/visits");
+const {
+  registerEvaluationVisitRoutes,
+} = require("./server/workflow/evaluationVisits");
+const {
+  registerApprovedWorkVisitRoutes,
+} = require("./server/workflow/approvedWorkVisits");
+const {
+  registerPreWorkDepositRoutes,
+} = require("./server/finance/preWorkDeposits");
+const {
+  registerWorkPreparationRoutes,
+} = require("./server/workflow/workPreparation");
+const {
+  registerApprovedWorkExecutionRoutes,
+} = require("./server/workflow/approvedWorkExecutions");
+const {
+  registerProfessionalScheduleRoutes,
+} = require("./server/workflow/professionalSchedule");
+const {
+  registerProfessionalJobPickerRoutes,
+} = require("./server/workflow/professionalJobPicker");
+const {
+  registerProfessionalQuoteCustomerOptionsRoutes,
+} = require("./server/workflow/professionalQuoteCustomerOptions");
+const {
+  registerProfessionalQuotesRoutes,
+} = require("./server/authorization/professionalQuotes");
+const {
+  registerCustomerJobQuotesRoutes,
+} = require("./server/authorization/customerJobQuotes");
+const {
+  registerCustomerEfrRoutes,
+} = require("./server/authorization/customerEfr");
+const {
+  registerJobCompletionRoutes,
+} = require("./server/workflow/jobCompletions");
+const {
+  registerInvoicePaymentRoutes,
+} = require("./server/finance/invoicePayments");
+const {
+  registerPaymentReminderRoutes,
+} = require("./server/finance/paymentReminders");
+const {
+  registerBusinessDocumentDraftRoutes,
+} = require("./server/documents/businessDocumentDrafts");
+const {
+  registerBusinessContactRoutes,
+} = require("./server/contacts/businessContacts");
+const {
+  registerBusinessCustomerRelationshipRoutes,
+} = require("./server/relationships/businessCustomerRelationships");
+const {
+  registerHomeownerProfessionalsRoutes,
+} = require("./server/relationships/homeownerProfessionals");
+const {
+  registerCustomerPartyRoutes,
+} = require("./server/relationships/customerParties");
 
 
 const JWT_SECRET = resolveJwtSecret(process.env);
@@ -142,6 +258,10 @@ const LOCAL_DEV_ORIGINS = Object.freeze([
   "http://127.0.0.1:3000",
 ]);
 
+const NATIVE_APP_ORIGINS = Object.freeze([
+  "capacitor://localhost",
+]);
+
 function parseOriginList(value) {
   if (!value) return [];
 
@@ -153,6 +273,7 @@ function parseOriginList(value) {
 
 function getApprovedCorsOrigins(env = process.env) {
   const configuredOrigins = [
+    ...NATIVE_APP_ORIGINS,
     ...parseOriginList(env.ALLOWED_ORIGINS),
     ...parseOriginList(env.FRONTEND_ORIGINS),
     ...parseOriginList(env.FRONTEND_URL),
@@ -188,7 +309,11 @@ function createCorsOptions(env = process.env) {
 }
 
 app.use(cors(createCorsOptions()));
-app.use(express.json());
+app.use(express.json({
+  verify(req, res, buffer) {
+    if (req.originalUrl === "/subscriptions/stripe/webhook") req.rawBody = Buffer.from(buffer);
+  },
+}));
 
 function jsonSyntaxErrorHandler(err, req, res, next) {
   if (err instanceof SyntaxError && "body" in err) {
@@ -206,6 +331,13 @@ const pool = new Pool({
     rejectUnauthorized: false,
   },
 });
+
+const workflowProviderConfiguration = createWorkflowProviderConfiguration(process.env, {
+  logger: console,
+});
+app.locals.intelligenceProviders = workflowProviderConfiguration.providers;
+app.locals.intelligenceTranscriptionProvider = workflowProviderConfiguration.transcriptionProvider;
+app.locals.intelligenceProviderMetadata = workflowProviderConfiguration.metadata;
 
 function getPool(req) {
   return req.app?.locals?.pool || pool;
@@ -536,40 +668,6 @@ function setPrivateNoStore(res) {
   }
 }
 
-function getRequestPhotoPublicId(photo = {}) {
-  return String(photo?.public_id || "").trim();
-}
-
-function getRemovedRequestPhotos(previousPhotos = [], replacementPhotos = []) {
-  const retainedPublicIds = new Set(
-    replacementPhotos.map(getRequestPhotoPublicId).filter(Boolean)
-  );
-  return previousPhotos.filter((photo) => {
-    const publicId = getRequestPhotoPublicId(photo);
-    return publicId && !retainedPublicIds.has(publicId);
-  });
-}
-
-async function cleanupRemovedRequestPhotos({
-  req,
-  removedPhotos = [],
-  userId,
-} = {}) {
-  if (!removedPhotos.length) return;
-
-  try {
-    const mediaService =
-      req.app?.locals?.cloudinaryMedia || createCloudinaryMedia({ env: process.env });
-    for (const media of removedPhotos) {
-      await safelyDeleteRequestPhoto(mediaService, media.public_id, userId);
-    }
-  } catch {
-    console.error("Request photo media cleanup failed", {
-      code: "REQUEST_PHOTO_DELETE_FAILED",
-    });
-  }
-}
-
 function buildUserPostsQuery(userId) {
   return {
     text: `
@@ -578,7 +676,10 @@ function buildUserPostsQuery(userId) {
              location_normalization_status, service_address_line1, service_city,
              service_region, service_postal_code, service_country_code,
              discovery_area_label, unit_number, access_notes, status,
-             created_at, updated_at, cancelled_at, mage_url, image_url, request_photos
+             request_origin, source_meetro_relationship_id,
+             lifecycle_contract_version, modification_version,
+             created_at, updated_at, cancelled_at,
+             mage_url, image_url, request_photos
       FROM posts
       WHERE user_id = $1
       ORDER BY posts.created_at DESC
@@ -595,7 +696,10 @@ function buildUserPostByIdQuery(postId, userId) {
              location_normalization_status, service_address_line1, service_city,
              service_region, service_postal_code, service_country_code,
              discovery_area_label, unit_number, access_notes, status,
-             created_at, updated_at, cancelled_at, mage_url, image_url, request_photos
+             request_origin, source_meetro_relationship_id,
+             lifecycle_contract_version, modification_version,
+             created_at, updated_at, cancelled_at,
+             mage_url, image_url, request_photos
       FROM posts
       WHERE id = $1 AND user_id = $2
       `,
@@ -667,7 +771,13 @@ function buildOwnedContractorProjectUpdateQuery({
           WHERE contractor_profiles.id = contractor_projects.contractor_id
             AND contractor_profiles.user_id = $6
         )
-      RETURNING *
+      RETURNING id,
+                contractor_id,
+                title,
+                description,
+                image_url,
+                image_urls,
+                created_at
       `,
     values: [
       title,
@@ -696,7 +806,13 @@ function buildOwnedContractorProjectCreateQuery({
       FROM contractor_profiles
       WHERE contractor_profiles.id = $1
         AND contractor_profiles.user_id = $6
-      RETURNING *
+      RETURNING id,
+                contractor_id,
+                title,
+                description,
+                image_url,
+                image_urls,
+                created_at
       `,
     values: [
       contractorId,
@@ -793,7 +909,81 @@ registerEvaluationRoutes({
   sendPublicDatabaseError,
 });
 
+registerRecommendationRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerQuoteDraftRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
 registerAlertRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerSubscriptionRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerTeamRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+  emailDelivery,
+});
+
+registerJobAssignmentRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerFieldOperationsRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerFieldCustomerCommunicationRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerPunchLocationRoutes({ app, authMiddleware, getPool, sendPublicDatabaseError });
+registerBusinessPunchLocationRoutes({ app, authMiddleware, getPool, sendPublicDatabaseError });
+
+registerTimeEvidenceRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerBusinessTimeSettingsRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerTimeOperationsRoutes({
   app,
   authMiddleware,
   getPool,
@@ -804,6 +994,182 @@ registerIntelligenceRoutes({
   app,
   authMiddleware,
   getPool,
+  logger: console,
+});
+
+registerLifecycleRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerRequestModificationRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerWorkstreamRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerWorkPlanRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerVisitRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerEvaluationVisitRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerApprovedWorkVisitRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerPreWorkDepositRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerWorkPreparationRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerApprovedWorkExecutionRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerProfessionalScheduleRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerProfessionalJobPickerRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+registerProfessionalQuoteCustomerOptionsRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerProfessionalQuotesRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerCustomerJobQuotesRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerCustomerEfrRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerJobCompletionRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerInvoicePaymentRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerPaymentReminderRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerLiveJobRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerBusinessDocumentDraftRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+  emailDelivery,
+});
+
+registerBusinessContactRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerHomeownerProfessionalsRoutes({
+  app,
+  authMiddleware,
+  getPool: () => pool,
+  sendPublicDatabaseError,
+});
+
+registerBusinessCustomerRelationshipRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerCustomerPartyRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
 });
 
 app.get("/health", (req, res) => {
@@ -819,6 +1185,11 @@ app.post(
   "/media/request-photo/cleanup",
   authMiddleware,
   createRequestPhotoCleanupHandler()
+);
+app.post(
+  "/media/quote-draft-photo/cleanup",
+  authMiddleware,
+  createQuoteDraftPhotoCleanupHandler({ getPool })
 );
 app.post(
   "/media/business-portfolio/cleanup",
@@ -919,10 +1290,42 @@ app.post("/auth/signup", async (req, res) => {
 
     const result = await requestPool.query(
       `
-      INSERT INTO users
-      (username, email, password_hash, role, account_type, business_name, business_category)
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
-      RETURNING id, username, email, role, account_type, business_name, business_category, profile_photo_url, token_version, created_at
+      WITH created_user AS (
+        INSERT INTO users
+        (username, email, password_hash, role, account_type, business_name, business_category)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING id, username, email, role, account_type, business_name,
+                  business_category, profile_photo_url, token_version, created_at
+      ), created_professional_profile AS (
+        INSERT INTO contractor_profiles
+        (user_id, business_name, category, phone, location, bio, image_url, profile_details)
+        SELECT id, business_name, business_category, '', '', '', '', '{}'::jsonb
+        FROM created_user
+        WHERE account_type = 'professional'
+        RETURNING id, user_id
+      ), reserved_business_trial AS (
+        INSERT INTO meetro_business_trials
+          (user_id, contractor_profile_id, created_reason)
+        SELECT user_id, id, 'PROFESSIONAL_SIGNUP'
+        FROM created_professional_profile
+        ON CONFLICT (user_id) DO NOTHING
+        RETURNING user_id
+      ), created_owner_membership AS (
+        INSERT INTO business_team_memberships
+          (contractor_profile_id, user_id, role, status, activated_at, created_by_user_id)
+        SELECT id, user_id, 'OWNER', 'ACTIVE', CURRENT_TIMESTAMP, user_id
+        FROM created_professional_profile
+        ON CONFLICT (contractor_profile_id, user_id) DO NOTHING
+        RETURNING user_id
+      )
+      SELECT created_user.*
+      FROM created_user
+      LEFT JOIN created_professional_profile
+        ON created_professional_profile.user_id = created_user.id
+      LEFT JOIN reserved_business_trial
+        ON reserved_business_trial.user_id = created_user.id
+      LEFT JOIN created_owner_membership
+        ON created_owner_membership.user_id = created_user.id
       `,
       [
         finalUsername,
@@ -1028,6 +1431,12 @@ app.put(
   createPersonalProfileImageHandler({ getPool })
 );
 
+app.patch(
+  "/auth/profile-photo/display",
+  authMiddleware,
+  createPersonalProfileDisplayHandler({ getPool })
+);
+
 app.put(
   "/contractor-profile/logo",
   authMiddleware,
@@ -1085,7 +1494,8 @@ app.get("/auth/me", authMiddleware, async (req, res) => {
       SELECT users.id, users.username, users.email, users.role, users.account_type,
              COALESCE(profile.business_name, users.business_name) AS business_name,
              COALESCE(profile.category, users.business_category) AS business_category,
-             users.profile_photo_url, users.created_at,
+             users.profile_photo_url, users.profile_photo_details,
+             users.created_at,
              profile.id AS contractor_profile_id,
              (profile.id IS NOT NULL) AS has_business_profile
       FROM users
@@ -1103,8 +1513,23 @@ app.get("/auth/me", authMiddleware, async (req, res) => {
       [req.user.id]
     );
 
-    res.json({
-      user: result.rows[0],
+    const user = result.rows[0];
+
+    if (!user) {
+      return res.json({ user: null });
+    }
+
+    const {
+      profile_photo_details: profilePhotoDetails,
+      ...safeUser
+    } = user;
+
+    return res.json({
+      user: {
+        ...safeUser,
+        profile_photo_display:
+          projectPersonalProfileDisplay(profilePhotoDetails),
+      },
     });
   } catch {
     logAuthFailure("auth_me", "AUTH_ME_FAILED", req.user.id);
@@ -1219,7 +1644,9 @@ async function completeAuthenticationVerification(req, res) {
                COALESCE(profile.category, users.business_category) AS business_category,
                users.profile_photo_url, users.token_version,
                profile.id AS contractor_profile_id,
-               (profile.id IS NOT NULL) AS has_business_profile
+               (profile.id IS NOT NULL) AS has_business_profile,
+               (business_trial.user_id IS NOT NULL AND business_trial.starts_at IS NULL)
+                 AS business_trial_activation_pending
         FROM users
         LEFT JOIN LATERAL (
           SELECT contractor_profiles.id,
@@ -1230,6 +1657,8 @@ async function completeAuthenticationVerification(req, res) {
           ORDER BY contractor_profiles.created_at ASC, contractor_profiles.id ASC
           LIMIT 1
         ) profile ON TRUE
+        LEFT JOIN meetro_business_trials business_trial
+          ON business_trial.user_id = users.id
         WHERE users.id = $1 AND users.email = $2
         `,
         [temporarySession.accountId, temporarySession.email]
@@ -1246,6 +1675,20 @@ async function completeAuthenticationVerification(req, res) {
           code: "SESSION_INVALID",
           message: "Verification challenge is no longer valid.",
         });
+      }
+
+      if (account.business_trial_activation_pending === true) {
+        const activatedTrial = await activateReservedMeetroBusinessTrial({
+          pool: getPool(req),
+          userId: account.id,
+        });
+        if (!activatedTrial || activatedTrial.status !== "ACTIVE") {
+          return res.status(503).json({
+            success: false,
+            code: "BUSINESS_TRIAL_ACTIVATION_FAILED",
+            message: "Your Meetro Business Trial could not be started. Please try again.",
+          });
+        }
       }
 
       const token = createToken(account);
@@ -1475,6 +1918,16 @@ app.post("/posts", authMiddleware, async (req, res) => {
       success: true,
       code: result.code,
       post: result.post,
+      reportedConcern: result.reportedConcern || null,
+      ...(result.relationship
+        ? { relationship: result.relationship }
+        : {}),
+      ...(result.conversation
+        ? { conversation: result.conversation }
+        : {}),
+      ...(result.job
+        ? { job: result.job }
+        : {}),
     });
   } catch (err) {
     if (err instanceof MediaValidationError) {
@@ -1524,176 +1977,6 @@ app.get("/posts/:id", authMiddleware, async (req, res) => {
   } catch (err) {
     res.status(500).json({
       error: "Failed to fetch post",
-    });
-  }
-});
-
-app.put("/posts/:id", authMiddleware, async (req, res) => {
-  setPrivateNoStore(res);
-  let transactionStarted = false;
-  try {
-    const validation = validateRequestPayload(req.body, { partial: true });
-    if (!validation.ok) {
-      return res.status(validation.status).json({
-        success: false,
-        code: validation.code,
-        message: validation.message,
-      });
-    }
-    const request = validation.request;
-    const replacesRequestPhotos = Object.hasOwn(req.body, "request_photos");
-    const pool = getPool(req);
-
-    await pool.query("BEGIN");
-    transactionStarted = true;
-
-    const existing = await pool.query(
-      `
-      SELECT id, title, description, location, category, request_category,
-             service_domain, service_specialty, location_intake_mode,
-             location_normalization_status, service_address_line1, service_city,
-             service_region, service_postal_code, service_country_code,
-             discovery_area_label, unit_number, access_notes, status,
-             created_at, updated_at, cancelled_at, mage_url, image_url, request_photos
-      FROM posts
-      WHERE id = $1 AND user_id = $2 AND status = 'open'
-      FOR UPDATE
-      `,
-      [req.params.id, req.user.id]
-    );
-
-    if (existing.rows.length === 0) {
-      await pool.query("ROLLBACK");
-      transactionStarted = false;
-      return res.status(404).json({
-        success: false,
-        code: "REQUEST_NOT_FOUND",
-        message: "Request was not found or cannot be edited.",
-      });
-    }
-
-    const existingLocationStatus =
-      existing.rows[0].location_normalization_status ||
-      LOCATION_NORMALIZATION_STATUS.LEGACY_UNCLASSIFIED;
-    if (
-      request.has_legacy_location_update &&
-      existingLocationStatus !==
-        LOCATION_NORMALIZATION_STATUS.LEGACY_UNCLASSIFIED
-    ) {
-      await pool.query("ROLLBACK");
-      transactionStarted = false;
-      return res.status(400).json({
-        success: false,
-        code: "STRUCTURED_SERVICE_LOCATION_REQUIRED",
-        message: "Normalized requests require structured service location.",
-      });
-    }
-
-    const previousRequestPhotos = parseStoredRequestPhotos(
-      existing.rows[0].request_photos
-    );
-    const normalizedRequestPhotos = replacesRequestPhotos
-      ? normalizeRequestPhotoCollection(req.body.request_photos, {
-          userId: req.user.id,
-        })
-      : previousRequestPhotos;
-    const compatibilityImageUrl = replacesRequestPhotos
-      ? normalizedRequestPhotos[0]?.secure_url || null
-      : existing.rows[0].image_url;
-
-    const result = await pool.query(
-      `
-      UPDATE posts
-      SET title = CASE WHEN $1::boolean THEN $2 ELSE title END,
-          description = CASE WHEN $3::boolean THEN $4 ELSE description END,
-          location = CASE WHEN $5::boolean THEN $6 ELSE location END,
-          request_photos = CASE WHEN $7::boolean THEN $8::jsonb ELSE request_photos END,
-          image_url = CASE WHEN $7::boolean THEN $9 ELSE image_url END,
-          location_intake_mode = CASE WHEN $10::boolean THEN $11 ELSE location_intake_mode END,
-          location_normalization_status = CASE WHEN $10::boolean THEN $12 ELSE location_normalization_status END,
-          service_address_line1 = CASE WHEN $10::boolean THEN $13 ELSE service_address_line1 END,
-          service_city = CASE WHEN $10::boolean THEN $14 ELSE service_city END,
-          service_region = CASE WHEN $10::boolean THEN $15 ELSE service_region END,
-          service_postal_code = CASE WHEN $10::boolean THEN $16 ELSE service_postal_code END,
-          service_country_code = CASE WHEN $10::boolean THEN $17 ELSE service_country_code END,
-          discovery_area_label = CASE WHEN $10::boolean THEN $18 ELSE discovery_area_label END,
-          unit_number = CASE WHEN $10::boolean THEN $19 ELSE unit_number END,
-          access_notes = CASE WHEN $20::boolean THEN $21 ELSE access_notes END,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = $22 AND user_id = $23 AND status = 'open'
-      RETURNING *
-      `,
-      [
-        req.body.title !== undefined,
-        request.title,
-        req.body.description !== undefined,
-        request.description,
-        request.has_service_location_update || request.has_legacy_location_update,
-        request.location,
-        replacesRequestPhotos,
-        JSON.stringify(normalizedRequestPhotos),
-        compatibilityImageUrl,
-        request.has_service_location_update,
-        request.location_intake_mode,
-        request.location_normalization_status,
-        request.service_address_line1,
-        request.service_city,
-        request.service_region,
-        request.service_postal_code,
-        request.service_country_code,
-        request.discovery_area_label,
-        request.unit_number,
-        request.has_access_notes_update,
-        request.access_notes,
-        req.params.id,
-        req.user.id,
-      ]
-    );
-    if (result.rows.length === 0) {
-      await pool.query("ROLLBACK");
-      transactionStarted = false;
-      return res.status(404).json({
-        success: false,
-        code: "REQUEST_NOT_FOUND",
-        message: "Request was not found or cannot be edited.",
-      });
-    }
-    await pool.query("COMMIT");
-    transactionStarted = false;
-
-    if (replacesRequestPhotos) {
-      await cleanupRemovedRequestPhotos({
-        req,
-        userId: req.user.id,
-        removedPhotos: getRemovedRequestPhotos(
-          previousRequestPhotos,
-          normalizedRequestPhotos
-        ),
-      });
-    }
-
-    return res.json({
-      success: true,
-      code: "REQUEST_UPDATED",
-      post: toSafePostRow(result.rows[0]),
-    });
-  } catch (error) {
-    if (transactionStarted) {
-      try {
-        await getPool(req).query("ROLLBACK");
-      } catch {
-        // The public update response below remains the canonical failure signal.
-      }
-    }
-    if (error instanceof MediaValidationError) {
-      return sendMediaError(res, error);
-    }
-    return sendPublicDatabaseError({
-      res,
-      error,
-      operation: "update_post",
-      code: "POST_UPDATE_FAILED",
-      message: "The request could not be updated.",
     });
   }
 });
@@ -2404,6 +2687,7 @@ app.post(
         privacy_stage: result.privacy_stage,
         resultClassification: result.resultClassification,
         replayed: result.replayed === true,
+        lifecycleJob: result.lifecycleJob || null,
       });
     } catch (error) {
       return sendPublicDatabaseError({
@@ -2917,9 +3201,12 @@ app.get("/reviews/:contractorId", async (req, res) => {
 
     const reviewsResult = await getPool(req).query(
       `
-      SELECT reviews.*, users.email AS reviewer_email
+      SELECT reviews.id,
+             reviews.contractor_id,
+             reviews.rating,
+             reviews.review_text,
+             reviews.created_at
       FROM reviews
-      JOIN users ON reviews.reviewer_id = users.id
       WHERE contractor_id = $1
       ORDER BY created_at DESC
       `,
@@ -2936,7 +3223,7 @@ app.get("/reviews/:contractorId", async (req, res) => {
     );
 
     res.json({
-      reviews: reviewsResult.rows,
+      reviews: reviewsResult.rows.map(serializePublicReview),
       stats: ratingResult.rows[0],
     });
   } catch (err) {
@@ -2950,73 +3237,11 @@ app.get("/reviews/:contractorId", async (req, res) => {
   }
 });
 
-app.post(
-  "/contractor-projects",
+registerBusinessPortfolioRoutes({
+  app,
   authMiddleware,
-  createPortfolioProjectHandler({ getPool })
-);
-
-app.put(
-  "/contractor-projects/:id",
-  authMiddleware,
-  createPortfolioProjectHandler({ getPool, update: true })
-);
-
-app.get("/my-contractor-projects", authMiddleware, async (req, res) => {
-  try {
-    const result = await getPool(req).query(
-      `
-      SELECT contractor_projects.*
-      FROM contractor_projects
-      JOIN contractor_profiles
-        ON contractor_profiles.id = contractor_projects.contractor_id
-      WHERE contractor_profiles.user_id = $1
-      ORDER BY contractor_projects.created_at DESC
-      `,
-      [req.user.id]
-    );
-    return res.json({
-      success: true,
-      code: "BUSINESS_PORTFOLIO_LOADED",
-      projects: result.rows.map(serializeOwnedPortfolioProject),
-    });
-  } catch (error) {
-    return sendPublicDatabaseError({
-      res,
-      error,
-      operation: "fetch_owned_contractor_projects",
-      code: "CONTRACTOR_PROJECTS_FETCH_FAILED",
-      message: "Projects could not be loaded.",
-    });
-  }
-});
-
-app.get("/contractor-projects/:contractorId", async (req, res) => {
-  try {
-    const contractorId = req.params.contractorId;
-
-    const result = await getPool(req).query(
-      `
-      SELECT *
-      FROM contractor_projects
-      WHERE contractor_id = $1
-      ORDER BY created_at DESC
-      `,
-      [contractorId]
-    );
-
-    res.json({
-      projects: result.rows.map(serializePublicPortfolioProject),
-    });
-  } catch (err) {
-    return sendPublicDatabaseError({
-      res,
-      error: err,
-      operation: "fetch_contractor_projects",
-      code: "CONTRACTOR_PROJECTS_FETCH_FAILED",
-      message: "Projects could not be loaded.",
-    });
-  }
+  getPool,
+  sendPublicDatabaseError,
 });
 
 app.use((err, req, res, next) => {

@@ -1,0 +1,908 @@
+"use strict";
+
+const { createHash, randomUUID } = require("node:crypto");
+
+const {
+  commercialAuthorityInternals,
+} = require("../authorization/commercialAuthorityService");
+const {
+  hasActiveLifecycleGrant,
+} = require("../authorization/lifecycleAuthorityService");
+const {
+  evaluateApprovedWorkDepositGateWithClient,
+  schedulingGateFailure,
+} = require("../finance/preWorkDepositService");
+
+const {
+  databaseClient,
+  failure,
+  isPlainObject,
+  normalizedUuid,
+  rollback,
+  validateAuthenticatedActor,
+} = commercialAuthorityInternals;
+
+const APPROVED_WORK_VISIT_AUTHORITY_SOURCE =
+  "CANONICAL_APPROVED_WORK_VISIT_AUTHORITY";
+const APPROVED_WORK_VISIT_SOURCE_TYPE = "approved_work_visit_activation";
+const QUOTE_READ_CAPABILITY = "quote.read";
+const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
+
+const CUSTOMER_APPROVED_WORK_VISIT_CAPABILITIES = Object.freeze([
+  "visit.read",
+  "visit.confirm",
+  "visit.change_request",
+]);
+const PROFESSIONAL_APPROVED_WORK_VISIT_CAPABILITIES = Object.freeze([
+  "visit.read",
+  "visit.propose",
+  "visit.reschedule",
+  "visit.cancel",
+  "visit.start",
+  "visit.complete",
+]);
+
+const EXTERNAL_SCHEDULING_CAPABILITIES = Object.freeze([
+  "visit.read", "visit.propose", "visit.reschedule", "visit.cancel",
+  "visit.external_confirmation.record",
+]);
+
+function professionalCapabilitiesFor(context) {
+  return context.approval_source === "EXTERNAL_EVIDENCE"
+    ? EXTERNAL_SCHEDULING_CAPABILITIES
+    : PROFESSIONAL_APPROVED_WORK_VISIT_CAPABILITIES;
+}
+
+function customerCapabilitiesFor(context) {
+  return context.approval_source === "EXTERNAL_EVIDENCE"
+    ? [] : CUSTOMER_APPROVED_WORK_VISIT_CAPABILITIES;
+}
+
+function safeLogger(value) {
+  return value && typeof value.info === "function" && typeof value.warn === "function"
+    ? value
+    : console;
+}
+
+function fingerprint(value) {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function validIdempotencyKey(value) {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  return IDEMPOTENCY_KEY_PATTERN.test(normalized) ? normalized : null;
+}
+
+async function runTransaction(pool, action) {
+  const client = await databaseClient(pool);
+  let started = false;
+  try {
+    await client.query("BEGIN");
+    started = true;
+    const outcome = await action(client);
+    if (outcome.abort) {
+      await rollback(client);
+      started = false;
+      return outcome.abort;
+    }
+    await client.query("COMMIT");
+    started = false;
+    if (outcome.afterCommit) outcome.afterCommit();
+    return outcome.result;
+  } catch (error) {
+    if (started) await rollback(client);
+    throw error;
+  } finally {
+    if (client !== pool && typeof client.release === "function") client.release();
+  }
+}
+
+async function runReadTransaction(pool, action) {
+  const client = await databaseClient(pool);
+  let started = false;
+  try {
+    await client.query("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    started = true;
+    const result = await action(client);
+    await client.query("COMMIT");
+    started = false;
+    return result;
+  } catch (error) {
+    if (started) await rollback(client);
+    throw error;
+  } finally {
+    if (client !== pool && typeof client.release === "function") client.release();
+  }
+}
+
+async function loadContext(client, { jobId, quoteId, actorUserId, lock = false }) {
+  const result = await client.query(
+    `
+    /* approved_work_visit:context */
+    SELECT
+      jobs.id AS job_id,
+      jobs.job_request_id,
+      jobs.source_request_selection_id,
+      jobs.source_request_relationship_id AS relationship_id,
+      jobs.originating_business_document_id,
+      jobs.contractor_profile_id,
+      jobs.business_contact_id,
+      jobs.business_customer_relationship_id,
+      jobs.source_business_customer_job_id,
+
+      quotes.id AS quote_id,
+      quotes.source_context_type AS quote_source_context_type,
+      quotes.job_source_type AS quote_job_source_type,
+      quotes.job_request_id AS quote_job_request_id,
+      quotes.relationship_id AS quote_relationship_id,
+      quotes.business_customer_job_source_id
+        AS quote_business_customer_job_source_id,
+
+      decisions.id AS approved_quote_decision_id,
+      decisions.decision AS approved_quote_decision,
+
+      approvals.issued_quote_version,
+      approvals.id AS quote_approval_id,
+      approvals.approval_source,
+
+      jobs.source_type,
+
+      posts.request_origin,
+      relationships.ordinary_authority_source,
+
+      professional.id AS professional_participant_id,
+      customer.id AS customer_participant_id,
+      professional.user_id AS professional_user_id,
+      relationships.homeowner_id,
+
+      job_customer_parties.contractor_profile_id
+        AS customer_party_contractor_profile_id,
+      job_customer_parties.business_contact_id
+        AS customer_party_business_contact_id,
+      job_customer_parties.business_customer_relationship_id
+        AS customer_party_business_customer_relationship_id,
+
+      business_customer_job_sources.id
+        AS business_customer_job_source_id,
+
+      EXISTS (
+        SELECT 1
+        FROM participant_role_assignments roles
+        LEFT JOIN participant_role_revocations revocations
+          ON revocations.role_assignment_id = roles.id
+        WHERE roles.participant_id = professional.id
+          AND roles.job_id = jobs.id
+          AND roles.role = 'PRIMARY_PROFESSIONAL'
+          AND roles.valid_from <= CURRENT_TIMESTAMP
+          AND (
+            roles.valid_until IS NULL
+            OR roles.valid_until > CURRENT_TIMESTAMP
+          )
+          AND revocations.id IS NULL
+      ) AS professional_role_active,
+
+      EXISTS (
+        SELECT 1
+        FROM participant_role_assignments roles
+        LEFT JOIN participant_role_revocations revocations
+          ON revocations.role_assignment_id = roles.id
+        WHERE roles.participant_id = customer.id
+          AND roles.job_id = jobs.id
+          AND roles.role = 'CUSTOMER_REPRESENTATIVE'
+          AND roles.valid_from <= CURRENT_TIMESTAMP
+          AND (
+            roles.valid_until IS NULL
+            OR roles.valid_until > CURRENT_TIMESTAMP
+          )
+          AND revocations.id IS NULL
+      ) AS customer_role_active
+
+    FROM jobs
+
+    LEFT JOIN posts
+      ON posts.id = jobs.job_request_id
+      AND posts.lifecycle_contract_version = 2
+      AND posts.cancelled_at IS NULL
+
+    LEFT JOIN request_relationships relationships
+      ON relationships.id =
+          jobs.source_request_relationship_id
+      AND relationships.post_id =
+          jobs.job_request_id
+      AND relationships.emergency_request_id IS NULL
+      AND relationships.status = 'active'
+      AND relationships.professional_user_id = $3
+
+    INNER JOIN canonical_quotes quotes
+      ON quotes.id = $2
+      AND quotes.job_id = jobs.id
+      AND quotes.relationship_id
+          IS NOT DISTINCT FROM
+          jobs.source_request_relationship_id
+      AND quotes.status = 'ISSUED'
+
+    INNER JOIN canonical_quote_approvals approvals
+      ON approvals.quote_id = quotes.id
+      AND approvals.job_id = jobs.id
+      AND approvals.decision = 'APPROVED'
+
+    LEFT JOIN contractor_profiles profiles
+      ON jobs.source_type IN (
+        'business_document',
+        'business_customer'
+      )
+      AND profiles.id = jobs.contractor_profile_id
+      AND profiles.user_id = $3
+
+    LEFT JOIN canonical_quote_customer_decisions decisions
+      ON decisions.id =
+          approvals.customer_decision_id
+      AND decisions.quote_id = quotes.id
+      AND decisions.job_id = jobs.id
+      AND decisions.decision = 'APPROVED'
+
+    LEFT JOIN job_customer_parties
+      ON jobs.source_type = 'business_customer'
+      AND job_customer_parties.job_id = jobs.id
+      AND job_customer_parties.contractor_profile_id =
+          jobs.contractor_profile_id
+      AND job_customer_parties.business_contact_id =
+          jobs.business_contact_id
+      AND job_customer_parties.business_customer_relationship_id =
+          jobs.business_customer_relationship_id
+
+    LEFT JOIN business_customer_job_sources
+      ON jobs.source_type = 'business_customer'
+      AND business_customer_job_sources.id =
+          jobs.source_business_customer_job_id
+      AND business_customer_job_sources.contractor_profile_id =
+          jobs.contractor_profile_id
+      AND business_customer_job_sources.business_contact_id =
+          jobs.business_contact_id
+      AND business_customer_job_sources.business_customer_relationship_id =
+          jobs.business_customer_relationship_id
+
+    INNER JOIN relationship_participants professional
+      ON professional.job_id = jobs.id
+      AND professional.user_id = $3
+      AND (
+        (
+          jobs.source_type =
+            'ordinary_request_selection'
+          AND professional.request_relationship_id =
+              relationships.id
+        )
+
+        OR
+
+        (
+          jobs.source_type =
+            'existing_customer_request'
+          AND professional.request_relationship_id =
+              relationships.id
+          AND professional.source_evidence_type =
+              'existing_customer_request'
+        )
+
+        OR
+
+        (
+          jobs.source_type =
+            'business_document'
+          AND professional.request_relationship_id IS NULL
+        )
+
+        OR
+
+        (
+          jobs.source_type =
+            'business_customer'
+          AND professional.request_relationship_id IS NULL
+          AND professional.source_evidence_type =
+              'business_customer'
+        )
+      )
+
+    LEFT JOIN relationship_participants customer
+      ON jobs.source_type IN (
+        'ordinary_request_selection',
+        'existing_customer_request'
+      )
+      AND customer.job_id = jobs.id
+      AND customer.request_relationship_id =
+          relationships.id
+      AND customer.user_id =
+          relationships.homeowner_id
+
+    WHERE jobs.id = $1
+      AND jobs.lifecycle_contract_version = 2
+
+      AND (
+        (
+          jobs.source_type =
+            'ordinary_request_selection'
+
+          AND posts.id IS NOT NULL
+          AND relationships.id IS NOT NULL
+          AND customer.id IS NOT NULL
+          AND decisions.id IS NOT NULL
+
+          AND approvals.approval_source =
+            'MEETRO_CUSTOMER'
+        )
+
+        OR
+
+        (
+          jobs.source_type =
+            'existing_customer_request'
+
+          AND posts.id IS NOT NULL
+          AND posts.request_origin =
+            'existing_customer_request'
+
+          AND relationships.id IS NOT NULL
+          AND relationships.ordinary_authority_source =
+            'existing_customer_request'
+
+          AND jobs.source_request_selection_id IS NULL
+          AND jobs.originating_business_document_id IS NULL
+
+          AND customer.id IS NOT NULL
+          AND decisions.id IS NOT NULL
+
+          AND approvals.approval_source =
+            'MEETRO_CUSTOMER'
+          AND approvals.customer_decision_id IS NOT NULL
+          AND approvals.external_approval_evidence_id IS NULL
+
+          AND quotes.source_context_type =
+            'ordinary_request'
+          AND quotes.job_source_type =
+            'existing_customer_request'
+          AND quotes.job_request_id =
+            jobs.job_request_id
+          AND quotes.relationship_id =
+            jobs.source_request_relationship_id
+          AND quotes.business_customer_job_source_id IS NULL
+        )
+
+        OR
+
+        (
+          jobs.source_type =
+            'business_document'
+
+          AND jobs.job_request_id IS NULL
+          AND jobs.source_request_relationship_id IS NULL
+          AND jobs.originating_business_document_id IS NOT NULL
+
+          AND profiles.id IS NOT NULL
+
+          AND approvals.approval_source =
+            'EXTERNAL_EVIDENCE'
+          AND approvals.customer_decision_id IS NULL
+
+          AND customer.id IS NULL
+        )
+
+        OR
+
+        (
+          jobs.source_type =
+            'business_customer'
+
+          AND jobs.job_request_id IS NULL
+          AND jobs.source_request_selection_id IS NULL
+          AND jobs.source_request_relationship_id IS NULL
+          AND jobs.originating_business_document_id IS NULL
+
+          AND jobs.contractor_profile_id IS NOT NULL
+          AND jobs.business_contact_id IS NOT NULL
+          AND jobs.business_customer_relationship_id IS NOT NULL
+          AND jobs.source_business_customer_job_id IS NOT NULL
+
+          AND profiles.id IS NOT NULL
+
+          AND job_customer_parties.job_id IS NOT NULL
+          AND business_customer_job_sources.id IS NOT NULL
+
+          AND approvals.approval_source =
+            'EXTERNAL_EVIDENCE'
+          AND approvals.customer_decision_id IS NULL
+          AND approvals.external_approval_evidence_id IS NOT NULL
+
+          AND customer.id IS NULL
+
+          AND quotes.source_context_type =
+            'business_customer'
+          AND quotes.job_source_type =
+            'business_customer'
+          AND quotes.job_request_id IS NULL
+          AND quotes.relationship_id IS NULL
+          AND quotes.business_customer_job_source_id =
+            jobs.source_business_customer_job_id
+        )
+      )
+
+    LIMIT 1
+
+    ${lock ? "FOR UPDATE OF jobs, quotes" : ""}
+    `,
+    [jobId, quoteId, actorUserId]
+  );
+
+  return result.rows[0] || null;
+}
+
+async function requireActivationAuthority({ client, context, actorUserId, logger }) {
+  if (
+    !context ||
+    !context.quote_approval_id ||
+    (context.approval_source !== "EXTERNAL_EVIDENCE" &&
+      (context.approved_quote_decision !== "APPROVED" || context.customer_role_active !== true)) ||
+    context.professional_role_active !== true ||
+    Number(context.professional_user_id) !== actorUserId
+  ) {
+    logger.warn("Approved Work Visit activation context denied", {
+      code: "APPROVED_WORK_VISIT_CONTEXT_DENIED",
+      actorUserId,
+    });
+    return failure(
+      404,
+      "APPROVED_WORK_VISIT_AUTHORITY_UNAVAILABLE",
+      "Approved Work Visit authority is unavailable."
+    );
+  }
+  const granted = await hasActiveLifecycleGrant({
+    client,
+    participantId: context.professional_participant_id,
+    capability: QUOTE_READ_CAPABILITY,
+    jobId: context.job_id,
+    logger,
+  });
+  return granted
+    ? null
+    : failure(403, "QUOTE_AUTHORITY_REQUIRED", "Quote authority is required.");
+}
+
+async function loadActivation(client, jobId, approvedQuoteDecisionId, quoteApprovalId) {
+  const result = await client.query(
+    `SELECT id, quote_id, quote_approval_id, approval_source, approved_quote_decision_id, approved_quote_decision,
+      job_id, activated_by_participant_id, idempotency_key,
+      request_fingerprint, created_at
+     FROM canonical_approved_work_visit_authority_activations
+     WHERE job_id = $2 AND (quote_approval_id = $3
+       OR (quote_approval_id IS NULL AND approved_quote_decision_id = $1))
+     LIMIT 1`,
+    [approvedQuoteDecisionId, jobId, quoteApprovalId]
+  );
+  return result.rows[0] || null;
+}
+
+async function loadActiveCapabilities(client, context) {
+  const result = await client.query(
+    `SELECT grants.grantee_participant_id, grants.capability
+     FROM lifecycle_authority_grants grants
+     LEFT JOIN lifecycle_authority_grant_revocations revocations
+       ON revocations.authority_grant_id = grants.id
+     WHERE grants.job_id = $1
+       AND grants.scope_type = 'approved_work'
+       AND grants.scope_job_id = $1
+       AND grants.scope_concern_id IS NULL
+       AND grants.scope_evaluation_id IS NULL
+       AND ((grants.scope_quote_approval_id = $4 AND grants.scope_quote_approval_source = $5)
+         OR (grants.scope_quote_approval_id IS NULL
+           AND grants.scope_approved_quote_decision_id = $2
+           AND grants.scope_approved_quote_decision = 'APPROVED'))
+       AND grants.grantee_participant_id = ANY($3::uuid[])
+       AND grants.valid_from <= CURRENT_TIMESTAMP
+       AND (grants.valid_until IS NULL OR grants.valid_until > CURRENT_TIMESTAMP)
+       AND revocations.id IS NULL
+     ORDER BY grants.grantee_participant_id, grants.capability`,
+    [
+      context.job_id,
+      context.approved_quote_decision_id,
+      [context.customer_participant_id, context.professional_participant_id].filter(Boolean),
+      context.quote_approval_id,
+      context.approval_source,
+    ]
+  );
+  return result.rows;
+}
+
+function capabilitiesFor(rows, participantId, expected) {
+  const actual = new Set(
+    rows
+      .filter((row) => row.grantee_participant_id === participantId)
+      .map((row) => row.capability)
+  );
+  return expected.filter((capability) => actual.has(capability));
+}
+
+function depositGateProjection(gate) {
+  return {
+    state: gate?.state || "UNAVAILABLE",
+    obligationId: gate?.obligation?.id || null,
+    requiredMinor: gate?.obligation
+      ? Number(gate.obligation.latest_required_minor)
+      : gate?.requirement?.requiredMinor || 0,
+    appliedMinor: gate?.obligation
+      ? Number(gate.obligation.latest_applied_minor)
+      : 0,
+    remainingMinor: gate?.obligation
+      ? Number(gate.obligation.latest_remaining_minor)
+      : gate?.requirement?.requiredMinor || 0,
+    currency: gate?.source?.currency || null,
+    latestVersion: gate?.obligation
+      ? Number(gate.obligation.latest_version)
+      : null,
+    schedulingLocked: gate?.allowed !== true,
+  };
+}
+
+function authorityProjection(
+  context,
+  activation,
+  grantRows,
+  { replayed = false, depositGate = { allowed: true, state: "NOT_REQUIRED" } } = {}
+) {
+  const customerCapabilities = capabilitiesFor(
+    grantRows,
+    context.customer_participant_id,
+    customerCapabilitiesFor(context)
+  );
+  const professionalCapabilities = capabilitiesFor(
+    grantRows,
+    context.professional_participant_id,
+    professionalCapabilitiesFor(context)
+  );
+  const complete = Boolean(
+    activation &&
+    customerCapabilities.length === customerCapabilitiesFor(context).length &&
+    professionalCapabilities.length === professionalCapabilitiesFor(context).length
+  );
+  const active = complete && depositGate.allowed === true;
+  return {
+    ok: true,
+    success: true,
+    status: 200,
+    code: active
+      ? "APPROVED_WORK_VISIT_AUTHORITY_ACTIVE"
+      : depositGate.allowed === true
+        ? "APPROVED_WORK_VISIT_AUTHORITY_AVAILABLE"
+        : "APPROVED_WORK_VISIT_AUTHORITY_LOCKED",
+    authority: {
+      authoritySource: APPROVED_WORK_VISIT_AUTHORITY_SOURCE,
+      jobId: context.job_id,
+      quoteId: context.quote_id,
+      approvalSource: context.approval_source || null,
+      quoteApprovalId: context.quote_approval_id || null,
+      approvedQuoteDecisionId: context.approved_quote_decision_id || null,
+      issuedQuoteVersion: Number(context.issued_quote_version),
+      purpose: "APPROVED_WORK",
+      state: active
+        ? "ACTIVE"
+        : depositGate.allowed === true
+          ? "AVAILABLE"
+          : "LOCKED",
+      activatedAt: activation?.created_at || null,
+      deposit: depositGateProjection(depositGate),
+      customerCapabilities,
+      professionalCapabilities,
+      actions: {
+        canActivate: !activation && depositGate.allowed === true,
+        canProposeApprovedWorkVisit: active,
+      },
+    },
+    ...(replayed ? { replayed: true } : {}),
+  };
+}
+
+function validateRequest(input, { command = false } = {}) {
+  const allowed = new Set([
+    "pool",
+    "authenticatedActor",
+    "jobId",
+    "quoteId",
+    "logger",
+    ...(command ? ["idempotencyKey"] : []),
+  ]);
+  if (!isPlainObject(input) || Object.keys(input).some((field) => !allowed.has(field))) {
+    return {
+      error: failure(
+        400,
+        "APPROVED_WORK_VISIT_AUTHORITY_FIELD_REJECTED",
+        "Server-owned Approved Work Visit authority fields cannot be supplied."
+      ),
+    };
+  }
+  const actor = validateAuthenticatedActor(input.authenticatedActor);
+  if (actor.error) return { error: actor.error };
+  const jobId = normalizedUuid(input.jobId);
+  const quoteId = normalizedUuid(input.quoteId);
+  if (!jobId || !quoteId) {
+    return {
+      error: failure(
+        400,
+        "INVALID_APPROVED_WORK_VISIT_AUTHORITY",
+        "A valid Job and Quote are required."
+      ),
+    };
+  }
+  if (!input.pool || typeof input.pool.query !== "function") {
+    throw new TypeError("A database pool or client is required.");
+  }
+  const idempotencyKey = command ? validIdempotencyKey(input.idempotencyKey) : null;
+  if (command && !idempotencyKey) {
+    return {
+      error: failure(
+        400,
+        "INVALID_APPROVED_WORK_VISIT_IDEMPOTENCY_KEY",
+        "A valid Approved Work Visit idempotency key is required."
+      ),
+    };
+  }
+  return {
+    actorId: actor.id,
+    jobId,
+    quoteId,
+    idempotencyKey,
+    logger: safeLogger(input.logger),
+  };
+}
+
+async function getApprovedWorkVisitAuthority(input = {}) {
+  const validated = validateRequest(input);
+  if (validated.error) return validated.error;
+  return runReadTransaction(input.pool, async (client) => {
+    const context = await loadContext(client, {
+      jobId: validated.jobId,
+      quoteId: validated.quoteId,
+      actorUserId: validated.actorId,
+    });
+    const authorityError = await requireActivationAuthority({
+      client,
+      context,
+      actorUserId: validated.actorId,
+      logger: validated.logger,
+    });
+    if (authorityError) return authorityError;
+    const activation = await loadActivation(
+      client,
+      validated.jobId,
+      context.approved_quote_decision_id,
+      context.quote_approval_id
+    );
+    const grants = await loadActiveCapabilities(client, context);
+    const depositGate = await evaluateApprovedWorkDepositGateWithClient({
+      client,
+      jobId: context.job_id,
+      quoteApprovalId: context.quote_approval_id || null,
+      approvedQuoteDecisionId: context.approved_quote_decision_id || null,
+    });
+    return authorityProjection(context, activation, grants, { depositGate });
+  });
+}
+
+async function insertGrant({ client, context, activationId, participantId, role, capability }) {
+  const idempotencyKey =
+    `approved-work-visit:${context.grant_identity || context.quote_approval_id}:${role}:${capability}`;
+  const result = await client.query(
+    `INSERT INTO lifecycle_authority_grants (
+      id, grantee_participant_id, grantor_participant_id, job_id,
+      capability, scope_type, scope_job_id, scope_concern_id,
+      scope_evaluation_id, scope_approved_quote_decision_id,
+      scope_approved_quote_decision, source_evidence_type,
+      source_evidence_reference, idempotency_key,
+      scope_quote_approval_id, scope_quote_approval_source
+     ) VALUES (
+      $1, $2, $3, $4, $5, 'approved_work', $4, NULL,
+      NULL, $6, CASE WHEN $6::uuid IS NULL THEN NULL ELSE 'APPROVED' END, $7, $8, $9, $10, $11
+     )
+     ON CONFLICT (
+       grantor_participant_id, grantee_participant_id, capability,
+       scope_type, scope_job_id, idempotency_key
+     ) DO NOTHING
+     RETURNING id`,
+    [
+      randomUUID(),
+      participantId,
+      context.professional_participant_id,
+      context.job_id,
+      capability,
+      context.approved_quote_decision_id,
+      APPROVED_WORK_VISIT_SOURCE_TYPE,
+      activationId,
+      idempotencyKey,
+      context.quote_approval_id,
+      context.approval_source,
+    ]
+  );
+  if (result.rows[0]) return;
+  const existing = await client.query(
+    `SELECT id
+     FROM lifecycle_authority_grants
+     WHERE grantee_participant_id = $1
+       AND grantor_participant_id = $2
+       AND job_id = $3
+       AND capability = $4
+       AND scope_type = 'approved_work'
+       AND scope_job_id = $3
+       AND scope_concern_id IS NULL
+       AND scope_evaluation_id IS NULL
+       AND (scope_quote_approval_id = $9 OR
+         (scope_quote_approval_id IS NULL AND scope_approved_quote_decision_id = $5
+          AND scope_approved_quote_decision = 'APPROVED'))
+       AND source_evidence_type = $6
+       AND source_evidence_reference = $7
+       AND idempotency_key = $8
+     LIMIT 1`,
+    [
+      participantId,
+      context.professional_participant_id,
+      context.job_id,
+      capability,
+      context.approved_quote_decision_id,
+      APPROVED_WORK_VISIT_SOURCE_TYPE,
+      activationId,
+      idempotencyKey,
+      context.quote_approval_id,
+    ]
+  );
+  if (!existing.rows[0]) {
+    throw new Error("Approved Work Visit capability grant creation failed.");
+  }
+}
+
+async function activateApprovedWorkVisitAuthority(input = {}) {
+  const validated = validateRequest(input, { command: true });
+  if (validated.error) return validated.error;
+  return runTransaction(input.pool, async (client) => {
+    const context = await loadContext(client, {
+      jobId: validated.jobId,
+      quoteId: validated.quoteId,
+      actorUserId: validated.actorId,
+      lock: true,
+    });
+    const authorityError = await requireActivationAuthority({
+      client,
+      context,
+      actorUserId: validated.actorId,
+      logger: validated.logger,
+    });
+    if (authorityError) return { abort: authorityError };
+    const depositGate = await evaluateApprovedWorkDepositGateWithClient({
+      client,
+      jobId: context.job_id,
+      quoteApprovalId: context.quote_approval_id || null,
+      approvedQuoteDecisionId: context.approved_quote_decision_id || null,
+      lock: true,
+    });
+    if (!depositGate.allowed) {
+      return { abort: schedulingGateFailure(depositGate) };
+    }
+
+    const requestFingerprint = fingerprint({
+      command: "approved_work.visit.activate",
+      jobId: validated.jobId,
+      quoteId: validated.quoteId,
+      ...(context.approval_source === "EXTERNAL_EVIDENCE" ? { quoteApprovalId: context.quote_approval_id } : {}),
+      approvedQuoteDecisionId: context.approved_quote_decision_id || null,
+      actorUserId: validated.actorId,
+    });
+    let activation = await loadActivation(
+      client,
+      validated.jobId,
+      context.approved_quote_decision_id,
+      context.quote_approval_id
+    );
+    let replayed = false;
+    if (activation) {
+      if (
+        activation.request_fingerprint !== requestFingerprint ||
+        activation.idempotency_key !== validated.idempotencyKey
+      ) {
+        return {
+          abort: failure(
+            409,
+            "APPROVED_WORK_VISIT_AUTHORITY_ALREADY_ACTIVE",
+            "Approved Work Visit authority is already active."
+          ),
+        };
+      }
+      replayed = true;
+    } else {
+      const inserted = await client.query(
+        `INSERT INTO canonical_approved_work_visit_authority_activations (
+          id, quote_id, approved_quote_decision_id, approved_quote_decision,
+          job_id, activated_by_participant_id, idempotency_key,
+          request_fingerprint, quote_approval_id, approval_source
+         ) VALUES ($1, $2, $3, CASE WHEN $3::uuid IS NULL THEN NULL ELSE 'APPROVED' END, $4, $5, $6, $7, $8, $9)
+         RETURNING id, quote_id, approved_quote_decision_id,
+           approved_quote_decision, job_id, activated_by_participant_id,
+           idempotency_key, request_fingerprint, created_at`,
+        [
+          randomUUID(),
+          context.quote_id,
+          context.approved_quote_decision_id,
+          context.job_id,
+          context.professional_participant_id,
+          validated.idempotencyKey,
+          requestFingerprint,
+          context.quote_approval_id,
+          context.approval_source,
+        ]
+      );
+      activation = inserted.rows[0];
+    }
+
+    // Historical activations retain their original grant idempotency identity.
+    context.grant_identity = replayed && !activation.quote_approval_id
+      ? context.approved_quote_decision_id : context.quote_approval_id;
+    for (const capability of customerCapabilitiesFor(context)) {
+      await insertGrant({
+        client,
+        context,
+        activationId: activation.id,
+        participantId: context.customer_participant_id,
+        role: "customer",
+        capability,
+      });
+    }
+    for (const capability of professionalCapabilitiesFor(context)) {
+      await insertGrant({
+        client,
+        context,
+        activationId: activation.id,
+        participantId: context.professional_participant_id,
+        role: "professional",
+        capability,
+      });
+    }
+
+    const grants = await loadActiveCapabilities(client, context);
+    const result = authorityProjection(context, activation, grants, {
+      replayed,
+      depositGate,
+    });
+    if (result.authority.state !== "ACTIVE") {
+      throw new Error("Approved Work Visit authority activation is incomplete.");
+    }
+    return {
+      result: {
+        ...result,
+        status: replayed ? 200 : 201,
+        code: "APPROVED_WORK_VISIT_AUTHORITY_ACTIVATED",
+      },
+      afterCommit: () => validated.logger.info(
+        replayed
+          ? "Approved Work Visit authority replayed"
+          : "Approved Work Visit authority activated",
+        {
+          code: "APPROVED_WORK_VISIT_AUTHORITY_ACTIVATED",
+          actorUserId: validated.actorId,
+          jobId: validated.jobId,
+          quoteId: validated.quoteId,
+          quoteApprovalId: context.quote_approval_id || null,
+      approvedQuoteDecisionId: context.approved_quote_decision_id || null,
+          replayed,
+        }
+      ),
+    };
+  });
+}
+
+module.exports = {
+  APPROVED_WORK_VISIT_AUTHORITY_SOURCE,
+  CUSTOMER_APPROVED_WORK_VISIT_CAPABILITIES,
+  EXTERNAL_SCHEDULING_CAPABILITIES,
+  PROFESSIONAL_APPROVED_WORK_VISIT_CAPABILITIES,
+  activateApprovedWorkVisitAuthority,
+  approvedWorkVisitServiceInternals: Object.freeze({
+    authorityProjection,
+    fingerprint,
+    validIdempotencyKey,
+  }),
+  getApprovedWorkVisitAuthority,
+};

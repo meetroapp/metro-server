@@ -5,20 +5,23 @@ const {
   isPlainObject,
 } = require("./intelligenceGatewayContracts");
 
-function prepareOperationSemanticInput({ definition, request }) {
+async function prepareOperationSemanticInput({ definition, request, runtimeContext }) {
   const input = cloneBoundedJson(request.input, {
     maxBytes: 32768,
     maxStringLength: 8000,
+    maxKeys: 400,
+    maxArrayLength: 80,
   });
   const callerContext = cloneBoundedJson(request.context, {
     maxBytes: 32768,
     maxStringLength: 8000,
   });
-  const candidateContext = definition.buildContext({
+  const candidateContext = await definition.buildContext({
     locale: request.locale,
     capability: request.capability,
     input,
     context: callerContext,
+    runtimeContext,
   });
   if (!isPlainObject(candidateContext || {})) {
     throw Object.assign(new Error("Operation context must be a normalized object."), {
@@ -26,8 +29,10 @@ function prepareOperationSemanticInput({ definition, request }) {
     });
   }
   const context = cloneBoundedJson(candidateContext || {}, {
-    maxBytes: 32768,
+    maxBytes: 65536,
     maxStringLength: 8000,
+    maxKeys: 1500,
+    maxArrayLength: 200,
   });
 
   return Object.freeze({

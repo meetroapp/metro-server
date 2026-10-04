@@ -1,0 +1,490 @@
+"use strict";
+
+const assert = require("node:assert/strict");
+const test = require("node:test");
+const {
+  deliverBusinessDocument,
+  getBusinessDocumentCustomerPdf,
+  listBusinessDocumentDeliveries,
+  businessDocumentDeliveryInternals: {
+    deliveryProjection,
+    listSql,
+    sqlStore,
+  },
+} = require("../server/documents/businessDocumentDeliveryService");
+const {
+  renderBusinessDocumentCustomerPdf,
+} = require("../server/documents/businessDocumentPdfRenderer");
+
+const DRAFT_ID = "11111111-1111-4111-8111-111111111111";
+const EMAIL_KEY = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const MESSAGE_KEY = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+function context({ owner = 1, jobId = "22222222-2222-4222-8222-222222222222", version = 2 } = {}) {
+  return {
+    owner,
+    contractorProfileId: 10,
+    business: { business_name: "Handyman LLC", business_email: "pro@example.test" },
+    document: {
+      id: DRAFT_ID,
+      documentType: "QUOTE",
+      reference: "WQ-FAN",
+      documentNumber: "Q-0001020",
+      jobId,
+      version,
+      content: {
+        customerName: "Jack Smith",
+        customerEmail: "jack@example.test",
+        projectTitle: "Fan replacement",
+        recommendedSolution: "Replace fan.",
+        materialItems: [{ name: "Fan", total: "89.99" }],
+        laborItems: [{ description: "Installation", total: "180" }],
+        agreement: { exclusions: ["Painting"], hiddenConditionsTerms: "Hidden work is excluded." },
+      },
+      photos: [
+        { id: "public", role: "BEFORE", visibility: "CUSTOMER_VISIBLE", media: { secure_url: "https://res.cloudinary.com/demo/public.jpg" } },
+        { id: "private", role: "AFTER", visibility: "PRIVATE_INTERNAL", media: { secure_url: "https://res.cloudinary.com/demo/private.jpg" } },
+      ],
+    },
+  };
+}
+
+function memoryStore({ conversation = true } = {}) {
+  const source = context();
+  const events = [];
+  const commands = new Map();
+  return {
+    source,
+    events,
+    async loadContext({ actorUserId, draftId }) {
+      return actorUserId === source.owner && draftId === source.document.id ? source : null;
+    },
+    async reserveEmail(values) {
+      if (source.document.version !== values.documentVersion) return { kind: "version_conflict", currentVersion: source.document.version };
+      const current = commands.get(`EMAIL:${values.idempotencyKey}`);
+      if (current) return current.hash === values.requestHash
+        ? { kind: "replay", delivery: { ...current.delivery, replayed: true } }
+        : { kind: "idempotency_conflict" };
+      const delivery = {
+        id: `email-${events.length + 1}`, documentId: DRAFT_ID, documentType: values.documentType,
+        documentReference: values.documentReference, documentNumber: values.documentReference,
+        documentVersion: values.documentVersion,
+        channel: "EMAIL", state: "REQUESTING", recipientEmail: values.recipientEmail,
+        subject: values.subject, customerMessage: values.customerMessage,
+      };
+      events.push({ delivery, snapshot: values.customerPackage });
+      commands.set(`EMAIL:${values.idempotencyKey}`, { hash: values.requestHash, delivery });
+      return { kind: "reserved", delivery, eventId: delivery.id };
+    },
+    async completeEmail({ eventId, state, providerStatus, providerReference, failureCode }) {
+      const event = events.find((item) => item.delivery.id === eventId);
+      Object.assign(event.delivery, { state, providerStatus, providerReference, failureCode, sentAt: state === "DELIVERY_REQUESTED" ? "2026-08-21T16:18:00.000Z" : null });
+      return event.delivery;
+    },
+    async deliverMessage(values) {
+      if (!conversation || !source.document.jobId) return { kind: "conversation_unavailable" };
+      const current = commands.get(`MEETRO_MESSAGE:${values.idempotencyKey}`);
+      if (current) return current.hash === values.requestHash
+        ? { kind: "replay", delivery: { ...current.delivery, replayed: true } }
+        : { kind: "idempotency_conflict" };
+      const delivery = {
+        id: `message-${events.length + 1}`, documentId: DRAFT_ID, documentType: values.documentType,
+        documentReference: values.documentReference, documentNumber: values.documentReference,
+        documentVersion: values.documentVersion,
+        channel: "MEETRO_MESSAGE", state: "SENT", recipientUserId: 8,
+        conversationId: 50, messageId: 70, sentAt: "2026-08-21T16:20:00.000Z",
+      };
+      events.push({ delivery, snapshot: values.customerPackage });
+      commands.set(`MEETRO_MESSAGE:${values.idempotencyKey}`, { hash: values.requestHash, delivery });
+      return { kind: "sent", delivery };
+    },
+    async list({ actorUserId }) {
+      return actorUserId === source.owner ? events.map((item) => item.delivery) : [];
+    },
+  };
+}
+
+function deliveryInput(overrides = {}) {
+  return {
+    pool: {}, authenticatedActor: { id: 1 }, draftId: DRAFT_ID,
+    expectedVersion: 2, idempotencyKey: EMAIL_KEY, channel: "EMAIL",
+    recipientEmail: "jack@example.test", subject: "Your Quote", customerMessage: "Please review.",
+    pdfRenderer: async (customerPackage) => ({
+      buffer: Buffer.from("%PDF-professional"),
+      base64: Buffer.from("%PDF-professional").toString("base64"),
+      filename: `quote-${customerPackage.document.reference}-v${customerPackage.document.version}.pdf`,
+      contentType: "application/pdf",
+    }),
+    ...overrides,
+  };
+}
+
+test("Email delivery sends one exact saved customer-safe version and retry replays without duplication", async () => {
+  const store = memoryStore();
+  const providerCalls = [];
+  const emailDelivery = {
+    providerName: "resend",
+    async sendBusinessDocumentEmail(input) { providerCalls.push(input); return { accepted: true, status: "accepted", providerReference: "email-1" }; },
+  };
+  const first = await deliverBusinessDocument({ ...deliveryInput(), store, emailDelivery });
+  const replay = await deliverBusinessDocument({ ...deliveryInput(), store, emailDelivery });
+  assert.equal(first.status, 202);
+  assert.equal(first.delivery.state, "DELIVERY_REQUESTED");
+  assert.equal(replay.delivery.replayed, true);
+  assert.equal(first.delivery.documentReference, "Q-0001020");
+  assert.equal(first.delivery.documentNumber, "Q-0001020");
+  assert.equal(replay.delivery.documentReference, first.delivery.documentReference);
+  assert.equal(replay.delivery.documentNumber, first.delivery.documentNumber);
+  assert.equal(providerCalls.length, 1);
+  assert.equal(providerCalls[0].idempotencyKey, EMAIL_KEY);
+  assert.equal(providerCalls[0].attachment.contentType, "application/pdf");
+  assert.equal(providerCalls[0].attachment.filename, "quote-Q-0001020-v2.pdf");
+  assert.equal(Buffer.from(providerCalls[0].attachment.content, "base64").toString(), "%PDF-professional");
+  assert.equal(store.events[0].snapshot.document.version, 2);
+  assert.equal(store.events[0].delivery.documentReference, "Q-0001020");
+  assert.doesNotMatch(JSON.stringify(store.events[0].snapshot), /private\.jpg/);
+});
+
+test("new numbered Invoice delivery freezes its business-facing number", async () => {
+  const store = memoryStore();
+  store.source.document.documentType = "INVOICE";
+  store.source.document.reference = "WI-FAN";
+  store.source.document.documentNumber = "INV-0000457";
+  const result = await deliverBusinessDocument({
+    ...deliveryInput({ subject: "Your Invoice" }),
+    store,
+    emailDelivery: {
+      providerName: "resend",
+      async sendBusinessDocumentEmail() {
+        return { accepted: true, status: "accepted", providerReference: "invoice-1" };
+      },
+    },
+  });
+  assert.equal(result.status, 202);
+  assert.equal(result.delivery.documentReference, "INV-0000457");
+  assert.equal(result.delivery.documentNumber, "INV-0000457");
+  assert.equal(store.events[0].delivery.documentReference, "INV-0000457");
+  assert.equal(store.events[0].snapshot.document.reference, "INV-0000457");
+});
+
+test("external Deposit Request delivery reuses governed Email history without Invoice numbering or payment", async () => {
+  const store = memoryStore();
+  store.source.document.documentType = "DEPOSIT_REQUEST";
+  store.source.document.reference = "WDR-ABCDEF12";
+  store.source.document.documentNumber = null;
+  store.source.document.paymentRequirementId = "77777777-7777-4777-8777-777777777777";
+  store.source.document.depositRequestAuthority = {
+    paymentRequirementId: store.source.document.paymentRequirementId,
+    jobId: store.source.document.jobId,
+    relationshipId: 341,
+    quoteId: "44444444-4444-4444-8444-444444444444",
+    issuedQuoteVersion: 13,
+    customerDecisionId: "55555555-5555-4555-8555-555555555555",
+    state: "DUE",
+    currency: "USD",
+    quoteTotalMinor: 68000,
+    requiredMinor: 51000,
+    appliedMinor: 0,
+    remainingMinor: 51000,
+    latestVersion: 1,
+    quoteReference: "Q-0000001",
+    depositRule: { type: "PERCENT", percentBasisPoints: 7500, fixedMinor: null },
+  };
+  store.source.document.content = {
+    customerName: "Jack Smith",
+    customerEmail: "jack@example.test",
+    projectTitle: "Fan replacement",
+    paymentInstructions: "Pay by check.",
+  };
+  store.source.document.photos = [];
+  const result = await deliverBusinessDocument({
+    ...deliveryInput({ subject: "Deposit Request" }),
+    store,
+    emailDelivery: {
+      providerName: "resend",
+      async sendBusinessDocumentEmail() {
+        return { accepted: true, status: "accepted", providerReference: "deposit-request-1" };
+      },
+    },
+  });
+  assert.equal(result.status, 202);
+  assert.equal(result.delivery.documentReference, "WDR-ABCDEF12");
+  assert.equal(store.events[0].snapshot.document.type, "DEPOSIT_REQUEST");
+  assert.equal(store.events[0].snapshot.depositRequest.requestedMinor, 51000);
+  assert.equal(store.events[0].snapshot.depositRequest.paymentsReceivedMinor, 0);
+  assert.doesNotMatch(JSON.stringify(store.events[0].snapshot), /invoiceId|receiptId|allocationId/i);
+});
+
+test("PDF rendering failure is governed before provider invocation and cannot create false delivery-requested state", async () => {
+  const store = memoryStore();
+  let providerCalls = 0;
+  const result = await deliverBusinessDocument({
+    ...deliveryInput({ pdfRenderer: async () => { throw new Error("decode failed"); } }),
+    store,
+    emailDelivery: { async sendBusinessDocumentEmail() { providerCalls += 1; return { accepted: true }; } },
+  });
+  assert.equal(result.status, 422);
+  assert.equal(result.code, "BUSINESS_DOCUMENT_PDF_RENDER_FAILED");
+  assert.equal(result.delivery.state, "FAILED");
+  assert.equal(result.delivery.failureCode, "BUSINESS_DOCUMENT_PDF_RENDER_FAILED");
+  assert.equal(providerCalls, 0);
+  assert.equal(store.events.some((event) => event.delivery.state === "DELIVERY_REQUESTED"), false);
+});
+
+test("customer photo timeout fails closed before the Email provider is invoked", async () => {
+  const store = memoryStore();
+  let providerCalls = 0;
+  const result = await deliverBusinessDocument({
+    ...deliveryInput({
+      pdfRenderer: (customerPackage) => renderBusinessDocumentCustomerPdf(customerPackage, {
+        timeoutMs: 5,
+        fetchImpl: async (_url, { signal }) => new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+        }),
+      }),
+    }),
+    store,
+    emailDelivery: { async sendBusinessDocumentEmail() { providerCalls += 1; return { accepted: true }; } },
+  });
+  assert.equal(result.status, 422);
+  assert.equal(result.code, "BUSINESS_DOCUMENT_PDF_RENDER_FAILED");
+  assert.equal(providerCalls, 0);
+  assert.equal(store.events.some((event) => event.delivery.state === "DELIVERY_REQUESTED"), false);
+});
+
+test("Email failure remains failed without acceptance, payment, lifecycle, or duplicate authority", async () => {
+  const store = memoryStore();
+  const before = structuredClone(store.source);
+  const failed = await deliverBusinessDocument({
+    ...deliveryInput(), store,
+    emailDelivery: { providerName: "resend", async sendBusinessDocumentEmail() { return { accepted: false, status: "provider_rejected" }; } },
+  });
+  assert.equal(failed.status, 502);
+  assert.equal(failed.delivery.state, "FAILED");
+  assert.deepEqual(store.source, before);
+  assert.equal(failed.delivery.acceptedAt, undefined);
+  assert.equal(failed.delivery.paymentStatus, undefined);
+  assert.equal(failed.delivery.jobStatus, undefined);
+});
+
+test("stale version and another business fail before provider invocation", async () => {
+  const store = memoryStore();
+  let providerCalls = 0;
+  const emailDelivery = { async sendBusinessDocumentEmail() { providerCalls += 1; return { accepted: true }; } };
+  const stale = await deliverBusinessDocument({ ...deliveryInput({ expectedVersion: 1 }), store, emailDelivery });
+  const other = await deliverBusinessDocument({ ...deliveryInput({ authenticatedActor: { id: 2 } }), store, emailDelivery });
+  assert.equal(stale.status, 409);
+  assert.equal(other.status, 404);
+  assert.equal(providerCalls, 0);
+});
+
+test("governed Message succeeds once while standalone draft remains truthfully unavailable", async () => {
+  const store = memoryStore();
+  const sent = await deliverBusinessDocument({
+    ...deliveryInput({ channel: "MEETRO_MESSAGE", recipientEmail: undefined, subject: "", idempotencyKey: MESSAGE_KEY }),
+    store,
+  });
+  assert.equal(sent.status, 200);
+  assert.equal(sent.delivery.channel, "MEETRO_MESSAGE");
+  assert.equal(sent.delivery.state, "SENT");
+  const unavailableStore = memoryStore({ conversation: false });
+  const unavailable = await deliverBusinessDocument({
+    ...deliveryInput({ channel: "MEETRO_MESSAGE", recipientEmail: undefined, subject: "", idempotencyKey: MESSAGE_KEY }),
+    store: unavailableStore,
+  });
+  assert.equal(unavailable.status, 409);
+  assert.equal(unavailable.code, "BUSINESS_DOCUMENT_MESSAGE_UNAVAILABLE");
+  assert.equal(unavailableStore.events.length, 0);
+});
+
+test("owner-scoped history preserves legitimate Email and Message attempts", async () => {
+  const store = memoryStore();
+  await deliverBusinessDocument({ ...deliveryInput(), store, emailDelivery: { async sendBusinessDocumentEmail() { return { accepted: true, status: "accepted" }; } } });
+  await deliverBusinessDocument({ ...deliveryInput({ channel: "MEETRO_MESSAGE", recipientEmail: undefined, subject: "", idempotencyKey: MESSAGE_KEY }), store });
+  const history = await listBusinessDocumentDeliveries({ pool: {}, authenticatedActor: { id: 1 }, draftId: DRAFT_ID, store });
+  const denied = await listBusinessDocumentDeliveries({ pool: {}, authenticatedActor: { id: 2 }, draftId: DRAFT_ID, store });
+  assert.equal(history.deliveries.length, 2);
+  assert.equal(denied.status, 404);
+});
+
+test("historical projection always uses the event-frozen reference, never a hypothetical current draft number", () => {
+  const projected = deliveryProjection({
+    id: "33333333-3333-4333-8333-333333333333",
+    source_document_id: DRAFT_ID,
+    document_type: "QUOTE",
+    document_reference: "WQ-LEGACY",
+    document_number: "Q-0001020",
+    document_version: 1,
+    channel: "EMAIL",
+    delivery_state: "SENT",
+    recipient_email: "jack@example.test",
+    requested_at: "2026-08-20T12:00:00.000Z",
+    sent_at: "2026-08-20T12:01:00.000Z",
+  });
+  assert.equal(projected.documentReference, "WQ-LEGACY");
+  assert.equal(projected.documentNumber, "WQ-LEGACY");
+});
+
+test("historical list SQL reads frozen events without requiring the current working draft", async () => {
+  const calls = [];
+  const deliveries = await listSql({
+    pool: {
+      async query(sql, values) {
+        calls.push({ sql, values });
+        return {
+          rows: [{
+            id: "33333333-3333-4333-8333-333333333333",
+            contractor_profile_id: 10,
+            source_document_id: DRAFT_ID,
+            document_type: "QUOTE",
+            document_reference: "WQ-LEGACY",
+            document_version: 1,
+            channel: "EMAIL",
+            delivery_state: "SENT",
+            recipient_email: "jack@example.test",
+            requested_at: "2026-08-20T12:00:00.000Z",
+            sent_at: "2026-08-20T12:01:00.000Z",
+          }],
+        };
+      },
+    },
+    actorUserId: 1,
+    draftId: DRAFT_ID,
+  });
+  assert.equal(deliveries[0].documentReference, "WQ-LEGACY");
+  assert.equal(deliveries[0].documentNumber, "WQ-LEGACY");
+  assert.doesNotMatch(calls[0].sql, /business_document_working_drafts/);
+  assert.match(calls[0].sql, /events\.contractor_profile_id/);
+  assert.match(calls[0].sql, /profiles\.user_id = \$1/);
+  assert.match(calls[0].sql, /events\.source_document_id = \$2/);
+  assert.deepEqual(calls[0].values, [1, DRAFT_ID]);
+});
+
+test("deleted-draft history remains readable when event ownership is valid", async () => {
+  let contextLoads = 0;
+  const frozen = {
+    id: "delivery-legacy",
+    documentId: DRAFT_ID,
+    documentType: "QUOTE",
+    documentReference: "WQ-LEGACY",
+    documentNumber: "WQ-LEGACY",
+    documentVersion: 1,
+    channel: "EMAIL",
+    state: "SENT",
+  };
+  const result = await listBusinessDocumentDeliveries({
+    pool: {},
+    authenticatedActor: { id: 1 },
+    draftId: DRAFT_ID,
+    store: {
+      async list({ actorUserId, draftId }) {
+        return actorUserId === 1 && draftId === DRAFT_ID ? [frozen] : [];
+      },
+      async loadContext() {
+        contextLoads += 1;
+        return null;
+      },
+    },
+  });
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.deliveries, [frozen]);
+  assert.equal(contextLoads, 0);
+});
+
+test("owner-scoped customer PDF retrieval enforces exact version for Quote and Invoice without mutation", async () => {
+  const store = memoryStore();
+  const before = structuredClone(store.source);
+  const pdfRenderer = async (customerPackage) => ({
+    buffer: Buffer.from("%PDF-saved"), base64: Buffer.from("%PDF-saved").toString("base64"),
+    filename: `${customerPackage.document.type.toLowerCase()}-${customerPackage.document.reference}-v${customerPackage.document.version}.pdf`,
+    contentType: "application/pdf",
+  });
+  const quote = await getBusinessDocumentCustomerPdf({
+    pool: {}, authenticatedActor: { id: 1 }, draftId: DRAFT_ID,
+    expectedVersion: 2, store, pdfRenderer,
+  });
+  assert.equal(quote.status, 200);
+  assert.equal(quote.pdf.contentType, "application/pdf");
+  assert.equal(quote.pdf.filename, "quote-Q-0001020-v2.pdf");
+  const stale = await getBusinessDocumentCustomerPdf({
+    pool: {}, authenticatedActor: { id: 1 }, draftId: DRAFT_ID,
+    expectedVersion: 1, store, pdfRenderer,
+  });
+  const denied = await getBusinessDocumentCustomerPdf({
+    pool: {}, authenticatedActor: { id: 2 }, draftId: DRAFT_ID,
+    expectedVersion: 2, store, pdfRenderer,
+  });
+  assert.equal(stale.status, 409);
+  assert.equal(denied.status, 404);
+  store.source.document.documentType = "INVOICE";
+  store.source.document.reference = "WI-FAN";
+  store.source.document.documentNumber = "INV-0000457";
+  const invoice = await getBusinessDocumentCustomerPdf({
+    pool: {}, authenticatedActor: { id: 1 }, draftId: DRAFT_ID,
+    expectedVersion: 2, store, pdfRenderer,
+  });
+  assert.equal(invoice.pdf.filename, "invoice-INV-0000457-v2.pdf");
+  store.source.document.documentType = before.document.documentType;
+  store.source.document.reference = before.document.reference;
+  store.source.document.documentNumber = before.document.documentNumber;
+  assert.deepEqual(store.source, before);
+});
+
+test("customer PDF hydrates blank Quote customer and project fields from exact durable links", async () => {
+  let renderedPackage = null;
+  const calls = [];
+  const pool = {
+    async query(sql, values) {
+      calls.push({ sql, values });
+      if (sql.includes("business_document_delivery:load_photos")) return { rows: [] };
+      return {
+        rows: [{
+          id: DRAFT_ID,
+          contractor_profile_id: 10,
+          document_type: "QUOTE",
+          draft_reference: "WQ-LINKED",
+          document_number: "Q-0000001",
+          job_id: "22222222-2222-4222-8222-222222222222",
+          version: 4,
+          content: { totalOverride: "680", depositMode: "PERCENT", depositPercent: "75" },
+          business_contact_id: "33333333-3333-4333-8333-333333333333",
+          business_customer_relationship_id: "44444444-4444-4444-8444-444444444444",
+          business_name: "Handyman LLC",
+          business_email: "pro@example.test",
+          linked_customer_name: "Antony Guzman",
+          linked_customer_email: "antony@example.test",
+          linked_customer_phone: null,
+          linked_customer_address: null,
+          linked_customer_service_area: "Cape Coral, FL",
+          linked_job_title: "Inspect damaged cabinet door and trim",
+          linked_job_concern: "Inspect the damaged cabinet door and surrounding trim.",
+        }],
+      };
+    },
+  };
+  const result = await getBusinessDocumentCustomerPdf({
+    pool,
+    authenticatedActor: { id: 1 },
+    draftId: DRAFT_ID,
+    expectedVersion: 4,
+    store: sqlStore,
+    pdfRenderer: async (customerPackage) => {
+      renderedPackage = customerPackage;
+      return {
+        buffer: Buffer.from("%PDF-linked"),
+        filename: "quote-Q-0000001-v4.pdf",
+        contentType: "application/pdf",
+      };
+    },
+  });
+  assert.equal(result.status, 200);
+  assert.equal(renderedPackage.customer.name, "Antony Guzman");
+  assert.equal(renderedPackage.project.title, "Inspect damaged cabinet door and trim");
+  assert.equal(
+    renderedPackage.project.scope,
+    "Inspect the damaged cabinet door and surrounding trim."
+  );
+  assert.equal(renderedPackage.totalMinor, 68000);
+  assert.match(calls[0].sql, /LEFT JOIN business_contacts contacts/);
+  assert.match(calls[0].sql, /LEFT JOIN LATERAL/);
+});

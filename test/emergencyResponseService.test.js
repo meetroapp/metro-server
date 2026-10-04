@@ -128,6 +128,10 @@ function respond(pool, overrides = {}) {
     emergencyRequestId: 41,
     payload: {},
     professionalCanSeeEmergencyOpportunity,
+    projectEmergencyResponseAlert: async () => ({
+      alertId: 901,
+      created: true,
+    }),
     ...overrides,
   });
 }
@@ -285,7 +289,14 @@ test("valid response inserts exactly one pending Emergency relationship", async 
   );
   assert.deepEqual(insert.values, [41, 7, 80, 9]);
   assert.match(insert.sql, /post_id, emergency_request_id/);
-  assert.match(insert.sql, /VALUES \(NULL, \$1, \$2, \$3, \$4, 'pending', ''\)/);
+  assert.match(
+    insert.sql,
+    /professional_user_id,\s*emergency_authority_source,\s*status,\s*introduction_text/
+  );
+  assert.match(
+    insert.sql,
+    /VALUES \(\s*NULL,\s*\$1,\s*\$2,\s*\$3,\s*\$4,\s*'professional_response',\s*'pending',\s*''\s*\)/
+  );
   assert.match(
     insert.sql,
     /ON CONFLICT \(emergency_request_id, contractor_id\) WHERE emergency_request_id IS NOT NULL DO NOTHING/
@@ -407,7 +418,7 @@ test("different professionals may respond while concurrent duplicates resolve on
   assert.equal(duplicatePool.relationships.size, 1);
 });
 
-test("response SQL never creates communication, updates Emergency, or writes side effects", async () => {
+test("response SQL never creates communication or mutates Emergency lifecycle state", async () => {
   const fake = createPool();
   await respond(fake.pool);
   const sql = fake.calls.map((call) => call.sql).join("\n");
@@ -415,7 +426,7 @@ test("response SQL never creates communication, updates Emergency, or writes sid
   assert.doesNotMatch(sql, /INSERT INTO messages/i);
   assert.doesNotMatch(sql, /UPDATE emergency_requests/i);
   assert.doesNotMatch(sql, /DELETE FROM/i);
-  assert.doesNotMatch(sql, /notification|visibility/i);
+  assert.doesNotMatch(sql, /visibility/i);
   assert.doesNotMatch(sql, /VALUES \(\$1, [^)]*'active'/i);
   assert.equal(fake.calls.filter((call) => call.sql === "COMMIT").length, 1);
   assert.equal(fake.released(), 1);

@@ -43,6 +43,17 @@ function parsePositiveInteger(value) {
   return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
+function parsePositiveOpaqueId(value) {
+  const normalized = String(value ?? "").trim();
+
+  if (!/^[1-9]\d*$/.test(normalized)) {
+    return null;
+  }
+
+  const parsed = Number(normalized);
+  return Number.isSafeInteger(parsed) ? parsed : normalized;
+}
+
 function isPlainObject(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return false;
@@ -356,6 +367,7 @@ module.exports = {
   cleanText,
   isPlainObject,
   isValidPositiveInteger,
+  parsePositiveOpaqueId,
   parsePositiveInteger,
   serializeEmergencyResponseRelationship,
   serializeCanonicalProfessionalResponse,

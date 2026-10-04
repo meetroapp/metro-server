@@ -3,6 +3,18 @@
 const {
   jobRequestInterpretEngines,
 } = require("./operations/jobRequestInterpret");
+const {
+  emergencyRequestInterpretEngines,
+} = require("./operations/emergencyRequestInterpret");
+const {
+  quoteComposeEngines,
+} = require("./operations/quoteCompose");
+const {
+  quickQuotePhotoAssistEngines,
+} = require("./operations/quickQuotePhotoAssist");
+const {
+  workflowAssistEngines,
+} = require("./operations/workflowAssist");
 
 function createIntelligenceEngineRegistry(engines = []) {
   const registry = new Map();
@@ -26,7 +38,13 @@ function createIntelligenceEngineRegistry(engines = []) {
 }
 
 const canonicalIntelligenceEngineRegistry = createIntelligenceEngineRegistry(
-  jobRequestInterpretEngines
+  [
+    ...jobRequestInterpretEngines,
+    ...emergencyRequestInterpretEngines,
+    ...quoteComposeEngines,
+    ...quickQuotePhotoAssistEngines,
+    ...workflowAssistEngines,
+  ]
 );
 
 module.exports = {
