@@ -22,9 +22,13 @@ test(
   () => {
     const migrations = getMigrationFiles();
 
-    assert.equal(migrations.length, 107);
-    assert.equal(migrations.at(-2)?.filename, previousMigration);
-    assert.equal(migrations.at(-1)?.filename, migrationName);
+    assert.equal(migrations.length, 110);
+    assert.equal(migrations[105]?.filename, previousMigration);
+    assert.equal(migrations[106]?.filename, migrationName);
+    assert.equal(
+      migrations.at(-1)?.filename,
+      "202609300003_extend_canonical_punch_verification_authority.sql"
+    );
 
     assert.doesNotMatch(
       sql,

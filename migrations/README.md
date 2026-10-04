@@ -125,6 +125,13 @@ Current inventory:
 105. `202609210001_add_emergency_available_now_direct_select_authority.sql`
 106. `202609230001_link_quote_issuance_evaluation.sql`
 107. `202609270001_create_emergency_follow_up_job_request_authority.sql`
+108. `202609300001_generalize_employee_assignment_source_authority.sql`
+109. `202609300002_create_canonical_punch_location_authority.sql`
+110. `202609300003_extend_canonical_punch_verification_authority.sql`
+
+Migration 110 extends canonical punch verification authority.
+Migration 109 creates canonical punch-location authority.
+Migration 108 generalizes employee assignment source authority.
 
 Migration 84 adds private numbered-draft archive. Application is environment-specific and is recorded by each database migration ledger.
 
