@@ -135,6 +135,9 @@ const {
   registerSubscriptionRoutes,
 } = require("./server/subscriptions/subscriptions");
 const {
+  registerConnectedServicesRoutes,
+} = require("./server/integrations/connectedServices");
+const {
   registerTeamRoutes,
 } = require("./server/team/team");
 const {
@@ -931,6 +934,13 @@ registerAlertRoutes({
 });
 
 registerSubscriptionRoutes({
+  app,
+  authMiddleware,
+  getPool,
+  sendPublicDatabaseError,
+});
+
+registerConnectedServicesRoutes({
   app,
   authMiddleware,
   getPool,
