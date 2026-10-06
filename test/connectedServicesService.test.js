@@ -125,3 +125,32 @@ test("multiple manageable Businesses fail closed until exact Business selection 
     "CONNECTED_SERVICES_BUSINESS_SELECTION_REQUIRED"
   );
 });
+
+test("shared authority extraction preserves Manager and rejects injected non-manager rows", async () => {
+  const shared = require("../server/integrations/connectedServicesBusinessAuthority");
+  for (const role of ["MANAGER", "BOOKKEEPER_FINANCE", "FIELD_EMPLOYEE"]) {
+    const rows = [{ contractor_profile_id: 42, role, business_name: "Business" }];
+    const publicResult = await getConnectedServices({ pool: poolWith(rows), authenticatedActor: { id: 7 } });
+    const internal = await shared.getConnectedServicesBusinessAuthority({ pool: poolWith(rows), authenticatedActor: { id: 7 } });
+    assert.equal(publicResult.ok, role === "MANAGER");
+    if (publicResult.ok) assert.deepEqual(publicResult.business, internal.business);
+    else assert.deepEqual(publicResult, internal);
+  }
+});
+
+test("R2 ignores requested Business and persisted/subscription state and keeps exact provider projection", async () => {
+  const { getConnectedServiceProviders } = require("../server/integrations/connectedServicesRegistry");
+  const pool = poolWith([{ contractor_profile_id: 42, role: "OWNER", business_name: " Business " }]);
+  const result = await getConnectedServices({
+    pool, authenticatedActor: { id: 7 }, businessId: 99,
+    body: { businessId: 99 }, query: { businessId: 99 },
+    connection: { status: "CONNECTED" }, subscription: { stripe_customer_id: "cus_fixture" },
+  });
+  assert.deepEqual(result, {
+    ok: true, status: 200, code: "CONNECTED_SERVICES_LOADED", contractVersion: 1,
+    business: { businessId: 42, displayName: "Business", role: "OWNER" },
+    providers: getConnectedServiceProviders(),
+  });
+  assert.equal(pool.calls.length, 1);
+  assert.doesNotMatch(pool.calls[0].sql, /business_provider_connections|professional_subscription/);
+});

@@ -128,6 +128,16 @@ Current inventory:
 108. `202609300001_generalize_employee_assignment_source_authority.sql`
 109. `202609300002_create_canonical_punch_location_authority.sql`
 110. `202609300003_extend_canonical_punch_verification_authority.sql`
+111. `202610060001_create_business_provider_connection_authority.sql`
+
+Migration 111 creates internal Business provider-connection persistence with bounded
+provider/environment scope, immutable ownership and account binding, versioned
+updates, and verification history protection. Subscription billing Customer
+identity remains separate from provider/merchant authority. Public Connected
+Services providers remain COMING_SOON. This migration has been created, not applied;
+actual database enforcement requires a separate isolated PostgreSQL certification
+gate. It grants no payment, deposit, invoice, quote, scheduling, or onboarding
+authority.
 
 Migration 110 extends canonical punch verification authority.
 Migration 109 creates canonical punch-location authority.

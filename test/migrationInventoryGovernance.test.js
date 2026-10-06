@@ -56,6 +56,7 @@ const expectedInventory = [
   { filename: "202609300001_generalize_employee_assignment_source_authority.sql", checksum: "6c5d21ce365e163f06b8f92575d5c31219730a26f4da00a76b2f8d4eca2843bd" },
   { filename: "202609300002_create_canonical_punch_location_authority.sql", checksum: "3d37e3b48a6650be48f3e7ec8cf8d782a013d36dde47fc54a31ee985e6f3ae27" },
   { filename: "202609300003_extend_canonical_punch_verification_authority.sql", checksum: "049aa6abc1bf0052085519c72a73337d41887c8293fb2bb6bf1bc9a88c17568f" },
+  { filename: "202610060001_create_business_provider_connection_authority.sql", checksum: "d7039c4f413aab49bbce57c706e34dba2925c69ba3e6a53ba2a1e9664cfc2b74" },
 ].sort((left, right) => left.filename.localeCompare(right.filename));
 
 function checksum(filename) {
@@ -64,13 +65,13 @@ function checksum(filename) {
     .digest("hex");
 }
 
-test("the governed repository migration inventory is the exact 110-file generation through canonical punch verification authority", () => {
+test("the governed repository migration inventory is the exact 111-file generation through Business provider-connection authority", () => {
   const actual = getMigrationFiles().map(({ filename }) => filename);
   const expected = expectedInventory.map(({ filename }) => filename);
 
-  assert.equal(expectedInventory.length, 110);
+  assert.equal(expectedInventory.length, 111);
   assert.deepEqual(actual, expected);
-  assert.equal(actual.at(-1), "202609300003_extend_canonical_punch_verification_authority.sql");
+  assert.equal(actual.at(-1), "202610060001_create_business_provider_connection_authority.sql");
   assert.equal(new Set(actual).size, actual.length);
   assert.ok(actual.every((filename) => filenamePattern.test(filename)));
 });

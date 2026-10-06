@@ -79,10 +79,10 @@ test(
     const migrations =
       getMigrationFiles();
 
-    assert.equal(migrations.length, 110);
+    assert.equal(migrations.length, 111);
     assert.equal(
       migrations.at(-1)?.filename,
-      "202609300003_extend_canonical_punch_verification_authority.sql"
+      "202610060001_create_business_provider_connection_authority.sql"
     );
 
     assert.equal(
