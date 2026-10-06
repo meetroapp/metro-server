@@ -41,8 +41,8 @@ jobs:
           SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
-          cp packaging/Dockerfile source/Dockerfile
-          cp packaging/.dockerignore source/.dockerignore
+          cp packaging/deployment/immutable-backend/Dockerfile source/Dockerfile
+          cp packaging/deployment/immutable-backend/.dockerignore source/.dockerignore
           node packaging/scripts/verify-docker-build-context.js source
 
       - name: Record build timestamp

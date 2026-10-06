@@ -27,7 +27,14 @@ Never use `latest`, `production`, or `stable` as production authority.
 ## Historical source packaging
 
 The workflow checks out the requested SHA into an isolated directory, then adds
-only the reviewed `Dockerfile` and `.dockerignore` from the workflow revision.
+only the reviewed `deployment/immutable-backend/Dockerfile` and
+`deployment/immutable-backend/.dockerignore` from the workflow revision.
+
+These immutable packaging files must remain outside the repository root.
+Git-connected Railway application deployments use the normal Railpack source
+boundary; placing a `Dockerfile` at repository root would cause Railway to
+auto-detect Dockerfile packaging instead.
+
 The image therefore consists of the exact historical application source plus a
 separately reviewable packaging authority. The source SHA and packaging commit
 must both be recorded with the published digest.

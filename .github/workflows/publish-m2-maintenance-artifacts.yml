@@ -40,8 +40,14 @@ jobs:
           test "$SOURCE_SHA" = "$(git -C source rev-parse HEAD)"
           test -f source/production-maintenance/bridge-v1/server.js
           test -f source/production-maintenance/bridge-v1/Dockerfile
-          cp packaging/Dockerfile source/Dockerfile
-          cp packaging/.dockerignore source/.dockerignore
+          PACKAGING_DIR="packaging/deployment/immutable-backend"
+          if [ ! -f "$PACKAGING_DIR/Dockerfile" ] || [ ! -f "$PACKAGING_DIR/.dockerignore" ]; then
+            PACKAGING_DIR="packaging"
+          fi
+          test -f "$PACKAGING_DIR/Dockerfile"
+          test -f "$PACKAGING_DIR/.dockerignore"
+          cp "$PACKAGING_DIR/Dockerfile" source/Dockerfile
+          cp "$PACKAGING_DIR/.dockerignore" source/.dockerignore
           node packaging/scripts/verify-docker-build-context.js source
 
       - name: Record build timestamp
