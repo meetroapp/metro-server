@@ -79,10 +79,10 @@ test(
     const migrations =
       getMigrationFiles();
 
-    assert.equal(migrations.length, 111);
+    assert.equal(migrations.length, 112);
     assert.equal(
       migrations.at(-1)?.filename,
-      "202610060001_create_business_provider_connection_authority.sql"
+      "202610060002_create_stripe_connect_onboarding_event_authority.sql"
     );
 
     assert.equal(

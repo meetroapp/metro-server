@@ -129,6 +129,13 @@ Current inventory:
 109. `202609300002_create_canonical_punch_location_authority.sql`
 110. `202609300003_extend_canonical_punch_verification_authority.sql`
 111. `202610060001_create_business_provider_connection_authority.sql`
+112. `202610060002_create_stripe_connect_onboarding_event_authority.sql`
+
+Migration 112 drafts dormant internal Stripe Connect creation/recovery, account-readiness,
+and verified account-event authority. It adds three guarded persistence tables;
+no provider calls, backfill, payment/deposit/invoice effects or public activation.
+Eligibility and cache freshness remain separate. Only isolated local certification
+is authorized; staging/production application requires a later approval.
 
 Migration 111 creates internal Business provider-connection persistence with bounded
 provider/environment scope, immutable ownership and account binding, versioned
