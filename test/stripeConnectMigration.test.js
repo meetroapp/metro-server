@@ -14,11 +14,12 @@ test("migration 112 is schema-only and preserves exact 111 checksum/inventory po
   assert.match(sql,/CHECK \(event_domain = 'ACCOUNT_LIFECYCLE'\)/);assert.match(sql,/stale_after > last_retrieved_at/);
   assert.doesNotMatch(sql,/stale_after.*interval '15 minutes'/);
 });
-test("new Connect foundation stays unimported by runtime and public R2 remains all COMING_SOON",()=>{
+test("activation has only approved runtime seams and disabled registry remains all COMING_SOON",()=>{
   const scan=dir=>fs.readdirSync(dir,{withFileTypes:true}).flatMap(e=>e.isDirectory()?scan(path.join(dir,e.name)):e.name.endsWith(".js")?[path.join(dir,e.name)]:[]);
   for(const file of [path.join(root,"index.js"),...scan(path.join(root,"server"))]){
     if(path.basename(file).startsWith("stripeConnect"))continue;
-    assert.doesNotMatch(fs.readFileSync(file,"utf8"),/require\([^\n]*stripeConnect/);
+    if (!["index.js","connectedServicesService.js"].includes(path.basename(file)))
+      assert.doesNotMatch(fs.readFileSync(file,"utf8"),/require\([^\n]*stripeConnect/);
   }
   const {getConnectedServiceProviders}=require("../server/integrations/connectedServicesRegistry");
   assert.deepEqual(getConnectedServiceProviders().map(p=>p.status),Array(4).fill("COMING_SOON"));

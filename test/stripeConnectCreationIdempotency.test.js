@@ -121,3 +121,26 @@ test("verification pending does not emit an unnecessary onboarding link",async t
   const result=await onboard({pool:h.pool,provider:h.provider,config:h.config,authenticatedActor:{id:1},command:{intent:"CONNECT",country:"us"},idempotencyKey:randomUUID(),now:h.now});
   assert.equal(result.code,"VERIFICATION_PENDING");assert.equal(result.onboardingUrl,undefined);assert.equal(h.calls.link,0);
 });
+test("offline live onboarding reuses durable creation intent/key after ambiguous provider response",async t=>{
+  const {fixture}=require("./stripeConnectLiveProvider.test"),readiness=require("../server/integrations/stripeConnectStateRepository");const f=fixture();
+  const operationId=randomUUID(),connectionId=randomUUID(),key=randomUUID();let connection={id:connectionId,provider:"STRIPE_PAYMENTS",provider_environment:"TEST",contractor_profile_id:10},attempts=0;
+  const lease={id:operationId,connection_id:connectionId,creation_intent:{country:"us",currency:"usd",operationId,connectionId},stripe_idempotency_key:key};
+  const pool={async query(){return {rows:[{contractor_profile_id:10,role:"OWNER",business_name:"Fixture"}]};}};
+  t.mock.method(ops,"load",async()=>connection);t.mock.method(ops,"reserve",async()=>({connection,operation:lease}));t.mock.method(ops,"claim",async()=>lease);
+  t.mock.method(ops,"uncertain",async(_p,_s,row,definitive)=>{assert.equal(row.stripe_idempotency_key,key);assert.equal(definitive,false);});
+  t.mock.method(ops,"complete",async(_p,_s,row,a)=>{assert.equal(row.id,operationId);connection={...connection,provider_account_id:a.id};});
+  t.mock.method(readiness,"claim",async()=>null);
+  const original=f.client.v2.core.accounts.create;f.client.v2.core.accounts.create=async(params,options)=>{assert.equal(options.idempotencyKey,key);attempts++;if(attempts===1)throw Error("synthetic timeout");return original(params,options);};
+  const input={pool,provider:f.provider,config:f.config,authenticatedActor:{id:1},command:{intent:"CONNECT",country:"us"},idempotencyKey:randomUUID()};
+  assert.equal((await onboard(input)).code,"STRIPE_CONNECT_CREATION_UNCERTAIN");assert.equal((await onboard({...input,idempotencyKey:randomUUID()})).code,"RECONCILIATION_PENDING");
+  assert.equal(attempts,2);assert.equal(connection.provider_account_id,"acct_fixture");
+  assert.equal((await onboard({...input,command:{intent:"CONTINUE"}})).code,"RECONCILIATION_PENDING");assert.equal(attempts,2);
+});
+test("offline Continue/refresh and browser success cannot create or confer CONNECTED",async()=>{
+  const {fixture}=require("./stripeConnectLiveProvider.test");const f=fixture();
+  const pool={async query(sql){if(sql.includes("business_team_memberships"))return {rows:[{contractor_profile_id:10,role:"OWNER"}]};return {rows:[]};}};
+  const base={pool,provider:f.provider,config:f.config,authenticatedActor:{id:1},idempotencyKey:randomUUID()};
+  assert.equal((await onboard({...base,command:{intent:"CONTINUE"}})).status,409);
+  assert.equal((await require("../server/integrations/stripeConnectOnboardingService").refresh(base)).status,409);
+  assert.equal((await onboard({...base,command:{intent:"CONNECT",success:true}})).status,400);assert.equal(f.calls.length,0);
+});

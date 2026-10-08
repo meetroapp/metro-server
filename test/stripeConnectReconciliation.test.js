@@ -76,3 +76,11 @@ test("bounded provider retry guidance and jitter are persisted without raw error
   await reconcile({...h,connectionId:b.connection.id,jitterMs:12000});
   const ready=await repo.load(h.pool,h.scope,b.connection.id);assert.equal(new Date(ready.next_reconcile_at)-h.now,312000);assert.equal(ready.last_error_code,"PROVIDER_UNAVAILABLE");
 });
+test("offline live reconciliation pins canonical Business/account and forwards only normalized lifecycle facts",async t=>{
+  const {fixture}=require("./stripeConnectLiveProvider.test");const f=fixture(),scope={businessId:10,environment:"TEST",providerScopeId:f.config.providerScopeId};
+  const lease={connection_id:"fixture",provider_account_id:"acct_fixture",creation_intent:{country:"us",currency:"usd"}};let committed=null,failed=null;
+  t.mock.method(repo,"claim",async(_pool,s)=>{assert.deepEqual(s,scope);return lease;});t.mock.method(repo,"commit",async(_p,s,l,facts)=>{assert.deepEqual(s,scope);committed=facts;return facts;});t.mock.method(repo,"failed",async(_p,_s,_l,details)=>{failed=details;});
+  assert.equal((await reconcile({pool:{},provider:f.provider,scope,connectionId:"fixture"})).ok,true);assert.equal(eligible(committed),true);assert.equal(f.calls[0].id,"acct_fixture");
+  f.client.v2.core.accounts.retrieve=async()=>({...account(),livemode:true});assert.equal((await reconcile({pool:{},provider:f.provider,scope,connectionId:"fixture"})).ok,false);assert.equal(failed.code,"PROVIDER_UNAVAILABLE");
+  assert.equal(Object.keys(committed).some(k=>/deposit|invoice|schedule|payment_satisfied/.test(k)),false);
+});

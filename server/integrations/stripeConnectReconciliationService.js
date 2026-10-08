@@ -1,11 +1,11 @@
 "use strict";
 const repository = require("./stripeConnectStateRepository");
 const { normalizeAccount } = require("./stripeConnectState");
-const { API_VERSION } = require("./stripeConnectProvider");
+const { API_VERSION, assertProvider } = require("./stripeConnectProvider");
 const { assertScope } = require("./stripeConnectOperationRepository");
 async function reconcile({ pool, provider, scope, connectionId, event = null, now = new Date(), jitterMs = 0 } = {}) {
   assertScope(scope);
-  if (provider?.isFakeProvider !== true || provider.providerScopeId !== scope.providerScopeId || provider.apiVersion !== API_VERSION) throw new Error("STRIPE_CONNECT_FAKE_PROVIDER_REQUIRED");
+  assertProvider(provider,scope);
   const lease = await repository.claim(pool,scope,connectionId,now);
   if (!lease) return { ok: false, code: "RECONCILIATION_PENDING" };
   let normalized;

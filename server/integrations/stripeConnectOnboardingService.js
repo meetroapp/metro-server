@@ -5,12 +5,12 @@ const operations = require("./stripeConnectOperationRepository");
 const readiness = require("./stripeConnectStateRepository");
 const { reconcile } = require("./stripeConnectReconciliationService");
 const { projectState, fresh } = require("./stripeConnectState");
-const { API_VERSION } = require("./stripeConnectProvider");
+const { assertProvider } = require("./stripeConnectProvider");
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 function scopeFor(authority, config, provider) {
   const scope = { businessId: authority.business.businessId,environment: config?.environment,providerScopeId: config?.providerScopeId };
   operations.assertScope(scope);
-  if (provider?.isFakeProvider !== true || provider.apiVersion !== API_VERSION || provider.providerScopeId !== scope.providerScopeId) throw new Error("STRIPE_CONNECT_FAKE_PROVIDER_REQUIRED");
+  assertProvider(provider,scope,config);
   return scope;
 }
 async function onboard({ pool, authenticatedActor, config, provider, command, idempotencyKey, now = new Date() } = {}) {
@@ -58,7 +58,7 @@ async function onboard({ pool, authenticatedActor, config, provider, command, id
   const linkAuthority = await requireOwner({ pool,authenticatedActor,command });
   if (!linkAuthority.ok || linkAuthority.business.businessId !== scope.businessId) return failure(403,"STRIPE_CONNECT_OWNER_REQUIRED");
   try {
-    // URLs come only from trusted server config; returned fake link stays transient.
+    // URLs come only from trusted server config; returned link stays transient.
     const link = await provider.createOnboardingLink(connection.provider_account_id,config.callbacks,randomUUID());
     return { ok: true,status: 200,code: "ONBOARDING_READY",provider: "STRIPE_PAYMENTS",state: state.status,
       action: "OPEN_STRIPE_ONBOARDING",onboardingUrl: link.url,expiresAt: link.expires_at };

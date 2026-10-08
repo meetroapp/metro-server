@@ -3,8 +3,7 @@ const API_VERSION = "2026-08-26.dahlia";
 const INCLUDE = Object.freeze(["configuration.merchant", "defaults", "identity", "requirements", "future_requirements"]);
 const ACCOUNT = /^acct_[A-Za-z0-9]{1,240}$/;
 
-// Dormant, offline adapter. No SDK construction, env lookup, credentials or
-// network fallback. A real provider is deliberately outside this release seam.
+// Deterministic offline adapter retained alongside the explicitly configured live provider.
 function createProvider({ fakeClient, providerScopeId } = {}) {
   if (fakeClient?.isFakeProvider !== true || typeof providerScopeId !== "string" || !providerScopeId) {
     throw new Error("STRIPE_CONNECT_FAKE_PROVIDER_REQUIRED");
@@ -44,4 +43,10 @@ function createProvider({ fakeClient, providerScopeId } = {}) {
     },
   });
 }
-module.exports = { API_VERSION, INCLUDE, ACCOUNT, createProvider };
+function assertProvider(provider, scope, config) {
+  const live = require("./stripeConnectLiveProvider").isLiveProvider(provider);
+  if (provider?.apiVersion !== API_VERSION || provider.providerScopeId !== scope?.providerScopeId ||
+    (!live && provider?.isFakeProvider !== true) || (live && provider.environment !== scope?.environment) ||
+    (config?.enabled === true && !live)) throw new Error("STRIPE_CONNECT_PROVIDER_REQUIRED");
+}
+module.exports = { API_VERSION, INCLUDE, ACCOUNT, createProvider, assertProvider };

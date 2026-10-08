@@ -1,14 +1,15 @@
 "use strict";
 const { createHash } = require("node:crypto");
 const repository = require("./stripeConnectEventRepository");
-const { API_VERSION, ACCOUNT } = require("./stripeConnectProvider");
+const { API_VERSION, ACCOUNT, assertProvider } = require("./stripeConnectProvider");
 const { reconcile } = require("./stripeConnectReconciliationService");
 const THIN_TYPES = new Set(["v2.core.account.created","v2.core.account.updated","v2.core.account.closed",
   "v2.core.account[configuration.merchant].capability_status_updated","v2.core.account[configuration.merchant].updated",
   "v2.core.account[requirements].updated","v2.core.account[future_requirements].updated","v2.core.account[defaults].updated"]);
 const SNAPSHOT_TYPES = new Set(["account.updated","account.application.deauthorized","account.external_account.updated","payout.failed"]);
 async function receive({ pool, provider, config, rawBody, signature, format, now = new Date() } = {}) {
-  if (provider?.isFakeProvider !== true || provider.providerScopeId !== config?.providerScopeId || !["TEST","LIVE"].includes(config?.environment)) throw new Error("STRIPE_CONNECT_FAKE_PROVIDER_REQUIRED");
+  assertProvider(provider,config,config);
+  if (!["TEST","LIVE"].includes(config?.environment)) throw new Error("STRIPE_CONNECT_INVALID_SCOPE");
   let event;
   try { event = await provider.verifyEvent(rawBody,signature,format); }
   catch { return { ok: false,status: 400,code: "SIGNATURE_OR_ENVELOPE_INVALID" }; }
@@ -37,11 +38,12 @@ async function receive({ pool, provider, config, rawBody, signature, format, now
       accountId,type: event.type,format,apiVersion: event.api_version ?? null,context: event.context == null ? null : String(event.context),
       relatedType,relatedId,hash: createHash("sha256").update(rawBody).digest("hex"),accepted,terminal,
       quarantine: format === "SNAPSHOT" && SNAPSHOT_TYPES.has(event.type) && event.api_version !== API_VERSION },now);
-    return { ok: true,status: 200,code: result.conflict ? "EVENT_QUARANTINED" : "EVENT_DURABLE" };
+    return { ok: true,status: 200,code: result.conflict || result.row.processing_status === "QUARANTINED" ? "EVENT_QUARANTINED" : "EVENT_DURABLE",
+      eventId: result.row.provider_event_id,processable: ["RECEIVED","RETRY","PROCESSING"].includes(result.row.processing_status) };
   } catch { return { ok: false,status: 503,code: "EVENT_DURABILITY_UNAVAILABLE" }; }
 }
 async function processEvent({ pool,provider,config,eventId,now = new Date() } = {}) {
-  if (provider?.isFakeProvider !== true || provider.providerScopeId !== config?.providerScopeId) throw new Error("STRIPE_CONNECT_FAKE_PROVIDER_REQUIRED");
+  assertProvider(provider,config,config);
   const event = await repository.claim(pool,{ providerScopeId: config.providerScopeId,environment: config.environment,eventId },now);
   if (!event) return { ok: false,code: "EVENT_NOT_CLAIMABLE" };
   const connection = (await pool.query(`SELECT contractor_profile_id FROM business_provider_connections

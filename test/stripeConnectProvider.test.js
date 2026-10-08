@@ -29,3 +29,10 @@ test("callback and account validation precede fake link provider calls",async ()
   }
   assert.equal(f.calls.link,0);
 });
+test("live provider authority cannot be forged by copying flags or selecting fake under enabled config",()=>{
+  const {assertProvider}=require("../server/integrations/stripeConnectProvider");const {fixture}=require("./stripeConnectLiveProvider.test");
+  const live=fixture();assertProvider(live.provider,live.config,live.config);
+  assert.throws(()=>assertProvider({...live.provider,isFakeProvider:false},live.config,live.config),/PROVIDER_REQUIRED/);
+  assert.throws(()=>assertProvider(fakeProvider().provider,live.config,live.config),/PROVIDER_REQUIRED/);
+  assert.throws(()=>assertProvider(live.provider,{...live.config,environment:"LIVE"},live.config),/PROVIDER_REQUIRED/);
+});

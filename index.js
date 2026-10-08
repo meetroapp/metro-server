@@ -247,6 +247,14 @@ const {
 } = require("./server/relationships/customerParties");
 
 
+const { readConnectConfig } = require("./server/integrations/stripeConnectConfig");
+const { createLiveProvider } = require("./server/integrations/stripeConnectLiveProvider");
+const { registerStripeConnectWebhooks, registerStripeConnectOwnerRoutes } = require("./server/integrations/stripeConnectRoutes");
+const connectedServicesService = require("./server/integrations/connectedServicesService");
+const stripeConnectConfig = readConnectConfig(process.env);
+const stripeConnectRuntime = Object.freeze({ config: stripeConnectConfig,
+  provider: stripeConnectConfig.enabled ? createLiveProvider({ config: stripeConnectConfig }) : null });
+
 const JWT_SECRET = resolveJwtSecret(process.env);
 const BCRYPT_ROUNDS = 10;
 
@@ -312,6 +320,7 @@ function createCorsOptions(env = process.env) {
 }
 
 app.use(cors(createCorsOptions()));
+registerStripeConnectWebhooks({ app, getPool, getRuntime: () => stripeConnectRuntime });
 app.use(express.json({
   verify(req, res, buffer) {
     if (req.originalUrl === "/subscriptions/stripe/webhook") req.rawBody = Buffer.from(buffer);
@@ -945,7 +954,9 @@ registerConnectedServicesRoutes({
   authMiddleware,
   getPool,
   sendPublicDatabaseError,
+  connectedServicesService: { getConnectedServices: options => connectedServicesService.getConnectedServices({ ...options, connectConfig: stripeConnectConfig }) },
 });
+registerStripeConnectOwnerRoutes({ app, authMiddleware, getPool, getRuntime: () => stripeConnectRuntime });
 
 registerTeamRoutes({
   app,

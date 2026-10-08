@@ -81,3 +81,55 @@ test("lost worker lease restarts from durable receipt without trusting event ord
   assert.equal((await h.pool.query("SELECT processing_status FROM business_provider_events")).rows[0].processing_status,"PROCESSED");
   assert.equal(await repo.retry(h.pool,old,h.now),null);
 });
+function offlineLedger(t){
+  const {fixture}=require("./stripeConnectLiveProvider.test");const f=fixture(),rows=new Map(),queries=[];let invalidations=0;
+  const ready=require("../server/integrations/stripeConnectStateRepository");t.mock.method(ready,"invalidate",async()=>{invalidations++;});
+  const client={release(){},async query(sql,args=[]){
+    queries.push(sql);if(["BEGIN","COMMIT","ROLLBACK"].includes(sql))return {rows:[]};
+    if(sql.includes("SELECT c.id"))return {rows:args[0]==="TEST"&&args[1]==="acct_fixture"&&args[2]===f.config.providerScopeId?[{id:"connection_fixture"}]:[]};
+    if(sql.includes("INSERT INTO business_provider_events")){
+      if(rows.has(args[2]))return {rows:[],rowCount:0};
+      const row={id:"ledger_"+args[2],provider_event_id:args[2],provider_scope_id:args[0],provider_account_id:args[3],connection_id:args[4],payload_sha256:args[12],processing_status:args[13]};rows.set(args[2],row);return {rows:[row],rowCount:1};
+    }
+    if(sql.includes("SELECT * FROM business_provider_events"))return {rows:[rows.get(args[2])]};
+    if(sql.includes("UPDATE business_provider_events")){const row=[...rows.values()].find(x=>x.id===args[0]);if(args[2])row.processing_status="QUARANTINED";return {rows:[row]};}
+    if(sql.includes("UPDATE business_provider_connections"))return {rows:[],rowCount:1};
+    throw Error("Unexpected fake-ledger SQL");
+  }};
+  return {...f,rows,queries,pool:{connect:async()=>client},invalidations:()=>invalidations};
+}
+test("offline live verified receipts are transactional, duplicate-safe, conflicting replay quarantined, unknown account isolated",async t=>{
+  const h=offlineLedger(t),raw=body();const options={pool:h.pool,provider:h.provider,config:h.config,rawBody:raw,signature:"fixture",format:"THIN"};
+  const first=await webhook.receive(options);assert.equal(first.processable,true);assert.equal(h.rows.size,1);assert.equal(h.invalidations(),1);
+  await webhook.receive(options);assert.equal(h.rows.size,1);assert.equal(h.invalidations(),1);
+  assert.equal((await webhook.receive({...options,rawBody:body("v2.core.account[requirements].updated")})).code,"EVENT_QUARANTINED");assert.equal(h.invalidations(),2);
+  const unknown=await webhook.receive({...options,rawBody:body("v2.core.account.updated","evt_unknown","acct_unknown")});assert.equal(unknown.code,"EVENT_QUARANTINED");assert.equal(unknown.processable,false);assert.equal(h.rows.get("evt_unknown").connection_id,null);
+  assert.equal(h.queries.filter(q=>q==="BEGIN").length,4);assert.equal(h.queries.filter(q=>q==="COMMIT").length,4);
+  assert.ok(h.queries.every(q=>!(/canonical_|deposit|invoice|schedule|professional_subscription/.test(q))));
+  assert.ok([...h.rows.values()].every(row=>!Object.hasOwn(row,"rawBody")&&!Object.hasOwn(row,"payload")));
+});
+test("offline live lifecycle rejects mode/context/application mismatch and cannot satisfy financial events",async t=>{
+  const h=offlineLedger(t);let raw=JSON.parse(body());
+  for(const change of [e=>e.livemode=true,e=>e.context="acct_other",e=>e.related_object.id="cus_fixture"]){const e=structuredClone(raw);change(e);assert.equal((await webhook.receive({pool:h.pool,provider:h.provider,config:h.config,rawBody:Buffer.from(JSON.stringify(e)),signature:"fixture",format:"THIN"})).status,400);}
+  for(const type of ["payment_intent.succeeded","invoice.paid","v2.core.account_link.returned"]){const r=await webhook.receive({pool:h.pool,provider:h.provider,config:h.config,rawBody:body(type,"evt_"+type.replaceAll(".","_")),signature:"fixture",format:"THIN"});assert.equal(r.processable,false);}
+  const snapshot={id:"evt_snapshot",type:"account.application.deauthorized",account:"acct_fixture",livemode:false,api_version:API_VERSION,data:{object:{id:"ca_other"}}};
+  assert.equal((await webhook.receive({pool:h.pool,provider:h.provider,config:h.config,rawBody:Buffer.from(JSON.stringify(snapshot)),signature:"fixture",format:"SNAPSHOT"})).status,400);assert.equal(h.invalidations(),0);
+});
+test("offline out-of-order notifications refetch canonical state; retries and binding loss fail closed",async t=>{
+  const {fixture}=require("./stripeConnectLiveProvider.test");const h=fixture(),eventRepo=require("../server/integrations/stripeConnectEventRepository"),stateRepo=require("../server/integrations/stripeConnectStateRepository");let retried=0,committed=0;
+  t.mock.method(eventRepo,"claim",async(_p,s)=>({id:s.eventId,connection_id:"fixture",provider_account_id:"acct_fixture"}));t.mock.method(eventRepo,"retry",async()=>{retried++;});
+  t.mock.method(stateRepo,"claim",async()=>({connection_id:"fixture",provider_account_id:"acct_fixture",creation_intent:{country:"us",currency:"usd"}}));t.mock.method(stateRepo,"commit",async()=>{committed++;return true;});t.mock.method(stateRepo,"failed",async()=>true);
+  const pool={async query(sql,args){assert.ok(!/deposit|invoice|schedule/.test(sql));assert.equal(args[2],"acct_fixture");return {rows:[{contractor_profile_id:10}]};}};
+  for(const eventId of ["evt_new","evt_old"])assert.equal((await webhook.processEvent({pool,provider:h.provider,config:h.config,eventId})).ok,true);
+  assert.equal(h.calls.filter(c=>c.method==="retrieve").length,2);assert.equal(committed,2);
+  t.mock.method(stateRepo,"claim",async()=>null);assert.equal((await webhook.processEvent({pool,provider:h.provider,config:h.config,eventId:"evt_retry"})).code,"RECONCILIATION_PENDING");assert.equal(retried,1);
+  const missing={async query(){return {rows:[]};}};assert.equal((await webhook.processEvent({pool:missing,provider:h.provider,config:h.config,eventId:"evt_missing"})).code,"EVENT_BINDING_UNAVAILABLE");assert.equal(retried,2);
+});
+test("offline snapshot API mismatch quarantines; matching application deauthorization stays lifecycle-only",async t=>{
+  const h=offlineLedger(t);const event={id:"evt_version",type:"account.updated",account:"acct_fixture",livemode:false,api_version:"unsupported",data:{object:{id:"acct_fixture"}}};
+  const receive=e=>webhook.receive({pool:h.pool,provider:h.provider,config:h.config,rawBody:Buffer.from(JSON.stringify(e)),signature:"fixture",format:"SNAPSHOT"});
+  const mismatch=await receive(event);assert.equal(mismatch.code,"EVENT_QUARANTINED");assert.equal(mismatch.processable,false);assert.equal(h.invalidations(),0);
+  const deauth=await receive({...event,id:"evt_deauthorized",type:"account.application.deauthorized",api_version:API_VERSION,data:{object:{id:h.config.applicationId}}});
+  assert.equal(deauth.processable,true);assert.equal(h.invalidations(),1);assert.ok(h.queries.some(sql=>sql.includes("connection_status='UNAVAILABLE'")));
+  assert.ok(h.queries.every(sql=>!(/canonical_|deposit|invoice|schedule|professional_subscription/.test(sql))));
+});

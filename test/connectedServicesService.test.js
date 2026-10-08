@@ -154,3 +154,22 @@ test("R2 ignores requested Business and persisted/subscription state and keeps e
   assert.equal(pool.calls.length, 1);
   assert.doesNotMatch(pool.calls[0].sql, /business_provider_connections|professional_subscription/);
 });
+test("enabled canonical Stripe projection preserves Manager read and unrelated provider states",async t=>{
+  const {fixture}=require("./stripeConnectLiveProvider.test");const f=fixture();
+  const operations=require("../server/integrations/stripeConnectOperationRepository");const readiness=require("../server/integrations/stripeConnectStateRepository");
+  let seen;
+  t.mock.method(operations,"load",async(_pool,scope)=>{seen=scope;return null;});
+  const result=await getConnectedServices({pool:poolWith([{contractor_profile_id:42,role:"MANAGER",business_name:"Fixture"}]),authenticatedActor:{id:7},businessId:99,connectConfig:f.config});
+  assert.equal(result.providers[0].status,"NOT_CONNECTED");assert.equal(seen.businessId,42);assert.equal(result.business.role,"MANAGER");assert.ok(result.providers.slice(1).every(p=>p.status==="COMING_SOON"));
+  t.mock.method(operations,"load",async()=>{throw Error("synthetic private failure");});
+  const unavailable=await getConnectedServices({pool:poolWith([{contractor_profile_id:42,role:"OWNER"}]),authenticatedActor:{id:7},connectConfig:f.config});assert.equal(unavailable.providers[0].status,"UNAVAILABLE");
+});
+test("stale assurance projects UNAVAILABLE without rewriting durable CONNECTED eligibility",async t=>{
+  const {fixture}=require("./stripeConnectLiveProvider.test");const {account}=require("./stripeConnectPersistence.test");const {normalizeAccount,eligible}=require("../server/integrations/stripeConnectState");const {API_VERSION}=require("../server/integrations/stripeConnectProvider");
+  const f=fixture(),now=new Date(),row={id:"connection_fixture",provider:"STRIPE_PAYMENTS",provider_account_id:"acct_fixture",provider_environment:"TEST",contractor_profile_id:42,connection_status:"CONNECTED"};
+  const facts=normalizeAccount(account(),{accountId:"acct_fixture",environment:"TEST",country:"us",currency:"usd",apiVersion:API_VERSION}).facts;
+  const cached={...facts,provider_scope_id:f.config.providerScopeId,verification_status:"VERIFIED",last_retrieved_at:new Date(now-900001),stale_after:new Date(now-1),invalidated_at:null};
+  t.mock.method(require("../server/integrations/stripeConnectOperationRepository"),"load",async()=>row);t.mock.method(require("../server/integrations/stripeConnectStateRepository"),"load",async()=>cached);
+  const r=await getConnectedServices({pool:poolWith([{contractor_profile_id:42,role:"OWNER"}]),authenticatedActor:{id:7},connectConfig:f.config,now});
+  assert.equal(r.providers[0].status,"UNAVAILABLE");assert.equal(eligible(cached),true);assert.equal(row.connection_status,"CONNECTED");
+});
