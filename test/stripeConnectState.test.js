@@ -57,3 +57,45 @@ test("freshly retrieved past-due state needs attention rather than becoming stal
   const ready=row(normalized.facts);assert.equal(fresh(ready,now),true);assert.equal(eligible(ready),false);
   assert.equal(projectState({enabled:true,scope,connection,readiness:ready,now}).status,"NEEDS_ATTENTION");
 });
+
+test("country casing preserves US scope without broadening currency or mutating input", () => {
+  for (const country of ["us", "US", "Us"]) {
+    const a = account(); a.identity.country = country;
+    const original = structuredClone(a), intent = { ...expected }, originalIntent = { ...intent };
+    const result = normalizeAccount(a,intent);
+    assert.equal(result.valid,true); assert.equal(result.facts.scope_match,true);
+    assert.equal(eligible(result.facts),true);
+    assert.deepEqual(a,original); assert.deepEqual(intent,originalIntent);
+  }
+  for (const [country,currency] of [["GB","usd"],["US","USD"],[" us","usd"],["us ","usd"]]) {
+    const a=account(); a.identity.country=country; a.defaults.currency=currency;
+    const result=normalizeAccount(a,expected);
+    assert.equal(result.valid,true); assert.equal(result.facts.scope_match,false);
+    assert.equal(eligible(result.facts),false);
+    assert.deepEqual(projectState({enabled:true,connection,scope,readiness:row(result.facts),now}),
+      {status:"UNAVAILABLE",reason:"CONFIGURATION_MISMATCH"});
+  }
+});
+test("non-string country keeps shape validation and malformed expected country fails closed", () => {
+  for (const country of [undefined,null,42,{},[]]) {
+    const a=account(); a.identity.country=country;
+    assert.deepEqual(normalizeAccount(a,expected),{valid:false,code:"ACCOUNT_SHAPE_UNSUPPORTED"});
+    const result=normalizeAccount(account(),{...expected,country});
+    assert.equal(result.valid,true); assert.equal(result.facts.scope_match,false);
+    assert.equal(eligible(result.facts),false);
+  }
+});
+test("country correction retains account, environment, Business, provider and terminal authority", () => {
+  const a=account(); a.identity.country="US";
+  for (const changed of [{...a,id:"acct_wrong"},{...a,livemode:true}]) {
+    assert.deepEqual(normalizeAccount(changed,expected),{valid:false,code:"ACCOUNT_SCOPE_MISMATCH"});
+  }
+  const facts=normalizeAccount(a,expected).facts;
+  for (const changed of [{...connection,contractor_profile_id:20},{...connection,provider_environment:"LIVE"},{...connection,provider:"OTHER"}]) {
+    assert.equal(projectState({enabled:true,connection:changed,scope,readiness:row(facts),now}).reason,"SCOPE_MISMATCH");
+  }
+  assert.equal(projectState({enabled:true,connection,scope,readiness:{...row(facts),provider_scope_id:"other"},now}).reason,"SCOPE_MISMATCH");
+  for (const extra of [{responsibilities_match:false},{card_payments_status:"unsupported"},{closed:true},{deauthorized:true},{verification_status:"TERMINAL"}]) {
+    assert.equal(projectState({enabled:true,connection,scope,readiness:{...row(facts),...extra},now}).status,"UNAVAILABLE");
+  }
+});

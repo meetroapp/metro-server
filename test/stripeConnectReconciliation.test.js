@@ -84,3 +84,20 @@ test("offline live reconciliation pins canonical Business/account and forwards o
   f.client.v2.core.accounts.retrieve=async()=>({...account(),livemode:true});assert.equal((await reconcile({pool:{},provider:f.provider,scope,connectionId:"fixture"})).ok,false);assert.equal(failed.code,"PROVIDER_UNAVAILABLE");
   assert.equal(Object.keys(committed).some(k=>/deposit|invoice|schedule|payment_satisfied/.test(k)),false);
 });
+
+test("offline reconciliation commits uppercase Stripe country against frozen lowercase intent", async t => {
+  const {fakeProvider}=require("./stripeConnectPersistence.test");
+  const fake=fakeProvider(), scope={businessId:10,environment:"TEST",providerScopeId:"platform_fixture/sandbox_fixture"};
+  const lease={connection_id:"fixture",provider_account_id:"acct_fixture",creation_intent:{country:"us",currency:"usd"}};
+  const retrieved=account(); retrieved.identity.country="US";
+  fake.hooks.retrieve=id=>{assert.equal(id,lease.provider_account_id);return retrieved;};
+  let committed=null;
+  t.mock.method(repo,"claim",async(_pool,s,id)=>{assert.deepEqual(s,scope);assert.equal(id,lease.connection_id);return lease;});
+  t.mock.method(repo,"commit",async(_pool,s,l,facts)=>{assert.deepEqual(s,scope);assert.equal(l,lease);committed=facts;return facts;});
+  t.mock.method(repo,"failed",async()=>assert.fail("eligible US/us retrieval must not fail"));
+  assert.deepEqual(await reconcile({pool:{},provider:fake.provider,scope,connectionId:lease.connection_id}),{ok:true,code:"ACCOUNT_RECONCILED"});
+  assert.equal(committed.scope_match,true); assert.equal(eligible(committed),true);
+  assert.equal(fake.calls.retrieve,1); assert.equal(fake.calls.create,0); assert.equal(fake.calls.link,0);
+  assert.deepEqual(lease.creation_intent,{country:"us",currency:"usd"});
+  assert.equal(retrieved.identity.country,"US");
+});

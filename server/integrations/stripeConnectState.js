@@ -6,6 +6,11 @@ const STATUSES = ["active", "pending", "restricted", "unsupported"];
 const DUE = ["currently_due", "past_due", "eventually_due"];
 const time = value => value == null ? NaN : new Date(value).getTime();
 
+function sameCountry(actual, expected) {
+  return typeof actual === "string" && typeof expected === "string" &&
+    actual.toLowerCase() === expected.toLowerCase();
+}
+
 function normalizeAccount(account, expected) {
   const bad = code => ({ valid: false, code });
   if (!account || account.object !== "v2.core.account" || !ACCOUNT.test(account.id || "") ||
@@ -46,7 +51,7 @@ function normalizeAccount(account, expected) {
     blocking_error_count: errors, future_requirements_due_at: deadline,
     responsibilities_match: account.dashboard === "full" && responsibilities.fees_collector === "stripe" &&
       responsibilities.losses_collector === "stripe" && responsibilities.requirements_collector === "stripe",
-    scope_match: account.identity.country === expected.country && account.defaults.currency === expected.currency,
+    scope_match: sameCountry(account.identity.country, expected.country) && account.defaults.currency === expected.currency,
     closed: account.closed, deauthorized: false,
   } };
 }
